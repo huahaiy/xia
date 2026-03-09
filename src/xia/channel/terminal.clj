@@ -1,0 +1,178 @@
+(ns xia.channel.terminal
+  "Terminal channel — interactive REPL for talking to xia."
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
+            [xia.db :as db]
+            [xia.agent :as agent]
+            [xia.skill :as skill]
+            [xia.tool :as tool]
+            [xia.memory :as memory]
+            [xia.identity :as identity]
+            [xia.hippocampus :as hippo]
+            [xia.working-memory :as wm]
+            [xia.context :as context]))
+
+(defn start!
+  "Start the terminal REPL loop."
+  []
+  (let [session-id (db/create-session! :terminal)]
+    ;; Initialize working memory with warm start
+    (wm/create-wm! session-id)
+    (wm/warm-start!)
+    (println)
+    (println (str "xia ready. Type your message (or /quit to exit, /help for commands)"))
+    (println)
+    (loop []
+      (print "you> ")
+      (flush)
+      (when-let [input (read-line)]
+        (let [trimmed (str/trim input)]
+          (cond
+            (or (= trimmed "/quit") (= trimmed "/exit"))
+            (do (println "consolidating memories...")
+                (let [topics (:topics (wm/get-wm))]
+                  (wm/snapshot!)
+                  (hippo/record-conversation! session-id :terminal :topics topics)
+                  (wm/clear-wm!))
+                (println "goodbye.")
+                (System/exit 0))
+
+            (= trimmed "/help")
+            (do (println)
+                (println "Commands:")
+                (println "  /quit              — exit xia")
+                (println "  /skills            — list installed skills")
+                (println "  /tools             — list installed tools")
+                (println "  /memories          — show recent memories")
+                (println "  /identity          — show current identity")
+                (println "  /context           — show current working memory context")
+                (println "  /compact           — summarize older messages to save tokens")
+                (println "  /import-skill <f>  — import a skill (.md or .edn)")
+                (println "  /import-tool <f>   — import a tool (.edn)")
+                (println)
+                (recur))
+
+            (= trimmed "/skills")
+            (do (let [skills (skill/all-enabled-skills)]
+                  (if (seq skills)
+                    (doseq [s skills]
+                      (println (str "  " (name (:skill/id s))
+                                    " — " (:skill/description s))))
+                    (println "  (no skills installed)")))
+                (println)
+                (recur))
+
+            (= trimmed "/tools")
+            (do (let [tools (db/list-tools)]
+                  (if (seq tools)
+                    (doseq [t tools]
+                      (println (str "  " (name (:tool/id t))
+                                    " — " (:tool/description t))))
+                    (println "  (no tools installed)")))
+                (println)
+                (recur))
+
+            (= trimmed "/memories")
+            (do (let [episodes (memory/recent-episodes 10)]
+                  (if (seq episodes)
+                    (doseq [ep episodes]
+                      (println (str "  • " (:summary ep))))
+                    (println "  (no memories yet)")))
+                (println)
+                (recur))
+
+            (= trimmed "/identity")
+            (do (let [soul (identity/get-soul)]
+                  (doseq [[k v] soul]
+                    (println (str "  " (name k) ": " v))))
+                (println)
+                (recur))
+
+            (= trimmed "/context")
+            (do (let [wm-ctx (wm/wm->context)]
+                  (if wm-ctx
+                    (do (when (:topics wm-ctx)
+                          (println (str "  Topic: " (:topics wm-ctx))))
+                      (println)
+                      (if (seq (:entities wm-ctx))
+                        (do (println "  Active entities:")
+                          (doseq [e (:entities wm-ctx)]
+                            (println (str "    " (:name e)
+                                          " (" (name (:type e)) ")"
+                                          " [relevance=" (format "%.2f" (double (:relevance e)))
+                                          (when (:pinned? e) " pinned")
+                                          "]"))))
+                        (println "  (no active entities)"))
+                      (println)
+                      (if (seq (:episodes wm-ctx))
+                        (do (println "  Relevant episodes:")
+                          (doseq [ep (:episodes wm-ctx)]
+                            (println (str "    • " (:summary ep)))))
+                        (println "  (no relevant episodes)"))
+                      (println)
+                      (let [prompt (context/assemble-system-prompt)]
+                        (println (str "  System prompt: ~"
+                                      (context/estimate-tokens prompt)
+                                      " tokens"))))
+                    (println "  (no working memory active)")))
+                (println)
+                (recur))
+
+            (= trimmed "/compact")
+            (do (println "  compacting message history...")
+                (let [messages (db/session-messages session-id)
+                      msg-count (count messages)
+                      tokens (->> messages (map #(context/estimate-tokens (:content %))) (reduce +))]
+                  (println (str "  current: " msg-count " messages, ~" tokens " tokens"))
+                  (if (> msg-count 4)
+                    (let [compacted (context/compact-history
+                                     (mapv (fn [{:keys [role content]}]
+                                             {:role (name role) :content content})
+                                           messages)
+                                     (quot tokens 2))
+                          new-tokens (->> compacted (map #(context/estimate-tokens (:content %))) (reduce +))]
+                      (println (str "  compacted to ~" new-tokens " tokens (recap applied)")))
+                    (println "  (too few messages to compact)")))
+                (println)
+                (recur))
+
+            (str/starts-with? trimmed "/import-skill ")
+            (do (let [path (subs trimmed 14)]
+                  (try
+                    (let [result (skill/import-skill-file! path)]
+                      (println (str "  imported skill: "
+                                    (if (vector? result)
+                                      (str/join ", " (map :name result))
+                                      (:name result)))))
+                    (catch Exception e
+                      (println (str "  error: " (.getMessage e))))))
+                (println)
+                (recur))
+
+            (str/starts-with? trimmed "/import-tool ")
+            (do (let [path (subs trimmed 13)]
+                  (try
+                    (let [result (tool/import-tool-file! path)]
+                      (println (str "  imported tool: "
+                                    (if (vector? result)
+                                      (str/join ", " (map :name result))
+                                      (:name result)))))
+                    (catch Exception e
+                      (println (str "  error: " (.getMessage e))))))
+                (println)
+                (recur))
+
+            (empty? trimmed)
+            (recur)
+
+            :else
+            (do (try
+                  (let [response (agent/process-message session-id trimmed :channel :terminal)]
+                    (println)
+                    (println (str "xia> " response))
+                    (println))
+                  (catch Exception e
+                    (log/error e "Error processing message")
+                    (println (str "  error: " (.getMessage e)))
+                    (println)))
+                (recur))))))))

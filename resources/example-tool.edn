@@ -1,0 +1,25 @@
+;; Example tool — lets the LLM explicitly note something about the user
+;; into the knowledge graph (immediate, not waiting for hippocampus).
+;;
+;; Import with: /import-tool resources/example-tool.edn
+;;
+;; Handler runs in SCI with access to:
+;;   xia.memory — add-node!, find-node, add-fact!, add-edge!, etc.
+;;   xia.db     — get-config, set-config!, q
+
+{:id          :note-about-user
+ :name        "note-about-user"
+ :description "Record a fact about the user into the knowledge graph."
+ :parameters  {"type"       "object"
+               "properties" {"fact" {"type"        "string"
+                                     "description" "The fact to record about the user"}}
+               "required"   ["fact"]}
+ :handler     "(fn [{\"fact\" fact}]
+                 (let [user-name (or (xia.db/get-config :user/name) \"User\")
+                       nodes     (xia.memory/find-node user-name)
+                       node-eid  (if (seq nodes)
+                                   (:eid (first nodes))
+                                   (let [id (xia.memory/add-node! {:name user-name :type :person})]
+                                     (:eid (first (xia.memory/find-node user-name)))))]
+                   (xia.memory/add-fact! {:node-eid node-eid :content fact})
+                   {\"status\" \"noted\" \"about\" user-name \"fact\" fact}))"}
