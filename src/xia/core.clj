@@ -8,6 +8,7 @@
             [xia.db :as db]
             [xia.setup :as setup]
             [xia.identity :as identity]
+            [xia.scheduler :as scheduler]
             [xia.skill :as skill]
             [xia.tool :as tool]
             [xia.channel.terminal :as terminal]
@@ -67,6 +68,9 @@
   (log/info "Loaded" (count (tool/registered-tools)) "tools,"
             (count (skill/all-enabled-skills)) "skills")
 
+  ;; Start background scheduler
+  (scheduler/start!)
+
   ;; Start channels based on mode
   (case mode
     "server"   (do (http/start! port)
@@ -101,4 +105,5 @@
           (println (str "Fatal error: " (.getMessage e)))
           (System/exit 1))
         (finally
+          (scheduler/stop!)
           (db/close!))))))

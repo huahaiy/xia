@@ -1,0 +1,14 @@
+;; Fetch a web page and return readable content.
+;; Import with: /import-tool resources/tools/web-fetch.edn
+
+{:id          :web-fetch
+ :name        "web-fetch"
+ :description "Fetch a web page and return its readable content as text. Use this to read articles, documentation, blog posts, or any web page. Returns markdown-like text with links preserved."
+ :parameters  {"type"       "object"
+               "properties" {"url"        {"type"        "string"
+                                           "description" "The URL to fetch"}
+                             "max_tokens" {"type"        "integer"
+                                           "description" "Max content length in estimated tokens (default 2000)"}}
+               "required"   ["url"]}
+ :handler     "(fn [{\"url\" url \"max_tokens\" max-tokens}]
+                 (xia.web/fetch-page url :max-tokens (or max-tokens 2000)))"}

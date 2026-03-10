@@ -1,0 +1,13 @@
+;; Log into a site using stored credentials (user never sees password in chat).
+;; Prerequisites: register credentials with xia.db/register-site-cred!
+;; Import with: /import-tool resources/tools/browser-login.edn
+
+{:id          :browser-login
+ :name        "browser-login"
+ :description "Log into a website using stored credentials. The credentials are loaded securely — they never appear in the conversation. Returns the logged-in page with a session_id for further browsing. Use list-sites to see available sites."
+ :parameters  {"type"       "object"
+               "properties" {"site" {"type"        "string"
+                                     "description" "The site keyword (e.g. \"workportal\", \"jira\"). Use browser list-sites to see available sites."}}
+               "required"   ["site"]}
+ :handler     "(fn [{\"site\" site}]
+                 (xia.browser/login (keyword site)))"}

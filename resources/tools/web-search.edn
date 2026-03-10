@@ -1,0 +1,14 @@
+;; Search the web and return structured results.
+;; Import with: /import-tool resources/tools/web-search.edn
+
+{:id          :web-search
+ :name        "web-search"
+ :description "Search the web for information. Returns a list of results with titles, URLs, and snippets. Use this when you need to find web pages about a topic."
+ :parameters  {"type"       "object"
+               "properties" {"query"       {"type"        "string"
+                                            "description" "The search query"}
+                             "max_results" {"type"        "integer"
+                                            "description" "Max number of results to return (default 5)"}}
+               "required"   ["query"]}
+ :handler     "(fn [{\"query\" query \"max_results\" n}]
+                 (xia.web/search-web query :max-results (or n 5)))"}

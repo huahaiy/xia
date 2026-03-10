@@ -1,0 +1,17 @@
+;; Open a browser session — full headless browser with JavaScript support.
+;; Use this when you need to interact with a site (click, fill forms, navigate).
+;; For simple page reading, prefer web-fetch instead.
+;;
+;; Import with: /import-tool resources/tools/browser-open.edn
+
+{:id          :browser-open
+ :name        "browser-open"
+ :description "Open a headless browser session and load a URL. Returns the page content, forms, and links along with a session_id for subsequent browser actions. Use this when you need to interact with a website (fill forms, click buttons). For simple page reading, use web-fetch instead."
+ :parameters  {"type"       "object"
+               "properties" {"url" {"type"        "string"
+                                    "description" "The URL to open"}
+                             "js"  {"type"        "boolean"
+                                    "description" "Enable JavaScript (default true)"}}
+               "required"   ["url"]}
+ :handler     "(fn [{\"url\" url \"js\" js}]
+                 (xia.browser/open-session url :js (if (nil? js) true js)))"}

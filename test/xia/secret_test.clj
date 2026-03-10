@@ -1,0 +1,116 @@
+(ns xia.secret-test
+  (:require [clojure.test :refer :all]
+            [xia.db :as db]
+            [xia.secret :as secret]
+            [xia.test-helpers :refer [with-test-db]]))
+
+(use-fixtures :each with-test-db)
+
+;; ---------------------------------------------------------------------------
+;; secret-attr? tests
+;; ---------------------------------------------------------------------------
+
+(deftest secret-attr?-test
+  (testing "known secret attributes"
+    (is (secret/secret-attr? :llm.provider/api-key)))
+  (testing "secret namespace prefixes"
+    (is (secret/secret-attr? :credential/gmail-token))
+    (is (secret/secret-attr? :secret/my-key)))
+  (testing "non-secret attributes"
+    (is (not (secret/secret-attr? :config/key)))
+    (is (not (secret/secret-attr? :llm.provider/model)))
+    (is (not (secret/secret-attr? :user/name)))))
+
+;; ---------------------------------------------------------------------------
+;; secret-config-key? tests
+;; ---------------------------------------------------------------------------
+
+(deftest secret-config-key?-test
+  (testing "secret config key prefixes"
+    (is (secret/secret-config-key? :credential/gmail))
+    (is (secret/secret-config-key? :secret/something))
+    (is (secret/secret-config-key? :api-key/openai))
+    (is (secret/secret-config-key? :oauth/google))
+    (is (secret/secret-config-key? :token/refresh)))
+  (testing "non-secret config keys"
+    (is (not (secret/secret-config-key? :user/name)))
+    (is (not (secret/secret-config-key? :context/budget)))))
+
+;; ---------------------------------------------------------------------------
+;; safe-get-config tests
+;; ---------------------------------------------------------------------------
+
+(deftest safe-get-config-test
+  (testing "allows non-secret config reads"
+    (db/set-config! :user/name "Alice")
+    (is (= "Alice" (secret/safe-get-config :user/name))))
+  (testing "blocks secret config reads"
+    (db/set-config! :credential/gmail "token123")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Access denied"
+                          (secret/safe-get-config :credential/gmail)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Access denied"
+                          (secret/safe-get-config :secret/my-key)))))
+
+;; ---------------------------------------------------------------------------
+;; safe-set-config! tests
+;; ---------------------------------------------------------------------------
+
+(deftest safe-set-config!-test
+  (testing "allows non-secret config writes"
+    (secret/safe-set-config! :user/name "Bob")
+    (is (= "Bob" (db/get-config :user/name))))
+  (testing "blocks secret config writes"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Access denied"
+                          (secret/safe-set-config! :credential/gmail "stolen")))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Access denied"
+                          (secret/safe-set-config! :secret/stuff "nope")))))
+
+;; ---------------------------------------------------------------------------
+;; safe-q tests
+;; ---------------------------------------------------------------------------
+
+(deftest safe-q-blocks-secret-queries
+  ;; Seed a provider with an API key
+  (db/transact! [{:llm.provider/id       :test
+                  :llm.provider/name     "test"
+                  :llm.provider/base-url "http://localhost"
+                  :llm.provider/api-key  "sk-super-secret"
+                  :llm.provider/model    "test-model"
+                  :llm.provider/default? true}])
+
+  (testing "blocks direct api-key query"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :where [?e :llm.provider/api-key ?v]]))))
+
+  (testing "blocks query with api-key in where clause"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?e :where
+                           [?e :llm.provider/api-key "sk-super-secret"]]))))
+
+  (testing "blocks queries referencing credential namespace"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :where [?e :credential/token ?v]]))))
+
+  (testing "allows non-secret queries"
+    (let [results (secret/safe-q '[:find ?name :where
+                                   [?e :llm.provider/name ?name]])]
+      (is (= #{["test"]} (set results))))))
+
+(deftest safe-q-blocks-pattern-based-secrets
+  (testing "blocks queries with secret-like attribute names"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :where [?e :service/password ?v]])))
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :where [?e :service/api-key ?v]])))
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :where [?e :auth/oauth-token ?v]])))))

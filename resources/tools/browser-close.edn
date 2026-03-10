@@ -1,0 +1,12 @@
+;; Close a browser session.
+;; Import with: /import-tool resources/tools/browser-close.edn
+
+{:id          :browser-close
+ :name        "browser-close"
+ :description "Close a browser session and free resources. Always close sessions when done."
+ :parameters  {"type"       "object"
+               "properties" {"session_id" {"type"        "string"
+                                           "description" "The browser session ID to close"}}
+               "required"   ["session_id"]}
+ :handler     "(fn [{\"session_id\" sid}]
+                 (xia.browser/close-session sid))"}

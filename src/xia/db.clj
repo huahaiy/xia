@@ -106,6 +106,49 @@
    :wm.episode-ref/episode  {:db/valueType :db.type/ref}     ; → episode
    :wm.episode-ref/relevance {:db/valueType :db.type/float}
 
+   ;; --- Site Credentials (login credentials for websites) ---
+   :site-cred/id              {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :site-cred/name            {:db/valueType :db.type/string}
+   :site-cred/login-url       {:db/valueType :db.type/string}
+   :site-cred/username-field  {:db/valueType :db.type/string}  ; form field name (e.g. "email")
+   :site-cred/password-field  {:db/valueType :db.type/string}  ; form field name (e.g. "password")
+   :site-cred/username        {:db/valueType :db.type/string}  ; actual username — SECRET
+   :site-cred/password        {:db/valueType :db.type/string}  ; actual password — SECRET
+   :site-cred/form-selector   {:db/valueType :db.type/string}  ; optional CSS selector for the form
+   :site-cred/extra-fields    {:db/valueType :db.type/string}  ; JSON: additional fields to fill
+
+   ;; --- Service (registered external services with auth credentials) ---
+   :service/id          {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :service/name        {:db/valueType :db.type/string}
+   :service/base-url    {:db/valueType :db.type/string}   ; e.g. "https://gmail.googleapis.com"
+   :service/auth-type   {:db/valueType :db.type/keyword}  ; :bearer :basic :api-key-header :query-param
+   :service/auth-key    {:db/valueType :db.type/string}    ; the secret — token, key, password
+   :service/auth-header {:db/valueType :db.type/string}    ; custom header/param name (for :api-key-header / :query-param)
+   :service/enabled?    {:db/valueType :db.type/boolean}
+
+   ;; --- Schedule (cron-based task scheduling) ---
+   :schedule/id          {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :schedule/name        {:db/valueType :db.type/string}
+   :schedule/description {:db/valueType :db.type/string}
+   :schedule/spec        {:db/valueType :db.type/string}     ; EDN schedule spec
+   :schedule/type        {:db/valueType :db.type/keyword}    ; :tool or :prompt
+   :schedule/tool-id     {:db/valueType :db.type/keyword}    ; for :tool type
+   :schedule/tool-args   {:db/valueType :db.type/string}     ; JSON for :tool args
+   :schedule/prompt      {:db/valueType :db.type/string}     ; for :prompt type
+   :schedule/enabled?    {:db/valueType :db.type/boolean}
+   :schedule/last-run    {:db/valueType :db.type/instant}
+   :schedule/next-run    {:db/valueType :db.type/instant}
+   :schedule/created-at  {:db/valueType :db.type/instant}
+
+   ;; --- Schedule Run (execution log) ---
+   :schedule-run/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :schedule-run/schedule-id {:db/valueType :db.type/keyword}
+   :schedule-run/started-at  {:db/valueType :db.type/instant}
+   :schedule-run/finished-at {:db/valueType :db.type/instant}
+   :schedule-run/status      {:db/valueType :db.type/keyword} ; :success :error
+   :schedule-run/result      {:db/valueType :db.type/string}
+   :schedule-run/error       {:db/valueType :db.type/string}
+
    ;; --- Tool (executable code the LLM can call via function-calling) ---
    :tool/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :tool/name          {:db/valueType :db.type/string}
@@ -350,6 +393,59 @@
                   [?e :skill/enabled? true]]
                 tags)]
     (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+
+;; ---------------------------------------------------------------------------
+;; Site Credentials (website login credentials)
+;; ---------------------------------------------------------------------------
+
+(defn register-site-cred!
+  [{:keys [id name login-url username-field password-field
+           username password form-selector extra-fields]}]
+  (transact! [(cond-> {:site-cred/id             id
+                        :site-cred/name           (or name (clojure.core/name id))
+                        :site-cred/login-url      login-url
+                        :site-cred/username-field (or username-field "username")
+                        :site-cred/password-field (or password-field "password")
+                        :site-cred/username       (or username "")
+                        :site-cred/password       (or password "")}
+                form-selector (assoc :site-cred/form-selector form-selector)
+                extra-fields  (assoc :site-cred/extra-fields extra-fields))]))
+
+(defn get-site-cred [site-id]
+  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
+    (when eid (into {} (d/entity (d/db (conn)) eid)))))
+
+(defn list-site-creds []
+  (let [eids (q '[:find ?e :where [?e :site-cred/id _]])]
+    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+
+(defn remove-site-cred! [site-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
+    (transact! [[:db/retractEntity eid]])))
+
+;; ---------------------------------------------------------------------------
+;; Services (external service registrations)
+;; ---------------------------------------------------------------------------
+
+(defn register-service! [{:keys [id name base-url auth-type auth-key auth-header]}]
+  (transact! [(cond-> {:service/id        id
+                        :service/name      (or name (clojure.core/name id))
+                        :service/base-url  base-url
+                        :service/auth-type (or auth-type :bearer)
+                        :service/auth-key  (or auth-key "")
+                        :service/enabled?  true}
+                auth-header (assoc :service/auth-header auth-header))]))
+
+(defn get-service [service-id]
+  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] service-id))]
+    (when eid (into {} (d/entity (d/db (conn)) eid)))))
+
+(defn list-services []
+  (let [eids (q '[:find ?e :where [?e :service/id _]])]
+    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+
+(defn enable-service! [service-id enabled?]
+  (transact! [{:service/id service-id :service/enabled? enabled?}]))
 
 ;; ---------------------------------------------------------------------------
 ;; Tools (executable code)

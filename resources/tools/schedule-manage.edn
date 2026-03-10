@@ -1,0 +1,21 @@
+;; Manage scheduled tasks — pause, resume, remove, view history.
+;; Import with: /import-tool resources/tools/schedule-manage.edn
+
+{:id          :schedule-manage
+ :name        "schedule-manage"
+ :description "Manage a scheduled task: pause, resume, remove, or view run history."
+ :parameters  {"type"       "object"
+               "properties" {"id"     {"type"        "string"
+                                       "description" "Schedule identifier"}
+                             "action" {"type"        "string"
+                                       "enum"        ["pause" "resume" "remove" "history" "details"]
+                                       "description" "Action to perform"}}
+               "required"   ["id" "action"]}
+ :handler     "(fn [{\"id\" id \"action\" action}]
+                 (let [sid (keyword id)]
+                   (case action
+                     \"pause\"   (xia.schedule/pause-schedule! sid)
+                     \"resume\"  (xia.schedule/resume-schedule! sid)
+                     \"remove\"  (xia.schedule/remove-schedule! sid)
+                     \"history\" (xia.schedule/schedule-history sid)
+                     \"details\" (xia.schedule/get-schedule sid))))"}

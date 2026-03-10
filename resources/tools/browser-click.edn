@@ -1,0 +1,14 @@
+;; Click an element in a browser session.
+;; Import with: /import-tool resources/tools/browser-click.edn
+
+{:id          :browser-click
+ :name        "browser-click"
+ :description "Click an element on the current page using a CSS selector. Returns the resulting page content. Use for clicking links, buttons, or any clickable element."
+ :parameters  {"type"       "object"
+               "properties" {"session_id" {"type"        "string"
+                                           "description" "The browser session ID from browser-open"}
+                             "selector"   {"type"        "string"
+                                           "description" "CSS selector for the element to click (e.g. \"#submit-btn\", \"a.next-page\", \"button[type=submit]\")"}}
+               "required"   ["session_id" "selector"]}
+ :handler     "(fn [{\"session_id\" sid \"selector\" sel}]
+                 (xia.browser/click sid sel))"}

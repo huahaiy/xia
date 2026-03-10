@@ -1,0 +1,14 @@
+;; Extract structured data from a web page using CSS selectors.
+;; Import with: /import-tool resources/tools/web-extract.edn
+
+{:id          :web-extract
+ :name        "web-extract"
+ :description "Extract structured data from a web page using CSS selectors. Use this to get specific elements like all links, headings, tables, prices, or any elements matching a CSS selector pattern."
+ :parameters  {"type"       "object"
+               "properties" {"url"       {"type"        "string"
+                                          "description" "The URL to fetch"}
+                             "selectors" {"type"        "object"
+                                          "description" "Map of output names to CSS selector strings, e.g. {\"links\": \"a[href]\", \"headings\": \"h1, h2\"}"}}
+               "required"   ["url" "selectors"]}
+ :handler     "(fn [{\"url\" url \"selectors\" selectors}]
+                 (xia.web/extract-data url selectors))"}

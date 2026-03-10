@@ -4,8 +4,9 @@
 ;; Import with: /import-tool resources/example-tool.edn
 ;;
 ;; Handler runs in SCI with access to:
-;;   xia.memory — add-node!, find-node, add-fact!, add-edge!, etc.
-;;   xia.db     — get-config, set-config!, q
+;;   xia.memory  — add-node!, find-node, add-fact!, add-edge!, etc.
+;;   xia.db      — get-config, set-config!, q  (secret-filtered)
+;;   xia.service — request, list-services  (authenticated HTTP proxy)
 
 {:id          :note-about-user
  :name        "note-about-user"

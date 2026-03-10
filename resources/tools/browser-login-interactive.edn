@@ -1,0 +1,22 @@
+;; Log into a site by prompting the user for credentials in the terminal.
+;; Credentials are never stored, never in LLM context.
+;; Import with: /import-tool resources/tools/browser-login-interactive.edn
+
+{:id          :browser-login-interactive
+ :name        "browser-login-interactive"
+ :description "Log into a website by asking the user to type credentials in the terminal. Password input is masked. Credentials are never stored or visible in the conversation. Use this for one-time logins or when the user hasn't registered site credentials."
+ :parameters  {"type"       "object"
+               "properties" {"url"    {"type"        "string"
+                                       "description" "The login page URL"}
+                             "fields" {"type"  "array"
+                                       "items" {"type" "object"
+                                                "properties" {"name"  {"type" "string"
+                                                                       "description" "Form field name (e.g. \"email\", \"password\")"}
+                                                              "label" {"type" "string"
+                                                                       "description" "What to show the user (e.g. \"Email address\")"}
+                                                              "mask?" {"type" "boolean"
+                                                                       "description" "Hide input (true for passwords)"}}}
+                                       "description" "Fields to prompt for. Include name, label, and mask? for each."}}
+               "required"   ["url" "fields"]}
+ :handler     "(fn [{\"url\" url \"fields\" fields}]
+                 (xia.browser/login-interactive url fields))"}

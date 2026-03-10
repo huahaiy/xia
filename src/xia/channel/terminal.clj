@@ -9,12 +9,31 @@
             [xia.memory :as memory]
             [xia.identity :as identity]
             [xia.hippocampus :as hippo]
+            [xia.prompt :as prompt]
             [xia.working-memory :as wm]
             [xia.context :as context]))
+
+(defn- terminal-prompt
+  "Prompt the user for input in the terminal.
+   Supports masked input for passwords via java.io.Console."
+  [label & {:keys [mask?] :or {mask? false}}]
+  (if mask?
+    ;; Use Console.readPassword for masked input (hides typing)
+    (if-let [console (System/console)]
+      (String. (.readPassword console "  %s: " (into-array Object [label])))
+      ;; No console (e.g., running in IDE) — fall back to read-line with warning
+      (do (print (str "  " label " (input visible): "))
+          (flush)
+          (or (read-line) "")))
+    (do (print (str "  " label ": "))
+        (flush)
+        (or (read-line) ""))))
 
 (defn start!
   "Start the terminal REPL loop."
   []
+  ;; Register the terminal prompt handler for interactive credential input
+  (prompt/register-prompt! terminal-prompt)
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
     (wm/create-wm! session-id)

@@ -1,0 +1,54 @@
+;; Create a scheduled task — runs a tool or prompt on a schedule.
+;; Import with: /import-tool resources/tools/schedule-create.edn
+
+{:id          :schedule-create
+ :name        "schedule-create"
+ :description "Create a scheduled task that runs automatically. Two schedule modes: calendar (specify minute/hour/day fields) or interval (every N minutes). Two execution modes: 'tool' (run a specific tool) or 'prompt' (send a message through the AI agent). Unspecified calendar fields default to 'every'."
+ :parameters  {"type"       "object"
+               "properties" {"id"               {"type"        "string"
+                                                  "description" "Unique identifier (e.g. \"morning-email-check\")"}
+                             "name"             {"type"        "string"
+                                                  "description" "Human-readable name"}
+                             "description"      {"type"        "string"
+                                                  "description" "What this schedule does"}
+                             "interval_minutes" {"type"        "integer"
+                                                  "description" "Run every N minutes (interval mode). Minimum 5."}
+                             "minute"           {"type"  "array" "items" {"type" "integer"}
+                                                  "description" "Minutes to run at (0-59). Omit for every minute."}
+                             "hour"             {"type"  "array" "items" {"type" "integer"}
+                                                  "description" "Hours to run at (0-23). Omit for every hour."}
+                             "dom"              {"type"  "array" "items" {"type" "integer"}
+                                                  "description" "Days of month (1-31). Omit for every day."}
+                             "month"            {"type"  "array" "items" {"type" "integer"}
+                                                  "description" "Months (1-12). Omit for every month."}
+                             "dow"              {"type"  "array" "items" {"type" "integer"}
+                                                  "description" "Days of week (0=Sun, 1=Mon, ..., 6=Sat). Omit for every day."}
+                             "type"             {"type"        "string"
+                                                  "enum"        ["tool" "prompt"]
+                                                  "description" "'tool' for direct tool execution, 'prompt' for AI agent"}
+                             "tool_id"          {"type"        "string"
+                                                  "description" "Tool to run (for type=tool)"}
+                             "tool_args"        {"type"        "object"
+                                                  "description" "Arguments for the tool (for type=tool)"}
+                             "prompt"           {"type"        "string"
+                                                  "description" "Message for the AI agent (for type=prompt)"}}
+               "required"   ["id" "type"]}
+ :handler     "(fn [{\"id\" id \"name\" nm \"description\" desc \"type\" typ
+                     \"interval_minutes\" ival \"minute\" mins \"hour\" hrs
+                     \"dom\" doms \"month\" mos \"dow\" dows
+                     \"tool_id\" tid \"tool_args\" targs \"prompt\" prompt}]
+                 (let [spec (if ival
+                              {:interval-minutes ival}
+                              (cond-> {}
+                                mins (assoc :minute (set mins))
+                                hrs  (assoc :hour (set hrs))
+                                doms (assoc :dom (set doms))
+                                mos  (assoc :month (set mos))
+                                dows (assoc :dow (set dows))))]
+                   (xia.schedule/create-schedule!
+                     (cond-> {:id (keyword id) :spec spec :type (keyword typ)}
+                       nm     (assoc :name nm)
+                       desc   (assoc :description desc)
+                       tid    (assoc :tool-id (keyword tid))
+                       targs  (assoc :tool-args targs)
+                       prompt (assoc :prompt prompt)))))"}

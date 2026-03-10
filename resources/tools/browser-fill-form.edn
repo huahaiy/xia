@@ -1,0 +1,20 @@
+;; Fill and optionally submit a form in a browser session.
+;; Import with: /import-tool resources/tools/browser-fill-form.edn
+
+{:id          :browser-fill-form
+ :name        "browser-fill-form"
+ :description "Fill form fields and optionally submit. Returns the resulting page content. The fields parameter maps field names to values. Set submit to true to submit the form after filling."
+ :parameters  {"type"       "object"
+               "properties" {"session_id"     {"type"        "string"
+                                               "description" "The browser session ID from browser-open"}
+                             "fields"         {"type"        "object"
+                                               "description" "Map of form field names to values, e.g. {\"q\": \"search query\", \"username\": \"me\"}"}
+                             "submit"         {"type"        "boolean"
+                                               "description" "Submit the form after filling (default false)"}
+                             "form_selector"  {"type"        "string"
+                                               "description" "CSS selector for the form (default: first form on page)"}}
+               "required"   ["session_id" "fields"]}
+ :handler     "(fn [{\"session_id\" sid \"fields\" fields \"submit\" submit \"form_selector\" fsel}]
+                 (xia.browser/fill-form sid fields
+                   :form-selector fsel
+                   :submit (boolean submit)))"}
