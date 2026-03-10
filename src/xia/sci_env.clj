@@ -7,7 +7,9 @@
    that tool code is allowed to access.
 
    SECURITY: Tool handlers run untrusted code. All DB access goes through
-   xia.secret safe wrappers that block access to credentials and secrets."
+   xia.secret safe wrappers that block access to credentials and secrets.
+   The sandbox also restricts all local file system access, ensuring tool
+   code cannot interact with the host beyond the database directory."
   (:require [sci.core :as sci]
             [xia.browser :as browser]
             [xia.cron :as cron]
