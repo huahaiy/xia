@@ -106,16 +106,3 @@ Xia is designed to be safe for the host system.
 Tools call authenticated external APIs (Gmail, GitHub, etc.) through a proxy. The tool passes a relative path; the proxy loads the credentials from the DB, injects the authentication headers, and makes the call. The tool receives the response but never sees the token.
 
 ---
-
-### Key Source Files
-
-| File | Role |
-|------|------|
-| `src/xia/working_memory.clj` | Working memory lifecycle and retrieval pipeline |
-| `src/xia/context.clj` | Token-budgeted prompt assembly and history compaction |
-| `src/xia/hippocampus.clj` | Knowledge extraction and graph consolidation |
-| `src/xia/browser.clj` | Headless browser management and stealth login |
-| `src/xia/scheduler.clj` | Background task execution engine |
-| `src/xia/secret.clj` | Secret registry and safe DB wrappers for SCI |
-| `src/xia/service.clj` | Capability proxy for authenticated HTTP |
-| `src/xia/sci_env.clj` | SCI sandbox configuration and function allowlisting |
