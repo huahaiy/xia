@@ -1,6 +1,6 @@
 # xia
 
-Portable personal AI assistant. Single native binary + embedded DB = zero install friction. Works with any OpenAI-compatible LLM (Qwen, Ollama, OpenAI, Anthropic via proxy).
+Portable personal AI assistant. Single native binary + embedded DB = zero install friction. Everything is in the database: you can take the DB file to any computer, start Xia, and resume your exact experience. Works with any OpenAI-compatible LLM (Qwen, Ollama, OpenAI, Anthropic via proxy).
 
 ## Positioning & Philosophy
 
@@ -8,6 +8,9 @@ Xia is an **online-first** assistant. Its primary focus is the digital world bey
 
 ### Hardware & Accessibility
 Unlike other autonomous AI assistants that might require a dedicated machine (like a Mac Mini) to avoid host interference, Xia is designed to live on your daily work computer. Because its tools are strictly sandboxed and isolated from your local file system, it can run alongside your normal tasks without any risk of side effects or host-system disruption. Any modern computer works.
+
+### Database-Centric Portability
+Xia is entirely self-contained within its database. Every memory, scheduled task, credential, and configuration is stored in a single database file. You can move this file to a different computer, start the Xia binary, and resume exactly where you left off with the same experience and full history.
 
 ### Xia vs. Local Assistants
 Unlike tools like `Claude Code` or `Codex`, Xia is not designed for local file system manipulation or host-level computer automation.
@@ -97,7 +100,7 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 ### File System Isolation
 Xia is designed to be safe for the host system.
 - **No Local File Access:** The SCI sandbox does not expose any file system APIs (`java.io`, `java.nio`, etc.) to tool handlers.
-- **Restricted Storage:** Xia only has read/write access to its own database directory (where the Datalevin files reside). It cannot read, modify, or delete any other files on the host system, ensuring there is no risk of accidental or malicious damage to the host environment.
+- **Restricted Storage:** Xia only has read/write access to its own database file. It cannot read, modify, or delete any other files on the host system, ensuring there is no risk of accidental or malicious damage to the host environment.
 
 ### Capability Proxy (`xia.service`)
 Tools call authenticated external APIs (Gmail, GitHub, etc.) through a proxy. The tool passes a relative path; the proxy loads the credentials from the DB, injects the authentication headers, and makes the call. The tool receives the response but never sees the token.
