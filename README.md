@@ -10,7 +10,26 @@ Xia is an **online-first** assistant. Its primary focus is the digital world bey
 Unlike other autonomous AI assistants that might require a dedicated machine (like a Mac Mini) to avoid host interference, Xia is designed to live on your daily work computer. Because its tools are strictly sandboxed and isolated from your local file system, it can run alongside your normal tasks without any risk of side effects or host-system disruption. Any modern computer works.
 
 ### Database-Centric Portability
-Xia is entirely self-contained within its database. Every memory, scheduled task, credential, and configuration is stored in a single database file. You can move this file to a different computer, start the Xia binary, and resume exactly where you left off with the same experience and full history.
+Xia keeps its state in its database, but encrypted secrets are protected by external key material. In passphrase mode that is your startup passphrase plus a non-secret salt file stored under `<db-path>/.xia/master.salt`. To fully restore an instance with encrypted data, move the DB together with the matching support files under the DB directory and the passphrase context. `xia pack` packages the DB plus required local support files into a single archive, and `xia backup.xia` opens that archive directly for non-technical users.
+
+Typical portable workflow:
+
+```bash
+# use Xia normally
+xia
+
+# create a single-file portable archive
+xia pack backup.xia
+
+# later, on this or another machine, open it directly
+xia backup.xia
+```
+
+Notes:
+- No manual unzip step is required for `.xia` archives.
+- Xia extracts the archive into a hidden working directory beside the archive and repacks changes back into the same `.xia` file on normal exit.
+- If the archive uses passphrase mode, enter the same master passphrase when opening it.
+- If the archive depends on a raw env-provided key such as `XIA_MASTER_KEY`, that key still must be supplied on the target machine.
 
 ### Xia vs. Local Assistants
 Unlike tools like `Claude Code` or `Codex`, Xia is not designed for local file system manipulation or host-level computer automation.
@@ -40,14 +59,14 @@ Working memory holds the active, curated context for the current conversation. I
 1. **Keyword Extraction:** Identifies core concepts in your messages (zero LLM cost).
 2. **Hybrid Retrieval:** Performs parallel full-text search across the Knowledge Graph and past episodes.
 3. **Spreading Activation:** Expands the search by one hop in the graph to activate related concepts (e.g., thinking about "Clojure" activates "Datalevin").
-4. **Relevance-Based Decay:** Entities stay in focus while they are relevant; they naturally decay and are evicted as the conversation shifts.
+4. **Relevance-Based Decay:** Unrefreshed working-memory entities lose relevance multiplicatively each turn and are evicted once they fall below threshold.
 5. **Topic Tracking:** Automatically summarizes the current focus and detects major topic shifts to segment memories into focused units.
 
 ### Knowledge Graph (The "Neocortex")
 The Knowledge Graph stores structured entities, relations, and atomic facts.
 - **Structured Extraction:** Xia automatically extracts entities (person, place, concept) and their properties (location, role, preference) from conversations.
 - **Smart Deduplication:** New information is merged with existing facts to prevent redundancy.
-- **Confidence Maintenance:** Stale or unreinforced facts naturally lose confidence over time, preventing the graph from becoming cluttered with outdated information.
+- **Confidence Maintenance:** Stale or unreinforced facts decay with a time-based half-life after a grace period, preventing the graph from becoming cluttered with outdated information.
 
 ### Episodic Memory (The "Hippocampus")
 Every interaction is recorded as an episode. A background "consolidation" process reviews these episodes to extract new knowledge and reinforce existing patterns, moving them from short-term recording to long-term structured memory.
@@ -96,6 +115,11 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 `xia.db` functions exposed to the sandbox are safe wrappers that enforce access control:
 - **Protected attributes:** Attributes like `:llm.provider/api-key` and `:service/auth-key` are blocked.
 - **Datalog query filtering:** Every query is analyzed before execution; if it references a secret attribute or pattern (password, token, etc.), it is rejected.
+
+### Master Key Handling
+- **Explicit key support:** `XIA_MASTER_KEY` and `XIA_MASTER_KEY_FILE` can provide a raw 32-byte base64 key for unattended deployments.
+- **Passphrase mode:** `XIA_MASTER_PASSPHRASE` and `XIA_MASTER_PASSPHRASE_FILE` derive the master key with PBKDF2. Interactive CLI startup also prompts for a passphrase for new DBs.
+- **Portable archives:** When a packed archive contains `db/.xia/master.key` or `db/.xia/master.passphrase`, `xia backup.xia` uses them automatically. Raw env-only keys remain external by design.
 
 ### File System Isolation
 Xia is designed to be safe for the host system.

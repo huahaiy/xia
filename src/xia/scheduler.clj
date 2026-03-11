@@ -13,6 +13,7 @@
   (:require [clojure.tools.logging :as log]
             [xia.db :as db]
             [xia.agent :as agent]
+            [xia.hippocampus :as hippo]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
             [xia.working-memory :as wm])
@@ -24,6 +25,10 @@
 
 (defonce ^:private executor (atom nil))
 (defonce ^:private running-schedules (atom #{}))
+(defonce ^:private maintenance-running? (atom false))
+(defonce ^:private last-maintenance-at (atom nil))
+
+(def ^:private maintenance-interval-ms (* 24 60 60 1000))
 
 ;; ---------------------------------------------------------------------------
 ;; Execution
@@ -34,7 +39,9 @@
   [{:keys [id tool-id tool-args]}]
   (let [started (java.util.Date.)]
     (try
-      (let [result (tool/execute-tool tool-id (or tool-args {}))]
+      (let [result (tool/execute-tool tool-id (or tool-args {})
+                                      {:channel :scheduler
+                                       :schedule-id id})]
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
@@ -101,7 +108,20 @@
         (log/info "Scheduler tick:" (count due) "schedule(s) due")
         (doseq [sched due]
           ;; Execute each in a future to avoid blocking the tick thread
-          (future (execute-schedule! sched)))))
+          (future (execute-schedule! sched))))
+      (when (and (or (nil? @last-maintenance-at)
+                     (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
+                         maintenance-interval-ms))
+                 (compare-and-set! maintenance-running? false true))
+        (future
+          (try
+            (hippo/consolidate-if-pending!)
+            (hippo/maintain-knowledge! now)
+            (reset! last-maintenance-at now)
+            (catch Exception e
+              (log/error e "Background maintenance failed"))
+            (finally
+              (reset! maintenance-running? false))))))
     (catch Exception e
       (log/error e "Scheduler tick failed"))))
 
@@ -130,6 +150,8 @@
       (catch InterruptedException _
         (.shutdownNow exec)))
     (reset! executor nil)
+    (reset! maintenance-running? false)
+    (reset! last-maintenance-at nil)
     (log/info "Scheduler stopped")))
 
 (defn running?

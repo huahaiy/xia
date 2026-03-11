@@ -4,6 +4,7 @@
 {:id          :schedule-create
  :name        "schedule-create"
  :description "Create a scheduled task that runs automatically. Two schedule modes: calendar (specify minute/hour/day fields) or interval (every N minutes). Two execution modes: 'tool' (run a specific tool) or 'prompt' (send a message through the AI agent). Unspecified calendar fields default to 'every'."
+ :approval    :session
  :parameters  {"type"       "object"
                "properties" {"id"               {"type"        "string"
                                                   "description" "Unique identifier (e.g. \"morning-email-check\")"}

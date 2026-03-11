@@ -269,6 +269,14 @@
                      :result      (:schedule-run/result e)
                      :error       (:schedule-run/error e)})))))))
 
+(defn safe-schedule-history
+  "Schedule history view for sandboxed tools.
+   Omits result bodies and error text, which may contain sensitive data."
+  ([schedule-id] (safe-schedule-history schedule-id 10))
+  ([schedule-id limit]
+   (mapv #(dissoc % :result :error)
+         (schedule-history schedule-id limit))))
+
 (defn trim-history!
   "Keep only the most recent `keep-count` runs per schedule."
   [schedule-id keep-count]

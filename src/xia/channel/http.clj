@@ -6,7 +6,10 @@
             [clojure.tools.logging :as log]
             [xia.db :as db]
             [xia.agent :as agent]
-            [xia.working-memory :as wm]))
+            [xia.prompt :as prompt]
+            [xia.working-memory :as wm])
+  (:import [java.security SecureRandom]
+           [java.util Base64]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -14,6 +17,16 @@
 
 (defonce ^:private server-atom (atom nil))
 (defonce ^:private ws-sessions (atom {})) ; channel → session-id
+(defonce ^:private pending-approvals (atom {})) ; session-id string → approval map
+
+(def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
+(def ^:private approval-timeout-ms (* 5 60 1000))
+(def ^:private local-session-cookie-name "xia-local-session")
+(defonce ^:private local-session-secret
+  (delay
+    (let [bytes (byte-array 32)
+          _     (.nextBytes (SecureRandom.) bytes)]
+      (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes))))
 
 ;; ---------------------------------------------------------------------------
 ;; Local web UI
@@ -151,9 +164,37 @@
      "      flex-direction: column;"
      "      min-height: 0;"
      "    }"
+     "    .approval-panel {"
+     "      border-color: rgba(178, 76, 50, 0.22);"
+     "      background: rgba(255, 246, 240, 0.9);"
+     "    }"
+     "    .approval-panel[hidden] { display: none; }"
+     "    .approval-summary {"
+     "      display: grid;"
+     "      gap: 10px;"
+     "      margin-bottom: 16px;"
+     "    }"
+     "    .approval-reason {"
+     "      margin: 0;"
+     "      color: var(--accent-dark);"
+     "      font-size: 0.95rem;"
+     "      line-height: 1.5;"
+     "    }"
+     "    .approval-args {"
+     "      margin: 0;"
+     "      padding: 14px;"
+     "      border-radius: 18px;"
+     "      border: 1px solid rgba(23, 33, 25, 0.12);"
+     "      background: rgba(255, 255, 255, 0.72);"
+     "      white-space: pre-wrap;"
+     "      word-break: break-word;"
+     "      font-family: \"SFMono-Regular\", Consolas, \"Liberation Mono\", monospace;"
+     "      font-size: 0.9rem;"
+     "      line-height: 1.55;"
+     "    }"
      "    .panel-header {"
-     "      display: flex;"
-     "      justify-content: space-between;"
+      "      display: flex;"
+      "      justify-content: space-between;"
      "      gap: 12px;"
      "      align-items: start;"
      "      margin-bottom: 16px;"
@@ -312,6 +353,29 @@
      "          </div>"
      "        </aside>"
      "      </section>"
+     "      <section class=\"panel approval-panel\" id=\"approval-panel\" hidden>"
+     "        <div class=\"panel-header\">"
+     "          <div>"
+     "            <h2 class=\"panel-title\">Approval Required</h2>"
+     "            <p class=\"panel-note\">Privileged tools need a local confirmation before Xia can execute them.</p>"
+     "          </div>"
+     "          <div class=\"actions\">"
+     "            <button class=\"secondary\" id=\"deny-approval\" type=\"button\">Deny</button>"
+     "            <button class=\"primary\" id=\"allow-approval\" type=\"button\">Allow for session</button>"
+     "          </div>"
+     "        </div>"
+     "        <div class=\"approval-summary\">"
+     "          <div class=\"meta-row\">"
+     "            <p class=\"meta-label\">Tool</p>"
+     "            <p class=\"meta-value\" id=\"approval-tool\">Waiting</p>"
+     "          </div>"
+     "          <div class=\"meta-row\">"
+     "            <p class=\"meta-label\">Reason</p>"
+     "            <p class=\"approval-reason\" id=\"approval-reason\">The current tool needs confirmation.</p>"
+     "          </div>"
+     "        </div>"
+     "        <pre class=\"approval-args\" id=\"approval-args\">{}</pre>"
+     "      </section>"
      "      <main class=\"workspace\">"
      "        <section class=\"panel\">"
      "          <div class=\"panel-header\">"
@@ -351,16 +415,23 @@
      "  </div>"
      "  <script>"
      "    const storageKeys = {"
-     "      sessionId: 'xia.local-ui.session-id',"
-     "      messages: 'xia.local-ui.messages'"
+     "      sessionId: 'xia.local-ui.session-id'"
      "    };"
      "    const state = {"
-     "      sessionId: localStorage.getItem(storageKeys.sessionId) || '',"
+     "      sessionId: sessionStorage.getItem(storageKeys.sessionId) || '',"
      "      messages: [],"
-     "      sending: false"
+     "      pendingApproval: null,"
+     "      sending: false,"
+     "      approvalSubmitting: false"
      "    };"
      "    const statusEl = document.getElementById('status');"
      "    const sessionLabelEl = document.getElementById('session-label');"
+     "    const approvalPanelEl = document.getElementById('approval-panel');"
+     "    const approvalToolEl = document.getElementById('approval-tool');"
+     "    const approvalReasonEl = document.getElementById('approval-reason');"
+     "    const approvalArgsEl = document.getElementById('approval-args');"
+     "    const allowApprovalEl = document.getElementById('allow-approval');"
+     "    const denyApprovalEl = document.getElementById('deny-approval');"
      "    const messagesEl = document.getElementById('messages');"
      "    const composerEl = document.getElementById('composer');"
      "    const sendEl = document.getElementById('send');"
@@ -369,23 +440,12 @@
      "    const copyTranscriptEl = document.getElementById('copy-transcript');"
      "    const composerFormEl = document.getElementById('composer-form');"
      ""
-     "    function loadMessages() {"
-     "      try {"
-     "        const raw = localStorage.getItem(storageKeys.messages);"
-     "        const parsed = raw ? JSON.parse(raw) : [];"
-     "        state.messages = Array.isArray(parsed) ? parsed : [];"
-     "      } catch (_err) {"
-     "        state.messages = [];"
-     "      }"
-     "    }"
-     ""
-     "    function persistState() {"
+     "    function persistSession() {"
      "      if (state.sessionId) {"
-     "        localStorage.setItem(storageKeys.sessionId, state.sessionId);"
+     "        sessionStorage.setItem(storageKeys.sessionId, state.sessionId);"
      "      } else {"
-     "        localStorage.removeItem(storageKeys.sessionId);"
+     "        sessionStorage.removeItem(storageKeys.sessionId);"
      "      }"
-     "      localStorage.setItem(storageKeys.messages, JSON.stringify(state.messages));"
      "      updateSessionLabel();"
      "    }"
      ""
@@ -397,6 +457,14 @@
      ""
      "    function setStatus(text) {"
      "      statusEl.textContent = text;"
+     "    }"
+     ""
+     "    function prettyJson(value) {"
+     "      try {"
+     "        return JSON.stringify(value == null ? {} : value, null, 2);"
+     "      } catch (_err) {"
+     "        return String(value);"
+     "      }"
      "    }"
      ""
      "    async function copyText(text, successLabel) {"
@@ -417,13 +485,28 @@
      "      }"
      "    }"
      ""
+     "    function renderApproval() {"
+     "      const approval = state.pendingApproval;"
+     "      approvalPanelEl.hidden = !approval;"
+     "      allowApprovalEl.disabled = !approval || state.approvalSubmitting;"
+     "      denyApprovalEl.disabled = !approval || state.approvalSubmitting;"
+     "      if (!approval) {"
+     "        approvalToolEl.textContent = 'Waiting';"
+     "        approvalReasonEl.textContent = 'The current tool needs confirmation.';"
+     "        approvalArgsEl.textContent = '{}';"
+     "        return;"
+     "      }"
+     "      approvalToolEl.textContent = approval.tool_name || approval.tool_id || 'Privileged tool';"
+     "      approvalReasonEl.textContent = approval.reason || 'This action can use stored credentials or cause live side effects.';"
+     "      approvalArgsEl.textContent = prettyJson(approval.arguments || {});"
+     "    }"
+     ""
      "    function addMessage(role, content) {"
      "      state.messages.push({"
      "        role: role,"
      "        content: content,"
      "        createdAt: new Date().toISOString()"
      "      });"
-     "      persistState();"
      "      renderMessages();"
      "    }"
      ""
@@ -488,11 +571,79 @@
      "      clearInputEl.disabled = state.sending || !composerEl.value.length;"
      "    }"
      ""
+     "    async function ensureSession() {"
+     "      if (state.sessionId) {"
+     "        return state.sessionId;"
+     "      }"
+     "      const response = await fetch('/sessions', { method: 'POST' });"
+     "      const data = await response.json();"
+     "      if (!response.ok) {"
+     "        throw new Error(data.error || 'Failed to create session');"
+     "      }"
+     "      state.sessionId = data.session_id || '';"
+     "      persistSession();"
+     "      return state.sessionId;"
+     "    }"
+     ""
+     "    async function pollApproval() {"
+     "      if (!state.sessionId) {"
+     "        state.pendingApproval = null;"
+     "        renderApproval();"
+     "        return;"
+     "      }"
+     "      try {"
+     "        const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval');"
+     "        const data = await response.json();"
+     "        if (!response.ok) {"
+     "          throw new Error(data.error || 'Failed to load approval state');"
+     "        }"
+     "        state.pendingApproval = data.pending ? (data.approval || null) : null;"
+     "        renderApproval();"
+     "        if (state.pendingApproval) {"
+     "          setStatus('Approval required');"
+     "        } else if (!state.sending) {"
+     "          setStatus('Ready');"
+     "        }"
+     "      } catch (_err) {"
+     "      }"
+     "    }"
+     ""
+     "    async function submitApproval(decision) {"
+     "      if (!state.sessionId || !state.pendingApproval || state.approvalSubmitting) {"
+     "        return;"
+     "      }"
+     "      state.approvalSubmitting = true;"
+     "      renderApproval();"
+     "      try {"
+     "        const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval', {"
+     "          method: 'POST',"
+     "          headers: { 'Content-Type': 'application/json' },"
+     "          body: JSON.stringify({"
+     "            approval_id: state.pendingApproval.approval_id,"
+     "            decision: decision"
+     "          })"
+     "        });"
+     "        const data = await response.json();"
+     "        if (!response.ok) {"
+     "          throw new Error(data.error || 'Failed to submit approval');"
+     "        }"
+     "        state.pendingApproval = null;"
+     "        renderApproval();"
+     "        setStatus(decision === 'allow' ? 'Approval submitted' : 'Approval denied');"
+     "      } catch (err) {"
+     "        setStatus(err.message || 'Failed to submit approval');"
+     "      } finally {"
+     "        state.approvalSubmitting = false;"
+     "        renderApproval();"
+     "      }"
+     "    }"
+     ""
      "    async function sendMessage(text) {"
      "      state.sending = true;"
      "      updateComposerState();"
-     "      setStatus('Waiting for Xia');"
-     "      try {"
+      "      setStatus('Waiting for Xia');"
+      "      try {"
+     "        await ensureSession();"
      "        const payload = { message: text };"
      "        if (state.sessionId) {"
      "          payload.session_id = state.sessionId;"
@@ -508,6 +659,7 @@
      "        }"
      "        if (data.session_id) {"
      "          state.sessionId = data.session_id;"
+     "          persistSession();"
      "        }"
      "        addMessage('assistant', data.content || '');"
      "        setStatus('Ready');"
@@ -516,8 +668,28 @@
      "        setStatus('Request failed');"
      "      } finally {"
      "        state.sending = false;"
-     "        persistState();"
      "        updateComposerState();"
+     "      }"
+     "    }"
+     ""
+     "    async function loadSessionMessages() {"
+     "      if (!state.sessionId) {"
+     "        state.messages = [];"
+     "        renderMessages();"
+     "        return;"
+     "      }"
+     "      try {"
+     "        const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/messages');"
+     "        const data = await response.json();"
+     "        if (!response.ok) {"
+     "          throw new Error(data.error || 'Failed to load transcript');"
+     "        }"
+     "        state.messages = Array.isArray(data.messages) ? data.messages : [];"
+     "        renderMessages();"
+     "      } catch (err) {"
+     "        state.messages = [];"
+     "        renderMessages();"
+     "        setStatus(err.message || 'Failed to load transcript');"
      "      }"
      "    }"
      ""
@@ -548,13 +720,18 @@
      "      composerEl.focus();"
      "    });"
      ""
+     "    allowApprovalEl.addEventListener('click', () => submitApproval('allow'));"
+     "    denyApprovalEl.addEventListener('click', () => submitApproval('deny'));"
+     ""
      "    newChatEl.addEventListener('click', () => {"
      "      state.sessionId = '';"
      "      state.messages = [];"
-     "      persistState();"
-     "      renderMessages();"
-     "      setStatus('Ready');"
-     "      composerEl.focus();"
+     "      state.pendingApproval = null;"
+      "      persistSession();"
+     "      renderApproval();"
+      "      renderMessages();"
+      "      setStatus('Ready');"
+      "      composerEl.focus();"
      "    });"
      ""
      "    copyTranscriptEl.addEventListener('click', () => {"
@@ -564,11 +741,17 @@
      "      copyText(transcript, 'Transcript copied');"
      "    });"
      ""
-     "    loadMessages();"
-     "    persistState();"
+     "    persistSession();"
+     "    renderApproval();"
      "    renderMessages();"
      "    updateComposerState();"
-     "    composerEl.focus();"
+      "    composerEl.focus();"
+      "    loadSessionMessages();"
+     "    window.setInterval(() => {"
+     "      if (state.sessionId) {"
+     "        pollApproval();"
+     "      }"
+     "    }, 1000);"
      "  </script>"
      "</body>"
      "</html>"]))
@@ -618,6 +801,66 @@
   (when-let [body (:body req)]
     (json/read-json (slurp body))))
 
+(defn- request-header
+  [req header-name]
+  (let [target (str/lower-case header-name)]
+    (or (get-in req [:headers header-name])
+        (get-in req [:headers target])
+        (some (fn [[k v]]
+                (when (= target (str/lower-case (str k)))
+                  v))
+              (:headers req)))))
+
+(defn- session-secret []
+  @local-session-secret)
+
+(defn- session-cookie-value []
+  (str local-session-cookie-name "=" (session-secret)))
+
+(defn- session-cookie-header []
+  (str (session-cookie-value) "; Path=/; HttpOnly; SameSite=Strict"))
+
+(defn- cookie-map
+  [req]
+  (let [cookie-header (request-header req "cookie")]
+    (into {}
+          (keep (fn [part]
+                  (let [[k v] (str/split (str/trim part) #"=" 2)]
+                    (when (and (seq k) (some? v))
+                      [k v]))))
+          (str/split (or cookie-header "") #";"))))
+
+(defn- local-origin?
+  [origin]
+  (try
+    (let [host (.getHost (java.net.URI. origin))]
+      (contains? local-hosts host))
+    (catch Exception _
+      false)))
+
+(defn- valid-session-secret?
+  [req]
+  (= (get (cookie-map req) local-session-cookie-name)
+     (session-secret)))
+
+(defn- trusted-local-origin?
+  "Allow loopback browser origins and direct local clients with no origin
+   headers. Origin checks prevent cross-site requests from using the cookie."
+  [req]
+  (let [origin  (request-header req "origin")
+        referer (request-header req "referer")]
+    (cond
+      (seq origin)  (local-origin? origin)
+      (seq referer) (local-origin? referer)
+      :else         true)))
+
+(defn- trusted-browser-request?
+  "Stateful local UI/API routes require both a local browser origin (when
+   present) and the per-process session secret cookie."
+  [req]
+  (and (trusted-local-origin? req)
+       (valid-session-secret? req)))
+
 (defn- json-response [status body]
   {:status  status
    :headers {"Content-Type" "application/json"}
@@ -627,6 +870,85 @@
   {:status  200
    :headers {"Content-Type" "text/html; charset=utf-8"}
    :body    body})
+
+(defn- forbidden-response []
+  (json-response 403 {:error "forbidden origin"}))
+
+(defn- unauthorized-response []
+  (json-response 401 {:error "missing or invalid local session secret"}))
+
+(defn- protected-route-response
+  [req allowed-fn]
+  (cond
+    (not (trusted-local-origin? req))
+    (forbidden-response)
+
+    (not (valid-session-secret? req))
+    (unauthorized-response)
+
+    :else
+    (allowed-fn)))
+
+(defn- approval->body
+  [{:keys [approval-id tool-id tool-name description arguments reason policy created-at]}]
+  {:approval_id approval-id
+   :tool_id     (name tool-id)
+   :tool_name   tool-name
+   :description description
+   :arguments   arguments
+   :reason      reason
+   :policy      (name policy)
+   :created_at  (some-> created-at .toInstant str)})
+
+(defn- clear-pending-approval!
+  [session-id approval-id]
+  (swap! pending-approvals
+         (fn [pending]
+           (let [current (get pending session-id)]
+             (if (= approval-id (:approval-id current))
+               (dissoc pending session-id)
+               pending)))))
+
+(defn- http-approval-handler
+  [{:keys [session-id tool-id tool-name description arguments reason policy]}]
+  (let [sid (some-> session-id str)]
+    (when-not sid
+      (throw (ex-info "HTTP approval requires a session id"
+                      {:tool-id tool-id})))
+    (let [approval-id (str (random-uuid))
+          decision    (promise)
+          approval    {:approval-id approval-id
+                       :tool-id     tool-id
+                       :tool-name   (or tool-name (name tool-id))
+                       :description description
+                       :arguments   arguments
+                       :reason      reason
+                       :policy      policy
+                       :created-at  (java.util.Date.)
+                       :decision    decision}]
+      (swap! pending-approvals assoc sid approval)
+      (try
+        (let [result (deref decision approval-timeout-ms ::timeout)]
+          (case result
+            :allow true
+            :deny  false
+            (throw (ex-info "Timed out waiting for tool approval"
+                            {:tool-id tool-id
+                             :session-id sid}))))
+        (finally
+          (clear-pending-approval! sid approval-id))))))
+
+(defn- parse-session-id
+  [session-id]
+  (try
+    (java.util.UUID/fromString session-id)
+    session-id
+    (catch IllegalArgumentException _
+      nil)))
+
+(defn- handle-create-session []
+  (let [sid (db/create-session! :http)]
+    (json-response 200 {:session_id (str sid)})))
 
 (defn- handle-chat [req]
   (let [data       (read-body req)
@@ -643,6 +965,55 @@
                             :role       "assistant"
                             :content    response})))))
 
+(defn- handle-get-approval [session-id]
+  (if-not (parse-session-id session-id)
+    (json-response 400 {:error "invalid session id"})
+    (if-let [approval (get @pending-approvals session-id)]
+      (json-response 200 {:pending true
+                          :approval (approval->body approval)})
+      (json-response 200 {:pending false}))))
+
+(defn- handle-submit-approval [session-id req]
+  (if-not (parse-session-id session-id)
+    (json-response 400 {:error "invalid session id"})
+    (let [data        (read-body req)
+          approval-id (get data "approval_id")
+          decision    (get data "decision")
+          current     (get @pending-approvals session-id)
+          decision*   (case decision
+                        "allow" :allow
+                        "deny"  :deny
+                        nil)]
+      (cond
+        (nil? current)
+        (json-response 404 {:error "no pending approval"})
+
+        (not= approval-id (:approval-id current))
+        (json-response 409 {:error "stale approval id"})
+
+        (nil? decision*)
+        (json-response 400 {:error "invalid decision"})
+
+        :else
+        (do
+          (deliver (:decision current) decision*)
+          (clear-pending-approval! session-id approval-id)
+          (json-response 200 {:status "recorded"}))))))
+
+(defn- handle-session-messages [session-id]
+  (try
+    (let [sid      (java.util.UUID/fromString session-id)
+          messages (->> (db/session-messages sid)
+                        (filter #(#{:user :assistant} (:role %)))
+                        (mapv (fn [{:keys [role content created-at]}]
+                                {:role       (name role)
+                                 :content    content
+                                 :created_at (some-> created-at .toInstant str)})))]
+      (json-response 200 {:session_id session-id
+                          :messages   messages}))
+    (catch IllegalArgumentException _
+      (json-response 400 {:error "invalid session id"}))))
+
 (defn- handle-skills [_req]
   (json-response 200 {:skills (mapv (fn [s]
                                       {:id          (name (:skill/id s))
@@ -656,7 +1027,9 @@
   (json-response 200 {:status "ok" :version "0.1.0"}))
 
 (defn- handle-home [_req]
-  (html-response local-ui-html))
+  (assoc-in (html-response local-ui-html)
+            [:headers "Set-Cookie"]
+            (session-cookie-header)))
 
 ;; ---------------------------------------------------------------------------
 ;; Router
@@ -664,21 +1037,42 @@
 
 (defn- router [req]
   (let [uri    (:uri req)
-        method (:request-method req)]
+        method (:request-method req)
+        session-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
+        approval-match (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)]
     (cond
       (and (= method :get) (= uri "/"))
       (handle-home req)
 
       ;; WebSocket upgrade
-      (and (= uri "/ws") (http/websocket-handshake-check req))
+      (and (= uri "/ws")
+           (http/websocket-handshake-check req)
+           (trusted-browser-request? req))
       (ws-handler req)
 
+      (and (= uri "/ws") (http/websocket-handshake-check req))
+      (if (trusted-local-origin? req)
+        (unauthorized-response)
+        (forbidden-response))
+
       ;; REST
+      (and (= method :post) (= uri "/sessions"))
+      (protected-route-response req handle-create-session)
+
       (and (= method :post) (= uri "/chat"))
-      (handle-chat req)
+      (protected-route-response req #(handle-chat req))
+
+      (and (= method :get) approval-match)
+      (protected-route-response req #(handle-get-approval (second approval-match)))
+
+      (and (= method :post) approval-match)
+      (protected-route-response req #(handle-submit-approval (second approval-match) req))
+
+      (and (= method :get) session-match)
+      (protected-route-response req #(handle-session-messages (second session-match)))
 
       (and (= method :get) (= uri "/skills"))
-      (handle-skills req)
+      (protected-route-response req #(handle-skills req))
 
       (and (= method :get) (= uri "/health"))
       (handle-health req)
@@ -691,17 +1085,25 @@
 ;; ---------------------------------------------------------------------------
 
 (defn start!
-  "Start the HTTP/WebSocket server on the given port."
-  [port]
-  (when @server-atom
-    (log/warn "Server already running"))
-  (let [s (http/run-server router {:port port})]
-    (reset! server-atom s)
-    (log/info "HTTP/WebSocket server started on port" port)
-    s))
+  "Start the HTTP/WebSocket server.
+   Defaults to loopback-only binding."
+  ([port]
+   (start! "127.0.0.1" port))
+  ([bind-host port]
+   (when @server-atom
+     (log/warn "Server already running"))
+   (prompt/register-approval! :http http-approval-handler)
+   (prompt/register-approval! :websocket http-approval-handler)
+   (let [s (http/run-server router {:ip bind-host :port port})]
+     (reset! server-atom s)
+     (log/info "HTTP/WebSocket server started on" bind-host ":" port)
+     s)))
 
 (defn stop! []
   (when-let [s @server-atom]
     (s) ; http-kit stop fn
+    (prompt/register-approval! :http nil)
+    (prompt/register-approval! :websocket nil)
+    (reset! pending-approvals {})
     (reset! server-atom nil)
     (log/info "Server stopped")))

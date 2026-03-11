@@ -20,14 +20,14 @@
 
 (defn- execute-tool-calls
   "Execute tool calls from the LLM response, return tool result messages."
-  [tool-calls]
+  [tool-calls context]
   (mapv (fn [tc]
           (let [func-name (get-in tc ["function" "name"])
                 args-str  (get-in tc ["function" "arguments"])
                 args      (try (json/read-json args-str) (catch Exception _ {}))
                 tool-id   (keyword func-name)
-                result    (tool/execute-tool tool-id args)]
-            (log/debug "Tool call:" func-name args "→" result)
+                result    (tool/execute-tool tool-id args context)]
+            (log/debug "Tool call completed:" func-name)
             {:role         "tool"
              :tool_call_id (get tc "id")
              :content      (if (string? result) result (json/write-json-str result))}))
@@ -59,7 +59,8 @@
                 assistant-msg {:role       "assistant"
                                :content    (get response "content" "")
                                :tool_calls tool-calls}
-                tool-results  (execute-tool-calls tool-calls)]
+                tool-results  (execute-tool-calls tool-calls {:session-id session-id
+                                                              :channel    channel})]
             ;; Store assistant message with tool calls
             (db/add-message! session-id :assistant
                              (get response "content" "")

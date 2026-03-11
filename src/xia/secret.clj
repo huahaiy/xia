@@ -6,37 +6,22 @@
    accesses credentials directly through xia.db; sandboxed tool handlers go
    through these filtered functions instead."
   (:require [clojure.string :as str]
-            [xia.db :as db]))
+            [xia.db :as db]
+            [xia.sensitive :as sensitive]))
 
 ;; ---------------------------------------------------------------------------
 ;; Secret definitions
 ;; ---------------------------------------------------------------------------
 
-(def ^:private secret-attrs
-  "DB attributes that must never be returned to sandboxed code."
-  #{:llm.provider/api-key :service/auth-key
-    :site-cred/username :site-cred/password})
-
-(def ^:private secret-attr-namespaces
-  "Attribute namespace prefixes that are always secret."
-  #{"credential" "secret"})
-
-(def ^:private secret-config-prefixes
-  "Config key namespace prefixes that are secret."
-  #{"credential" "secret" "api-key" "oauth" "token"})
-
 (defn secret-attr?
   "True if the given attribute keyword is secret."
   [attr]
-  (or (contains? secret-attrs attr)
-      (when-let [ns (namespace attr)]
-        (some #(str/starts-with? ns %) secret-attr-namespaces))))
+  (sensitive/secret-attr? attr))
 
 (defn secret-config-key?
   "True if the given config key should be treated as secret."
   [k]
-  (when-let [ns (namespace k)]
-    (some #(str/starts-with? ns %) secret-config-prefixes)))
+  (sensitive/secret-config-key? k))
 
 ;; ---------------------------------------------------------------------------
 ;; Safe wrappers for SCI sandbox
@@ -69,25 +54,94 @@
                     "token" "oauth"
                     "private.key" "private-key"]))))
 
-(defn- query-references-secret?
-  "Check if a Datalog query references any secret attributes."
+(def ^:private blocked-query-ops
+  '#{pull pull-many})
+
+(def ^:private query-section-keys
+  #{:find :with :in :where :keys :strs :syms})
+
+(defn- secret-like-keyword?
+  [form]
+  (and (keyword? form)
+       (or (secret-attr? form)
+           (when-let [n (name form)]
+             (re-find blocked-attrs-pattern n)))))
+
+(defn- split-query-sections
   [query]
-  (let [walk-form (fn walk [form]
-                    (cond
-                      (keyword? form)
-                      (or (secret-attr? form)
-                          (when-let [n (name form)]
-                            (re-find blocked-attrs-pattern n)))
+  (loop [xs       query
+         current  nil
+         sections {}]
+    (if-let [x (first xs)]
+      (if (and (keyword? x) (contains? query-section-keys x))
+        (recur (rest xs) x (assoc sections x []))
+        (recur (rest xs) current (update sections current (fnil conj []) x)))
+      sections)))
 
-                      (coll? form)
-                      (some walk form)
+(declare unsafe-where-clause?)
 
-                      :else false))]
-    (boolean (walk-form query))))
+(defn- unsafe-form?
+  [form]
+  (cond
+    (secret-like-keyword? form)
+    true
+
+    (seq? form)
+    (or (contains? blocked-query-ops (first form))
+        (some unsafe-form? form))
+
+    (coll? form)
+    (some unsafe-form? form)
+
+    :else false))
+
+(defn- data-pattern-clause?
+  [clause]
+  (and (vector? clause)
+       (<= 3 (count clause) 4)
+       (not (seq? (first clause)))))
+
+(defn- unsafe-data-pattern?
+  [clause]
+  (let [attr (nth clause 1)]
+    (or (not (keyword? attr))
+        (secret-like-keyword? attr))))
+
+(defn- unsafe-where-clause?
+  [clause]
+  (cond
+    (data-pattern-clause? clause)
+    (unsafe-data-pattern? clause)
+
+    (vector? clause)
+    (unsafe-form? (first clause))
+
+    (seq? clause)
+    (let [op   (first clause)
+          args (if (#{'or-join 'not-join} op)
+                 (rest (rest clause))
+                 (rest clause))]
+      (or (contains? blocked-query-ops op)
+          (some unsafe-where-clause? args)))
+
+    :else false))
+
+(defn- query-references-secret?
+  "Check if a Datalog query references secret attrs or uses query forms that
+   can enumerate attributes indirectly."
+  [query]
+  (let [sections (if (vector? query)
+                   (split-query-sections query)
+                   {})]
+    (boolean
+      (or (unsafe-form? (get sections :find))
+          (some unsafe-where-clause? (get sections :where))
+          (and (empty? sections) (unsafe-form? query))))))
 
 (defn safe-q
   "Restricted Datalog query for the SCI sandbox.
-   Rejects queries that reference secret attributes."
+   Rejects queries that reference secret attributes or use indirect attribute
+   access such as pull or attr-position variables."
   [query & inputs]
   (when (query-references-secret? query)
     (throw (ex-info "Access denied: query references secret attributes"

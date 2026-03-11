@@ -1,7 +1,8 @@
 (ns xia.web-test
   (:require [clojure.test :refer :all]
             [xia.web :as web])
-  (:import [org.jsoup Jsoup]
+  (:import [java.net InetAddress]
+           [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element]))
 
 ;; ---------------------------------------------------------------------------
@@ -17,6 +18,15 @@
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"private/internal"
           (#'web/validate-url! "http://localhost/secret")))))
+
+(deftest validate-url-blocks-mixed-public-and-private-resolution
+  (with-redefs-fn {#'web/resolve-host-addresses
+                   (fn [_]
+                     [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))
+                      (InetAddress/getByAddress "private.example" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))])}
+    #(is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"private/internal"
+           (#'web/validate-url! "https://mixed.example/path")))))
 
 (deftest validate-url-blocks-bad-schemes
   (testing "blocks file://"
@@ -195,6 +205,46 @@
   (let [result (web/fetch-page "file:///etc/passwd")]
     (is (some? (:error result)))
     (is (re-find #"Only http" (:error result)))))
+
+(deftest fetch-raw-follows-redirects-hop-by-hop
+  (let [calls (atom [])]
+    (with-redefs-fn {#'web/resolve-host-addresses
+                     (fn [_]
+                       [(InetAddress/getByAddress "example.com" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))])
+                     #'hato.client/request
+                     (fn [{:keys [url]}]
+                       (swap! calls conj url)
+                       (if (= url "https://example.com/start")
+                         {:status 302
+                          :headers {"location" "/next"}
+                          :body ""}
+                         {:status 200
+                          :headers {"content-type" "text/plain"}
+                          :body "ok"}))}
+      #(let [result (#'web/fetch-raw "https://example.com/start")]
+         (is (= ["https://example.com/start" "https://example.com/next"] @calls))
+         (is (= "https://example.com/next" (:final-url result)))
+         (is (= 200 (:status result)))
+         (is (= "ok" (:body result)))))))
+
+(deftest fetch-raw-blocks-private-redirect-target
+  (with-redefs-fn {#'web/resolve-host-addresses
+                   (fn [host]
+                     (case host
+                       "public.example"
+                       [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))]
+                       "127.0.0.1"
+                       [(InetAddress/getByAddress "127.0.0.1" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))]))
+                   #'hato.client/request
+                   (fn [{:keys [url]}]
+                     (if (= url "https://public.example/start")
+                       {:status 302
+                        :headers {"location" "http://127.0.0.1/secret"}
+                        :body ""}
+                       (throw (ex-info "unexpected follow-up request" {:url url}))))}
+    #(is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"private/internal"
+           (#'web/fetch-raw "https://public.example/start")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Integration: extract-data (live HTTP)

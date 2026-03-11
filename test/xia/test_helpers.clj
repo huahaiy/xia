@@ -13,7 +13,7 @@
   "Fixture: create a temp Datalevin DB for the duration of the test."
   [f]
   (let [path (temp-db-path)]
-    (db/connect! path)
+    (db/connect! path {:passphrase-provider (constantly "xia-test-passphrase")})
     (try
       (f)
       (finally

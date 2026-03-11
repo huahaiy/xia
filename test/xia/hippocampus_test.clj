@@ -193,15 +193,37 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest test-maintain-knowledge
-  (let [node-eid (th/seed-node! "TestEntity" "concept")
-        fact-eid (th/seed-fact! node-eid "some fact" :confidence 1.0)
-        ;; Backdate the fact to 2 weeks ago
-        two-weeks-ago (java.util.Date. (- (System/currentTimeMillis) (* 14 24 60 60 1000)))]
-    (db/transact! [[:db/add fact-eid :kg.fact/updated-at two-weeks-ago]])
-    (hippo/maintain-knowledge!)
-    (let [updated-conf (:kg.fact/confidence (db/entity fact-eid))]
+  (let [node-eid      (th/seed-node! "TestEntity" "concept")
+        fact-eid      (th/seed-fact! node-eid "some fact" :confidence 1.0)
+        now-ms        (System/currentTimeMillis)
+        ninety-days   (* 90 24 60 60 1000)
+        now           (java.util.Date. now-ms)
+        old-updated   (java.util.Date. (- now-ms ninety-days))
+        expected-conf (max 0.1
+                           (Math/pow 0.5 (/ (- ninety-days (* 7 24 60 60 1000))
+                                            (double (* 60 24 60 60 1000)))))]
+    (db/transact! [[:db/add fact-eid :kg.fact/updated-at old-updated]])
+    (hippo/maintain-knowledge! now)
+    (let [updated-conf (:kg.fact/confidence (db/entity fact-eid))
+          decayed-at   (:kg.fact/decayed-at (db/entity fact-eid))]
       (is (< updated-conf 1.0) "Confidence should have decayed")
-      (is (> updated-conf 0.9) "Decay should be gradual (0.95 factor)"))))
+      (is (< (Math/abs (- updated-conf expected-conf)) 1.0e-3)
+          "Confidence should follow the documented exponential half-life")
+      (is (= now decayed-at) "Maintenance should record when decay was applied"))))
+
+(deftest test-maintain-knowledge-is-idempotent-for-same-time
+  (let [node-eid    (th/seed-node! "StableEntity" "concept")
+        fact-eid    (th/seed-fact! node-eid "stable fact" :confidence 1.0)
+        now-ms      (System/currentTimeMillis)
+        now         (java.util.Date. now-ms)
+        thirty-days (java.util.Date. (- now-ms (* 30 24 60 60 1000)))]
+    (db/transact! [[:db/add fact-eid :kg.fact/updated-at thirty-days]])
+    (hippo/maintain-knowledge! now)
+    (let [once-conf (:kg.fact/confidence (db/entity fact-eid))]
+      (hippo/maintain-knowledge! now)
+      (let [twice-conf (:kg.fact/confidence (db/entity fact-eid))]
+        (is (= once-conf twice-conf)
+            "The same elapsed time should not be charged twice")))))
 
 ;; ---------------------------------------------------------------------------
 ;; consolidate-if-pending!

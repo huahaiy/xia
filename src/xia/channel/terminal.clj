@@ -29,11 +29,29 @@
         (flush)
         (or (read-line) ""))))
 
+(defn- terminal-approval
+  "Prompt the user to approve a privileged tool for the current session."
+  [{:keys [tool-id tool-name description arguments reason]}]
+  (println)
+  (println (str "  approval required for tool " (or tool-name (name tool-id))))
+  (when (seq description)
+    (println (str "  " description)))
+  (when (seq reason)
+    (println (str "  reason: " reason)))
+  (when (seq arguments)
+    (println (str "  arguments: " (pr-str arguments))))
+  (let [answer (-> (terminal-prompt "Allow for this session? [y/N]")
+                   str/trim
+                   str/lower-case)]
+    (println)
+    (#{"y" "yes"} answer)))
+
 (defn start!
   "Start the terminal REPL loop."
   []
   ;; Register the terminal prompt handler for interactive credential input
-  (prompt/register-prompt! terminal-prompt)
+  (prompt/register-prompt! :terminal terminal-prompt)
+  (prompt/register-approval! :terminal terminal-approval)
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
     (wm/create-wm! session-id)

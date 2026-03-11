@@ -12,11 +12,12 @@
             [charred.api :as json]
             [xia.db :as db]
             [xia.prompt :as prompt])
-  (:import [org.htmlunit WebClient BrowserVersion]
+  (:import [org.htmlunit WebClient BrowserVersion WebRequest]
            [org.htmlunit.html HtmlPage HtmlElement HtmlForm
                               HtmlInput HtmlTextArea HtmlSelect
                               HtmlOption HtmlAnchor
                               DomElement DomNode]
+           [org.htmlunit.util WebConnectionWrapper]
            [java.util.concurrent ConcurrentHashMap]))
 
 ;; ---------------------------------------------------------------------------
@@ -28,17 +29,31 @@
 
 (defonce ^:private sessions (ConcurrentHashMap.))
 
+(declare validate-url!)
+
+(defn- install-url-guard!
+  [^WebClient client]
+  (.setWebConnection
+    client
+    (proxy [WebConnectionWrapper] [client]
+      (getResponse [^WebRequest request]
+        (validate-url! (str (.getUrl request)))
+        (proxy-super getResponse request))))
+  client)
+
 (defn- make-client
   "Create a configured HtmlUnit WebClient."
   ^WebClient []
-  (doto (WebClient. BrowserVersion/CHROME)
-    (-> .getOptions (.setCssEnabled false))
-    (-> .getOptions (.setJavaScriptEnabled true))
-    (-> .getOptions (.setThrowExceptionOnScriptError false))
-    (-> .getOptions (.setThrowExceptionOnFailingStatusCode false))
-    (-> .getOptions (.setPrintContentOnFailingStatusCode false))
-    (-> .getOptions (.setTimeout 15000))
-    (-> .getOptions (.setDownloadImages false))))
+  (let [client (WebClient. BrowserVersion/CHROME)]
+    (doto client
+      (-> .getOptions (.setCssEnabled false))
+      (-> .getOptions (.setJavaScriptEnabled true))
+      (-> .getOptions (.setThrowExceptionOnScriptError false))
+      (-> .getOptions (.setThrowExceptionOnFailingStatusCode false))
+      (-> .getOptions (.setPrintContentOnFailingStatusCode false))
+      (-> .getOptions (.setTimeout 15000))
+      (-> .getOptions (.setDownloadImages false))
+      install-url-guard!)))
 
 (defn- session-expired?
   [{:keys [last-access]}]
@@ -138,6 +153,17 @@
 ;; SSRF protection (reuse pattern from xia.web)
 ;; ---------------------------------------------------------------------------
 
+(defn- private-ip?
+  [^java.net.InetAddress addr]
+  (or (.isLoopbackAddress addr)
+      (.isLinkLocalAddress addr)
+      (.isSiteLocalAddress addr)
+      (.isAnyLocalAddress addr)))
+
+(defn- resolve-host-addresses
+  [host]
+  (seq (java.net.InetAddress/getAllByName host)))
+
 (defn- validate-url!
   [url]
   (let [uri (java.net.URI. url)]
@@ -147,13 +173,8 @@
     (let [host (.getHost uri)]
       (when (str/blank? host)
         (throw (ex-info "URL has no host" {:url url})))
-      (let [addrs (java.net.InetAddress/getAllByName host)]
-        (when (every? (fn [^java.net.InetAddress a]
-                        (or (.isLoopbackAddress a)
-                            (.isLinkLocalAddress a)
-                            (.isSiteLocalAddress a)
-                            (.isAnyLocalAddress a)))
-                      addrs)
+      (let [addrs (resolve-host-addresses host)]
+        (when (some private-ip? addrs)
           (throw (ex-info "Access to private/internal addresses is blocked"
                           {:url url :host host})))))))
 

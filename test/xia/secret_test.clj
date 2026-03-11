@@ -12,7 +12,9 @@
 
 (deftest secret-attr?-test
   (testing "known secret attributes"
-    (is (secret/secret-attr? :llm.provider/api-key)))
+    (is (secret/secret-attr? :llm.provider/api-key))
+    (is (secret/secret-attr? :message/content))
+    (is (secret/secret-attr? :schedule-run/result)))
   (testing "secret namespace prefixes"
     (is (secret/secret-attr? :credential/gmail-token))
     (is (secret/secret-attr? :secret/my-key)))
@@ -114,3 +116,61 @@
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"Access denied"
           (secret/safe-q '[:find ?v :where [?e :auth/oauth-token ?v]])))))
+
+(deftest safe-q-blocks-indirect-attribute-access
+  (db/transact! [{:service/id        :leak
+                  :service/name      "Leak"
+                  :service/base-url  "https://example.com"
+                  :service/auth-type :bearer
+                  :service/auth-key  "top-secret"
+                  :service/enabled?  true}])
+
+  (testing "blocks wildcard-style attr scans"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?a ?v :where
+                           [?e :service/id :leak]
+                           [?e ?a ?v]]))))
+
+  (testing "blocks attr-position variables from :in"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :in $ ?attr :where [?e ?attr ?v]]
+                         :service/auth-key)))))
+
+(deftest safe-q-blocks-pull
+  (db/transact! [{:llm.provider/id       :test
+                  :llm.provider/name     "test"
+                  :llm.provider/base-url "http://localhost"
+                  :llm.provider/api-key  "sk-super-secret"
+                  :llm.provider/model    "test-model"
+                  :llm.provider/default? true}])
+
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo #"Access denied"
+        (secret/safe-q '[:find (pull ?e [*]) :where
+                         [?e :llm.provider/id :test]]))))
+
+(deftest safe-q-blocks-transcript-and-run-history-queries
+  (let [sid         (db/create-session! :terminal)
+        session-eid (ffirst (db/q '[:find ?e :in $ ?sid
+                                    :where [?e :session/id ?sid]]
+                                  sid))]
+    (db/transact! [{:message/id         (random-uuid)
+                    :message/session    session-eid
+                    :message/role       :user
+                    :message/content    "copied secret"
+                    :message/created-at (java.util.Date.)}
+                   {:schedule-run/id          (random-uuid)
+                    :schedule-run/schedule-id :hist
+                    :schedule-run/started-at  (java.util.Date.)
+                    :schedule-run/status      :success
+                    :schedule-run/result      "{\"token\":\"secret\"}"}])
+
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?content :where [?m :message/content ?content]])))
+
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?result :where [?run :schedule-run/result ?result]])))))

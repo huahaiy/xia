@@ -4,6 +4,7 @@
 {:id          :browser-fill-form
  :name        "browser-fill-form"
  :description "Fill form fields and optionally submit. Returns the resulting page content. The fields parameter maps field names to values. Set submit to true to submit the form after filling."
+ :approval    :session
  :parameters  {"type"       "object"
                "properties" {"session_id"     {"type"        "string"
                                                "description" "The browser session ID from browser-open"}

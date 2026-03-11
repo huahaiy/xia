@@ -1,7 +1,10 @@
 (ns xia.db
   "Datalevin database — the single source of truth for a xia instance.
    All state lives here: config, identity, memory, messages, skills, tools."
-  (:require [datalevin.core :as d]))
+  (:require [clojure.string :as str]
+            [datalevin.core :as d]
+            [xia.crypto :as crypto]
+            [xia.sensitive :as sensitive]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schema
@@ -61,6 +64,7 @@
    :kg.fact/source     {:db/valueType :db.type/ref}     ; → episode (provenance)
    :kg.fact/created-at {:db/valueType :db.type/instant}
    :kg.fact/updated-at {:db/valueType :db.type/instant}
+   :kg.fact/decayed-at {:db/valueType :db.type/instant}
 
    ;; --- Session ---
    :session/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
@@ -155,6 +159,7 @@
    :tool/description   {:db/valueType :db.type/string}
    :tool/parameters    {:db/valueType :db.type/string}  ; JSON schema for parameters
    :tool/handler       {:db/valueType :db.type/string}  ; SCI code → fn
+   :tool/approval      {:db/valueType :db.type/keyword} ; :auto :session :always
    :tool/enabled?      {:db/valueType :db.type/boolean}
    :tool/installed-at  {:db/valueType :db.type/instant}})
 
@@ -163,13 +168,17 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private conn-atom (atom nil))
+(declare migrate-secrets!)
 
 (defn connect!
   "Open (or create) the Datalevin database at `db-path`."
-  [db-path]
-  (let [c (d/get-conn db-path schema)]
-    (reset! conn-atom c)
-    c))
+  ([db-path] (connect! db-path nil))
+  ([db-path crypto-opts]
+   (let [c (d/get-conn db-path schema)]
+     (reset! conn-atom c)
+     (crypto/configure! db-path crypto-opts)
+     (migrate-secrets!)
+     c)))
 
 (defn conn
   "Return the current connection. Throws if not connected."
@@ -186,14 +195,114 @@
 ;; Generic helpers
 ;; ---------------------------------------------------------------------------
 
+(defn- config-aad [k]
+  (str "config:" (name k)))
+
+(defn- attr-aad [attr]
+  (str "attr:" (namespace attr) "/" (name attr)))
+
+(defn- decrypt-secret-attr [attr value]
+  (if (sensitive/secret-attr? attr)
+    (crypto/decrypt value (attr-aad attr))
+    value))
+
+(defn- maybe-encrypt-config-value [k value]
+  (if (sensitive/secret-config-key? k)
+    (crypto/encrypt value (config-aad k))
+    (str value)))
+
+(defn- encrypt-secret-attrs [record]
+  (reduce-kv
+    (fn [acc k v]
+      (assoc acc k
+             (if (sensitive/secret-attr? k)
+               (crypto/encrypt v (attr-aad k))
+               v)))
+    record
+    record))
+
+(defn- prepare-tx-item [item]
+  (cond
+    (map? item)
+    (let [item (if (contains? item :config/key)
+                 (update item :config/value #(maybe-encrypt-config-value (:config/key item) %))
+                 item)]
+      (encrypt-secret-attrs item))
+
+    (and (vector? item)
+         (= :db/add (first item))
+         (= 4 (count item))
+         (keyword? (nth item 2))
+         (sensitive/secret-attr? (nth item 2)))
+    (let [[op eid attr value] item]
+      [op eid attr (crypto/encrypt value (attr-aad attr))])
+
+    :else
+    item))
+
 (defn transact! [tx-data]
-  (d/transact! (conn) tx-data))
+  (d/transact! (conn) (mapv prepare-tx-item tx-data)))
 
 (defn q [query & inputs]
   (apply d/q query (d/db (conn)) inputs))
 
 (defn entity [eid]
-  (d/entity (d/db (conn)) eid))
+  (let [e (into {} (d/entity (d/db (conn)) eid))]
+    (reduce-kv (fn [acc k v]
+                 (assoc acc k (decrypt-secret-attr k v)))
+               {}
+               e)))
+
+(defn- raw-entity [eid]
+  (into {} (d/entity (d/db (conn)) eid)))
+
+(defn- decrypt-entity [entity-map]
+  (reduce-kv (fn [acc k v]
+               (assoc acc k (decrypt-secret-attr k v)))
+             {}
+             entity-map))
+
+(defn- migrate-secret-attr! [eid attr value]
+  (when (and (string? value)
+             (not (str/blank? value))
+             (not (crypto/encrypted? value)))
+    (transact! [[:db/add eid attr (crypto/encrypt value (attr-aad attr))]])
+    1))
+
+(defn- migrate-secret-config! [eid config-key value]
+  (when (and (sensitive/secret-config-key? config-key)
+             (string? value)
+             (not (str/blank? value))
+             (not (crypto/encrypted? value)))
+    (transact! [[:db/add eid :config/value (crypto/encrypt value (config-aad config-key))]])
+    1))
+
+(defn- migrate-secrets!
+  []
+  (let [db (d/db (conn))
+        config-count
+        (reduce
+          +
+          0
+          (map (fn [[eid k v]]
+                 (or (migrate-secret-config! eid k v) 0))
+               (d/q '[:find ?e ?k ?v
+                      :where
+                      [?e :config/key ?k]
+                      [?e :config/value ?v]]
+                    db)))
+        attr-count
+        (reduce
+          +
+          0
+          (for [attr sensitive/secret-attrs
+                [eid value] (d/q '[:find ?e ?v
+                                   :in $ ?attr
+                                   :where
+                                   [?e ?attr ?v]]
+                                 db attr)]
+            (or (migrate-secret-attr! eid attr value) 0)))]
+    (+ config-count attr-count)))
 
 ;; ---------------------------------------------------------------------------
 ;; Config
@@ -203,7 +312,10 @@
   (transact! [{:config/key k :config/value (str v)}]))
 
 (defn get-config [k]
-  (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k)))
+  (let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
+    (if (sensitive/secret-config-key? k)
+      (crypto/decrypt value (config-aad k))
+      value)))
 
 ;; ---------------------------------------------------------------------------
 ;; Identity
@@ -220,17 +332,38 @@
 ;; ---------------------------------------------------------------------------
 
 (defn upsert-provider! [{:keys [id] :as provider}]
-  (transact! [(assoc provider :llm.provider/id id)]))
+  (let [provider-id (or id (:llm.provider/id provider))]
+    (transact! [(cond-> {:llm.provider/id provider-id}
+                  (contains? provider :llm.provider/name)
+                  (assoc :llm.provider/name (:llm.provider/name provider))
+                  (contains? provider :name)
+                  (assoc :llm.provider/name (:name provider))
+                  (contains? provider :llm.provider/base-url)
+                  (assoc :llm.provider/base-url (:llm.provider/base-url provider))
+                  (contains? provider :base-url)
+                  (assoc :llm.provider/base-url (:base-url provider))
+                  (contains? provider :llm.provider/api-key)
+                  (assoc :llm.provider/api-key (:llm.provider/api-key provider))
+                  (contains? provider :api-key)
+                  (assoc :llm.provider/api-key (:api-key provider))
+                  (contains? provider :llm.provider/model)
+                  (assoc :llm.provider/model (:llm.provider/model provider))
+                  (contains? provider :model)
+                  (assoc :llm.provider/model (:model provider))
+                  (contains? provider :llm.provider/default?)
+                  (assoc :llm.provider/default? (:llm.provider/default? provider))
+                  (contains? provider :default?)
+                  (assoc :llm.provider/default? (:default? provider)))])))
 
 (defn get-default-provider []
   (let [results (q '[:find ?e :where
                      [?e :llm.provider/default? true]])]
     (when-let [eid (ffirst results)]
-      (into {} (d/entity (d/db (conn)) eid)))))
+      (decrypt-entity (raw-entity eid)))))
 
 (defn list-providers []
   (let [eids (q '[:find ?e :where [?e :llm.provider/id _]])]
-    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
 
 ;; ---------------------------------------------------------------------------
 ;; Memory — episodic and knowledge graph operations are in xia.memory
@@ -341,9 +474,11 @@
   (sort-by :created-at
            (map (fn [[content role created tool-calls tool-id]]
                   {:role       role
-                   :content    content
+                   :content    (decrypt-secret-attr :message/content content)
                    :created-at created
-                   :tool-calls (empty->nil tool-calls)
+                   :tool-calls (some->> tool-calls
+                                         (decrypt-secret-attr :message/tool-calls)
+                                         empty->nil)
                    :tool-id    (empty->nil tool-id)})
                 (q '[:find ?content ?role ?created ?tc ?tid
                      :in $ ?sid
@@ -374,11 +509,11 @@
 
 (defn get-skill [skill-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
-    (when eid (into {} (d/entity (d/db (conn)) eid)))))
+    (when eid (raw-entity eid))))
 
 (defn list-skills []
   (let [eids (q '[:find ?e :where [?e :skill/id _]])]
-    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+    (mapv #(raw-entity (first %)) eids)))
 
 (defn enable-skill! [skill-id enabled?]
   (transact! [{:skill/id skill-id :skill/enabled? enabled?}]))
@@ -413,11 +548,11 @@
 
 (defn get-site-cred [site-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
-    (when eid (into {} (d/entity (d/db (conn)) eid)))))
+    (when eid (decrypt-entity (raw-entity eid)))))
 
 (defn list-site-creds []
   (let [eids (q '[:find ?e :where [?e :site-cred/id _]])]
-    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
 
 (defn remove-site-cred! [site-id]
   (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
@@ -438,11 +573,11 @@
 
 (defn get-service [service-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] service-id))]
-    (when eid (into {} (d/entity (d/db (conn)) eid)))))
+    (when eid (decrypt-entity (raw-entity eid)))))
 
 (defn list-services []
   (let [eids (q '[:find ?e :where [?e :service/id _]])]
-    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
 
 (defn enable-service! [service-id enabled?]
   (transact! [{:service/id service-id :service/enabled? enabled?}]))
@@ -451,22 +586,23 @@
 ;; Tools (executable code)
 ;; ---------------------------------------------------------------------------
 
-(defn install-tool! [{:keys [id name description parameters handler]}]
+(defn install-tool! [{:keys [id name description parameters handler approval]}]
   (transact! [{:tool/id           id
                :tool/name         (or name (clojure.core/name id))
                :tool/description  (or description "")
                :tool/parameters   (or parameters "{}")
                :tool/handler      (or handler "")
+               :tool/approval     (or approval :auto)
                :tool/enabled?     true
                :tool/installed-at (java.util.Date.)}]))
 
 (defn get-tool [tool-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :tool/id ?id]] tool-id))]
-    (when eid (into {} (d/entity (d/db (conn)) eid)))))
+    (when eid (raw-entity eid))))
 
 (defn list-tools []
   (let [eids (q '[:find ?e :where [?e :tool/id _]])]
-    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+    (mapv #(raw-entity (first %)) eids)))
 
 (defn enable-tool! [tool-id enabled?]
   (transact! [{:tool/id tool-id :tool/enabled? enabled?}]))

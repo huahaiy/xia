@@ -7,9 +7,11 @@
 
    Contrast with skills: a skill is text the LLM reads and follows;
    a tool is code the LLM triggers and gets results from."
-  (:require [clojure.tools.logging :as log]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [charred.api :as json]
             [xia.db :as db]
+            [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]))
 
 ;; ---------------------------------------------------------------------------
@@ -17,11 +19,52 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private registry (atom {}))
+(defonce ^:private session-approvals (atom {}))
+
+(def ^:private approval-note
+  " Requires user approval before execution.")
+
+(def ^:private privileged-handler-rules
+  [{:match "xia.service/request"
+    :policy :session
+    :reason "uses stored service credentials"}
+   {:match "xia.browser/login-interactive"
+    :policy :session
+    :reason "prompts for interactive credentials"}
+   {:match "xia.browser/login"
+    :policy :session
+    :reason "uses stored site credentials"}
+   {:match "xia.browser/fill-form"
+    :policy :session
+    :reason "submits data into live browser sessions"}
+   {:match "xia.browser/click"
+    :policy :session
+    :reason "can trigger live browser actions"}
+   {:match "xia.schedule/create-schedule!"
+    :policy :session
+    :reason "creates autonomous background tasks"}
+   {:match "xia.schedule/update-schedule!"
+    :policy :session
+    :reason "changes autonomous background tasks"}
+   {:match "xia.schedule/remove-schedule!"
+    :policy :session
+    :reason "changes autonomous background tasks"}
+   {:match "xia.schedule/pause-schedule!"
+    :policy :session
+    :reason "changes autonomous background tasks"}
+   {:match "xia.schedule/resume-schedule!"
+    :policy :session
+    :reason "changes autonomous background tasks"}])
 
 (defn registered-tools
   "Return all currently loaded tool handlers."
   []
   @registry)
+
+(defn clear-session-approvals!
+  "Clear cached approval decisions for a session."
+  [session-id]
+  (swap! session-approvals dissoc session-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool loading
@@ -63,7 +106,7 @@
 (defn import-tool!
   "Import a tool from an EDN definition map. Installs in DB and loads it."
   [tool-def]
-  (let [{:keys [id name description parameters handler]} tool-def]
+  (let [{:keys [id name description parameters handler approval]} tool-def]
     (when-not id
       (throw (ex-info "Tool definition must have an :id" {:def tool-def})))
     (db/install-tool! {:id          id
@@ -72,10 +115,49 @@
                        :parameters  (if (map? parameters)
                                       (json/write-json-str parameters)
                                       (or parameters "{}"))
-                       :handler     (if (string? handler) handler (pr-str handler))})
+                       :handler     (if (string? handler) handler (pr-str handler))
+                       :approval    (cond
+                                      (keyword? approval) approval
+                                      (string? approval) (keyword approval)
+                                      :else approval)})
     (load-tool! id)
     (log/info "Imported tool:" (or name (clojure.core/name id)))
     tool-def))
+
+(defn- explicit-approval-policy
+  [tool]
+  (when-let [approval (or (:tool/approval tool) (:approval tool))]
+    {:policy (cond
+               (keyword? approval) approval
+               (string? approval) (keyword approval)
+               :else :auto)}))
+
+(defn- inferred-approval-policy
+  [tool]
+  (let [handler (or (:tool/handler tool) "")]
+    (or (some (fn [{:keys [match] :as rule}]
+                (when (str/includes? handler match)
+                  rule))
+              privileged-handler-rules)
+        {:policy :auto})))
+
+(defn- tool-approval-policy
+  [tool]
+  (let [{:keys [policy] :as decision} (or (explicit-approval-policy tool)
+                                          (inferred-approval-policy tool))]
+    (assoc decision :policy (case policy
+                              :session :session
+                              :always  :always
+                              :auto    :auto
+                              :auto))))
+
+(defn- tool-description-for-llm
+  [tool]
+  (let [{:keys [policy]} (tool-approval-policy tool)
+        desc             (:tool/description tool)]
+    (if (= :auto policy)
+      desc
+      (str desc approval-note))))
 
 (defn import-tool-file!
   "Import tools from an EDN file."
@@ -98,19 +180,78 @@
        (mapv (fn [{:keys [tool]}]
                {:type     "function"
                 :function {:name        (name (:tool/id tool))
-                           :description (:tool/description tool)
+                           :description (tool-description-for-llm tool)
                            :parameters  (json/read-json
                                           (or (:tool/parameters tool) "{}"))}}))))
 
+(defn- approval-error
+  [tool-id message]
+  {:error (str "Tool " (name tool-id) " blocked: " message)})
+
+(defn- approved-for-session?
+  [session-id tool-id]
+  (contains? (get @session-approvals session-id #{}) tool-id))
+
+(defn- remember-session-approval!
+  [session-id tool-id]
+  (when session-id
+    (swap! session-approvals update session-id (fnil conj #{}) tool-id)))
+
+(defn- ensure-approved
+  [tool-id tool arguments context]
+  (let [{:keys [policy reason]} (tool-approval-policy tool)
+        session-id              (:session-id context)
+        request                 {:tool-id     tool-id
+                                 :tool-name   (:tool/name tool)
+                                 :description (:tool/description tool)
+                                 :arguments   arguments
+                                 :policy      policy
+                                 :reason      reason}]
+    (case policy
+      :auto
+      {:allowed? true}
+
+      :session
+      (if (and session-id (approved-for-session? session-id tool-id))
+        {:allowed? true}
+        (try
+          (if (prompt/approve! request)
+            (do
+              (remember-session-approval! session-id tool-id)
+              {:allowed? true})
+            {:allowed? false
+             :error    (str "user denied approval for privileged tool "
+                            (name tool-id))})
+          (catch Exception e
+            {:allowed? false :error (.getMessage e)})))
+
+      :always
+      (try
+        (if (prompt/approve! request)
+          {:allowed? true}
+          {:allowed? false
+           :error    (str "user denied approval for privileged tool "
+                          (name tool-id))})
+        (catch Exception e
+          {:allowed? false :error (.getMessage e)}))
+
+      {:allowed? true})))
+
 (defn execute-tool
   "Execute a tool by id with the given arguments map."
-  [tool-id arguments]
-  (if-let [{:keys [handler]} (get @registry tool-id)]
+  ([tool-id arguments]
+   (execute-tool tool-id arguments {}))
+  ([tool-id arguments context]
+   (if-let [{:keys [tool handler]} (get @registry tool-id)]
     (if (fn? handler)
       (try
-        (handler arguments)
+        (binding [prompt/*interaction-context* context]
+          (let [{:keys [allowed? error]} (ensure-approved tool-id tool arguments context)]
+            (if allowed?
+              (handler arguments)
+              (approval-error tool-id error))))
         (catch Exception e
           (log/error e "Tool execution failed:" tool-id)
           {:error (str "Tool execution failed: " (.getMessage e))}))
       {:error (str "Tool " tool-id " has no callable handler")})
-    {:error (str "Unknown tool: " tool-id)}))
+    {:error (str "Unknown tool: " tool-id)})))

@@ -4,6 +4,7 @@
 {:id          :schedule-manage
  :name        "schedule-manage"
  :description "Manage a scheduled task: pause, resume, remove, or view run history."
+ :approval    :session
  :parameters  {"type"       "object"
                "properties" {"id"     {"type"        "string"
                                        "description" "Schedule identifier"}

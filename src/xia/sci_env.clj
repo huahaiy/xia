@@ -79,7 +79,7 @@
    'remove-schedule!  schedule/remove-schedule!
    'pause-schedule!   schedule/pause-schedule!
    'resume-schedule!  schedule/resume-schedule!
-   'schedule-history  schedule/schedule-history})
+   'schedule-history  schedule/safe-schedule-history})
 
 (def ^:private xia-cron-ns
   {'describe cron/describe})
@@ -104,8 +104,7 @@
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns
                   'xia.db             xia-db-ns}
-     :classes    {'System System
-                  'java.util.Date java.util.Date
+     :classes    {'java.util.Date java.util.Date
                   'java.util.UUID java.util.UUID}}))
 
 (defonce ^:private default-ctx (delay (make-ctx)))

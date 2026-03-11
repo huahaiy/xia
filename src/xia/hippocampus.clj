@@ -107,10 +107,12 @@ Rules:
    an existing one, lower the old fact's confidence and add the new one."
   [node-eid content source-eid]
   (let [existing (memory/node-facts-with-eids node-eid)
-        similar  (first (filter #(fact-similar? (:content %) content) existing))]
+        similar  (first (filter #(fact-similar? (:content %) content) existing))
+        now      (java.util.Date.)]
     (if similar
       ;; Update existing fact (refresh timestamp, keep higher confidence)
-      (db/transact! [[:db/add (:eid similar) :kg.fact/updated-at (java.util.Date.)]])
+      (db/transact! [[:db/add (:eid similar) :kg.fact/updated-at now]
+                     [:db/add (:eid similar) :kg.fact/decayed-at now]])
       ;; No similar fact — add new
       (memory/add-fact! {:node-eid   node-eid
                          :content    content
@@ -237,23 +239,67 @@ Rules:
 ;; Knowledge maintenance
 ;; ---------------------------------------------------------------------------
 
+(def ^:private knowledge-decay-config
+  {:grace-period-ms      (* 7 24 60 60 1000)
+   :half-life-ms         (* 60 24 60 60 1000)
+   :min-confidence       0.1
+   :maintenance-step-ms  (* 24 60 60 1000)})
+
+(defn- decay-window-ms
+  [^java.util.Date updated-at ^java.util.Date as-of]
+  (max 0
+       (- (.getTime as-of)
+          (.getTime updated-at)
+          (:grace-period-ms knowledge-decay-config))))
+
+(defn- decayed-at
+  [fact-entity ^java.util.Date updated-at]
+  (let [last-decayed (:kg.fact/decayed-at fact-entity)]
+    (if (and last-decayed (.before ^java.util.Date last-decayed updated-at))
+      updated-at
+      (or last-decayed updated-at))))
+
+(defn- next-confidence
+  [confidence ^java.util.Date updated-at ^java.util.Date last-decayed ^java.util.Date as-of]
+  (let [previous-window (decay-window-ms updated-at last-decayed)
+        current-window  (decay-window-ms updated-at as-of)
+        delta-window    (- current-window previous-window)]
+    (when (pos? delta-window)
+      (max (:min-confidence knowledge-decay-config)
+           (* confidence
+              (Math/pow 0.5
+                        (/ delta-window
+                           (double (:half-life-ms knowledge-decay-config)))))))))
+
 (defn maintain-knowledge!
-  "Periodic maintenance: decay confidence of unreinforced facts.
-   Facts that haven't been updated recently get slightly lower confidence."
-  []
-  (let [one-week-ago (java.util.Date. (- (System/currentTimeMillis) (* 7 24 60 60 1000)))
-        old-facts (db/q '[:find ?f ?confidence ?updated
-                          :where
-                          [?f :kg.fact/confidence ?confidence]
-                          [?f :kg.fact/updated-at ?updated]])
-        stale     (filter (fn [[_ _ updated]]
-                            (.before ^java.util.Date updated one-week-ago))
-                          old-facts)]
-    (when (seq stale)
-      (log/info "Decaying confidence of" (count stale) "stale facts")
-      (doseq [[eid confidence _] stale]
-        (let [new-conf (max 0.1 (* confidence 0.95))]
-          (db/transact! [[:db/add eid :kg.fact/confidence (float new-conf)]]))))))
+  "Periodic maintenance: apply time-based exponential decay to stale facts.
+   Facts get a 7-day grace period, then decay toward a floor using a 60-day half-life."
+  ([] (maintain-knowledge! (java.util.Date.)))
+  ([^java.util.Date as-of]
+   (let [facts (db/q '[:find ?f ?confidence ?updated
+                       :where
+                       [?f :kg.fact/confidence ?confidence]
+                       [?f :kg.fact/updated-at ?updated]])
+         step-ms (:maintenance-step-ms knowledge-decay-config)
+         stale   (reduce
+                   (fn [acc [eid confidence updated]]
+                     (let [fact-entity   (db/entity eid)
+                           last-decayed (decayed-at fact-entity updated)
+                           due?         (>= (- (.getTime as-of) (.getTime last-decayed))
+                                            step-ms)]
+                       (if due?
+                         (if-let [new-conf (next-confidence confidence updated last-decayed as-of)]
+                           (conj acc [eid new-conf])
+                           acc)
+                         acc)))
+                   []
+                   facts)]
+     (when (seq stale)
+       (log/info "Exponentially decaying confidence of" (count stale) "stale facts")
+       (doseq [[eid new-conf] stale]
+         (db/transact! [[:db/add eid :kg.fact/confidence (float new-conf)]
+                        [:db/add eid :kg.fact/decayed-at as-of]])))
+     (count stale))))
 
 (defn consolidate-if-pending!
   "Idle consolidation: if pending episodes exceed threshold, consolidate."

@@ -23,11 +23,11 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private http-client
-  (delay (hc/build-http-client {:connect-timeout 10000
-                                :redirect-policy :normal})))
+  (delay (hc/build-http-client {:connect-timeout 10000})))
 
 (def ^:private user-agent "Xia/0.1 (personal AI assistant)")
 (def ^:private max-body-bytes (* 1 1024 1024)) ; 1 MB
+(def ^:private max-redirects 5)
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -41,6 +41,10 @@
       (.isSiteLocalAddress addr)
       (.isAnyLocalAddress addr)))
 
+(defn- resolve-host-addresses
+  [host]
+  (seq (InetAddress/getAllByName host)))
+
 (defn- validate-url!
   "Validate a URL for safety. Throws on disallowed schemes or private IPs."
   [url]
@@ -51,8 +55,8 @@
     (let [host (.getHost uri)]
       (when (str/blank? host)
         (throw (ex-info "URL has no host" {:url url})))
-      (let [addrs (InetAddress/getAllByName host)]
-        (when (every? private-ip? addrs)
+      (let [addrs (resolve-host-addresses host)]
+        (when (some private-ip? addrs)
           (throw (ex-info "Access to private/internal network addresses is blocked"
                           {:url url :host host})))))))
 
@@ -91,20 +95,33 @@
 (defn- fetch-raw
   "Fetch a URL, return {:status :headers :body :final-url}."
   [url]
-  (validate-url! url)
-  (check-rate-limit! url)
-  (let [resp (hc/request {:url         url
-                           :method      :get
-                           :headers     {"User-Agent" user-agent
-                                         "Accept"     "text/html,application/xhtml+xml,*/*"}
-                           :http-client @http-client})]
-    (let [body (str (:body resp))]
-      (when (> (count body) max-body-bytes)
-        (throw (ex-info "Response too large" {:url url :size (count body)})))
-      {:status    (:status resp)
-       :headers   (:headers resp)
-       :body      body
-       :final-url url})))
+  (loop [current-url url
+         redirects   0]
+    (validate-url! current-url)
+    (check-rate-limit! current-url)
+    (let [resp (hc/request {:url              current-url
+                            :method           :get
+                            :headers          {"User-Agent" user-agent
+                                               "Accept"     "text/html,application/xhtml+xml,*/*"}
+                            :throw-exceptions false
+                            :http-client      @http-client})
+          status (:status resp)
+          location (or (get-in resp [:headers "location"])
+                       (get-in resp [:headers "Location"]))]
+      (if (and (#{301 302 303 307 308} status) (seq location))
+        (do
+          (when (>= redirects max-redirects)
+            (throw (ex-info "Too many redirects"
+                            {:url current-url :redirects redirects})))
+          (let [next-url (str (.resolve (URI. current-url) location))]
+            (recur next-url (inc redirects))))
+        (let [body (str (:body resp))]
+          (when (> (count body) max-body-bytes)
+            (throw (ex-info "Response too large" {:url current-url :size (count body)})))
+          {:status    status
+           :headers   (:headers resp)
+           :body      body
+           :final-url current-url})))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion

@@ -215,14 +215,16 @@
 (defn add-fact!
   "Add a fact about an entity."
   [{:keys [node-eid content confidence source-eid]}]
-  (db/transact!
-    [(cond-> {:kg.fact/id         (random-uuid)
-              :kg.fact/node       node-eid
-              :kg.fact/content    content
-              :kg.fact/confidence (or confidence 1.0)
-              :kg.fact/created-at (java.util.Date.)
-              :kg.fact/updated-at (java.util.Date.)}
-       source-eid (assoc :kg.fact/source source-eid))]))
+  (let [now (java.util.Date.)]
+    (db/transact!
+      [(cond-> {:kg.fact/id         (random-uuid)
+                :kg.fact/node       node-eid
+                :kg.fact/content    content
+                :kg.fact/confidence (or confidence 1.0)
+                :kg.fact/created-at now
+                :kg.fact/updated-at now
+                :kg.fact/decayed-at now}
+         source-eid (assoc :kg.fact/source source-eid))])))
 
 (defn node-facts
   "Get all facts about a node."

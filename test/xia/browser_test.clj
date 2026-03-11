@@ -1,6 +1,8 @@
 (ns xia.browser-test
   (:require [clojure.test :refer :all]
-            [xia.browser :as browser]))
+            [xia.browser :as browser])
+  (:import [java.net InetAddress URL]
+           [org.htmlunit WebRequest]))
 
 (use-fixtures :each
   (fn [f]
@@ -20,6 +22,15 @@
         clojure.lang.ExceptionInfo #"private/internal"
         (#'browser/validate-url! "http://localhost/"))))
 
+(deftest validate-url-blocks-mixed-public-and-private-resolution
+  (with-redefs-fn {#'browser/resolve-host-addresses
+                   (fn [_]
+                     [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))
+                      (InetAddress/getByAddress "private.example" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))])}
+    #(is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"private/internal"
+           (#'browser/validate-url! "https://mixed.example")))))
+
 (deftest validate-url-blocks-bad-schemes
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo #"Only http"
@@ -31,6 +42,17 @@
 (deftest validate-url-allows-public
   (is (nil? (#'browser/validate-url! "https://example.com")))
   (is (nil? (#'browser/validate-url! "http://example.com"))))
+
+(deftest web-client-validates-every-request
+  (let [client (#'browser/make-client)]
+    (with-redefs-fn {#'browser/validate-url!
+                     (fn [_]
+                       (throw (ex-info "blocked redirect target" {})))}
+      #(is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"blocked redirect target"
+             (.getResponse (.getWebConnection client)
+                           (WebRequest. (URL. "https://example.com"))))))
+    (.close client)))
 
 ;; ---------------------------------------------------------------------------
 ;; Session lifecycle

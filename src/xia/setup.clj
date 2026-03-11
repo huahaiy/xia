@@ -7,13 +7,21 @@
 (defn- prompt
   "Print a prompt and read a line. Returns default if input is empty."
   ([msg] (prompt msg nil))
-  ([msg default]
-   (if default
-     (print (str msg " [" default "]: "))
-     (print (str msg ": ")))
-   (flush)
-   (let [input (str/trim (or (read-line) ""))]
-     (if (empty? input) default input))))
+  ([msg default & {:keys [mask?] :or {mask? false}}]
+   (let [prompt-text (if default
+                       (str msg " [" default "]: ")
+                       (str msg ": "))
+         input       (if mask?
+                       (if-let [console (System/console)]
+                         (String. (.readPassword console "%s" (into-array Object [prompt-text])))
+                         (do (print (str prompt-text "(input visible): "))
+                             (flush)
+                             (or (read-line) "")))
+                       (do (print prompt-text)
+                           (flush)
+                           (or (read-line) "")))
+         trimmed     (str/trim input)]
+     (if (empty? trimmed) default trimmed))))
 
 (defn- setup-identity! []
   (println)
@@ -29,14 +37,14 @@
   (println "  Examples: OpenAI, Anthropic (via proxy), Ollama, Qwen, etc.")
   (println)
   (let [base-url (prompt "API base URL" "http://localhost:11434/v1")
-        api-key  (prompt "API key (or 'none' for local)" "none")
+        api-key  (prompt "API key (or 'none' for local)" "none" :mask? true)
         model    (prompt "Model name" "qwen2.5:7b")]
-    (db/transact! [{:llm.provider/id       :default
-                    :llm.provider/name     "default"
-                    :llm.provider/base-url base-url
-                    :llm.provider/api-key  (if (= api-key "none") "" api-key)
-                    :llm.provider/model    model
-                    :llm.provider/default? true}])
+    (db/upsert-provider! {:id       :default
+                          :name     "default"
+                          :base-url base-url
+                          :api-key  (if (= api-key "none") "" api-key)
+                          :model    model
+                          :default? true})
     (println (str "  → Using " model " at " base-url))))
 
 (defn- setup-user! []
