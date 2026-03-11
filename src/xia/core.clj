@@ -8,6 +8,7 @@
             [clojure.java.io :as io]
             [xia.crypto :as crypto]
             [xia.db :as db]
+            [xia.logging :as logging]
             [xia.pack :as pack]
             [xia.setup :as setup]
             [xia.identity :as identity]
@@ -32,6 +33,7 @@
     :parse-fn #(Integer/parseInt %)]
    ["-m" "--mode MODE" "Run mode: terminal, server, both"
     :default "terminal"]
+   ["-l" "--log-file PATH" "Write INFO+ logs to this file (or set XIA_LOG_FILE)"]
    ["-h" "--help" "Show help"]])
 
 (def pack-cli-options
@@ -56,6 +58,7 @@
   (println "  xia pack backup.xia     Create a portable archive at a specific path")
   (println "  xia --mode server       Start HTTP/WebSocket server only")
   (println "  xia --mode both         Start both terminal and server")
+  (println "  xia --log-file xia.log  Write logs to a file")
   (println "  xia --bind 0.0.0.0      Expose server beyond localhost")
   (println "  xia --db /path/to/db    Use a specific database"))
 
@@ -265,7 +268,8 @@
 
           :else
           (try
-            (let [run-options (resolve-run-options options arguments)
+            (let [_           (logging/configure! options)
+                  run-options (resolve-run-options options arguments)
                   cleanup     (make-cleanup run-options)
                   hook        (register-shutdown-hook! cleanup)]
               (try

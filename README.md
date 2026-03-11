@@ -31,6 +31,11 @@ Notes:
 - If the archive uses passphrase mode, enter the same master passphrase when opening it.
 - If the archive depends on a raw env-provided key such as `XIA_MASTER_KEY`, that key still must be supplied on the target machine.
 
+Operational defaults:
+- Xia does not create a log file by default.
+- Warnings and errors go to stderr.
+- Use `xia --log-file xia.log` or `XIA_LOG_FILE=/path/to/xia.log` when you want persistent logs.
+
 ### Xia vs. Local Assistants
 Unlike tools like `Claude Code` or `Codex`, Xia is not designed for local file system manipulation or host-level computer automation.
 - **Xia:** Focused on the online digital environment, secure credential management, and long-term memory.

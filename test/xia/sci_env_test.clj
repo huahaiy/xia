@@ -1,5 +1,6 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer :all]
+            [xia.db]
             [xia.schedule :as schedule]
             [xia.sci-env :as sci-env]
             [xia.test-helpers :refer [with-test-db]]))
@@ -28,3 +29,15 @@
     (is (= :error (:status run)))
     (is (not (contains? run :result)))
     (is (not (contains? run :error)))))
+
+(deftest scratch-pads-are-exposed-through-sci
+  (let [sid    (str (xia.db/create-session! :http))
+        result (sci-env/eval-string
+                 (str "(let [pad (xia.scratch/create-pad! {:scope :session"
+                      "                                     :session-id \"" sid "\""
+                      "                                     :title \"Draft\""
+                      "                                     :content \"alpha\"})]"
+                      "   (xia.scratch/edit-pad! (:id pad) {:op :append :text \" beta\"})"
+                      "   (xia.scratch/get-pad (:id pad)))"))]
+    (is (= "Draft" (:title result)))
+    (is (= "alpha beta" (:content result)))))

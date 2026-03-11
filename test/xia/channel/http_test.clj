@@ -47,6 +47,7 @@
     (is (re-find #"Paste Input" (:body response)))
     (is (re-find #"Approval Required" (:body response)))
     (is (re-find #"Copy transcript" (:body response)))
+    (is (re-find #"Scratch Pads" (:body response)))
     (is (re-find #"<textarea" (:body response)))
     (is (re-find #"sessionStorage\.getItem" (:body response)))
     (is (not (re-find #"localStorage\.setItem\(storageKeys\.messages" (:body response))))))
@@ -188,6 +189,64 @@
         body     (response-json response)]
     (is (= 401 (:status response)))
     (is (= "missing or invalid local session secret" (get body "error")))))
+
+(deftest scratch-pad-routes-round-trip
+  (let [sid         (str (db/create-session! :http))
+        create-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads")
+                                    :request-method :post
+                                    :headers        (ui-headers)
+                                    :body           (request-body {"title" "Draft"
+                                                                   "content" "alpha"})})
+        create-body (response-json create-res)
+        pad-id      (get-in create-body ["pad" "id"])]
+    (is (= 201 (:status create-res)))
+    (is (= "Draft" (get-in create-body ["pad" "title"])))
+    (is (= "alpha" (get-in create-body ["pad" "content"])))
+    (let [list-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads")
+                                    :request-method :get
+                                    :headers        (ui-headers)})
+          list-body (response-json list-res)]
+      (is (= 200 (:status list-res)))
+      (is (= 1 (count (get list-body "pads"))))
+      (is (= pad-id (get-in list-body ["pads" 0 "id"]))))
+    (let [get-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads/" pad-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          get-body (response-json get-res)]
+      (is (= 200 (:status get-res)))
+      (is (= "alpha" (get-in get-body ["pad" "content"]))))
+    (let [save-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads/" pad-id)
+                                    :request-method :put
+                                    :headers        (ui-headers)
+                                    :body           (request-body {"title" "Draft 2"
+                                                                   "content" "beta"
+                                                                   "expected_version" 1})})
+          save-body (response-json save-res)]
+      (is (= 200 (:status save-res)))
+      (is (= "Draft 2" (get-in save-body ["pad" "title"])))
+      (is (= "beta" (get-in save-body ["pad" "content"])))
+      (is (= 2 (get-in save-body ["pad" "version"]))))
+    (let [edit-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads/" pad-id "/edit")
+                                    :request-method :post
+                                    :headers        (ui-headers)
+                                    :body           (request-body {"operation" {"op" "append"
+                                                                                 "separator" "\n"
+                                                                                 "text" "gamma"}
+                                                                   "expected_version" 2})})
+          edit-body (response-json edit-res)]
+      (is (= 200 (:status edit-res)))
+      (is (= "beta\ngamma" (get-in edit-body ["pad" "content"]))))
+    (let [delete-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads/" pad-id)
+                                      :request-method :delete
+                                      :headers        (ui-headers)})
+          delete-body (response-json delete-res)]
+      (is (= 200 (:status delete-res)))
+      (is (= "deleted" (get delete-body "status"))))
+    (let [list-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads")
+                                    :request-method :get
+                                    :headers        (ui-headers)})
+          list-body (response-json list-res)]
+      (is (= [] (get list-body "pads"))))))
 
 (deftest approval-route-allows-round-trip
   (let [sid    (str (db/create-session! :http))

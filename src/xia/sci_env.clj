@@ -14,6 +14,7 @@
             [xia.browser :as browser]
             [xia.cron :as cron]
             [xia.memory :as memory]
+            [xia.scratch :as scratch]
             [xia.schedule :as schedule]
             [xia.secret :as secret]
             [xia.service :as service]
@@ -49,6 +50,14 @@
   {'get-config  secret/safe-get-config
    'set-config! secret/safe-set-config!
    'q           secret/safe-q})
+
+(def ^:private xia-scratch-ns
+  {'list-pads    scratch/list-pads
+   'get-pad      scratch/get-pad
+   'create-pad!  scratch/create-pad!
+   'save-pad!    scratch/save-pad!
+   'edit-pad!    scratch/edit-pad!
+   'delete-pad!  scratch/delete-pad!})
 
 (def ^:private xia-service-ns
   {'request       service/request
@@ -99,6 +108,7 @@
                   'xia.working-memory xia-wm-ns
                   'xia.skill          xia-skill-ns
                   'xia.schedule       xia-schedule-ns
+                  'xia.scratch        xia-scratch-ns
                   'xia.cron           xia-cron-ns
                   'xia.service        xia-service-ns
                   'xia.web            xia-web-ns

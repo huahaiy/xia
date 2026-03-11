@@ -1,0 +1,27 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ -n "${GRAALVM_HOME:-}" ]; then
+  export JAVA_HOME="$GRAALVM_HOME"
+  export PATH="$GRAALVM_HOME/bin:$PATH"
+elif ! command -v native-image >/dev/null 2>&1; then
+  echo "Please set GRAALVM_HOME or ensure native-image is on PATH"
+  exit 1
+fi
+
+mkdir -p "$ROOT_DIR/target/native-tmp/.tmp" "$ROOT_DIR/target/native-image"
+
+cd "$ROOT_DIR"
+
+clojure -T:build uber
+
+env TMPDIR="$ROOT_DIR/target/native-tmp/.tmp" \
+  native-image \
+  --verbose \
+  -H:TempDirectory=target/native-tmp \
+  -H:Path=target/native-image \
+  -jar target/xia.jar \
+  -H:Name=xia
