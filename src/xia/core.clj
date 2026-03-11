@@ -53,6 +53,9 @@
     (when-not (.exists parent)
       (.mkdirs parent))))
 
+(defn- local-ui-url [port]
+  (str "http://localhost:" port "/"))
+
 (defn- start! [{:keys [db port mode]}]
   (ensure-db-dir! db)
   (db/connect! db)
@@ -75,9 +78,11 @@
   (case mode
     "server"   (do (http/start! port)
                    (println (str "xia server running on port " port))
+                   (println (str "open " (local-ui-url port)))
                    @(promise))
     "both"     (do (http/start! port)
                    (println (str "xia server running on port " port))
+                   (println (str "open " (local-ui-url port)))
                    (terminal/start!))
     ;; default: terminal
     (terminal/start!)))
