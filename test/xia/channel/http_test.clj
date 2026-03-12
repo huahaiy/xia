@@ -50,6 +50,7 @@
     (is (re-find #"Scratch Pads" (:body response)))
     (is (re-find #"Admin" (:body response)))
     (is (re-find #"Providers" (:body response)))
+    (is (re-find #"OAuth Accounts" (:body response)))
     (is (re-find #"Site Logins" (:body response)))
     (is (re-find #"<textarea" (:body response)))
     (is (re-find #"sessionStorage\.getItem" (:body response)))
@@ -295,6 +296,14 @@
                          :auth-type   :api-key-header
                          :auth-key    "gh-secret"
                          :auth-header "X-API-Key"})
+  (db/register-oauth-account! {:id            :google
+                               :name          "Google"
+                               :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+                               :token-url     "https://oauth2.googleapis.com/token"
+                               :client-id     "client-id"
+                               :client-secret "client-secret"
+                               :access-token  "access-123"
+                               :refresh-token "refresh-123"})
   (db/register-site-cred! {:id             :github
                            :name           "GitHub login"
                            :login-url      "https://github.com/login"
@@ -319,6 +328,7 @@
                                  :headers        (ui-headers)})
         body     (response-json response)
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
         service  (first (filter #(= "github" (get % "id")) (get body "services")))
         site     (first (filter #(= "github" (get % "id")) (get body "sites")))
         tool     (first (filter #(= "demo-tool" (get % "id")) (get body "tools")))
@@ -327,6 +337,10 @@
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
     (is (= true (get provider "default")))
+    (is (= true (get oauth "client_secret_configured")))
+    (is (= true (get oauth "access_token_configured")))
+    (is (not (contains? oauth "client_secret")))
+    (is (not (contains? oauth "access_token")))
     (is (= true (get service "auth_key_configured")))
     (is (not (contains? service "auth_key")))
     (is (= "api-key-header" (get service "auth_type")))
@@ -337,6 +351,72 @@
     (is (= "session" (get tool "approval")))
     (is (= true (get tool "enabled")))
     (is (= true (get skill "enabled")))))
+
+(deftest admin-oauth-account-routes-save-connect-and-delete
+  (db/register-oauth-account! {:id            :google
+                               :name          "Google"
+                               :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+                               :token-url     "https://oauth2.googleapis.com/token"
+                               :client-id     "client-id"
+                               :client-secret "client-secret"})
+  (let [save-response (#'http/router {:uri            "/admin/oauth-accounts"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"id" "google"
+                                                                     "name" "Google Workspace"
+                                                                     "authorize_url" "https://accounts.google.com/o/oauth2/v2/auth"
+                                                                     "token_url" "https://oauth2.googleapis.com/token"
+                                                                     "client_id" "client-id"
+                                                                     "client_secret" ""
+                                                                     "scopes" "openid email"
+                                                                     "redirect_uri" ""
+                                                                     "auth_params" "{\"access_type\":\"offline\"}"
+                                                                     "token_params" ""})})
+        save-body     (response-json save-response)
+        account       (db/get-oauth-account :google)]
+    (is (= 200 (:status save-response)))
+    (is (= "Google Workspace" (get-in save-body ["oauth_account" "name"])))
+    (is (= "client-secret" (:oauth.account/client-secret account)))
+    (is (= "{\"access_type\":\"offline\"}" (:oauth.account/auth-params account))))
+  (with-redefs [xia.oauth/start-authorization!
+                (fn [account-id callback-url]
+                  (is (= :google account-id))
+                  (is (= "http://localhost:18790/oauth/callback" callback-url))
+                  {:authorization-url "https://accounts.google.com/o/oauth2/v2/auth?state=abc"
+                   :redirect-uri callback-url})]
+    (let [response (#'http/router {:uri            "/admin/oauth-accounts/google/connect"
+                                   :request-method :post
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= "https://accounts.google.com/o/oauth2/v2/auth?state=abc"
+             (get body "authorization_url")))))
+  (db/register-service! {:id            :gmail
+                         :name          "Gmail"
+                         :base-url      "https://gmail.googleapis.com"
+                         :auth-type     :oauth-account
+                         :oauth-account :google})
+  (let [delete-response (#'http/router {:uri            "/admin/oauth-accounts/google"
+                                        :request-method :delete
+                                        :headers        (ui-headers)})
+        delete-body     (response-json delete-response)]
+    (is (= 409 (:status delete-response)))
+    (is (= "oauth account is still referenced by a service" (get delete-body "error")))))
+
+(deftest oauth-callback-route-renders-success-page
+  (with-redefs [xia.oauth/callback-account-id (fn [_state] :google)
+                xia.oauth/complete-authorization!
+                (fn [state code]
+                  (is (= "abc" state))
+                  (is (= "secret-code" code))
+                  {:oauth.account/id :google})]
+    (let [response (#'http/router {:uri            "/oauth/callback"
+                                   :request-method :get
+                                   :query-string   "state=abc&code=secret-code"})]
+      (is (= 200 (:status response)))
+      (is (= "text/html; charset=utf-8" (get-in response [:headers "Content-Type"])))
+      (is (re-find #"OAuth connected" (:body response)))
+      (is (re-find #"xia-oauth-complete" (:body response))))))
 
 (deftest admin-provider-route-preserves-secret-and-switches-default
   (db/upsert-provider! {:id       :anthropic

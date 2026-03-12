@@ -49,6 +49,25 @@
     (is (crypto/encrypted? (:llm.provider/api-key raw)))
     (is (= "sk-secret" (:llm.provider/api-key provider)))))
 
+(deftest oauth-account-secrets-are-encrypted-at-rest
+  (db/register-oauth-account! {:id            :google
+                               :name          "Google"
+                               :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+                               :token-url     "https://oauth2.googleapis.com/token"
+                               :client-id     "client-123"
+                               :client-secret "client-secret"
+                               :access-token  "access-123"
+                               :refresh-token "refresh-123"})
+  (let [eid     (ffirst (db/q '[:find ?e :where [?e :oauth.account/id :google]]))
+        raw     (raw-entity eid)
+        account (db/get-oauth-account :google)]
+    (is (crypto/encrypted? (:oauth.account/client-secret raw)))
+    (is (crypto/encrypted? (:oauth.account/access-token raw)))
+    (is (crypto/encrypted? (:oauth.account/refresh-token raw)))
+    (is (= "client-secret" (:oauth.account/client-secret account)))
+    (is (= "access-123" (:oauth.account/access-token account)))
+    (is (= "refresh-123" (:oauth.account/refresh-token account)))))
+
 (deftest secret-config-values-are-encrypted-at-rest
   (db/set-config! :token/github "gho_secret")
   (let [raw-value (ffirst (db/q '[:find ?v :where

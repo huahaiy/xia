@@ -13,12 +13,14 @@
      :bearer         — Authorization: Bearer <auth-key>
      :basic          — Authorization: Basic <base64(auth-key)>  (auth-key = \"user:pass\")
      :api-key-header — <auth-header>: <auth-key>  (e.g. X-API-Key)
-     :query-param    — appends <auth-header>=<auth-key> to query string"
+     :query-param    — appends <auth-header>=<auth-key> to query string
+     :oauth-account  — Authorization header from a stored OAuth account"
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [hato.client :as hc]
             [charred.api :as json]
-            [xia.db :as db])
+            [xia.db :as db]
+            [xia.oauth :as oauth])
   (:import [java.util Base64]))
 
 ;; ---------------------------------------------------------------------------
@@ -53,7 +55,7 @@
 
 (defn- inject-auth
   "Add authentication to a request map based on the service's auth-type."
-  [req {:keys [auth-type auth-key auth-header]}]
+  [req {:keys [auth-type auth-key auth-header oauth-account]}]
   (case auth-type
     :bearer
     (assoc-in req [:headers "Authorization"] (str "Bearer " auth-key))
@@ -71,6 +73,9 @@
     (do (when-not auth-header
           (throw (ex-info "auth-header required for :query-param auth type" {})))
         (update req :query-params assoc auth-header auth-key))
+
+    :oauth-account
+    (assoc-in req [:headers "Authorization"] (oauth/oauth-header oauth-account))
 
     ;; No auth / unknown — pass through
     req))
@@ -90,10 +95,18 @@
     (when-not (:service/enabled? svc)
       (throw (ex-info (str "Service " (name service-id) " is disabled")
                       {:service-id service-id})))
-    {:base-url    (:service/base-url svc)
-     :auth-type   (:service/auth-type svc)
-     :auth-key    (:service/auth-key svc)
-     :auth-header (:service/auth-header svc)}))
+    (let [auth-type (:service/auth-type svc)
+          oauth-account-id (:service/oauth-account svc)]
+      {:base-url      (:service/base-url svc)
+       :auth-type     auth-type
+       :auth-key      (:service/auth-key svc)
+       :auth-header   (:service/auth-header svc)
+       :oauth-account (when (= :oauth-account auth-type)
+                        (when-not oauth-account-id
+                          (throw (ex-info (str "Service " (name service-id)
+                                               " is missing an OAuth account")
+                                          {:service-id service-id})))
+                        (oauth/ensure-account-ready! oauth-account-id))})))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API — exposed to SCI sandbox

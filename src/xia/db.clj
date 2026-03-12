@@ -125,10 +125,29 @@
    :service/id          {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :service/name        {:db/valueType :db.type/string}
    :service/base-url    {:db/valueType :db.type/string}   ; e.g. "https://gmail.googleapis.com"
-   :service/auth-type   {:db/valueType :db.type/keyword}  ; :bearer :basic :api-key-header :query-param
+   :service/auth-type   {:db/valueType :db.type/keyword}  ; :bearer :basic :api-key-header :query-param :oauth-account
    :service/auth-key    {:db/valueType :db.type/string}    ; the secret — token, key, password
    :service/auth-header {:db/valueType :db.type/string}    ; custom header/param name (for :api-key-header / :query-param)
+   :service/oauth-account {:db/valueType :db.type/keyword} ; linked OAuth account for :oauth-account auth
    :service/enabled?    {:db/valueType :db.type/boolean}
+
+   ;; --- OAuth Accounts (authorization-code + PKCE / refresh-token auth) ---
+   :oauth.account/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :oauth.account/name          {:db/valueType :db.type/string}
+   :oauth.account/authorize-url {:db/valueType :db.type/string}
+   :oauth.account/token-url     {:db/valueType :db.type/string}
+   :oauth.account/client-id     {:db/valueType :db.type/string}
+   :oauth.account/client-secret {:db/valueType :db.type/string}
+   :oauth.account/scopes        {:db/valueType :db.type/string}
+   :oauth.account/redirect-uri  {:db/valueType :db.type/string}
+   :oauth.account/auth-params   {:db/valueType :db.type/string}
+   :oauth.account/token-params  {:db/valueType :db.type/string}
+   :oauth.account/access-token  {:db/valueType :db.type/string}
+   :oauth.account/refresh-token {:db/valueType :db.type/string}
+   :oauth.account/token-type    {:db/valueType :db.type/string}
+   :oauth.account/expires-at    {:db/valueType :db.type/instant}
+   :oauth.account/connected-at  {:db/valueType :db.type/instant}
+   :oauth.account/updated-at    {:db/valueType :db.type/instant}
 
    ;; --- Schedule (cron-based task scheduling) ---
    :schedule/id          {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
@@ -607,7 +626,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn save-service!
-  [{:keys [id name base-url auth-type auth-key auth-header enabled?]}]
+  [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?]}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current (when eid (raw-entity eid))
         tx-data (cond-> [{:service/id        id
@@ -619,12 +638,22 @@
                   auth-header
                   (update 0 assoc :service/auth-header auth-header)
 
+                  oauth-account
+                  (update 0 assoc :service/oauth-account oauth-account)
+
                   (and eid
                        (nil? auth-header)
                        (contains? current :service/auth-header))
                   (conj [:db/retract eid
                          :service/auth-header
-                         (:service/auth-header current)]))]
+                         (:service/auth-header current)])
+
+                  (and eid
+                       (nil? oauth-account)
+                       (contains? current :service/oauth-account))
+                  (conj [:db/retract eid
+                         :service/oauth-account
+                         (:service/oauth-account current)]))]
     (transact! tx-data)))
 
 (defn register-service! [service]
@@ -640,6 +669,133 @@
 
 (defn enable-service! [service-id enabled?]
   (transact! [{:service/id service-id :service/enabled? enabled?}]))
+
+;; ---------------------------------------------------------------------------
+;; OAuth accounts
+;; ---------------------------------------------------------------------------
+
+(defn save-oauth-account!
+  [{:keys [id name authorize-url token-url client-id client-secret scopes
+           redirect-uri auth-params token-params access-token refresh-token
+           token-type expires-at connected-at]}]
+  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] id))
+        current (when eid (raw-entity eid))
+        now     (java.util.Date.)
+        tx-data (cond-> [{:oauth.account/id            id
+                          :oauth.account/name          (or name (clojure.core/name id))
+                          :oauth.account/authorize-url authorize-url
+                          :oauth.account/token-url     token-url
+                          :oauth.account/client-id     client-id
+                          :oauth.account/scopes        (or scopes "")
+                          :oauth.account/updated-at    now}]
+                  (contains? #{true false} (some? client-secret))
+                  (update 0 assoc :oauth.account/client-secret (or client-secret ""))
+
+                  redirect-uri
+                  (update 0 assoc :oauth.account/redirect-uri redirect-uri)
+
+                  auth-params
+                  (update 0 assoc :oauth.account/auth-params auth-params)
+
+                  token-params
+                  (update 0 assoc :oauth.account/token-params token-params)
+
+                  access-token
+                  (update 0 assoc :oauth.account/access-token access-token)
+
+                  refresh-token
+                  (update 0 assoc :oauth.account/refresh-token refresh-token)
+
+                  token-type
+                  (update 0 assoc :oauth.account/token-type token-type)
+
+                  expires-at
+                  (update 0 assoc :oauth.account/expires-at expires-at)
+
+                  connected-at
+                  (update 0 assoc :oauth.account/connected-at connected-at)
+
+                  (and eid
+                       (nil? redirect-uri)
+                       (contains? current :oauth.account/redirect-uri))
+                  (conj [:db/retract eid
+                         :oauth.account/redirect-uri
+                         (:oauth.account/redirect-uri current)])
+
+                  (and eid
+                       (nil? auth-params)
+                       (contains? current :oauth.account/auth-params))
+                  (conj [:db/retract eid
+                         :oauth.account/auth-params
+                         (:oauth.account/auth-params current)])
+
+                  (and eid
+                       (nil? token-params)
+                       (contains? current :oauth.account/token-params))
+                  (conj [:db/retract eid
+                         :oauth.account/token-params
+                         (:oauth.account/token-params current)])
+
+                  (and eid
+                       (nil? access-token)
+                       (contains? current :oauth.account/access-token))
+                  (conj [:db/retract eid
+                         :oauth.account/access-token
+                         (:oauth.account/access-token current)])
+
+                  (and eid
+                       (nil? refresh-token)
+                       (contains? current :oauth.account/refresh-token))
+                  (conj [:db/retract eid
+                         :oauth.account/refresh-token
+                         (:oauth.account/refresh-token current)])
+
+                  (and eid
+                       (nil? token-type)
+                       (contains? current :oauth.account/token-type))
+                  (conj [:db/retract eid
+                         :oauth.account/token-type
+                         (:oauth.account/token-type current)])
+
+                  (and eid
+                       (nil? expires-at)
+                       (contains? current :oauth.account/expires-at))
+                  (conj [:db/retract eid
+                         :oauth.account/expires-at
+                         (:oauth.account/expires-at current)])
+
+                  (and eid
+                       (nil? connected-at)
+                       (contains? current :oauth.account/connected-at))
+                  (conj [:db/retract eid
+                         :oauth.account/connected-at
+                         (:oauth.account/connected-at current)]))]
+    (transact! tx-data)))
+
+(defn register-oauth-account!
+  [oauth-account]
+  (save-oauth-account! oauth-account))
+
+(defn get-oauth-account [account-id]
+  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] account-id))]
+    (when eid (decrypt-entity (raw-entity eid)))))
+
+(defn list-oauth-accounts []
+  (let [eids (q '[:find ?e :where [?e :oauth.account/id _]])]
+    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
+
+(defn remove-oauth-account! [account-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] account-id))]
+    (transact! [[:db/retractEntity eid]])))
+
+(defn oauth-account-in-use?
+  [account-id]
+  (boolean
+    (ffirst
+      (q '[:find ?e :in $ ?id
+           :where
+           [?e :service/oauth-account ?id]]
+         account-id))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tools (executable code)

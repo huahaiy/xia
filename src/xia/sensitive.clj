@@ -6,6 +6,9 @@
   "DB attributes that must never be exposed to sandboxed code and should be encrypted at rest."
   #{:llm.provider/api-key
     :service/auth-key
+    :oauth.account/client-secret
+    :oauth.account/access-token
+    :oauth.account/refresh-token
     :site-cred/username
     :site-cred/password
     :message/content

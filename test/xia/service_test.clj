@@ -69,6 +69,14 @@
         result (#'service/inject-auth req svc)]
     (is (= "abc123" (get-in result [:query-params "api_key"])))))
 
+(deftest inject-auth-oauth-account
+  (let [req    {:uri "https://api.example.com/test" :method :get}
+        svc    {:auth-type :oauth-account
+                :oauth-account {:oauth.account/access-token "oauth-token"
+                                :oauth.account/token-type "Bearer"}}
+        result (#'service/inject-auth req svc)]
+    (is (= "Bearer oauth-token" (get-in result [:headers "Authorization"])))))
+
 (deftest inject-auth-api-key-header-requires-auth-header
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo #"auth-header required"
@@ -151,3 +159,44 @@
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"Access denied"
           (secret/safe-q '[:find ?v :where [?e :service/auth-key ?v]])))))
+
+(deftest request-refreshes-expiring-oauth-account
+  (db/register-oauth-account! {:id            :github-oauth
+                               :name          "GitHub OAuth"
+                               :authorize-url "https://github.com/login/oauth/authorize"
+                               :token-url     "https://github.com/login/oauth/access_token"
+                               :client-id     "client-id"
+                               :client-secret "client-secret"
+                               :access-token  "old-access"
+                               :refresh-token "old-refresh"
+                               :token-type    "Bearer"
+                               :expires-at    (java.util.Date. 0)})
+  (db/register-service! {:id            :github
+                         :name          "GitHub"
+                         :base-url      "https://api.github.com"
+                         :auth-type     :oauth-account
+                         :oauth-account :github-oauth})
+  (let [calls (atom [])]
+    (with-redefs [hato.client/request
+                  (fn [req]
+                    (swap! calls conj (select-keys req [:uri :method :headers :body]))
+                    (case (:uri req)
+                      "https://github.com/login/oauth/access_token"
+                      {:status 200
+                       :body "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"}
+
+                      "https://api.github.com/user"
+                      (do
+                        (is (= "Bearer new-access" (get-in req [:headers "Authorization"])))
+                        {:status 200
+                         :headers {"content-type" "application/json"}
+                         :body "{\"login\":\"hyang\"}"})
+
+                      (throw (ex-info "unexpected request" {:uri (:uri req)}))))]
+      (let [response (service/request :github :get "/user")
+            account  (db/get-oauth-account :github-oauth)]
+        (is (= 200 (:status response)))
+        (is (= "hyang" (get-in response [:body "login"])))
+        (is (= "new-access" (:oauth.account/access-token account)))
+        (is (= "new-refresh" (:oauth.account/refresh-token account)))
+        (is (= 2 (count @calls)))))))

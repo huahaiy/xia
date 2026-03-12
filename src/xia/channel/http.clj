@@ -6,6 +6,7 @@
             [clojure.tools.logging :as log]
             [xia.scratch :as scratch]
             [xia.db :as db]
+            [xia.oauth :as oauth]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.working-memory :as wm])
@@ -23,7 +24,7 @@
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
-(def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param})
+(def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (defonce ^:private local-session-secret
   (delay
     (let [bytes (byte-array 32)
@@ -667,7 +668,7 @@
      "        <div class=\"panel-header\">"
      "          <div>"
      "            <h2 class=\"panel-title\">Admin</h2>"
-     "            <p class=\"panel-note\">Configure providers, service credentials, and site logins without dropping to the terminal. Stored secrets never come back to the browser once saved.</p>"
+     "            <p class=\"panel-note\">Configure providers, OAuth accounts, service credentials, and site logins without dropping to the terminal. Stored secrets never come back to the browser once saved.</p>"
      "          </div>"
      "        </div>"
      "        <div class=\"admin-grid\">"
@@ -720,6 +721,69 @@
      "          <section class=\"admin-card\">"
      "            <div class=\"panel-header\">"
      "              <div>"
+     "                <h3 class=\"panel-title\">OAuth Accounts</h3>"
+     "                <p class=\"panel-note\">Authorization-code + PKCE accounts for APIs that cannot use static tokens alone.</p>"
+     "              </div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"new-oauth-account\" type=\"button\">New account</button>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"admin-list\" id=\"oauth-account-list\"></div>"
+     "            <div class=\"field-grid\">"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"oauth-account-id\">Id</label>"
+     "                <input class=\"text-input\" id=\"oauth-account-id\" type=\"text\" placeholder=\"google-work\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"oauth-account-name\">Name</label>"
+     "                <input class=\"text-input\" id=\"oauth-account-name\" type=\"text\" placeholder=\"Google Workspace\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-authorize-url\">Authorize URL</label>"
+     "                <input class=\"text-input\" id=\"oauth-authorize-url\" type=\"url\" placeholder=\"https://accounts.google.com/o/oauth2/v2/auth\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-token-url\">Token URL</label>"
+     "                <input class=\"text-input\" id=\"oauth-token-url\" type=\"url\" placeholder=\"https://oauth2.googleapis.com/token\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"oauth-client-id\">Client ID</label>"
+     "                <input class=\"text-input\" id=\"oauth-client-id\" type=\"text\" placeholder=\"client-id\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"oauth-client-secret\">Client Secret</label>"
+     "                <input class=\"text-input\" id=\"oauth-client-secret\" type=\"password\" autocomplete=\"off\" placeholder=\"Leave blank to keep stored secret\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-scopes\">Scopes</label>"
+     "                <input class=\"text-input\" id=\"oauth-scopes\" type=\"text\" placeholder=\"repo read:user offline_access\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-redirect-uri\">Redirect URI</label>"
+     "                <input class=\"text-input\" id=\"oauth-redirect-uri\" type=\"url\" placeholder=\"Optional. Leave blank to use this Xia server's /oauth/callback\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-auth-params\">Authorize Params JSON</label>"
+     "                <textarea id=\"oauth-auth-params\" spellcheck=\"false\" placeholder='{\"access_type\":\"offline\",\"prompt\":\"consent\"}'></textarea>"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-token-params\">Token Params JSON</label>"
+     "                <textarea id=\"oauth-token-params\" spellcheck=\"false\" placeholder='{\"audience\":\"https://api.example.com\"}'></textarea>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"composer-foot\">"
+     "              <div class=\"admin-status\" id=\"oauth-account-status\">No OAuth account selected.</div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"connect-oauth-account\" type=\"button\">Connect</button>"
+     "                <button class=\"secondary\" id=\"refresh-oauth-account\" type=\"button\">Refresh</button>"
+     "                <button class=\"secondary\" id=\"delete-oauth-account\" type=\"button\">Delete</button>"
+     "                <button class=\"primary\" id=\"save-oauth-account\" type=\"button\">Save account</button>"
+     "              </div>"
+     "            </div>"
+     "          </section>"
+     "          <section class=\"admin-card\">"
+     "            <div class=\"panel-header\">"
+     "              <div>"
      "                <h3 class=\"panel-title\">Services</h3>"
      "                <p class=\"panel-note\">Registered API endpoints Xia can call through the service proxy.</p>"
      "              </div>"
@@ -748,6 +812,7 @@
      "                  <option value=\"basic\">Basic auth</option>"
      "                  <option value=\"api-key-header\">API key header</option>"
      "                  <option value=\"query-param\">Query parameter</option>"
+     "                  <option value=\"oauth-account\">OAuth account</option>"
      "                </select>"
      "              </div>"
      "              <div class=\"field\">"
@@ -755,9 +820,14 @@
      "                <input class=\"text-input\" id=\"service-auth-header\" type=\"text\" placeholder=\"X-API-Key\">"
      "              </div>"
      "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"service-oauth-account\">OAuth Account</label>"
+     "                <select class=\"text-input\" id=\"service-oauth-account\"></select>"
+     "                <div class=\"secret-note\">Pick a connected OAuth account when auth type is OAuth account. Otherwise leave this blank.</div>"
+     "              </div>"
+     "              <div class=\"field full\">"
      "                <label class=\"field-label\" for=\"service-auth-key\">Auth Secret</label>"
      "                <input class=\"text-input\" id=\"service-auth-key\" type=\"password\" autocomplete=\"off\" placeholder=\"Leave blank to keep stored secret\">"
-     "                <div class=\"secret-note\">For bearer/basic auth, the header field can stay blank.</div>"
+     "                <div class=\"secret-note\">For bearer/basic auth, the header field can stay blank. OAuth services use the linked OAuth account instead of this field.</div>"
      "              </div>"
      "              <div class=\"field full\">"
      "                <label class=\"check-row\" for=\"service-enabled\">"
@@ -869,15 +939,18 @@
      "      scratchSaving: false,"
      "      admin: {"
      "        providers: [],"
+     "        oauthAccounts: [],"
      "        services: [],"
      "        sites: [],"
      "        tools: [],"
      "        skills: []"
      "      },"
      "      activeProviderId: '',"
+     "      activeOauthAccountId: '',"
      "      activeServiceId: '',"
      "      activeSiteId: '',"
      "      providerSaving: false,"
+     "      oauthSaving: false,"
      "      serviceSaving: false,"
      "      siteSaving: false"
      "    };"
@@ -914,12 +987,30 @@
      "    const providerStatusEl = document.getElementById('provider-status');"
      "    const newProviderEl = document.getElementById('new-provider');"
      "    const saveProviderEl = document.getElementById('save-provider');"
+     "    const oauthAccountListEl = document.getElementById('oauth-account-list');"
+     "    const oauthAccountIdEl = document.getElementById('oauth-account-id');"
+     "    const oauthAccountNameEl = document.getElementById('oauth-account-name');"
+     "    const oauthAuthorizeUrlEl = document.getElementById('oauth-authorize-url');"
+     "    const oauthTokenUrlEl = document.getElementById('oauth-token-url');"
+     "    const oauthClientIdEl = document.getElementById('oauth-client-id');"
+     "    const oauthClientSecretEl = document.getElementById('oauth-client-secret');"
+     "    const oauthScopesEl = document.getElementById('oauth-scopes');"
+     "    const oauthRedirectUriEl = document.getElementById('oauth-redirect-uri');"
+     "    const oauthAuthParamsEl = document.getElementById('oauth-auth-params');"
+     "    const oauthTokenParamsEl = document.getElementById('oauth-token-params');"
+     "    const oauthAccountStatusEl = document.getElementById('oauth-account-status');"
+     "    const newOauthAccountEl = document.getElementById('new-oauth-account');"
+     "    const saveOauthAccountEl = document.getElementById('save-oauth-account');"
+     "    const connectOauthAccountEl = document.getElementById('connect-oauth-account');"
+     "    const refreshOauthAccountEl = document.getElementById('refresh-oauth-account');"
+     "    const deleteOauthAccountEl = document.getElementById('delete-oauth-account');"
      "    const serviceListEl = document.getElementById('service-list');"
      "    const serviceIdEl = document.getElementById('service-id');"
      "    const serviceNameEl = document.getElementById('service-name');"
      "    const serviceBaseUrlEl = document.getElementById('service-base-url');"
      "    const serviceAuthTypeEl = document.getElementById('service-auth-type');"
      "    const serviceAuthHeaderEl = document.getElementById('service-auth-header');"
+     "    const serviceOauthAccountEl = document.getElementById('service-oauth-account');"
      "    const serviceAuthKeyEl = document.getElementById('service-auth-key');"
      "    const serviceEnabledEl = document.getElementById('service-enabled');"
      "    const serviceStatusEl = document.getElementById('service-status');"
@@ -1064,11 +1155,23 @@
      "      return bits.join(' • ');"
      "    }"
      ""
+     "    function oauthAccountMeta(account) {"
+     "      const bits = [];"
+     "      bits.push(account.connected ? 'Connected' : 'Not connected');"
+     "      if (account.refresh_token_configured) bits.push('Refresh token stored');"
+     "      if (account.expires_at) bits.push('Expires ' + formatStamp(account.expires_at));"
+     "      return bits.join(' • ');"
+     "    }"
+     ""
      "    function serviceMeta(service) {"
      "      const bits = [];"
      "      if (service.auth_type) bits.push(service.auth_type);"
+     "      if (service.oauth_account_name) bits.push(service.oauth_account_name);"
+     "      if (service.auth_type === 'oauth-account') bits.push(service.oauth_account_connected ? 'OAuth connected' : 'OAuth not connected');"
      "      bits.push(service.enabled ? 'Enabled' : 'Disabled');"
-     "      bits.push(service.auth_key_configured ? 'Secret stored' : 'No secret');"
+     "      bits.push(service.auth_type === 'oauth-account'"
+     "        ? (service.oauth_account ? 'Account linked' : 'No account linked')"
+     "        : (service.auth_key_configured ? 'Secret stored' : 'No secret'));"
      "      return bits.join(' • ');"
      "    }"
      ""
@@ -1084,6 +1187,12 @@
      "      providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;"
      "      saveProviderEl.disabled = state.providerSaving;"
      "      newProviderEl.disabled = state.providerSaving;"
+     "      oauthAccountIdEl.disabled = state.oauthSaving || !!state.activeOauthAccountId;"
+     "      saveOauthAccountEl.disabled = state.oauthSaving;"
+     "      newOauthAccountEl.disabled = state.oauthSaving;"
+     "      connectOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
+     "      refreshOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
+     "      deleteOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
      "      serviceIdEl.disabled = state.serviceSaving || !!state.activeServiceId;"
      "      saveServiceEl.disabled = state.serviceSaving;"
      "      newServiceEl.disabled = state.serviceSaving;"
@@ -1103,6 +1212,40 @@
      "        providerMeta,"
      "        selectProvider"
      "      );"
+     "    }"
+     ""
+     "    function renderOauthAccountList() {"
+     "      renderSelectableList("
+     "        oauthAccountListEl,"
+     "        state.admin.oauthAccounts,"
+     "        state.activeOauthAccountId,"
+     "        'No OAuth accounts configured yet. Add one for APIs that need a real OAuth flow.',"
+     "        (account) => firstNonEmpty(account.name, account.id),"
+     "        oauthAccountMeta,"
+     "        selectOauthAccount"
+     "      );"
+     "    }"
+     ""
+     "    function renderOauthAccountOptions() {"
+     "      const previous = serviceOauthAccountEl.value;"
+     "      serviceOauthAccountEl.innerHTML = '';"
+     "      const blank = document.createElement('option');"
+     "      blank.value = '';"
+     "      blank.textContent = 'None';"
+     "      serviceOauthAccountEl.appendChild(blank);"
+     "      state.admin.oauthAccounts.forEach((account) => {"
+     "        const option = document.createElement('option');"
+     "        option.value = account.id || '';"
+     "        option.textContent = firstNonEmpty(account.name, account.id)"
+     "          + (account.connected ? ' (connected)' : ' (not connected)');"
+     "        serviceOauthAccountEl.appendChild(option);"
+     "      });"
+     "      if (state.activeServiceId && state.admin.services.some((service) => service.id === state.activeServiceId)) {"
+     "        const current = state.admin.services.find((service) => service.id === state.activeServiceId);"
+     "        serviceOauthAccountEl.value = (current && current.oauth_account) || '';"
+     "      } else {"
+     "        serviceOauthAccountEl.value = previous || '';"
+     "      }"
      "    }"
      ""
      "    function renderServiceList() {"
@@ -1161,6 +1304,23 @@
      "      updateAdminButtons();"
      "    }"
      ""
+     "    function resetOauthAccountForm(statusText) {"
+     "      state.activeOauthAccountId = '';"
+     "      oauthAccountIdEl.value = '';"
+     "      oauthAccountNameEl.value = '';"
+     "      oauthAuthorizeUrlEl.value = '';"
+     "      oauthTokenUrlEl.value = '';"
+     "      oauthClientIdEl.value = '';"
+     "      oauthClientSecretEl.value = '';"
+     "      oauthScopesEl.value = '';"
+     "      oauthRedirectUriEl.value = '';"
+     "      oauthAuthParamsEl.value = '';"
+     "      oauthTokenParamsEl.value = '';"
+     "      oauthAccountStatusEl.textContent = statusText || 'Create an OAuth account or select an existing one.';"
+     "      renderOauthAccountList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
      "    function resetServiceForm(statusText) {"
      "      state.activeServiceId = '';"
      "      serviceIdEl.value = '';"
@@ -1168,10 +1328,12 @@
      "      serviceBaseUrlEl.value = '';"
      "      serviceAuthTypeEl.value = 'bearer';"
      "      serviceAuthHeaderEl.value = '';"
+     "      serviceOauthAccountEl.value = '';"
      "      serviceAuthKeyEl.value = '';"
      "      serviceEnabledEl.checked = true;"
      "      serviceStatusEl.textContent = statusText || 'Create a service or select an existing one.';"
      "      renderServiceList();"
+     "      renderOauthAccountOptions();"
      "      updateAdminButtons();"
      "    }"
      ""
@@ -1206,6 +1368,27 @@
      "      updateAdminButtons();"
      "    }"
      ""
+     "    function selectOauthAccount(account) {"
+     "      state.activeOauthAccountId = account.id || '';"
+     "      oauthAccountIdEl.value = account.id || '';"
+     "      oauthAccountNameEl.value = account.name || '';"
+     "      oauthAuthorizeUrlEl.value = account.authorize_url || '';"
+     "      oauthTokenUrlEl.value = account.token_url || '';"
+     "      oauthClientIdEl.value = account.client_id || '';"
+     "      oauthClientSecretEl.value = '';"
+     "      oauthScopesEl.value = account.scopes || '';"
+     "      oauthRedirectUriEl.value = account.redirect_uri || '';"
+     "      oauthAuthParamsEl.value = account.auth_params || '';"
+     "      oauthTokenParamsEl.value = account.token_params || '';"
+     "      oauthAccountStatusEl.textContent = ["
+     "        account.client_secret_configured ? 'Client secret stored.' : 'No client secret stored.',"
+     "        account.connected ? 'OAuth connection is active.' : 'Not connected yet.',"
+     "        account.refresh_token_configured ? 'Refresh token stored.' : 'No refresh token stored.'"
+     "      ].join(' ');"
+     "      renderOauthAccountList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
      "    function selectService(service) {"
      "      state.activeServiceId = service.id || '';"
      "      serviceIdEl.value = service.id || '';"
@@ -1213,12 +1396,16 @@
      "      serviceBaseUrlEl.value = service.base_url || '';"
      "      serviceAuthTypeEl.value = service.auth_type || 'bearer';"
      "      serviceAuthHeaderEl.value = service.auth_header || '';"
+     "      serviceOauthAccountEl.value = service.oauth_account || '';"
      "      serviceAuthKeyEl.value = '';"
      "      serviceEnabledEl.checked = !!service.enabled;"
-     "      serviceStatusEl.textContent = service.auth_key_configured"
-     "        ? 'Auth secret stored. Leave the field blank to keep it, or enter a new one to replace it.'"
-     "        : 'No auth secret stored yet.';"
-     "      renderServiceList();"
+     "      serviceStatusEl.textContent = service.auth_type === 'oauth-account'"
+     "        ? ((service.oauth_account_name || 'No OAuth account') + (service.oauth_account_connected ? ' is connected.' : ' is not connected yet.'))"
+     "        : (service.auth_key_configured"
+     "          ? 'Auth secret stored. Leave the field blank to keep it, or enter a new one to replace it.'"
+     "          : 'No auth secret stored yet.');"
+      "      renderServiceList();"
+     "      renderOauthAccountOptions();"
      "      updateAdminButtons();"
      "    }"
      ""
@@ -1245,19 +1432,29 @@
      "      try {"
      "        const data = await fetchJson('/admin/config');"
      "        state.admin.providers = Array.isArray(data.providers) ? data.providers : [];"
+     "        state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];"
      "        state.admin.services = Array.isArray(data.services) ? data.services : [];"
      "        state.admin.sites = Array.isArray(data.sites) ? data.sites : [];"
      "        state.admin.tools = Array.isArray(data.tools) ? data.tools : [];"
      "        state.admin.skills = Array.isArray(data.skills) ? data.skills : [];"
      "        const provider = state.admin.providers.find((entry) => entry.id === state.activeProviderId);"
+     "        const oauthAccount = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);"
      "        const service = state.admin.services.find((entry) => entry.id === state.activeServiceId);"
      "        const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);"
+     "        renderOauthAccountOptions();"
      "        if (provider) {"
      "          selectProvider(provider);"
      "        } else if (!state.activeProviderId) {"
      "          resetProviderForm('Create a provider or select an existing one.');"
      "        } else {"
      "          resetProviderForm('Selected provider no longer exists.');"
+     "        }"
+     "        if (oauthAccount) {"
+     "          selectOauthAccount(oauthAccount);"
+     "        } else if (!state.activeOauthAccountId) {"
+     "          resetOauthAccountForm('Create an OAuth account or select an existing one.');"
+     "        } else {"
+     "          resetOauthAccountForm('Selected OAuth account no longer exists.');"
      "        }"
      "        if (service) {"
      "          selectService(service);"
@@ -1276,6 +1473,7 @@
      "        renderCapabilities();"
      "      } catch (err) {"
      "        providerStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
+     "        oauthAccountStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
      "        serviceStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
      "        siteStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
      "      }"
@@ -1315,6 +1513,114 @@
      "      }"
      "    }"
      ""
+     "    async function saveOauthAccount() {"
+     "      if (state.oauthSaving) {"
+     "        return;"
+     "      }"
+     "      state.oauthSaving = true;"
+     "      oauthAccountStatusEl.textContent = 'Saving OAuth account...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        const data = await fetchJson('/admin/oauth-accounts', {"
+     "          method: 'POST',"
+     "          headers: { 'Content-Type': 'application/json' },"
+     "          body: JSON.stringify({"
+     "            id: oauthAccountIdEl.value,"
+     "            name: oauthAccountNameEl.value,"
+     "            authorize_url: oauthAuthorizeUrlEl.value,"
+     "            token_url: oauthTokenUrlEl.value,"
+     "            client_id: oauthClientIdEl.value,"
+     "            client_secret: oauthClientSecretEl.value,"
+     "            scopes: oauthScopesEl.value,"
+     "            redirect_uri: oauthRedirectUriEl.value,"
+     "            auth_params: oauthAuthParamsEl.value,"
+     "            token_params: oauthTokenParamsEl.value"
+     "          })"
+     "        });"
+     "        const account = data.oauth_account || null;"
+     "        state.activeOauthAccountId = account && account.id ? account.id : state.activeOauthAccountId;"
+     "        oauthClientSecretEl.value = '';"
+     "        oauthAccountStatusEl.textContent = 'OAuth account saved.';"
+     "        await loadAdminConfig();"
+     "        setStatus('OAuth account saved');"
+     "      } catch (err) {"
+     "        oauthAccountStatusEl.textContent = err.message || 'Failed to save OAuth account.';"
+     "      } finally {"
+     "        state.oauthSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
+     "    async function connectOauthAccount() {"
+     "      if (!state.activeOauthAccountId || state.oauthSaving) {"
+     "        oauthAccountStatusEl.textContent = 'Save the OAuth account first, then connect it.';"
+     "        return;"
+     "      }"
+     "      state.oauthSaving = true;"
+     "      oauthAccountStatusEl.textContent = 'Opening OAuth consent flow...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        const data = await fetchJson('/admin/oauth-accounts/' + encodeURIComponent(state.activeOauthAccountId) + '/connect', { method: 'POST' });"
+     "        const popup = window.open(data.authorization_url, 'xia-oauth-connect', 'popup,width=720,height=860');"
+     "        if (!popup) {"
+     "          oauthAccountStatusEl.textContent = 'Popup blocked. Allow popups for this Xia page and try again.';"
+     "        } else {"
+     "          oauthAccountStatusEl.textContent = 'OAuth flow opened in a new window.';"
+     "          popup.focus();"
+     "        }"
+     "      } catch (err) {"
+     "        oauthAccountStatusEl.textContent = err.message || 'Failed to start OAuth flow.';"
+     "      } finally {"
+     "        state.oauthSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
+     "    async function refreshOauthAccount() {"
+     "      if (!state.activeOauthAccountId || state.oauthSaving) {"
+     "        return;"
+     "      }"
+     "      state.oauthSaving = true;"
+     "      oauthAccountStatusEl.textContent = 'Refreshing OAuth token...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        await fetchJson('/admin/oauth-accounts/' + encodeURIComponent(state.activeOauthAccountId) + '/refresh', { method: 'POST' });"
+     "        oauthAccountStatusEl.textContent = 'OAuth token refreshed.';"
+     "        await loadAdminConfig();"
+     "        setStatus('OAuth token refreshed');"
+     "      } catch (err) {"
+     "        oauthAccountStatusEl.textContent = err.message || 'Failed to refresh OAuth token.';"
+     "      } finally {"
+     "        state.oauthSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
+     "    async function deleteOauthAccount() {"
+     "      if (!state.activeOauthAccountId || state.oauthSaving) {"
+     "        return;"
+     "      }"
+     "      if (!window.confirm('Delete this OAuth account?')) {"
+     "        return;"
+     "      }"
+     "      state.oauthSaving = true;"
+     "      oauthAccountStatusEl.textContent = 'Deleting OAuth account...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        await fetchJson('/admin/oauth-accounts/' + encodeURIComponent(state.activeOauthAccountId), { method: 'DELETE' });"
+     "        const deletedId = state.activeOauthAccountId;"
+     "        state.activeOauthAccountId = '';"
+     "        resetOauthAccountForm('OAuth account deleted.');"
+     "        await loadAdminConfig();"
+     "        setStatus('Deleted OAuth account ' + deletedId);"
+     "      } catch (err) {"
+     "        oauthAccountStatusEl.textContent = err.message || 'Failed to delete OAuth account.';"
+     "      } finally {"
+     "        state.oauthSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
      "    async function saveService() {"
      "      if (state.serviceSaving) {"
      "        return;"
@@ -1332,6 +1638,7 @@
      "            base_url: serviceBaseUrlEl.value,"
      "            auth_type: serviceAuthTypeEl.value,"
      "            auth_header: serviceAuthHeaderEl.value,"
+     "            oauth_account: serviceOauthAccountEl.value,"
      "            auth_key: serviceAuthKeyEl.value,"
      "            enabled: serviceEnabledEl.checked"
      "          })"
@@ -1957,6 +2264,27 @@
      "      saveProvider();"
      "    });"
      ""
+     "    newOauthAccountEl.addEventListener('click', () => {"
+     "      resetOauthAccountForm('Create a new OAuth account.');"
+     "      oauthAccountIdEl.focus();"
+     "    });"
+     ""
+     "    saveOauthAccountEl.addEventListener('click', () => {"
+     "      saveOauthAccount();"
+     "    });"
+     ""
+     "    connectOauthAccountEl.addEventListener('click', () => {"
+     "      connectOauthAccount();"
+     "    });"
+     ""
+     "    refreshOauthAccountEl.addEventListener('click', () => {"
+     "      refreshOauthAccount();"
+     "    });"
+     ""
+     "    deleteOauthAccountEl.addEventListener('click', () => {"
+     "      deleteOauthAccount();"
+     "    });"
+     ""
      "    newServiceEl.addEventListener('click', () => {"
      "      resetServiceForm('Create a new service.');"
      "      serviceIdEl.focus();"
@@ -2005,11 +2333,26 @@
      "      copyText(transcript, 'Transcript copied');"
      "    });"
      ""
+     "    window.addEventListener('message', (event) => {"
+     "      if (!event || event.origin !== window.location.origin) {"
+     "        return;"
+     "      }"
+     "      const data = event.data || {};"
+     "      if (data.type === 'xia-oauth-complete') {"
+     "        loadAdminConfig();"
+     "        oauthAccountStatusEl.textContent = data.status === 'ok'"
+     "          ? 'OAuth account connected.'"
+     "          : 'OAuth flow ended with an error.';"
+     "        setStatus(data.status === 'ok' ? 'OAuth account connected' : 'OAuth flow failed');"
+     "      }"
+     "    });"
+     ""
      "    persistSession();"
      "    renderApproval();"
      "    renderMessages();"
      "    syncScratchEditor('No scratch pad selected.');"
      "    resetProviderForm('Loading providers...');"
+     "    resetOauthAccountForm('Loading OAuth accounts...');"
      "    resetServiceForm('Loading services...');"
      "    resetSiteForm('Loading site logins...');"
      "    renderCapabilities();"
@@ -2083,6 +2426,35 @@
                   v))
               (:headers req)))))
 
+(declare nonblank-str)
+
+(defn- first-forwarded
+  [value]
+  (some-> value str (str/split #",") first str/trim nonblank-str))
+
+(defn- request-base-url
+  [req]
+  (or (when-let [origin (nonblank-str (request-header req "origin"))]
+        (let [uri (java.net.URI. origin)]
+          (str (.getScheme uri) "://" (.getAuthority uri))))
+      (let [scheme (or (first-forwarded (request-header req "x-forwarded-proto"))
+                       (some-> (:scheme req) name)
+                       "http")
+            host   (or (first-forwarded (request-header req "x-forwarded-host"))
+                       (nonblank-str (request-header req "host")))]
+        (when host
+          (str scheme "://" host)))))
+
+(defn- parse-query-string
+  [query-string]
+  (into {}
+        (keep (fn [part]
+                (let [[k v] (str/split (str part) #"=" 2)]
+                  (when (seq k)
+                    [(java.net.URLDecoder/decode k "UTF-8")
+                     (some-> v (java.net.URLDecoder/decode "UTF-8"))]))))
+        (str/split (or query-string "") #"&")))
+
 (defn- session-secret []
   @local-session-secret)
 
@@ -2142,6 +2514,15 @@
   {:status  200
    :headers {"Content-Type" "text/html; charset=utf-8"}
    :body    body})
+
+(defn- escape-html
+  [value]
+  (-> (str (or value ""))
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")
+      (str/replace "\"" "&quot;")
+      (str/replace "'" "&#39;")))
 
 (defn- forbidden-response []
   (json-response 403 {:error "forbidden origin"}))
@@ -2277,6 +2658,22 @@
           (throw (ex-info "extra_fields must be valid JSON"
                           {:field "extra_fields"})))))))
 
+(defn- parse-json-object-string
+  [value field-name]
+  (let [text (nonblank-str value)]
+    (when text
+      (try
+        (let [parsed (json/read-json text)]
+          (when-not (map? parsed)
+            (throw (ex-info (str field-name " must be a JSON object")
+                            {:field field-name})))
+          (json/write-json-str parsed))
+        (catch clojure.lang.ExceptionInfo e
+          (throw e))
+        (catch Exception _
+          (throw (ex-info (str field-name " must be valid JSON")
+                          {:field field-name})))))))
+
 (defn- parse-auth-type
   [value]
   (let [auth-type (some-> value nonblank-str keyword)]
@@ -2304,13 +2701,35 @@
 
 (defn- service->admin-body
   [service]
-  {:id                  (some-> (:service/id service) name)
-   :name                (:service/name service)
-   :base_url            (:service/base-url service)
-   :auth_type           (some-> (:service/auth-type service) name)
-   :auth_header         (:service/auth-header service)
-   :enabled             (boolean (:service/enabled? service))
-   :auth_key_configured (boolean (nonblank-str (:service/auth-key service)))})
+  (let [oauth-account (some-> (:service/oauth-account service) db/get-oauth-account)]
+    {:id                     (some-> (:service/id service) name)
+     :name                   (:service/name service)
+     :base_url               (:service/base-url service)
+     :auth_type              (some-> (:service/auth-type service) name)
+     :auth_header            (:service/auth-header service)
+     :oauth_account          (some-> (:service/oauth-account service) name)
+     :oauth_account_name     (:oauth.account/name oauth-account)
+     :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
+     :enabled                (boolean (:service/enabled? service))
+     :auth_key_configured    (boolean (nonblank-str (:service/auth-key service)))}))
+
+(defn- oauth-account->admin-body
+  [account]
+  {:id                       (some-> (:oauth.account/id account) name)
+   :name                     (:oauth.account/name account)
+   :authorize_url            (:oauth.account/authorize-url account)
+   :token_url                (:oauth.account/token-url account)
+   :client_id                (:oauth.account/client-id account)
+   :scopes                   (:oauth.account/scopes account)
+   :redirect_uri             (:oauth.account/redirect-uri account)
+   :auth_params              (:oauth.account/auth-params account)
+   :token_params             (:oauth.account/token-params account)
+   :client_secret_configured (boolean (nonblank-str (:oauth.account/client-secret account)))
+   :access_token_configured  (boolean (nonblank-str (:oauth.account/access-token account)))
+   :refresh_token_configured (boolean (nonblank-str (:oauth.account/refresh-token account)))
+   :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
+   :expires_at               (instant->str (:oauth.account/expires-at account))
+   :connected_at             (instant->str (:oauth.account/connected-at account))})
 
 (defn- site->admin-body
   [site]
@@ -2568,6 +2987,9 @@
     {:providers (->> (db/list-providers)
                      (map provider->admin-body)
                      sort-by-name)
+     :oauth_accounts (->> (db/list-oauth-accounts)
+                          (map oauth-account->admin-body)
+                          sort-by-name)
      :services  (->> (db/list-services)
                      (map service->admin-body)
                      sort-by-name)
@@ -2622,10 +3044,26 @@
           enabled?          (if (contains? data "enabled")
                               (true? (get data "enabled"))
                               true)
+          oauth-account-id  (when (= :oauth-account auth-type)
+                              (let [value (or (nonblank-str (get data "oauth_account"))
+                                              (some-> (:service/oauth-account existing) name))]
+                                (when-not value
+                                  (throw (ex-info "oauth_account is required for oauth-account auth_type"
+                                                  {:field "oauth_account"})))
+                                (let [account-id (keyword value)]
+                                  (when-not (db/get-oauth-account account-id)
+                                    (throw (ex-info "unknown oauth_account"
+                                                    {:field "oauth_account"
+                                                     :value value})))
+                                  account-id)))
           entered-header    (nonblank-str (get data "auth_header"))
           auth-header       (when (#{:api-key-header :query-param} auth-type)
                               (or entered-header
-                                  (:service/auth-header existing)))]
+                                  (:service/auth-header existing)))
+          auth-key          (when-not (= :oauth-account auth-type)
+                              (or entered-auth-key
+                                  (:service/auth-key existing)
+                                  ""))]
       (when-not base-url
         (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
       (when (and (#{:api-key-header :query-param} auth-type)
@@ -2636,15 +3074,162 @@
                          :name        name
                          :base-url    base-url
                          :auth-type   auth-type
-                         :auth-key    (or entered-auth-key
-                                          (:service/auth-key existing)
-                                          "")
+                         :auth-key    (or auth-key "")
                          :auth-header auth-header
+                         :oauth-account oauth-account-id
                          :enabled?    enabled?})
       (json-response 200 {:service (service->admin-body (db/get-service service-id))}))
     (catch clojure.lang.ExceptionInfo e
       (json-response 400 {:error (.getMessage e)
                           :details (ex-data e)}))))
+
+(defn- handle-save-oauth-account [req]
+  (try
+    (let [data           (or (read-body req) {})
+          account-id     (parse-keyword-id (get data "id") "id")
+          existing       (db/get-oauth-account account-id)
+          name           (or (nonblank-str (get data "name"))
+                             (name account-id))
+          authorize-url  (nonblank-str (get data "authorize_url"))
+          token-url      (nonblank-str (get data "token_url"))
+          client-id      (nonblank-str (get data "client_id"))
+          client-secret  (or (nonblank-str (get data "client_secret"))
+                             (:oauth.account/client-secret existing)
+                             "")
+          scopes         (or (nonblank-str (get data "scopes")) "")
+          redirect-uri   (nonblank-str (get data "redirect_uri"))
+          auth-params    (parse-json-object-string (get data "auth_params") "auth_params")
+          token-params   (parse-json-object-string (get data "token_params") "token_params")]
+      (when-not authorize-url
+        (throw (ex-info "missing 'authorize_url' field" {:field "authorize_url"})))
+      (when-not token-url
+        (throw (ex-info "missing 'token_url' field" {:field "token_url"})))
+      (when-not client-id
+        (throw (ex-info "missing 'client_id' field" {:field "client_id"})))
+      (db/save-oauth-account! {:id            account-id
+                               :name          name
+                               :authorize-url authorize-url
+                               :token-url     token-url
+                               :client-id     client-id
+                               :client-secret client-secret
+                               :scopes        scopes
+                               :redirect-uri  redirect-uri
+                               :auth-params   auth-params
+                               :token-params  token-params
+                               :access-token  (:oauth.account/access-token existing)
+                               :refresh-token (:oauth.account/refresh-token existing)
+                               :token-type    (:oauth.account/token-type existing)
+                               :expires-at    (:oauth.account/expires-at existing)
+                               :connected-at  (:oauth.account/connected-at existing)})
+      (json-response 200 {:oauth_account (oauth-account->admin-body
+                                           (db/get-oauth-account account-id))}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-delete-oauth-account [account-id]
+  (try
+    (let [oauth-id (parse-keyword-id account-id "oauth_account_id")]
+      (cond
+        (nil? (db/get-oauth-account oauth-id))
+        (json-response 404 {:error "oauth account not found"})
+
+        (db/oauth-account-in-use? oauth-id)
+        (json-response 409 {:error "oauth account is still referenced by a service"})
+
+        :else
+        (do
+          (db/remove-oauth-account! oauth-id)
+          (json-response 200 {:status "deleted"
+                              :oauth_account_id (name oauth-id)}))))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-start-oauth-connect [account-id req]
+  (try
+    (let [oauth-id    (parse-keyword-id account-id "oauth_account_id")
+          callback-url (str (or (request-base-url req)
+                                (throw (ex-info "cannot determine callback base URL"
+                                                {:field "host"})))
+                            "/oauth/callback")
+          started     (oauth/start-authorization! oauth-id callback-url)]
+      (json-response 200 {:oauth_account_id (name oauth-id)
+                          :authorization_url (:authorization-url started)
+                          :redirect_uri (:redirect-uri started)}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-refresh-oauth-account [account-id]
+  (try
+    (let [oauth-id (parse-keyword-id account-id "oauth_account_id")
+          account  (oauth/refresh-account! oauth-id)]
+      (json-response 200 {:oauth_account (oauth-account->admin-body account)}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- oauth-callback-page
+  [status title message account-id]
+  (let [title*   (escape-html title)
+        message* (escape-html message)
+        account* (some-> account-id name escape-html)]
+    (str "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+       "<title>Xia OAuth</title>"
+       "<style>body{margin:0;font-family:\"Avenir Next\",\"Segoe UI\",sans-serif;background:#f5efe3;color:#172119;display:grid;place-items:center;min-height:100vh;padding:24px;}main{max-width:36rem;background:rgba(255,252,246,.96);border:1px solid rgba(23,33,25,.12);border-radius:24px;padding:28px;box-shadow:0 20px 50px rgba(23,33,25,.12);}h1{margin:0 0 12px;font-size:2rem;}p{line-height:1.6;margin:0 0 10px;}code{font-family:\"SFMono-Regular\",Consolas,monospace;background:rgba(23,33,25,.06);padding:2px 6px;border-radius:8px;}</style>"
+       "</head><body><main><h1>" title* "</h1><p>" message* "</p>"
+       (when account*
+         (str "<p>OAuth account: <code>" account* "</code></p>"))
+       "<p>You can close this window and return to Xia.</p>"
+       "<script>"
+       "try {"
+       "  if (window.opener && window.opener !== window) {"
+       "    window.opener.postMessage({type:'xia-oauth-complete', status:'" status "', account_id:" (json/write-json-str (some-> account-id name)) "}, window.location.origin);"
+       "  }"
+       "} catch (_err) {}"
+       "setTimeout(() => { try { window.close(); } catch (_err) {} }, 1200);"
+       "</script></main></body></html>")))
+
+(defn- handle-oauth-callback [req]
+  (let [params            (parse-query-string (:query-string req))
+        state             (get params "state")
+        pending-account-id (some-> (and (seq state) (oauth/callback-account-id state)) name)
+        code              (get params "code")
+        error-code        (get params "error")
+        error-description (or (get params "error_description") error-code)]
+    (cond
+      (not (seq state))
+      (html-response (oauth-callback-page "error"
+                                          "OAuth failed"
+                                          "Missing authorization state."
+                                          nil))
+
+      (seq error-code)
+      (html-response (oauth-callback-page "error"
+                                          "OAuth was not completed"
+                                          (str "Provider returned: " error-description)
+                                          pending-account-id))
+
+      (not (seq code))
+      (html-response (oauth-callback-page "error"
+                                          "OAuth failed"
+                                          "Missing authorization code."
+                                          pending-account-id))
+
+      :else
+      (try
+        (let [account (oauth/complete-authorization! state code)]
+          (html-response (oauth-callback-page "ok"
+                                              "OAuth connected"
+                                              "Xia stored the new access token and can now use this account for online work."
+                                              (some-> (:oauth.account/id account) name))))
+        (catch clojure.lang.ExceptionInfo e
+          (html-response (oauth-callback-page "error"
+                                              "OAuth failed"
+                                              (.getMessage e)
+                                              pending-account-id)))))))
 
 (defn- handle-save-site [req]
   (try
@@ -2724,10 +3309,16 @@
         scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
         scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
         scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)
-        admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)]
+        admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
+        admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
+        admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
+        admin-oauth-refresh-match (re-matches #"/admin/oauth-accounts/([^/]+)/refresh" uri)]
     (cond
       (and (= method :get) (= uri "/"))
       (handle-home req)
+
+      (and (= method :get) (= uri "/oauth/callback"))
+      (handle-oauth-callback req)
 
       ;; WebSocket upgrade
       (and (= uri "/ws")
@@ -2785,6 +3376,18 @@
 
       (and (= method :post) (= uri "/admin/providers"))
       (protected-route-response req #(handle-save-provider req))
+
+      (and (= method :post) (= uri "/admin/oauth-accounts"))
+      (protected-route-response req #(handle-save-oauth-account req))
+
+      (and (= method :post) admin-oauth-connect-match)
+      (protected-route-response req #(handle-start-oauth-connect (second admin-oauth-connect-match) req))
+
+      (and (= method :post) admin-oauth-refresh-match)
+      (protected-route-response req #(handle-refresh-oauth-account (second admin-oauth-refresh-match)))
+
+      (and (= method :delete) admin-oauth-match)
+      (protected-route-response req #(handle-delete-oauth-account (second admin-oauth-match)))
 
       (and (= method :post) (= uri "/admin/services"))
       (protected-route-response req #(handle-save-service req))

@@ -13,6 +13,7 @@
 (deftest secret-attr?-test
   (testing "known secret attributes"
     (is (secret/secret-attr? :llm.provider/api-key))
+    (is (secret/secret-attr? :oauth.account/client-secret))
     (is (secret/secret-attr? :message/content))
     (is (secret/secret-attr? :schedule-run/result)))
   (testing "secret namespace prefixes"
