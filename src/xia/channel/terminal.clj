@@ -13,6 +13,8 @@
             [xia.working-memory :as wm]
             [xia.context :as context]))
 
+(defonce ^:private terminal-statuses (atom {}))
+
 (defn- terminal-prompt
   "Prompt the user for input in the terminal.
    Supports masked input for passwords via java.io.Console."
@@ -46,12 +48,35 @@
     (println)
     (#{"y" "yes"} answer)))
 
+(defn- terminal-status
+  [{:keys [session-id state message]}]
+  (let [sid  (or (some-> session-id str) :default)
+        next {:state state :message message}]
+    (cond
+      (= :done state)
+      (swap! terminal-statuses dissoc sid)
+
+      (str/blank? message)
+      nil
+
+      (= next (get @terminal-statuses sid))
+      nil
+
+      :else
+      (do
+        (swap! terminal-statuses assoc sid next)
+        (println (str "xia: " message))
+        (flush)
+        (when (= :error state)
+          (swap! terminal-statuses dissoc sid))))))
+
 (defn start!
   "Start the terminal REPL loop."
   []
   ;; Register the terminal prompt handler for interactive credential input
   (prompt/register-prompt! :terminal terminal-prompt)
   (prompt/register-approval! :terminal terminal-approval)
+  (prompt/register-status! :terminal terminal-status)
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
     (wm/ensure-wm! session-id)

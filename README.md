@@ -50,6 +50,7 @@ Xia is designed to be a long-lived, autonomous partner that learns from every in
 
 - **Human-Inspired Memory:** A multi-layered memory system that separates active focus (Working Memory) from long-term facts (Knowledge Graph) and past experiences (Episodic Memory).
 - **Secure Web & Browser Automation:** A built-in headless browser and SSRF-protected web tools allow Xia to research, fill forms, and interact with the web safely within a sandboxed environment.
+- **Authenticated Online Work:** Xia supports stored API credentials, website logins, and first-class OAuth accounts, so it can operate against real user services instead of only anonymous web pages.
 - **Autonomous Task Scheduling:** A background engine for recurring tasks, from automated web monitoring to periodic memory consolidation and maintenance.
 - **Privacy-First Security:** Rigorous credential isolation ensures that untrusted tools can never see your API keys, even while performing authenticated actions on your behalf.
 
@@ -82,10 +83,32 @@ Every interaction is recorded as an episode. A background "consolidation" proces
 
 Xia can interact with the live web through a suite of secure, sandboxed tools.
 
-- **Headless Browser:** A stateful, JavaScript-enabled browser (HtmlUnit) that runs within the SCI sandbox. Tools can open sessions, navigate, click elements, and fill forms.
+- **Headless Browser:** A stateful, JavaScript-enabled browser (HtmlUnit) that runs within the SCI sandbox. Tools can open sessions, navigate, read pages, wait for JS-heavy pages to settle, click elements, and fill forms.
+- **Resumable Browser Sessions:** Browser sessions persist cookies and current URL into Xia's DB, so multi-step authenticated browsing can resume later instead of starting from scratch.
 - **Stealth Authenticated Login:** Xia can log into sites using stored credentials without the LLM ever seeing your passwords. Credentials are injected by a secure proxy at the system level.
 - **Interactive Login:** For sites with MFA or complex auth, Xia can prompt you directly in the terminal to enter credentials that are used immediately and never stored.
 - **Secure Fetch & Search:** Built-in tools for SSRF-protected web fetching, structured data extraction (CSS selectors), and anonymous web search (DuckDuckGo).
+
+### Authenticated Services & OAuth
+
+For API-based online work, Xia supports multiple authentication models:
+
+- **Static service auth:** `:bearer`, `:basic`, `:api-key-header`, and `:query-param` service registrations.
+- **OAuth accounts:** First-class OAuth 2 authorization-code + PKCE accounts with stored access tokens, refresh tokens, expiry tracking, and automatic refresh.
+- **Built-in provider presets:** The web admin UI can prefill OAuth account settings for GitHub, Google, and Microsoft, while still leaving every field editable.
+- **Local callback flow:** Xia completes OAuth flows through its own local `/oauth/callback`, so a non-technical user can connect an account from the browser UI instead of manually extracting tokens.
+- **Service linkage:** A service can use either a static secret or a linked OAuth account. Tools still call `xia.service/request`; the auth mechanism stays behind the proxy boundary.
+- **Service prefill:** After connecting an OAuth account from a built-in preset, the Admin UI can prefill a matching service entry with the right API base URL and link it back to that account.
+
+### Local Web UI
+
+The local browser UI is intended to be the main interface for non-technical users:
+
+- **Chat + scratch pads:** Paste local material, keep per-session scratch notes, and copy transcript output without giving Xia direct file access.
+- **Admin panel:** Configure LLM providers, OAuth accounts, service registrations, and site logins from the browser.
+- **OAuth templates:** Start from common provider presets, then enter your own client id and secret instead of assembling authorize/token endpoints manually.
+- **OAuth-to-service handoff:** From a saved OAuth account, Xia can prefill the matching service form so the user only needs to review and save it.
+- **No repeated login prompts:** Xia binds to localhost by default and uses a local session secret cookie for the UI, while privileged actions still go through approval policy.
 
 ---
 
@@ -118,7 +141,7 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 
 ### Credential Protection (`xia.secret`)
 `xia.db` functions exposed to the sandbox are safe wrappers that enforce access control:
-- **Protected attributes:** Attributes like `:llm.provider/api-key` and `:service/auth-key` are blocked.
+- **Protected attributes:** Attributes like `:llm.provider/api-key`, `:service/auth-key`, `:oauth.account/client-secret`, `:oauth.account/access-token`, and `:oauth.account/refresh-token` are blocked.
 - **Datalog query filtering:** Every query is analyzed before execution; if it references a secret attribute or pattern (password, token, etc.), it is rejected.
 
 ### Master Key Handling
@@ -133,5 +156,8 @@ Xia is designed to be safe for the host system.
 
 ### Capability Proxy (`xia.service`)
 Tools call authenticated external APIs (Gmail, GitHub, etc.) through a proxy. The tool passes a relative path; the proxy loads the credentials from the DB, injects the authentication headers, and makes the call. The tool receives the response but never sees the token.
+
+- **Static auth path:** service records can inject bearer tokens, basic auth, API-key headers, or query-param credentials.
+- **OAuth path:** service records can point at a stored OAuth account. `xia.service/request` ensures the account is connected, refreshes expiring tokens when needed, and then injects the resulting `Authorization` header.
 
 ---

@@ -138,6 +138,7 @@
    :oauth.account/token-url     {:db/valueType :db.type/string}
    :oauth.account/client-id     {:db/valueType :db.type/string}
    :oauth.account/client-secret {:db/valueType :db.type/string}
+   :oauth.account/provider-template {:db/valueType :db.type/keyword}
    :oauth.account/scopes        {:db/valueType :db.type/string}
    :oauth.account/redirect-uri  {:db/valueType :db.type/string}
    :oauth.account/auth-params   {:db/valueType :db.type/string}
@@ -676,7 +677,7 @@
 
 (defn save-oauth-account!
   [{:keys [id name authorize-url token-url client-id client-secret scopes
-           redirect-uri auth-params token-params access-token refresh-token
+           provider-template redirect-uri auth-params token-params access-token refresh-token
            token-type expires-at connected-at]}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] id))
         current (when eid (raw-entity eid))
@@ -690,6 +691,9 @@
                           :oauth.account/updated-at    now}]
                   (contains? #{true false} (some? client-secret))
                   (update 0 assoc :oauth.account/client-secret (or client-secret ""))
+
+                  provider-template
+                  (update 0 assoc :oauth.account/provider-template provider-template)
 
                   redirect-uri
                   (update 0 assoc :oauth.account/redirect-uri redirect-uri)
@@ -714,6 +718,13 @@
 
                   connected-at
                   (update 0 assoc :oauth.account/connected-at connected-at)
+
+                  (and eid
+                       (nil? provider-template)
+                       (contains? current :oauth.account/provider-template))
+                  (conj [:db/retract eid
+                         :oauth.account/provider-template
+                         (:oauth.account/provider-template current)])
 
                   (and eid
                        (nil? redirect-uri)

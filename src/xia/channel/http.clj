@@ -7,6 +7,7 @@
             [xia.scratch :as scratch]
             [xia.db :as db]
             [xia.oauth :as oauth]
+            [xia.oauth-template :as oauth-template]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.working-memory :as wm])
@@ -20,6 +21,7 @@
 (defonce ^:private server-atom (atom nil))
 (defonce ^:private ws-sessions (atom {})) ; channel → session-id
 (defonce ^:private pending-approvals (atom {})) ; session-id string → approval map
+(defonce ^:private session-statuses (atom {})) ; session-id string → latest status map
 
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
@@ -730,6 +732,14 @@
      "            </div>"
      "            <div class=\"admin-list\" id=\"oauth-account-list\"></div>"
      "            <div class=\"field-grid\">"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"oauth-template\">Provider Template</label>"
+     "                <div class=\"actions\">"
+     "                  <select class=\"text-input\" id=\"oauth-template\"></select>"
+     "                  <button class=\"secondary\" id=\"apply-oauth-template\" type=\"button\">Use template</button>"
+     "                </div>"
+     "                <div class=\"secret-note\" id=\"oauth-template-note\">Choose a preset for common providers, then fill in your client id and client secret.</div>"
+     "              </div>"
      "              <div class=\"field\">"
      "                <label class=\"field-label\" for=\"oauth-account-id\">Id</label>"
      "                <input class=\"text-input\" id=\"oauth-account-id\" type=\"text\" placeholder=\"google-work\">"
@@ -774,6 +784,7 @@
      "            <div class=\"composer-foot\">"
      "              <div class=\"admin-status\" id=\"oauth-account-status\">No OAuth account selected.</div>"
      "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"oauth-account-create-service\" type=\"button\">Create service</button>"
      "                <button class=\"secondary\" id=\"connect-oauth-account\" type=\"button\">Connect</button>"
      "                <button class=\"secondary\" id=\"refresh-oauth-account\" type=\"button\">Refresh</button>"
      "                <button class=\"secondary\" id=\"delete-oauth-account\" type=\"button\">Delete</button>"
@@ -939,6 +950,7 @@
      "      scratchSaving: false,"
      "      admin: {"
      "        providers: [],"
+     "        oauthProviderTemplates: [],"
      "        oauthAccounts: [],"
      "        services: [],"
      "        sites: [],"
@@ -952,7 +964,9 @@
      "      providerSaving: false,"
      "      oauthSaving: false,"
      "      serviceSaving: false,"
-     "      siteSaving: false"
+     "      siteSaving: false,"
+     "      baseStatus: 'Ready',"
+     "      liveStatus: null"
      "    };"
      "    const statusEl = document.getElementById('status');"
      "    const sessionLabelEl = document.getElementById('session-label');"
@@ -988,6 +1002,9 @@
      "    const newProviderEl = document.getElementById('new-provider');"
      "    const saveProviderEl = document.getElementById('save-provider');"
      "    const oauthAccountListEl = document.getElementById('oauth-account-list');"
+     "    const oauthTemplateEl = document.getElementById('oauth-template');"
+     "    const oauthTemplateNoteEl = document.getElementById('oauth-template-note');"
+     "    const applyOauthTemplateEl = document.getElementById('apply-oauth-template');"
      "    const oauthAccountIdEl = document.getElementById('oauth-account-id');"
      "    const oauthAccountNameEl = document.getElementById('oauth-account-name');"
      "    const oauthAuthorizeUrlEl = document.getElementById('oauth-authorize-url');"
@@ -1001,6 +1018,7 @@
      "    const oauthAccountStatusEl = document.getElementById('oauth-account-status');"
      "    const newOauthAccountEl = document.getElementById('new-oauth-account');"
      "    const saveOauthAccountEl = document.getElementById('save-oauth-account');"
+     "    const oauthAccountCreateServiceEl = document.getElementById('oauth-account-create-service');"
      "    const connectOauthAccountEl = document.getElementById('connect-oauth-account');"
      "    const refreshOauthAccountEl = document.getElementById('refresh-oauth-account');"
      "    const deleteOauthAccountEl = document.getElementById('delete-oauth-account');"
@@ -1048,8 +1066,27 @@
      "        : 'New local session';"
      "    }"
      ""
+     "    function currentStatusText() {"
+     "      if (state.pendingApproval) {"
+     "        return state.liveStatus && state.liveStatus.message"
+     "          ? state.liveStatus.message"
+     "          : 'Approval required';"
+     "      }"
+     "      if (state.sending) {"
+     "        return state.liveStatus && state.liveStatus.message"
+     "          ? state.liveStatus.message"
+     "          : 'Waiting for Xia';"
+     "      }"
+     "      return state.baseStatus || 'Ready';"
+     "    }"
+     ""
+     "    function syncStatus() {"
+     "      statusEl.textContent = currentStatusText();"
+     "    }"
+     ""
      "    function setStatus(text) {"
-     "      statusEl.textContent = text;"
+     "      state.baseStatus = text || 'Ready';"
+     "      syncStatus();"
      "    }"
      ""
      "    function prettyJson(value) {"
@@ -1156,10 +1193,17 @@
      "    }"
      ""
      "    function oauthAccountMeta(account) {"
+      "      const bits = [];"
+      "      bits.push(account.connected ? 'Connected' : 'Not connected');"
+      "      if (account.refresh_token_configured) bits.push('Refresh token stored');"
+      "      if (account.expires_at) bits.push('Expires ' + formatStamp(account.expires_at));"
+      "      return bits.join(' • ');"
+      "    }"
+      ""
+     "    function oauthTemplateMeta(template) {"
      "      const bits = [];"
-     "      bits.push(account.connected ? 'Connected' : 'Not connected');"
-     "      if (account.refresh_token_configured) bits.push('Refresh token stored');"
-     "      if (account.expires_at) bits.push('Expires ' + formatStamp(account.expires_at));"
+     "      if (template.api_base_url) bits.push(template.api_base_url);"
+     "      if (template.description) bits.push(template.description);"
      "      return bits.join(' • ');"
      "    }"
      ""
@@ -1190,7 +1234,10 @@
      "      oauthAccountIdEl.disabled = state.oauthSaving || !!state.activeOauthAccountId;"
      "      saveOauthAccountEl.disabled = state.oauthSaving;"
      "      newOauthAccountEl.disabled = state.oauthSaving;"
-     "      connectOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
+     "      oauthTemplateEl.disabled = state.oauthSaving;"
+     "      applyOauthTemplateEl.disabled = state.oauthSaving;"
+     "      oauthAccountCreateServiceEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
+      "      connectOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
      "      refreshOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
      "      deleteOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;"
      "      serviceIdEl.disabled = state.serviceSaving || !!state.activeServiceId;"
@@ -1215,19 +1262,39 @@
      "    }"
      ""
      "    function renderOauthAccountList() {"
-     "      renderSelectableList("
-     "        oauthAccountListEl,"
+      "      renderSelectableList("
+      "        oauthAccountListEl,"
      "        state.admin.oauthAccounts,"
      "        state.activeOauthAccountId,"
      "        'No OAuth accounts configured yet. Add one for APIs that need a real OAuth flow.',"
      "        (account) => firstNonEmpty(account.name, account.id),"
      "        oauthAccountMeta,"
      "        selectOauthAccount"
-     "      );"
+      "      );"
+      "    }"
+      ""
+     "    function renderOauthTemplateOptions() {"
+     "      const selected = oauthTemplateEl.value;"
+     "      oauthTemplateEl.innerHTML = '';"
+     "      const blank = document.createElement('option');"
+     "      blank.value = '';"
+     "      blank.textContent = 'Custom';"
+     "      oauthTemplateEl.appendChild(blank);"
+     "      state.admin.oauthProviderTemplates.forEach((template) => {"
+     "        const option = document.createElement('option');"
+     "        option.value = template.id || '';"
+     "        option.textContent = firstNonEmpty(template.name, template.id);"
+     "        oauthTemplateEl.appendChild(option);"
+     "      });"
+     "      oauthTemplateEl.value = selected || '';"
+     "      const current = state.admin.oauthProviderTemplates.find((template) => template.id === oauthTemplateEl.value);"
+     "      oauthTemplateNoteEl.textContent = current"
+     "        ? ((current.description || 'OAuth provider preset.') + (current.notes ? ' ' + current.notes : ''))"
+     "        : 'Choose a preset for common providers, then fill in your client id and client secret.';"
      "    }"
      ""
      "    function renderOauthAccountOptions() {"
-     "      const previous = serviceOauthAccountEl.value;"
+      "      const previous = serviceOauthAccountEl.value;"
      "      serviceOauthAccountEl.innerHTML = '';"
      "      const blank = document.createElement('option');"
      "      blank.value = '';"
@@ -1316,11 +1383,13 @@
      "      oauthRedirectUriEl.value = '';"
      "      oauthAuthParamsEl.value = '';"
      "      oauthTokenParamsEl.value = '';"
-     "      oauthAccountStatusEl.textContent = statusText || 'Create an OAuth account or select an existing one.';"
-     "      renderOauthAccountList();"
-     "      updateAdminButtons();"
-     "    }"
-     ""
+      "      oauthTemplateEl.value = '';"
+      "      renderOauthTemplateOptions();"
+      "      oauthAccountStatusEl.textContent = statusText || 'Create an OAuth account or select an existing one.';"
+      "      renderOauthAccountList();"
+      "      updateAdminButtons();"
+      "    }"
+      ""
      "    function resetServiceForm(statusText) {"
      "      state.activeServiceId = '';"
      "      serviceIdEl.value = '';"
@@ -1380,8 +1449,10 @@
      "      oauthRedirectUriEl.value = account.redirect_uri || '';"
      "      oauthAuthParamsEl.value = account.auth_params || '';"
      "      oauthTokenParamsEl.value = account.token_params || '';"
-     "      oauthAccountStatusEl.textContent = ["
-     "        account.client_secret_configured ? 'Client secret stored.' : 'No client secret stored.',"
+     "      oauthTemplateEl.value = account.provider_template || '';"
+      "      renderOauthTemplateOptions();"
+      "      oauthAccountStatusEl.textContent = ["
+      "        account.client_secret_configured ? 'Client secret stored.' : 'No client secret stored.',"
      "        account.connected ? 'OAuth connection is active.' : 'Not connected yet.',"
      "        account.refresh_token_configured ? 'Refresh token stored.' : 'No refresh token stored.'"
      "      ].join(' ');"
@@ -1431,8 +1502,9 @@
      "    async function loadAdminConfig() {"
      "      try {"
      "        const data = await fetchJson('/admin/config');"
-     "        state.admin.providers = Array.isArray(data.providers) ? data.providers : [];"
-     "        state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];"
+      "        state.admin.providers = Array.isArray(data.providers) ? data.providers : [];"
+     "        state.admin.oauthProviderTemplates = Array.isArray(data.oauth_provider_templates) ? data.oauth_provider_templates : [];"
+      "        state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];"
      "        state.admin.services = Array.isArray(data.services) ? data.services : [];"
      "        state.admin.sites = Array.isArray(data.sites) ? data.sites : [];"
      "        state.admin.tools = Array.isArray(data.tools) ? data.tools : [];"
@@ -1440,8 +1512,9 @@
      "        const provider = state.admin.providers.find((entry) => entry.id === state.activeProviderId);"
      "        const oauthAccount = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);"
      "        const service = state.admin.services.find((entry) => entry.id === state.activeServiceId);"
-     "        const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);"
-     "        renderOauthAccountOptions();"
+      "        const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);"
+     "        renderOauthTemplateOptions();"
+      "        renderOauthAccountOptions();"
      "        if (provider) {"
      "          selectProvider(provider);"
      "        } else if (!state.activeProviderId) {"
@@ -1475,8 +1548,62 @@
      "        providerStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
      "        oauthAccountStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
      "        serviceStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
-     "        siteStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
+      "        siteStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
+      "      }"
+      "    }"
+      ""
+     "    function applyOauthTemplate() {"
+     "      const templateId = oauthTemplateEl.value;"
+     "      const template = state.admin.oauthProviderTemplates.find((entry) => entry.id === templateId);"
+     "      if (!template) {"
+     "        oauthAccountStatusEl.textContent = 'Choose a provider template first.';"
+     "        return;"
      "      }"
+     "      if (state.activeOauthAccountId) {"
+     "        state.activeOauthAccountId = '';"
+     "      }"
+     "      renderOauthAccountList();"
+     "      oauthAccountIdEl.value = oauthAccountIdEl.value.trim() || template.id || '';"
+     "      oauthAccountNameEl.value = template.name || '';"
+     "      oauthAuthorizeUrlEl.value = template.authorize_url || '';"
+     "      oauthTokenUrlEl.value = template.token_url || '';"
+     "      oauthScopesEl.value = template.scopes || '';"
+     "      oauthRedirectUriEl.value = '';"
+     "      oauthAuthParamsEl.value = template.auth_params || '';"
+     "      oauthTokenParamsEl.value = template.token_params || '';"
+     "      oauthTemplateEl.value = template.id || '';"
+      "      oauthAccountStatusEl.textContent = [template.description || 'Template applied.', template.notes || '']"
+      "        .filter(Boolean)"
+      "        .join(' ');"
+      "      updateAdminButtons();"
+      "      oauthClientIdEl.focus();"
+      "    }"
+      ""
+     "    function createServiceFromOauthAccount() {"
+     "      const account = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);"
+     "      if (!account) {"
+     "        oauthAccountStatusEl.textContent = 'Select an OAuth account first.';"
+     "        return;"
+     "      }"
+     "      const template = account.provider_template"
+     "        ? state.admin.oauthProviderTemplates.find((entry) => entry.id === account.provider_template)"
+     "        : null;"
+     "      state.activeServiceId = '';"
+     "      renderServiceList();"
+     "      renderOauthAccountOptions();"
+     "      serviceIdEl.value = (template && template.service_id) || account.id || '';"
+     "      serviceNameEl.value = (template && template.service_name) || (firstNonEmpty(account.name, account.id) + ' API');"
+     "      serviceBaseUrlEl.value = (template && template.api_base_url) || '';"
+     "      serviceAuthTypeEl.value = 'oauth-account';"
+     "      serviceAuthHeaderEl.value = '';"
+     "      serviceOauthAccountEl.value = account.id || '';"
+     "      serviceAuthKeyEl.value = '';"
+     "      serviceEnabledEl.checked = true;"
+     "      serviceStatusEl.textContent = template"
+     "        ? ('Service prefilled from the ' + firstNonEmpty(template.name, template.id) + ' template. Review and save it.')"
+     "        : 'Service prefilled from the selected OAuth account. Review the base URL and save it.';"
+     "      updateAdminButtons();"
+     "      serviceIdEl.focus();"
      "    }"
      ""
      "    async function saveProvider() {"
@@ -1531,6 +1658,7 @@
      "            token_url: oauthTokenUrlEl.value,"
      "            client_id: oauthClientIdEl.value,"
      "            client_secret: oauthClientSecretEl.value,"
+     "            provider_template: oauthTemplateEl.value,"
      "            scopes: oauthScopesEl.value,"
      "            redirect_uri: oauthRedirectUriEl.value,"
      "            auth_params: oauthAuthParamsEl.value,"
@@ -2088,6 +2216,7 @@
      "      if (!state.sessionId) {"
      "        state.pendingApproval = null;"
      "        renderApproval();"
+     "        syncStatus();"
      "        return;"
      "      }"
      "      try {"
@@ -2098,11 +2227,25 @@
      "        }"
      "        state.pendingApproval = data.pending ? (data.approval || null) : null;"
      "        renderApproval();"
-     "        if (state.pendingApproval) {"
-     "          setStatus('Approval required');"
-     "        } else if (!state.sending) {"
-     "          setStatus('Ready');"
+     "        syncStatus();"
+     "      } catch (_err) {"
+     "      }"
+     "    }"
+     ""
+     "    async function pollStatus() {"
+     "      if (!state.sessionId) {"
+     "        state.liveStatus = null;"
+     "        syncStatus();"
+     "        return;"
+     "      }"
+     "      try {"
+     "        const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/status');"
+     "        const data = await response.json();"
+     "        if (!response.ok) {"
+     "          throw new Error(data.error || 'Failed to load status');"
      "        }"
+     "        state.liveStatus = data.status || null;"
+     "        syncStatus();"
      "      } catch (_err) {"
      "      }"
      "    }"
@@ -2128,6 +2271,7 @@
      "        }"
      "        state.pendingApproval = null;"
      "        renderApproval();"
+     "        state.liveStatus = null;"
      "        setStatus(decision === 'allow' ? 'Approval submitted' : 'Approval denied');"
      "      } catch (err) {"
      "        setStatus(err.message || 'Failed to submit approval');"
@@ -2139,19 +2283,22 @@
      ""
      "    async function sendMessage(text) {"
      "      state.sending = true;"
+     "      state.liveStatus = null;"
      "      updateComposerState();"
-     "      setStatus('Waiting for Xia');"
+     "      syncStatus();"
      "      try {"
      "        await ensureSession();"
      "        const payload = { message: text };"
      "        if (state.sessionId) {"
      "          payload.session_id = state.sessionId;"
      "        }"
-     "        const response = await fetch('/chat', {"
+     "        const responsePromise = fetch('/chat', {"
      "          method: 'POST',"
      "          headers: { 'Content-Type': 'application/json' },"
      "          body: JSON.stringify(payload)"
      "        });"
+     "        await pollStatus();"
+     "        const response = await responsePromise;"
      "        const data = await response.json();"
      "        if (!response.ok) {"
      "          throw new Error(data.error || 'Request failed');"
@@ -2161,12 +2308,15 @@
      "          persistSession();"
      "        }"
      "        addMessage('assistant', data.content || '');"
+     "        state.liveStatus = null;"
      "        setStatus('Ready');"
      "      } catch (err) {"
      "        addMessage('error', err.message || 'Request failed');"
+     "        state.liveStatus = null;"
      "        setStatus('Request failed');"
      "      } finally {"
      "        state.sending = false;"
+     "        syncStatus();"
      "        updateComposerState();"
      "      }"
      "    }"
@@ -2265,12 +2415,24 @@
      "    });"
      ""
      "    newOauthAccountEl.addEventListener('click', () => {"
-     "      resetOauthAccountForm('Create a new OAuth account.');"
-     "      oauthAccountIdEl.focus();"
+      "      resetOauthAccountForm('Create a new OAuth account.');"
+      "      oauthAccountIdEl.focus();"
+      "    });"
+      ""
+     "    oauthTemplateEl.addEventListener('change', () => {"
+     "      renderOauthTemplateOptions();"
+     "    });"
+     ""
+     "    applyOauthTemplateEl.addEventListener('click', () => {"
+     "      applyOauthTemplate();"
      "    });"
      ""
      "    saveOauthAccountEl.addEventListener('click', () => {"
      "      saveOauthAccount();"
+     "    });"
+     ""
+     "    oauthAccountCreateServiceEl.addEventListener('click', () => {"
+     "      createServiceFromOauthAccount();"
      "    });"
      ""
      "    connectOauthAccountEl.addEventListener('click', () => {"
@@ -2314,6 +2476,7 @@
      "      state.sessionId = '';"
      "      state.messages = [];"
      "      state.pendingApproval = null;"
+     "      state.liveStatus = null;"
      "      state.scratchPads = [];"
      "      state.activePadId = '';"
      "      state.activePad = null;"
@@ -2365,6 +2528,9 @@
      "    window.setInterval(() => {"
      "      if (state.sessionId) {"
      "        pollApproval();"
+     "        if (state.sending) {"
+     "          pollStatus();"
+     "        }"
      "      }"
      "    }, 1000);"
      "  </script>"
@@ -2426,7 +2592,7 @@
                   v))
               (:headers req)))))
 
-(declare nonblank-str)
+(declare nonblank-str parse-session-id session-exists?)
 
 (defn- first-forwarded
   [value]
@@ -2611,6 +2777,30 @@
 (defn- instant->str [value]
   (some-> value .toInstant str))
 
+(defn- status->body
+  [status]
+  (when status
+    {:state      (some-> (:state status) name)
+     :phase      (some-> (:phase status) name)
+     :message    (:message status)
+     :tool_id    (some-> (:tool-id status) name)
+     :tool_name  (:tool-name status)
+     :round      (:round status)
+     :tool_count (:tool-count status)
+     :updated_at (instant->str (:updated-at status))}))
+
+(defn- clear-session-status!
+  [session-id]
+  (when session-id
+    (swap! session-statuses dissoc (str session-id))))
+
+(defn- http-status-handler
+  [{:keys [session-id state] :as status}]
+  (when-let [sid (some-> session-id str)]
+    (if (= :done state)
+      (clear-session-status! sid)
+      (swap! session-statuses assoc sid (assoc status :updated-at (java.util.Date.))))))
+
 (defn- scratch-pad->body
   [pad]
   {:id         (:id pad)
@@ -2720,6 +2910,7 @@
    :authorize_url            (:oauth.account/authorize-url account)
    :token_url                (:oauth.account/token-url account)
    :client_id                (:oauth.account/client-id account)
+   :provider_template        (some-> (:oauth.account/provider-template account) name)
    :scopes                   (:oauth.account/scopes account)
    :redirect_uri             (:oauth.account/redirect-uri account)
    :auth_params              (:oauth.account/auth-params account)
@@ -2730,6 +2921,21 @@
    :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
    :expires_at               (instant->str (:oauth.account/expires-at account))
    :connected_at             (instant->str (:oauth.account/connected-at account))})
+
+(defn- oauth-template->admin-body
+  [template]
+  {:id            (some-> (:id template) name)
+   :name          (:name template)
+   :description   (:description template)
+   :authorize_url (:authorize-url template)
+   :token_url     (:token-url template)
+   :api_base_url  (:api-base-url template)
+   :service_id    (:service-id template)
+   :service_name  (:service-name template)
+   :scopes        (:scopes template)
+   :auth_params   (json/write-json-str (or (:auth-params template) {}))
+   :token_params  (json/write-json-str (or (:token-params template) {}))
+   :notes         (:notes template)})
 
 (defn- site->admin-body
   [site]
@@ -2783,11 +2989,24 @@
         (let [sid      (if session-id
                          (java.util.UUID/fromString session-id)
                          (db/create-session! :http))
-              _        (wm/ensure-wm! sid)
-            response (agent/process-message sid message :channel :http)]
+              _wm      (wm/ensure-wm! sid)
+              _status  (clear-session-status! sid)
+              response (agent/process-message sid message :channel :http)]
           (json-response 200 {:session_id (str sid)
                               :role       "assistant"
                               :content    response}))))))
+
+(defn- handle-get-status [session-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (json-response 200 {:session_id session-id
+                        :status     (status->body (get @session-statuses session-id))})))
 
 (defn- handle-get-approval [session-id]
   (if-not (parse-session-id session-id)
@@ -2987,6 +3206,9 @@
     {:providers (->> (db/list-providers)
                      (map provider->admin-body)
                      sort-by-name)
+     :oauth_provider_templates (->> (oauth-template/list-templates)
+                                    (map oauth-template->admin-body)
+                                    sort-by-name)
      :oauth_accounts (->> (db/list-oauth-accounts)
                           (map oauth-account->admin-body)
                           sort-by-name)
@@ -3096,6 +3318,9 @@
           client-secret  (or (nonblank-str (get data "client_secret"))
                              (:oauth.account/client-secret existing)
                              "")
+          provider-template-id (if (contains? data "provider_template")
+                                 (some-> (get data "provider_template") nonblank-str keyword)
+                                 (:oauth.account/provider-template existing))
           scopes         (or (nonblank-str (get data "scopes")) "")
           redirect-uri   (nonblank-str (get data "redirect_uri"))
           auth-params    (parse-json-object-string (get data "auth_params") "auth_params")
@@ -3106,12 +3331,18 @@
         (throw (ex-info "missing 'token_url' field" {:field "token_url"})))
       (when-not client-id
         (throw (ex-info "missing 'client_id' field" {:field "client_id"})))
+      (when (and provider-template-id
+                 (nil? (oauth-template/get-template provider-template-id)))
+        (throw (ex-info "unknown provider_template"
+                        {:field "provider_template"
+                         :value (name provider-template-id)})))
       (db/save-oauth-account! {:id            account-id
                                :name          name
                                :authorize-url authorize-url
                                :token-url     token-url
                                :client-id     client-id
                                :client-secret client-secret
+                               :provider-template provider-template-id
                                :scopes        scopes
                                :redirect-uri  redirect-uri
                                :auth-params   auth-params
@@ -3305,6 +3536,7 @@
   (let [uri    (:uri req)
         method (:request-method req)
         session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
+        status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
         approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
         scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
         scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
@@ -3337,6 +3569,9 @@
 
       (and (= method :post) (= uri "/chat"))
       (protected-route-response req #(handle-chat req))
+
+      (and (= method :get) status-match)
+      (protected-route-response req #(handle-get-status (second status-match)))
 
       (and (= method :get) approval-match)
       (protected-route-response req #(handle-get-approval (second approval-match)))
@@ -3421,6 +3656,7 @@
      (log/warn "Server already running"))
    (prompt/register-approval! :http http-approval-handler)
    (prompt/register-approval! :websocket http-approval-handler)
+   (prompt/register-status! :http http-status-handler)
    (let [s (http/run-server router {:ip bind-host :port port})]
      (reset! server-atom s)
      (log/info "HTTP/WebSocket server started on" bind-host ":" port)
@@ -3431,6 +3667,8 @@
     (s) ; http-kit stop fn
     (prompt/register-approval! :http nil)
     (prompt/register-approval! :websocket nil)
+    (prompt/register-status! :http nil)
     (reset! pending-approvals {})
+    (reset! session-statuses {})
     (reset! server-atom nil)
     (log/info "Server stopped")))

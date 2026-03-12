@@ -1,0 +1,37 @@
+[{:id :github
+  :name "GitHub"
+  :description "Preset for GitHub OAuth Apps."
+  :authorize-url "https://github.com/login/oauth/authorize"
+  :token-url "https://github.com/login/oauth/access_token"
+  :api-base-url "https://api.github.com"
+  :service-id "github"
+  :service-name "GitHub API"
+  :scopes "read:user user:email repo"
+  :auth-params {}
+  :token-params {}
+  :notes "Create a GitHub OAuth App and set the callback URL to Xia's /oauth/callback."}
+ {:id :google
+  :name "Google"
+  :description "Preset for Google OAuth 2 web applications."
+  :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+  :token-url "https://oauth2.googleapis.com/token"
+  :api-base-url "https://www.googleapis.com"
+  :service-id "google"
+  :service-name "Google APIs"
+  :scopes "openid email profile"
+  :auth-params {:access_type "offline"
+                :prompt "consent"}
+  :token-params {}
+  :notes "Create a Google OAuth client of type Web application and add Xia's /oauth/callback as an authorized redirect URI."}
+ {:id :microsoft
+  :name "Microsoft"
+  :description "Preset for Microsoft identity platform v2 applications."
+  :authorize-url "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  :token-url "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  :api-base-url "https://graph.microsoft.com/v1.0"
+  :service-id "microsoft-graph"
+  :service-name "Microsoft Graph"
+  :scopes "offline_access openid profile User.Read"
+  :auth-params {}
+  :token-params {}
+  :notes "Register an Azure app and add Xia's /oauth/callback as a web redirect URI."}]

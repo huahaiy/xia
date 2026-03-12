@@ -237,8 +237,9 @@
   (let [{:keys [policy reason]} (tool-approval-policy tool)
         session-id              (:session-id context)
         bypass?                 (:approval-bypass? context)
+        tool-name               (or (:tool/name tool) (name tool-id))
         request                 {:tool-id     tool-id
-                                 :tool-name   (:tool/name tool)
+                                 :tool-name   tool-name
                                  :description (:tool/description tool)
                                  :arguments   arguments
                                  :policy      policy
@@ -253,6 +254,11 @@
         (if (and session-id (approved-for-session? session-id tool-id))
           {:allowed? true}
           (try
+            (prompt/status! {:state    :waiting
+                             :phase    :approval
+                             :message  (str "Waiting for approval for " tool-name)
+                             :tool-id  tool-id
+                             :tool-name tool-name})
             (if (prompt/approve! request)
               (do
                 (remember-session-approval! session-id tool-id)
@@ -265,6 +271,11 @@
 
         :always
         (try
+          (prompt/status! {:state    :waiting
+                           :phase    :approval
+                           :message  (str "Waiting for approval for " tool-name)
+                           :tool-id  tool-id
+                           :tool-name tool-name})
           (if (prompt/approve! request)
             {:allowed? true}
             {:allowed? false
@@ -287,9 +298,36 @@
                   wm/*session-id*            (:session-id context)]
           (let [{:keys [allowed? error]} (ensure-approved tool-id tool arguments context)]
             (if allowed?
-              (handler arguments)
-              (approval-error tool-id error))))
+              (do
+                (prompt/status! {:state    :running
+                                 :phase    :tool
+                                 :message  (str "Running tool " (or (:tool/name tool)
+                                                                    (name tool-id)))
+                                 :tool-id  tool-id
+                                 :tool-name (or (:tool/name tool) (name tool-id))})
+                (let [result (handler arguments)]
+                  (prompt/status! {:state    :running
+                                   :phase    :tool
+                                   :message  (str "Finished tool " (or (:tool/name tool)
+                                                                       (name tool-id)))
+                                   :tool-id  tool-id
+                                   :tool-name (or (:tool/name tool) (name tool-id))})
+                  result))
+              (do
+                (prompt/status! {:state    :running
+                                 :phase    :approval
+                                 :message  (str "Skipped tool " (or (:tool/name tool)
+                                                                    (name tool-id))
+                                                ": " error)
+                                 :tool-id  tool-id
+                                 :tool-name (or (:tool/name tool) (name tool-id))})
+                (approval-error tool-id error)))))
         (catch Exception e
+          (prompt/status! {:state   :error
+                           :phase   :tool
+                           :message (str "Tool " (name tool-id) " failed: " (.getMessage e))
+                           :tool-id tool-id
+                           :tool-name (or (:tool/name tool) (name tool-id))})
           (log/error e "Tool execution failed:" tool-id)
           {:error (str "Tool execution failed: " (.getMessage e))}))
       {:error (str "Tool " tool-id " has no callable handler")})

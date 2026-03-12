@@ -65,6 +65,43 @@
         (prompt/register-approval! :terminal nil)
         (tool/clear-session-approvals! session-id)))))
 
+(deftest privileged-tool-reports-status-updates
+  (db/install-tool! {:id          :status-tool
+                     :name        "status-tool"
+                     :description "Status tool"
+                     :approval    :session
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :status-tool)
+  (let [events     (atom [])
+        session-id (random-uuid)]
+    (prompt/register-status! :terminal
+                             (fn [status]
+                               (swap! events conj (select-keys status
+                                                               [:state :phase :message :tool-id]))))
+    (prompt/register-approval! :terminal (fn [_] true))
+    (try
+      (is (= {"status" "ok"}
+             (tool/execute-tool :status-tool {}
+                                {:channel :terminal
+                                 :session-id session-id})))
+      (is (= [{:state :waiting
+               :phase :approval
+               :message "Waiting for approval for status-tool"
+               :tool-id :status-tool}
+              {:state :running
+               :phase :tool
+               :message "Running tool status-tool"
+               :tool-id :status-tool}
+              {:state :running
+               :phase :tool
+               :message "Finished tool status-tool"
+               :tool-id :status-tool}]
+             @events))
+      (finally
+        (prompt/register-status! :terminal nil)
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)))))
+
 (deftest tool-definitions-annotate-approval-requirement
   (db/install-tool! {:id          :annotated-tool
                      :name        "annotated-tool"

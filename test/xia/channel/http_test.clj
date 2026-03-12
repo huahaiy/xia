@@ -51,8 +51,12 @@
     (is (re-find #"Admin" (:body response)))
     (is (re-find #"Providers" (:body response)))
     (is (re-find #"OAuth Accounts" (:body response)))
+    (is (re-find #"Provider Template" (:body response)))
+    (is (re-find #"Use template" (:body response)))
+    (is (re-find #"Create service" (:body response)))
     (is (re-find #"Site Logins" (:body response)))
     (is (re-find #"<textarea" (:body response)))
+    (is (re-find #"pollStatus" (:body response)))
     (is (re-find #"sessionStorage\.getItem" (:body response)))
     (is (not (re-find #"localStorage\.setItem\(storageKeys\.messages" (:body response))))))
 
@@ -194,6 +198,32 @@
     (is (= 401 (:status response)))
     (is (= "missing or invalid local session secret" (get body "error")))))
 
+(deftest session-status-route-returns-live-status
+  (let [sid (str (db/create-session! :http))]
+    (#'http/http-status-handler {:session-id sid
+                                 :state      :running
+                                 :phase      :llm
+                                 :message    "Calling model"})
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/status")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= sid (get body "session_id")))
+      (is (= "running" (get-in body ["status" "state"])))
+      (is (= "llm" (get-in body ["status" "phase"])))
+      (is (= "Calling model" (get-in body ["status" "message"])))
+      (is (string? (get-in body ["status" "updated_at"]))))
+    (#'http/http-status-handler {:session-id sid
+                                 :state      :done
+                                 :message    "Ready"})
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/status")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (nil? (get body "status"))))))
+
 (deftest scratch-pad-routes-round-trip
   (let [sid         (str (db/create-session! :http))
         create-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads")
@@ -328,6 +358,7 @@
                                  :headers        (ui-headers)})
         body     (response-json response)
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        templates (get body "oauth_provider_templates")
         oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
         service  (first (filter #(= "github" (get % "id")) (get body "services")))
         site     (first (filter #(= "github" (get % "id")) (get body "sites")))
@@ -337,6 +368,12 @@
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
     (is (= true (get provider "default")))
+    (is (= #{"github" "google" "microsoft"}
+           (set (map #(get % "id") templates))))
+    (is (= "{\"access_type\":\"offline\",\"prompt\":\"consent\"}"
+           (get (first (filter #(= "google" (get % "id")) templates)) "auth_params")))
+    (is (= "GitHub API"
+           (get (first (filter #(= "github" (get % "id")) templates)) "service_name")))
     (is (= true (get oauth "client_secret_configured")))
     (is (= true (get oauth "access_token_configured")))
     (is (not (contains? oauth "client_secret")))
@@ -368,6 +405,7 @@
                                                                      "token_url" "https://oauth2.googleapis.com/token"
                                                                      "client_id" "client-id"
                                                                      "client_secret" ""
+                                                                     "provider_template" "google"
                                                                      "scopes" "openid email"
                                                                      "redirect_uri" ""
                                                                      "auth_params" "{\"access_type\":\"offline\"}"
@@ -376,7 +414,9 @@
         account       (db/get-oauth-account :google)]
     (is (= 200 (:status save-response)))
     (is (= "Google Workspace" (get-in save-body ["oauth_account" "name"])))
+    (is (= "google" (get-in save-body ["oauth_account" "provider_template"])))
     (is (= "client-secret" (:oauth.account/client-secret account)))
+    (is (= :google (:oauth.account/provider-template account)))
     (is (= "{\"access_type\":\"offline\"}" (:oauth.account/auth-params account))))
   (with-redefs [xia.oauth/start-authorization!
                 (fn [account-id callback-url]
