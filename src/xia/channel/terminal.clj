@@ -190,7 +190,8 @@
                                      (mapv (fn [{:keys [role content]}]
                                              {:role (name role) :content content})
                                            messages)
-                                     (quot tokens 2))
+                                     (quot tokens 2)
+                                     {:workload :history-compaction})
                           new-tokens (->> compacted (map #(context/estimate-tokens (:content %))) (reduce +))]
                       (println (str "  compacted to ~" new-tokens " tokens (recap applied)")))
                     (println "  (too few messages to compact)")))

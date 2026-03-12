@@ -19,26 +19,78 @@
 
 ;; build-messages is now in xia.context
 
+(defn- call-model
+  [messages tools provider-id]
+  (cond
+    (and provider-id (seq tools))
+    (llm/chat-with-tools messages tools :provider-id provider-id)
+
+    provider-id
+    (llm/chat-simple messages :provider-id provider-id)
+
+    (seq tools)
+    (llm/chat-with-tools messages tools)
+
+    :else
+    (llm/chat-simple messages)))
+
 (defn- report-status!
   [message & {:as extra}]
   (prompt/status! (merge {:state :running
                           :message message}
                          extra)))
 
+(defn- prepare-tool-call
+  [tc]
+  (let [func-name (get-in tc ["function" "name"])
+        args-str  (get-in tc ["function" "arguments"])
+        args      (try (json/read-json args-str) (catch Exception _ {}))
+        tool-id   (keyword func-name)]
+    {:tool-call   tc
+     :func-name   func-name
+     :args        args
+     :tool-id     tool-id
+     :parallel?   (boolean (tool/parallel-safe? tool-id))}))
+
+(defn- execute-tool-call
+  [{:keys [tool-call func-name args tool-id]} context]
+  (let [result (tool/execute-tool tool-id args context)]
+    (log/debug "Tool call completed:" func-name)
+    {:role         "tool"
+     :tool_call_id (get tool-call "id")
+     :content      (if (string? result) result (json/write-json-str result))}))
+
+(defn- tool-call-batches
+  [prepared-calls]
+  (->> prepared-calls
+       (partition-by :parallel?)
+       (mapv (fn [calls]
+               {:parallel? (:parallel? (first calls))
+                :calls     (vec calls)}))))
+
+(defn- execute-tool-batch
+  [{:keys [parallel? calls]} context]
+  (if (and parallel? (> (count calls) 1))
+    (do
+      (report-status! (str "Running " (count calls) " independent tools in parallel")
+                      :phase :tool
+                      :parallel true
+                      :tool-count (count calls))
+      (log/debug "Executing tool batch in parallel:" (mapv :func-name calls))
+      (->> calls
+           (mapv (fn [call]
+                   (future (execute-tool-call call context))))
+           (mapv deref)))
+    (mapv #(execute-tool-call % context) calls)))
+
 (defn- execute-tool-calls
   "Execute tool calls from the LLM response, return tool result messages."
   [tool-calls context]
-  (mapv (fn [tc]
-          (let [func-name (get-in tc ["function" "name"])
-                args-str  (get-in tc ["function" "arguments"])
-                args      (try (json/read-json args-str) (catch Exception _ {}))
-                tool-id   (keyword func-name)
-                result    (tool/execute-tool tool-id args context)]
-            (log/debug "Tool call completed:" func-name)
-            {:role         "tool"
-             :tool_call_id (get tc "id")
-             :content      (if (string? result) result (json/write-json-str result))}))
-        tool-calls))
+  (->> tool-calls
+       (mapv prepare-tool-call)
+       tool-call-batches
+       (mapcat #(execute-tool-batch % context))
+       vec))
 
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.
@@ -48,7 +100,7 @@
    3. Calls the LLM with available tools (function-calling)
    4. If the LLM wants to use tools, executes them and loops
    5. Returns the final text response"
-  [session-id user-message & {:keys [channel tool-context]
+  [session-id user-message & {:keys [channel tool-context provider-id]
                               :or   {channel :terminal
                                      tool-context {}}}]
   (binding [prompt/*interaction-context* {:channel    channel
@@ -58,8 +110,17 @@
       (report-status! "Updating working memory"
                       :phase :working-memory)
       (wm/update-wm! user-message session-id channel)
-      (let [tools (tool/tool-definitions)]
-        (loop [messages (context/build-messages session-id)
+      (let [{assistant-provider    :provider
+             assistant-provider-id :provider-id}
+            (llm/resolve-provider-selection
+              (cond-> {:workload :assistant}
+                provider-id
+                (assoc :provider-id provider-id)))
+            tools (tool/tool-definitions)]
+        (loop [messages (context/build-messages session-id
+                                                {:provider            assistant-provider
+                                                 :provider-id         assistant-provider-id
+                                                 :compaction-workload :history-compaction})
                round    0]
           (when (>= round max-tool-rounds)
             (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
@@ -68,9 +129,7 @@
                             "Calling model with tool results")
                           :phase :llm
                           :round round)
-          (let [response   (if (seq tools)
-                             (llm/chat-with-tools messages tools)
-                             (llm/chat-simple messages))
+          (let [response   (call-model messages tools assistant-provider-id)
                 has-tools? (and (map? response) (seq (get response "tool_calls")))]
             (if has-tools?
               (let [tool-calls    (get response "tool_calls")

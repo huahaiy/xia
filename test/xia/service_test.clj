@@ -3,7 +3,8 @@
             [xia.db :as db]
             [xia.secret :as secret]
             [xia.service :as service]
-            [xia.test-helpers :refer [with-test-db]]))
+            [xia.test-helpers :refer [with-test-db]])
+  (:import [java.util.concurrent ConcurrentHashMap]))
 
 (use-fixtures :each with-test-db)
 
@@ -128,6 +129,7 @@
       (is (contains? svc :id))
       (is (contains? svc :name))
       (is (contains? svc :base-url))
+      (is (contains? svc :rate-limit-per-minute))
       (is (not (contains? svc :auth-key)))
       (is (not (contains? svc :auth-type))))))
 
@@ -147,6 +149,39 @@
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo #"disabled"
         (#'service/resolve-service :disabled-svc))))
+
+(deftest resolve-service-applies-default-rate-limit
+  (db/register-service! {:id :default-rate-limit
+                         :base-url "https://example.com"
+                         :auth-type :bearer
+                         :auth-key "tok"})
+  (is (= service/default-rate-limit-per-minute
+         (:rate-limit-per-minute (#'service/resolve-service :default-rate-limit)))))
+
+(deftest request-enforces-configured-rate-limit
+  (db/register-service! {:id                    :limited
+                         :base-url              "https://api.example.com"
+                         :auth-type             :bearer
+                         :auth-key              "tok"
+                         :rate-limit-per-minute 2})
+  (let [request-count (atom 0)
+        now-values    (atom [0 1000 2000])]
+    (with-redefs [xia.service/service-rate-limits (ConcurrentHashMap.)
+                  xia.service/current-time-ms     (fn []
+                                                    (let [value (first @now-values)]
+                                                      (swap! now-values rest)
+                                                      value))
+                  xia.http-client/request         (fn [_req]
+                                                    (swap! request-count inc)
+                                                    {:status 200
+                                                     :headers {"content-type" "application/json"}
+                                                     :body "{}"})]
+      (is (= 200 (:status (service/request :limited :get "/one"))))
+      (is (= 200 (:status (service/request :limited :get "/two"))))
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"Rate limit exceeded for service limited"
+            (service/request :limited :get "/three")))
+      (is (= 2 @request-count)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Secret module protects service/auth-key
@@ -177,7 +212,7 @@
                          :auth-type     :oauth-account
                          :oauth-account :github-oauth})
   (let [calls (atom [])]
-    (with-redefs [hato.client/request
+    (with-redefs [xia.http-client/request
                   (fn [req]
                     (let [url (or (:url req) (:uri req))]
                       (swap! calls conj (assoc (select-keys req [:method :headers :body]) :url url))

@@ -17,17 +17,14 @@
      :oauth-account  — Authorization header from a stored OAuth account"
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [hato.client :as hc]
             [charred.api :as json]
             [xia.db :as db]
+            [xia.http-client :as http]
             [xia.oauth :as oauth])
-  (:import [java.util Base64]))
+  (:import [java.util Base64]
+           [java.util.concurrent ConcurrentHashMap]))
 
-;; ---------------------------------------------------------------------------
-;; HTTP client (shared with xia.llm — could be extracted, but keeping simple)
-;; ---------------------------------------------------------------------------
-
-(defonce ^:private http-client (delay (hc/build-http-client {:connect-timeout 30000})))
+(def default-rate-limit-per-minute 60)
 
 ;; ---------------------------------------------------------------------------
 ;; URL safety
@@ -81,6 +78,42 @@
     req))
 
 ;; ---------------------------------------------------------------------------
+;; Rate limiting
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private service-rate-limits (ConcurrentHashMap.))
+(def ^:private rate-limit-window-ms 60000)
+
+(defn effective-rate-limit-per-minute
+  "Return the effective per-service request cap for a minute window."
+  [service]
+  (long (or (:service/rate-limit-per-minute service)
+            (:rate-limit-per-minute service)
+            default-rate-limit-per-minute)))
+
+(defn- current-time-ms []
+  (System/currentTimeMillis))
+
+(defn- check-rate-limit!
+  [service-id service]
+  (let [limit (effective-rate-limit-per-minute service)
+        now   (current-time-ms)
+        state (.computeIfAbsent service-rate-limits service-id
+                (reify java.util.function.Function
+                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
+    (swap! state
+      (fn [{:keys [timestamps]}]
+        (let [cutoff (- now rate-limit-window-ms)
+              recent (filterv #(> % cutoff) timestamps)]
+          (when (>= (count recent) limit)
+            (throw (ex-info (str "Rate limit exceeded for service " (name service-id)
+                                 " (max " limit " requests/minute)")
+                            {:service-id service-id
+                             :limit      limit})))
+          {:timestamps (conj recent now)
+           :cleaned    now})))))
+
+;; ---------------------------------------------------------------------------
 ;; Service resolution
 ;; ---------------------------------------------------------------------------
 
@@ -101,6 +134,7 @@
        :auth-type     auth-type
        :auth-key      (:service/auth-key svc)
        :auth-header   (:service/auth-header svc)
+       :rate-limit-per-minute (effective-rate-limit-per-minute svc)
        :oauth-account (when (= :oauth-account auth-type)
                         (when-not oauth-account-id
                           (throw (ex-info (str "Service " (name service-id)
@@ -113,12 +147,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn list-services
-  "List registered services. Returns ID, name, base-url — never credentials."
+  "List registered services. Returns safe metadata only, never credentials."
   []
   (mapv (fn [svc]
           {:id       (:service/id svc)
            :name     (:service/name svc)
            :base-url (:service/base-url svc)
+           :rate-limit-per-minute (effective-rate-limit-per-minute svc)
            :enabled? (:service/enabled? svc)})
         (db/list-services)))
 
@@ -151,7 +186,7 @@
                    :else          (str body))
         req     (cond-> {:url         url
                          :method      method
-                         :http-client @http-client}
+                         :request-label (str "Service request " (name service-id))}
                   body-str     (assoc :body body-str)
                   body-str     (assoc-in [:headers "Content-Type"] "application/json")
                   query-params (assoc :query-params query-params))
@@ -162,8 +197,9 @@
         req     (if headers
                   (update req :headers #(merge headers %))
                   req)
+        _       (check-rate-limit! service-id svc)
         _       (log/debug "Service request:" (name service-id) method path)
-        resp    (hc/request req)]
+        resp    (http/request req)]
     {:status  (:status resp)
      :headers (into {} (:headers resp))
      :body    (case as

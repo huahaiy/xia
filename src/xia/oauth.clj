@@ -3,15 +3,13 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [hato.client :as hc]
-            [xia.db :as db])
+            [xia.db :as db]
+            [xia.http-client :as http])
   (:import [java.net URI URLDecoder URLEncoder]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest SecureRandom]
            [java.time Instant]
            [java.util Base64 Date]))
-
-(defonce ^:private http-client (delay (hc/build-http-client {:connect-timeout 30000})))
 (defonce ^:private pending-authorizations (atom {}))
 
 (def ^:private auth-state-ttl-ms (* 15 60 1000))
@@ -105,12 +103,12 @@
 
 (defn- token-request!
   [url params]
-  (let [resp   (hc/request {:uri         url
-                            :method      :post
-                            :headers     {"Accept" "application/json"
-                                          "Content-Type" "application/x-www-form-urlencoded"}
-                            :body        (encode-www-form params)
-                            :http-client @http-client})
+  (let [resp   (http/request {:url           url
+                              :method        :post
+                              :headers       {"Accept" "application/json"
+                                              "Content-Type" "application/x-www-form-urlencoded"}
+                              :body          (encode-www-form params)
+                              :request-label "OAuth token request"})
         body   (parse-token-response (:body resp))
         status (:status resp)]
     (when (or (< status 200) (>= status 300))

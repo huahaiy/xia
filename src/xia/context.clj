@@ -37,7 +37,7 @@
 ;; Budget config
 ;; ============================================================================
 
-(def ^:private default-budget
+(def ^:private default-system-prompt-budget
   {:total      4000
    :identity   300
    :topic      100
@@ -45,10 +45,79 @@
    :episodes   500
    :skills     1500})
 
-(defn- get-budget []
+(def ^:private default-history-budget 8000)
+
+(defn- valid-budget
+  [value]
+  (and (map? value)
+       (seq value)))
+
+(defn- configured-system-prompt-budget []
   (if-let [custom (db/get-config :context/budget)]
-    (try (edn/read-string custom) (catch Exception _ default-budget))
-    default-budget))
+    (try
+      (let [parsed (edn/read-string custom)]
+        (if (valid-budget parsed)
+          (merge default-system-prompt-budget parsed)
+          default-system-prompt-budget))
+      (catch Exception _
+        default-system-prompt-budget))
+    default-system-prompt-budget))
+
+(defn- configured-history-budget []
+  (if-let [custom (db/get-config :context/history-budget)]
+    (try
+      (long (edn/read-string custom))
+      (catch Exception _
+        default-history-budget))
+    default-history-budget))
+
+(defn- scale-budget
+  [budget total]
+  (let [base-total (max 1 (long (:total budget)))
+        ratio      (/ (double total) base-total)]
+    (reduce-kv (fn [scaled k v]
+                 (assoc scaled
+                        k
+                        (if (= k :total)
+                          (long total)
+                          (max 1 (long (Math/round (* ratio (double v))))))))
+               {}
+               budget)))
+
+(defn- resolve-context-provider
+  [{:keys [provider provider-id]}]
+  (or provider
+      (when provider-id
+        (db/get-provider provider-id))
+      (when-not provider-id
+        (db/get-default-provider))))
+
+(defn- provider-system-prompt-budget
+  [provider]
+  (or (:llm.provider/system-prompt-budget provider)
+      (:system-prompt-budget provider)))
+
+(defn- provider-history-budget
+  [provider]
+  (or (:llm.provider/history-budget provider)
+      (:history-budget provider)))
+
+(defn- resolve-system-prompt-budget
+  [provider]
+  (let [budget         (configured-system-prompt-budget)
+        total-override (provider-system-prompt-budget provider)]
+    (if (and (number? total-override)
+             (pos? (long total-override)))
+      (scale-budget budget total-override)
+      budget)))
+
+(defn- resolve-history-budget
+  [provider]
+  (let [override (provider-history-budget provider)]
+    (if (and (number? override)
+             (pos? (long override)))
+      (long override)
+      (configured-history-budget))))
 
 ;; ============================================================================
 ;; Renderers
@@ -164,8 +233,10 @@
 (defn assemble-system-prompt
   "Build the complete system prompt with budget enforcement.
    Priority: identity (P0) > topic (P0) > entities (P1) > episodes (P2) > skills (P3)."
-  [session-id]
-  (let [budget     (get-budget)
+  ([session-id]
+   (assemble-system-prompt session-id nil))
+  ([session-id opts]
+   (let [budget     (resolve-system-prompt-budget (resolve-context-provider opts))
         wm-context (or (wm/wm->context session-id)
                        {:topics nil :entities [] :episodes [] :turn-count 0})
         skills     (skill/skills-for-context wm-context)
@@ -202,7 +273,7 @@
          (when topic-section (str "## Context\n" topic-section))
          (when ent-section (str ent-section "\n\n"))
          (when ep-section (str ep-section "\n\n"))
-         (when skill-section (str skill-section "\n\n")))))
+         (when skill-section (str skill-section "\n\n"))))))
 
 ;; ============================================================================
 ;; Message history compaction
@@ -211,32 +282,42 @@
 (defn compact-history
   "When message history exceeds budget, summarize older messages.
    Returns compacted message list. Raw messages remain in DB."
-  [messages budget]
-  (let [total-tokens (->> messages
-                          (map #(estimate-tokens (:content %)))
-                          (reduce +))
-        msg-count    (count messages)]
-    (if (or (<= total-tokens budget) (<= msg-count 4))
-      messages ; fits in budget or too few to compact
-      ;; Summarize the older half
-      (let [keep-count  (max 4 (quot msg-count 2))
-            old-msgs    (subvec (vec messages) 0 (- msg-count keep-count))
-            recent-msgs (subvec (vec messages) (- msg-count keep-count))
-            old-text    (->> old-msgs
-                             (map (fn [{:keys [role content]}]
-                                    (str (name role) ": " content)))
-                             (str/join "\n"))]
-        (try
-          (let [recap (llm/chat-simple
-                        [{:role "system"
-                          :content "Summarize this conversation excerpt in 2-4 sentences. Capture key topics, decisions, and any personal information shared. Be factual."}
-                         {:role "user" :content old-text}])]
-            (into [{:role "system"
-                    :content (str "[Conversation recap: " (str/trim recap) "]")}]
-                  recent-msgs))
-          (catch Exception e
-            (log/warn "Failed to compact history:" (.getMessage e))
-            messages))))))
+  ([messages budget]
+   (compact-history messages budget nil))
+  ([messages budget {:keys [provider-id workload]}]
+   (let [total-tokens (->> messages
+                           (map #(estimate-tokens (:content %)))
+                           (reduce +))
+         msg-count    (count messages)]
+     (if (or (<= total-tokens budget) (<= msg-count 4))
+       messages ; fits in budget or too few to compact
+       ;; Summarize the older half
+       (let [keep-count  (max 4 (quot msg-count 2))
+             old-msgs    (subvec (vec messages) 0 (- msg-count keep-count))
+             recent-msgs (subvec (vec messages) (- msg-count keep-count))
+             old-text    (->> old-msgs
+                              (map (fn [{:keys [role content]}]
+                                     (str (name role) ": " content)))
+                              (str/join "\n"))]
+         (try
+           (let [messages [{:role "system"
+                            :content "Summarize this conversation excerpt in 2-4 sentences. Capture key topics, decisions, and any personal information shared. Be factual."}
+                           {:role "user" :content old-text}]
+                 recap    (cond
+                            provider-id
+                            (llm/chat-simple messages :provider-id provider-id)
+
+                            workload
+                            (llm/chat-simple messages :workload workload)
+
+                            :else
+                            (llm/chat-simple messages))]
+             (into [{:role "system"
+                     :content (str "[Conversation recap: " (str/trim recap) "]")}]
+                   recent-msgs))
+           (catch Exception e
+             (log/warn "Failed to compact history:" (.getMessage e))
+             messages)))))))
 
 ;; ============================================================================
 ;; Build messages (moved from agent.clj)
@@ -245,18 +326,29 @@
 (defn build-messages
   "Build the full message list for an LLM call:
    system prompt (identity + WM context + skills) + compacted history."
-  [session-id]
-  (let [sys-prompt   (assemble-system-prompt session-id)
+  ([session-id]
+   (build-messages session-id nil))
+  ([session-id opts]
+   (let [provider     (resolve-context-provider opts)
+         compaction-provider-id (:compaction-provider-id opts)
+         compaction-workload    (or (:compaction-workload opts)
+                                    :history-compaction)
+         sys-prompt   (assemble-system-prompt session-id (assoc opts :provider provider))
         history      (db/session-messages session-id)
         history-msgs (mapv (fn [{:keys [role content tool-calls tool-id]}]
                              (cond-> {:role (name role) :content content}
                                tool-calls (assoc :tool_calls (json/read-json tool-calls))
                                tool-id    (assoc :tool_call_id tool-id)))
                            history)
-        ;; Compact history if needed (budget = half of model context estimate)
-        budget       (or (some-> (db/get-config :context/history-budget)
-                                 edn/read-string)
-                         8000)
-        compacted    (compact-history history-msgs budget)]
+        budget       (resolve-history-budget provider)
+        compacted    (compact-history history-msgs
+                                      budget
+                                      (cond-> {}
+                                        compaction-provider-id
+                                        (assoc :provider-id compaction-provider-id)
+
+                                        (and (not compaction-provider-id)
+                                             compaction-workload)
+                                        (assoc :workload compaction-workload)))]
     (into [{:role "system" :content sys-prompt}]
-          compacted)))
+          compacted))))

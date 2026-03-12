@@ -65,7 +65,8 @@ Rules:
                         (str "\nContext: " (:context episode))))
         response (llm/chat-simple
                    [{:role "system" :content extraction-prompt}
-                    {:role "user"   :content user-msg}])]
+                    {:role "user"   :content user-msg}]
+                   :workload :memory-extraction)]
     (try
       (json/read-json response)
       (catch Exception e
@@ -215,7 +216,8 @@ Rules:
                                 Focus on: what was discussed, what was decided,
                                 what the user wanted, and any personal information
                                 shared. Be factual and concise."}
-                      {:role "user" :content convo-text}])]
+                      {:role "user" :content convo-text}]
+                     :workload :memory-summary)]
     response))
 
 (defn record-conversation!

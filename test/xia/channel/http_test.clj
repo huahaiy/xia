@@ -50,11 +50,14 @@
     (is (re-find #"Notes" (:body response)))
     (is (re-find #"Settings" (:body response)))
     (is (re-find #"AI Models" (:body response)))
+    (is (re-find #"Workloads" (:body response)))
+    (is (re-find #"System Prompt Budget" (:body response)))
     (is (re-find #"App Connections" (:body response)))
     (is (re-find #"Service Preset" (:body response)))
     (is (re-find #"Apply preset" (:body response)))
     (is (re-find #"Add to API list" (:body response)))
     (is (re-find #"Site Logins" (:body response)))
+    (is (re-find #"Rate Limit \(req/min\)" (:body response)))
     (is (re-find #"<textarea" (:body response)))
     (is (re-find #"src=\"app.js\"" (:body response)))
     (is (re-find #"href=\"style.css\"" (:body response)))))
@@ -329,14 +332,18 @@
                         :name     "OpenAI"
                         :base-url "https://api.openai.com/v1"
                         :api-key  "sk-secret"
-                        :model    "gpt-5"})
+                        :model    "gpt-5"
+                        :workloads #{:assistant :history-compaction}
+                        :system-prompt-budget 16000
+                        :history-budget 32000})
   (db/set-default-provider! :openai)
   (db/register-service! {:id          :github
                          :name        "GitHub"
                          :base-url    "https://api.github.com"
                          :auth-type   :api-key-header
                          :auth-key    "gh-secret"
-                         :auth-header "X-API-Key"})
+                         :auth-header "X-API-Key"
+                         :rate-limit-per-minute 90})
   (db/register-oauth-account! {:id            :google
                                :name          "Google"
                                :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
@@ -369,6 +376,7 @@
                                  :headers        (ui-headers)})
         body     (response-json response)
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        llm-workloads (get body "llm_workloads")
         templates (get body "oauth_provider_templates")
         oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
         service  (first (filter #(= "github" (get % "id")) (get body "services")))
@@ -379,6 +387,12 @@
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
     (is (= true (get provider "default")))
+    (is (= ["assistant" "history-compaction"] (get provider "workloads")))
+    (is (= 16000 (get provider "system_prompt_budget")))
+    (is (= 32000 (get provider "history_budget")))
+    (is (= "healthy" (get provider "health_status")))
+    (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-extraction"}
+           (set (map #(get % "id") llm-workloads))))
     (is (= #{"github" "google" "microsoft"}
            (set (map #(get % "id") templates))))
     (is (= "{\"access_type\":\"offline\",\"prompt\":\"consent\"}"
@@ -392,6 +406,8 @@
     (is (= true (get service "auth_key_configured")))
     (is (not (contains? service "auth_key")))
     (is (= "api-key-header" (get service "auth_type")))
+    (is (= 90 (get service "rate_limit_per_minute")))
+    (is (= 90 (get service "effective_rate_limit_per_minute")))
     (is (= true (get site "username_configured")))
     (is (= true (get site "password_configured")))
     (is (not (contains? site "username")))
@@ -488,15 +504,53 @@
                                                                 "name" "OpenAI"
                                                                 "base_url" "https://api.openai.com/v1"
                                                                 "model" "gpt-5-mini"
+                                                                "workloads" ["assistant"
+                                                                              "history-compaction"]
+                                                                "system_prompt_budget" "16000"
+                                                                "history_budget" "32000"
                                                                 "api_key" ""
                                                                 "default" true})})
         body     (response-json response)]
     (is (= 200 (:status response)))
     (is (= "openai" (get-in body ["provider" "id"])))
     (is (= "gpt-5-mini" (get-in body ["provider" "model"])))
+    (is (= ["assistant" "history-compaction"] (get-in body ["provider" "workloads"])))
+    (is (= 16000 (get-in body ["provider" "system_prompt_budget"])))
+    (is (= 32000 (get-in body ["provider" "history_budget"])))
     (is (= "openai-key" (:llm.provider/api-key (db/get-provider :openai))))
+    (is (= #{:assistant :history-compaction}
+           (set (:llm.provider/workloads (db/get-provider :openai)))))
+    (is (= 16000 (:llm.provider/system-prompt-budget (db/get-provider :openai))))
+    (is (= 32000 (:llm.provider/history-budget (db/get-provider :openai))))
     (is (= true (:llm.provider/default? (db/get-provider :openai))))
     (is (= false (:llm.provider/default? (db/get-provider :anthropic))))))
+
+(deftest admin-provider-route-clears-model-budgets
+  (db/upsert-provider! {:id                   :openai
+                        :name                 "OpenAI"
+                        :base-url             "https://api.openai.com/v1"
+                        :api-key              "openai-key"
+                        :model                "gpt-5"
+                        :system-prompt-budget 16000
+                        :history-budget       32000
+                        :default?             true})
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "openai"
+                                                                "name" "OpenAI"
+                                                                "base_url" "https://api.openai.com/v1"
+                                                                "model" "gpt-5"
+                                                                "workloads" []
+                                                                "system_prompt_budget" ""
+                                                                "history_budget" ""
+                                                                "api_key" ""
+                                                                "default" true})})
+        provider (db/get-provider :openai)]
+    (is (= 200 (:status response)))
+    (is (empty? (or (:llm.provider/workloads provider) [])))
+    (is (nil? (:llm.provider/system-prompt-budget provider)))
+    (is (nil? (:llm.provider/history-budget provider)))))
 
 (deftest admin-service-route-preserves-secret-and-clears-unused-header
   (db/register-service! {:id          :github
@@ -513,6 +567,7 @@
                                                                 "base_url" "https://api.github.com"
                                                                 "auth_type" "bearer"
                                                                 "auth_header" ""
+                                                                "rate_limit_per_minute" "120"
                                                                 "auth_key" ""
                                                                 "enabled" false})})
         service  (db/get-service :github)]
@@ -520,6 +575,7 @@
     (is (= :bearer (:service/auth-type service)))
     (is (= "gh-secret" (:service/auth-key service)))
     (is (nil? (:service/auth-header service)))
+    (is (= 120 (:service/rate-limit-per-minute service)))
     (is (= false (:service/enabled? service)))))
 
 (deftest admin-site-routes-preserve-secrets-and-delete

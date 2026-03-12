@@ -192,6 +192,16 @@
 ;; assemble-system-prompt (integration)
 ;; ---------------------------------------------------------------------------
 
+(deftest test-provider-specific-system-prompt-budget
+  (let [budget (#'xia.context/resolve-system-prompt-budget
+                 {:llm.provider/system-prompt-budget 16000})]
+    (is (= 16000 (:total budget)))
+    (is (= 1200 (:identity budget)))
+    (is (= 400 (:topic budget)))
+    (is (= 6000 (:entities budget)))
+    (is (= 2000 (:episodes budget)))
+    (is (= 6000 (:skills budget)))))
+
 (deftest test-assemble-system-prompt
   ;; Set up identity
   (db/set-identity! :name "TestXia")
@@ -238,7 +248,18 @@
                                           "Recap of earlier conversation.")]
         (let [result (ctx/compact-history msgs 100)]
           (is @called? "LLM should have been called for compaction")
-          (is (< (count result) (count msgs)) "Should have fewer messages"))))))
+          (is (< (count result) (count msgs)) "Should have fewer messages")))))
+
+  (testing "forwards workload routing to the LLM"
+    (let [msgs (vec (for [i (range 10)]
+                      {:role    (if (even? i) :user :assistant)
+                       :content (str "message " i " " (apply str (repeat 200 "x")))}))
+          opts-seen (atom nil)]
+      (with-redefs [xia.llm/chat-simple (fn [_messages & opts]
+                                          (reset! opts-seen opts)
+                                          "Recap of earlier conversation.")]
+        (ctx/compact-history msgs 100 {:workload :history-compaction})
+        (is (= [:workload :history-compaction] @opts-seen))))))
 
 ;; ---------------------------------------------------------------------------
 ;; build-messages
@@ -266,3 +287,25 @@
 
       (testing "includes history"
         (is (>= (count msgs) 3))))))
+
+(deftest test-build-messages-uses-provider-history-budget
+  (db/set-identity! :name "TestXia")
+  (db/set-identity! :description "Test")
+  (db/upsert-provider! {:id             :openai
+                        :name           "OpenAI"
+                        :base-url       "https://api.openai.com/v1"
+                        :model          "gpt-5"
+                        :default?       true
+                        :history-budget 12345})
+  (let [sid             (db/create-session! :terminal)
+        captured-budget (atom nil)]
+    (doseq [i (range 6)]
+      (db/add-message! sid
+                       (if (even? i) :user :assistant)
+                       (apply str "message " i " " (repeat 300 "x"))))
+    (with-redefs [xia.context/compact-history
+                  (fn [messages budget & _]
+                    (reset! captured-budget budget)
+                    messages)]
+      (ctx/build-messages sid))
+    (is (= 12345 @captured-budget))))

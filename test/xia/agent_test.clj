@@ -1,8 +1,10 @@
 (ns xia.agent-test
   (:require [clojure.test :refer :all]
+            [charred.api :as json]
             [xia.agent :as agent]
             [xia.db :as db]
             [xia.prompt :as prompt]
+            [xia.tool :as tool]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory :as wm]))
 
@@ -18,7 +20,9 @@
                                                                  [:state :phase :message]))))
     (try
       (with-redefs [xia.tool/tool-definitions (constantly [])
-                    xia.llm/chat-simple       (fn [_messages] "All set.")]
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.llm/chat-simple       (fn [_messages & _opts] "All set.")]
         (is (= "All set."
                (agent/process-message session-id "hello" :channel :terminal))))
       (is (= [{:state :running
@@ -36,3 +40,71 @@
              @statuses))
       (finally
         (prompt/register-status! :terminal nil)))))
+
+(deftest process-message-resolves-assistant-provider-once
+  (let [session-id        (db/create-session! :terminal)
+        selection-calls   (atom 0)
+        build-messages-opts (atom nil)
+        llm-opts          (atom nil)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (fn [_]
+                                                       (swap! selection-calls inc)
+                                                       {:provider {:llm.provider/id :router-a}
+                                                        :provider-id :router-a})
+                  xia.context/build-messages         (fn [_session-id opts]
+                                                       (reset! build-messages-opts opts)
+                                                       [{:role "system" :content "test"}])
+                  xia.llm/chat-simple                (fn [_messages & opts]
+                                                       (reset! llm-opts opts)
+                                                       "All set.")]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (is (= 1 @selection-calls))
+    (is (= :router-a (:provider-id @build-messages-opts)))
+    (is (= :router-a (get-in @build-messages-opts [:provider :llm.provider/id])))
+    (is (= :history-compaction (:compaction-workload @build-messages-opts)))
+    (is (= [:provider-id :router-a] @llm-opts))))
+
+(deftest execute-tool-calls-runs-independent-batches-in-parallel
+  (let [active     (atom 0)
+        max-active (atom 0)
+        tool-calls [{"id"       "call-1"
+                     "function" {"name"      "web-fetch"
+                                 "arguments" "{}"}}
+                    {"id"       "call-2"
+                     "function" {"name"      "web-search"
+                                 "arguments" "{}"}}]]
+    (with-redefs [tool/parallel-safe? (constantly true)
+                  tool/execute-tool   (fn [tool-id _args _context]
+                                        (let [sleep-ms (if (= tool-id :web-fetch) 200 50)
+                                              active-now (swap! active inc)]
+                                          (swap! max-active max active-now)
+                                          (Thread/sleep sleep-ms)
+                                          (swap! active dec)
+                                          {:tool (name tool-id)}))]
+      (let [results (#'agent/execute-tool-calls tool-calls {:channel :terminal})]
+        (is (= 2 @max-active))
+        (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))
+        (is (= ["web-fetch" "web-search"]
+               (mapv #(get (json/read-json (:content %)) "tool") results)))))))
+
+(deftest execute-tool-calls-keeps-unsafe-tools-sequential
+  (let [active     (atom 0)
+        max-active (atom 0)
+        tool-calls [{"id"       "call-1"
+                     "function" {"name"      "browser-open"
+                                 "arguments" "{}"}}
+                    {"id"       "call-2"
+                     "function" {"name"      "browser-navigate"
+                                 "arguments" "{}"}}]]
+    (with-redefs [tool/parallel-safe? (constantly false)
+                  tool/execute-tool   (fn [tool-id _args _context]
+                                        (let [active-now (swap! active inc)]
+                                          (swap! max-active max active-now)
+                                          (Thread/sleep 75)
+                                          (swap! active dec)
+                                          {:tool (name tool-id)}))]
+      (let [results (#'agent/execute-tool-calls tool-calls {:channel :terminal})]
+        (is (= 1 @max-active))
+        (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))))))

@@ -25,6 +25,10 @@
    :llm.provider/base-url {:db/valueType :db.type/string}
    :llm.provider/api-key  {:db/valueType :db.type/string}
    :llm.provider/model    {:db/valueType :db.type/string}
+   :llm.provider/workloads {:db/valueType :db.type/keyword
+                            :db/cardinality :db.cardinality/many}
+   :llm.provider/system-prompt-budget {:db/valueType :db.type/long}
+   :llm.provider/history-budget {:db/valueType :db.type/long}
    :llm.provider/default? {:db/valueType :db.type/boolean}
 
    ;; --- Episodic Memory ---
@@ -129,6 +133,7 @@
    :service/auth-key    {:db/valueType :db.type/string}    ; the secret — token, key, password
    :service/auth-header {:db/valueType :db.type/string}    ; custom header/param name (for :api-key-header / :query-param)
    :service/oauth-account {:db/valueType :db.type/keyword} ; linked OAuth account for :oauth-account auth
+   :service/rate-limit-per-minute {:db/valueType :db.type/long}
    :service/enabled?    {:db/valueType :db.type/boolean}
 
    ;; --- OAuth Accounts (authorization-code + PKCE / refresh-token auth) ---
@@ -181,6 +186,7 @@
    :tool/parameters    {:db/valueType :db.type/string}  ; JSON schema for parameters
    :tool/handler       {:db/valueType :db.type/string}  ; SCI code → fn
    :tool/approval      {:db/valueType :db.type/keyword} ; :auto :session :always
+   :tool/execution-mode {:db/valueType :db.type/keyword} ; :sequential :parallel-safe
    :tool/enabled?      {:db/valueType :db.type/boolean}
    :tool/installed-at  {:db/valueType :db.type/instant}})
 
@@ -353,28 +359,73 @@
 ;; ---------------------------------------------------------------------------
 
 (defn upsert-provider! [{:keys [id] :as provider}]
-  (let [provider-id (or id (:llm.provider/id provider))]
-    (transact! [(cond-> {:llm.provider/id provider-id}
-                  (contains? provider :llm.provider/name)
-                  (assoc :llm.provider/name (:llm.provider/name provider))
-                  (contains? provider :name)
-                  (assoc :llm.provider/name (:name provider))
-                  (contains? provider :llm.provider/base-url)
-                  (assoc :llm.provider/base-url (:llm.provider/base-url provider))
-                  (contains? provider :base-url)
-                  (assoc :llm.provider/base-url (:base-url provider))
-                  (contains? provider :llm.provider/api-key)
-                  (assoc :llm.provider/api-key (:llm.provider/api-key provider))
-                  (contains? provider :api-key)
-                  (assoc :llm.provider/api-key (:api-key provider))
-                  (contains? provider :llm.provider/model)
-                  (assoc :llm.provider/model (:llm.provider/model provider))
-                  (contains? provider :model)
-                  (assoc :llm.provider/model (:model provider))
-                  (contains? provider :llm.provider/default?)
-                  (assoc :llm.provider/default? (:llm.provider/default? provider))
-                  (contains? provider :default?)
-                  (assoc :llm.provider/default? (:default? provider)))])))
+  (let [provider-id                  (or id (:llm.provider/id provider))
+        provider-eid                 (ffirst (q '[:find ?e :in $ ?id
+                                                  :where [?e :llm.provider/id ?id]]
+                                                provider-id))
+        workloads                    (some-> (or (:llm.provider/workloads provider)
+                                                (:workloads provider))
+                                             set)
+        system-prompt-budget         (or (:llm.provider/system-prompt-budget provider)
+                                         (:system-prompt-budget provider))
+        history-budget               (or (:llm.provider/history-budget provider)
+                                         (:history-budget provider))
+        has-workloads?               (or (contains? provider :llm.provider/workloads)
+                                         (contains? provider :workloads))
+        has-system-prompt-budget?    (or (contains? provider :llm.provider/system-prompt-budget)
+                                         (contains? provider :system-prompt-budget))
+        has-history-budget?          (or (contains? provider :llm.provider/history-budget)
+                                         (contains? provider :history-budget))
+        provider-tx                  (cond-> {:llm.provider/id provider-id}
+                                       (contains? provider :llm.provider/name)
+                                       (assoc :llm.provider/name (:llm.provider/name provider))
+                                       (contains? provider :name)
+                                       (assoc :llm.provider/name (:name provider))
+                                       (contains? provider :llm.provider/base-url)
+                                       (assoc :llm.provider/base-url (:llm.provider/base-url provider))
+                                       (contains? provider :base-url)
+                                       (assoc :llm.provider/base-url (:base-url provider))
+                                       (contains? provider :llm.provider/api-key)
+                                       (assoc :llm.provider/api-key (:llm.provider/api-key provider))
+                                       (contains? provider :api-key)
+                                       (assoc :llm.provider/api-key (:api-key provider))
+                                       (contains? provider :llm.provider/model)
+                                       (assoc :llm.provider/model (:llm.provider/model provider))
+                                       (contains? provider :model)
+                                       (assoc :llm.provider/model (:model provider))
+                                       (and has-workloads?
+                                            (seq workloads))
+                                       (assoc :llm.provider/workloads workloads)
+                                       (and has-system-prompt-budget?
+                                            (some? system-prompt-budget))
+                                       (assoc :llm.provider/system-prompt-budget system-prompt-budget)
+                                       (and has-history-budget?
+                                            (some? history-budget))
+                                       (assoc :llm.provider/history-budget history-budget)
+                                       (contains? provider :llm.provider/default?)
+                                       (assoc :llm.provider/default? (:llm.provider/default? provider))
+                                       (contains? provider :default?)
+                                       (assoc :llm.provider/default? (:default? provider)))
+        retracts                     (cond-> []
+                                       (and provider-eid
+                                            has-workloads?)
+                                       (into (mapv (fn [workload]
+                                                     [:db/retract provider-eid
+                                                      :llm.provider/workloads
+                                                      workload])
+                                                   (or (:llm.provider/workloads (raw-entity provider-eid))
+                                                       [])))
+                                       (and provider-eid
+                                            has-system-prompt-budget?
+                                            (nil? system-prompt-budget))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/system-prompt-budget])
+                                       (and provider-eid
+                                            has-history-budget?
+                                            (nil? history-budget))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/history-budget]))]
+    (transact! (conj retracts provider-tx))))
 
 (defn get-default-provider []
   (let [results (q '[:find ?e :where
@@ -630,9 +681,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn save-service!
-  [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?]}]
+  [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?] :as service}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current (when eid (raw-entity eid))
+        rate-limit-per-minute (or (:service/rate-limit-per-minute service)
+                                  (:rate-limit-per-minute service))
+        has-rate-limit? (or (contains? service :service/rate-limit-per-minute)
+                            (contains? service :rate-limit-per-minute))
         tx-data (cond-> [{:service/id        id
                           :service/name      (or name (clojure.core/name id))
                           :service/base-url  base-url
@@ -644,6 +699,10 @@
 
                   oauth-account
                   (update 0 assoc :service/oauth-account oauth-account)
+
+                  (and has-rate-limit?
+                       (some? rate-limit-per-minute))
+                  (update 0 assoc :service/rate-limit-per-minute rate-limit-per-minute)
 
                   (and eid
                        (nil? auth-header)
@@ -657,7 +716,15 @@
                        (contains? current :service/oauth-account))
                   (conj [:db/retract eid
                          :service/oauth-account
-                         (:service/oauth-account current)]))]
+                         (:service/oauth-account current)])
+
+                  (and eid
+                       has-rate-limit?
+                       (nil? rate-limit-per-minute)
+                       (contains? current :service/rate-limit-per-minute))
+                  (conj [:db/retract eid
+                         :service/rate-limit-per-minute
+                         (:service/rate-limit-per-minute current)]))]
     (transact! tx-data)))
 
 (defn register-service! [service]
@@ -815,15 +882,37 @@
 ;; Tools (executable code)
 ;; ---------------------------------------------------------------------------
 
-(defn install-tool! [{:keys [id name description parameters handler approval]}]
-  (transact! [{:tool/id           id
-               :tool/name         (or name (clojure.core/name id))
-               :tool/description  (or description "")
-               :tool/parameters   (or parameters "{}")
-               :tool/handler      (or handler "")
-               :tool/approval     (or approval :auto)
-               :tool/enabled?     true
-               :tool/installed-at (java.util.Date.)}]))
+(declare get-tool)
+
+(defn install-tool!
+  [{:keys [id name description parameters handler approval execution-mode enabled? installed-at]}]
+  (let [existing (when id (get-tool id))]
+    (transact! [(cond-> {:tool/id           id
+                         :tool/name         (or name
+                                                (:tool/name existing)
+                                                (clojure.core/name id))
+                         :tool/description  (or description
+                                                (:tool/description existing)
+                                                "")
+                         :tool/parameters   (or parameters
+                                                (:tool/parameters existing)
+                                                "{}")
+                         :tool/handler      (or handler
+                                                (:tool/handler existing)
+                                                "")
+                         :tool/approval     (or approval
+                                                (:tool/approval existing)
+                                                :auto)
+                         :tool/enabled?     (if (some? enabled?)
+                                              enabled?
+                                              (if (contains? existing :tool/enabled?)
+                                                (:tool/enabled? existing)
+                                                true))
+                         :tool/installed-at (or installed-at
+                                                (:tool/installed-at existing)
+                                                (java.util.Date.))}
+                  (some? execution-mode)
+                  (assoc :tool/execution-mode execution-mode))])))
 
 (defn get-tool [tool-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :tool/id ?id]] tool-id))]

@@ -117,6 +117,24 @@
     (is (= "Annotated tool Requires user approval before execution."
            (get-in tool-def [:function :description])))))
 
+(deftest execution-mode-controls-parallel-safety
+  (db/install-tool! {:id             :parallel-tool
+                     :name           "parallel-tool"
+                     :description    "Parallel safe tool"
+                     :approval       :auto
+                     :execution-mode :parallel-safe
+                     :handler        "(fn [_] {\"status\" \"ok\"})"})
+  (db/install-tool! {:id             :sequential-tool
+                     :name           "sequential-tool"
+                     :description    "Sequential tool"
+                     :approval       :auto
+                     :execution-mode :sequential
+                     :handler        "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :parallel-tool)
+  (tool/load-tool! :sequential-tool)
+  (is (true? (tool/parallel-safe? :parallel-tool)))
+  (is (false? (tool/parallel-safe? :sequential-tool))))
+
 (deftest ensure-bundled-tools-installs-default-set
   (let [count (tool/ensure-bundled-tools!)]
     (is (pos? count))
@@ -126,4 +144,7 @@
     (is (= :browser-read-page (:tool/id (db/get-tool :browser-read-page))))
     (is (= :browser-wait (:tool/id (db/get-tool :browser-wait))))
     (is (= :browser-list-sessions (:tool/id (db/get-tool :browser-list-sessions))))
-    (is (= :browser-list-sites (:tool/id (db/get-tool :browser-list-sites))))))
+    (is (= :browser-list-sites (:tool/id (db/get-tool :browser-list-sites))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :web-search))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-list-sessions))))
+    (is (nil? (:tool/execution-mode (db/get-tool :browser-open))))))

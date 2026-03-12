@@ -128,7 +128,7 @@
 (defn import-tool!
   "Import a tool from an EDN definition map. Installs in DB and loads it."
   [tool-def]
-  (let [{:keys [id name description parameters handler approval]} tool-def]
+  (let [{:keys [id name description parameters handler approval execution-mode]} tool-def]
     (when-not id
       (throw (ex-info "Tool definition must have an :id" {:def tool-def})))
     (db/install-tool! {:id          id
@@ -141,7 +141,11 @@
                        :approval    (cond
                                       (keyword? approval) approval
                                       (string? approval) (keyword approval)
-                                      :else :auto)})
+                                      :else :auto)
+                       :execution-mode (cond
+                                         (keyword? execution-mode) execution-mode
+                                         (string? execution-mode) (keyword execution-mode)
+                                         :else nil)})
     (load-tool! id)
     (log/info "Imported tool:" (or name (clojure.core/name id)))
     tool-def))
@@ -181,6 +185,24 @@
       desc
       (str desc approval-note))))
 
+(defn- execution-mode
+  [tool]
+  (let [mode (or (:tool/execution-mode tool)
+                 (:execution-mode tool))]
+    (cond
+      (keyword? mode) mode
+      (string? mode)  (keyword mode)
+      :else           :sequential)))
+
+(defn parallel-safe?
+  "True when a tool is safe to execute in parallel with other independent
+   tool calls in the same model round."
+  [tool-id]
+  (when-let [{:keys [tool]} (get @registry tool-id)]
+    (let [{:keys [policy]} (tool-approval-policy tool)]
+      (and (= :auto policy)
+           (= :parallel-safe (execution-mode tool))))))
+
 (defn import-tool-file!
   "Import tools from an EDN file."
   [path]
@@ -199,6 +221,16 @@
             missing (filterv #(nil? (db/get-tool (:id %))) defs)]
         (doseq [tool-def missing]
           (import-tool! tool-def))
+        (doseq [{:keys [id execution-mode]} defs
+                :when execution-mode]
+          (let [tool (db/get-tool id)]
+            (when (and tool (nil? (:tool/execution-mode tool)))
+              (db/install-tool! {:id             id
+                                 :execution-mode (if (keyword? execution-mode)
+                                                   execution-mode
+                                                   (keyword execution-mode))})
+              (when (contains? @registry id)
+                (load-tool! id)))))
         (+ installed-count (clojure.core/count missing))))
     0
     bundled-tool-resources))

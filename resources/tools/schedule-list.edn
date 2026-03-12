@@ -4,5 +4,6 @@
 {:id          :schedule-list
  :name        "schedule-list"
  :description "List all scheduled tasks with their status, schedule spec, and next run time."
+ :execution-mode :parallel-safe
  :parameters  {"type" "object" "properties" {}}
  :handler     "(fn [_] (xia.schedule/list-schedules))"}

@@ -7,8 +7,10 @@
             [clojure.tools.logging :as log]
             [xia.scratch :as scratch]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
+            [xia.service :as service-proxy]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.working-memory :as wm])
@@ -354,6 +356,40 @@
       :else
       (keyword id-str))))
 
+(defn- parse-optional-positive-long
+  [value field-name]
+  (let [text (nonblank-str value)]
+    (when text
+      (try
+        (let [parsed (Long/parseLong text)]
+          (when-not (pos? parsed)
+            (throw (ex-info (str "'" field-name "' must be a positive integer")
+                            {:field field-name
+                             :value value})))
+          parsed)
+        (catch NumberFormatException _
+          (throw (ex-info (str "'" field-name "' must be a positive integer")
+                          {:field field-name
+                           :value value})))))))
+
+(defn- parse-provider-workloads
+  [value]
+  (let [entries (cond
+                  (nil? value) []
+                  (sequential? value) value
+                  :else (str/split (str value) #","))]
+    (->> entries
+         (map nonblank-str)
+         (remove nil?)
+         distinct
+         (mapv (fn [entry]
+                 (let [workload (keyword entry)]
+                   (when-not (llm/known-workload? workload)
+                     (throw (ex-info "invalid workload"
+                                     {:field "workloads"
+                                      :value entry})))
+                   workload))))))
+
 (defn- parse-extra-fields
   [value]
   (let [text (nonblank-str value)]
@@ -398,12 +434,24 @@
 
 (defn- provider->admin-body
   [provider]
-  {:id                 (some-> (:llm.provider/id provider) name)
-   :name               (:llm.provider/name provider)
-   :base_url           (:llm.provider/base-url provider)
-   :model              (:llm.provider/model provider)
-   :default            (boolean (:llm.provider/default? provider))
-   :api_key_configured (boolean (nonblank-str (:llm.provider/api-key provider)))})
+  (let [provider-id (some-> (:llm.provider/id provider) name)
+        health      (llm/provider-health-summary (:llm.provider/id provider))]
+    {:id                    provider-id
+     :name                  (:llm.provider/name provider)
+     :base_url              (:llm.provider/base-url provider)
+     :model                 (:llm.provider/model provider)
+     :workloads             (->> (:llm.provider/workloads provider)
+                                 (map name)
+                                 sort
+                                 vec)
+     :system_prompt_budget  (:llm.provider/system-prompt-budget provider)
+     :history_budget        (:llm.provider/history-budget provider)
+     :health_status         (name (:status health))
+     :health_failures       (:consecutive-failures health)
+     :health_cooldown_ms    (:cooldown-remaining-ms health)
+     :health_last_error     (:last-error health)
+     :default               (boolean (:llm.provider/default? provider))
+     :api_key_configured    (boolean (nonblank-str (:llm.provider/api-key provider)))}))
 
 (defn- service->admin-body
   [service]
@@ -416,6 +464,8 @@
      :oauth_account          (some-> (:service/oauth-account service) name)
      :oauth_account_name     (:oauth.account/name oauth-account)
      :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
+     :rate_limit_per_minute  (:service/rate-limit-per-minute service)
+     :effective_rate_limit_per_minute (service-proxy/effective-rate-limit-per-minute service)
      :enabled                (boolean (:service/enabled? service))
      :auth_key_configured    (boolean (nonblank-str (:service/auth-key service)))}))
 
@@ -722,6 +772,11 @@
     {:providers (->> (db/list-providers)
                      (map provider->admin-body)
                      sort-by-name)
+     :llm_workloads (mapv (fn [{:keys [id label description]}]
+                            {:id          (name id)
+                             :label       label
+                             :description description})
+                          (llm/workload-routes))
      :oauth_provider_templates (->> (oauth-template/list-templates)
                                     (map oauth-template->admin-body)
                                     sort-by-name)
@@ -750,6 +805,12 @@
           name         (or (nonblank-str (get data "name"))
                            (name provider-id))
           api-key      (nonblank-str (get data "api_key"))
+          workloads    (when (contains? data "workloads")
+                         (parse-provider-workloads (get data "workloads")))
+          system-prompt-budget (parse-optional-positive-long (get data "system_prompt_budget")
+                                                             "system_prompt_budget")
+          history-budget (parse-optional-positive-long (get data "history_budget")
+                                                       "history_budget")
           make-default (true? (get data "default"))
           has-default? (some? (db/get-default-provider))]
       (when-not base-url
@@ -759,7 +820,11 @@
       (db/upsert-provider! (cond-> {:id       provider-id
                                     :name     name
                                     :base-url base-url
-                                    :model    model}
+                                    :model    model
+                                    :system-prompt-budget system-prompt-budget
+                                    :history-budget history-budget}
+                             (contains? data "workloads")
+                             (assoc :workloads workloads)
                              api-key
                              (assoc :api-key api-key)))
       (when (or make-default (not has-default?))
@@ -779,6 +844,8 @@
                                 (name service-id))
           auth-type         (parse-auth-type (get data "auth_type"))
           entered-auth-key  (nonblank-str (get data "auth_key"))
+          rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
+                                                              "rate_limit_per_minute")
           enabled?          (if (contains? data "enabled")
                               (true? (get data "enabled"))
                               true)
@@ -815,6 +882,7 @@
                          :auth-key    (or auth-key "")
                          :auth-header auth-header
                          :oauth-account oauth-account-id
+                         :rate-limit-per-minute rate-limit-per-minute
                          :enabled?    enabled?})
       (json-response 200 {:service (service->admin-body (db/get-service service-id))}))
     (catch clojure.lang.ExceptionInfo e

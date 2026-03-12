@@ -4,6 +4,7 @@
 {:id          :web-extract
  :name        "web-extract"
  :description "Extract structured data from a web page using CSS selectors. Use this to get specific elements like all links, headings, tables, prices, or any elements matching a CSS selector pattern."
+ :execution-mode :parallel-safe
  :parameters  {"type"       "object"
                "properties" {"url"       {"type"        "string"
                                           "description" "The URL to fetch"}

@@ -279,3 +279,54 @@
           (is (= "functional" (:paradigm (:properties clojure-slot)))))))
 
     (wm/clear-wm! sid)))
+
+;; ---------------------------------------------------------------------------
+;; Session serialization
+;; ---------------------------------------------------------------------------
+
+(deftest session-ops-serialize-per-session
+  (let [sid        (random-uuid)
+        gate       (promise)
+        active     (atom 0)
+        max-active (atom 0)
+        op         (fn []
+                     (#'xia.working-memory/run-session-op! sid
+                      (fn [_]
+                        @gate
+                        (let [n (swap! active inc)]
+                          (swap! max-active max n)
+                          (Thread/sleep 75)
+                          (swap! active dec)))))]
+    (wm/create-wm! sid)
+    (let [f1 (future (op))
+          f2 (future (op))]
+      (deliver gate true)
+      @f1
+      @f2
+      (is (= 1 @max-active)))
+    (wm/clear-wm! sid)))
+
+(deftest session-ops-allow-different-sessions-in-parallel
+  (let [sid-a      (random-uuid)
+        sid-b      (random-uuid)
+        gate       (promise)
+        active     (atom 0)
+        max-active (atom 0)
+        op         (fn [sid]
+                     (#'xia.working-memory/run-session-op! sid
+                      (fn [_]
+                        @gate
+                        (let [n (swap! active inc)]
+                          (swap! max-active max n)
+                          (Thread/sleep 75)
+                          (swap! active dec)))))]
+    (wm/create-wm! sid-a)
+    (wm/create-wm! sid-b)
+    (let [f1 (future (op sid-a))
+          f2 (future (op sid-b))]
+      (deliver gate true)
+      @f1
+      @f2
+      (is (= 2 @max-active)))
+    (wm/clear-wm! sid-a)
+    (wm/clear-wm! sid-b)))

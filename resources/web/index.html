@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xia</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <div class="frame">
+      <header class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow">Personal Assistant</div>
+          <h1>Xia</h1>
+          <p class="lead">Xia is an online-first assistant designed for research and automation. Anything Xia cannot read from disk can be provided through these tools.</p>
+        </div>
+        <aside class="hero-meta">
+          <div class="meta-row">
+            <h2 class="meta-label">Status</h2>
+            <div class="status-pill" id="status">Ready</div>
+          </div>
+          <div class="meta-row">
+            <h2 class="meta-label">Current Session</h2>
+            <div class="meta-value" id="session-label">New local session</div>
+          </div>
+          <div class="actions">
+            <button type="button" class="secondary" id="new-chat">New session</button>
+          </div>
+        </aside>
+      </header>
+
+      <nav class="tabs">
+        <button type="button" class="tab-link active" data-tab="chat-tab">Chat</button>
+        <button type="button" class="tab-link" data-tab="notes-tab">Notes</button>
+        <button type="button" class="tab-link" data-tab="settings-tab">Settings</button>
+      </nav>
+
+      <section class="panel approval-panel" id="approval-panel" hidden>
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Approval Required</h2>
+            <p class="panel-note">Xia wants to use a privileged tool. Review the details below.</p>
+          </div>
+          <div class="actions">
+            <button type="button" class="primary" id="allow-approval">Allow</button>
+            <button type="button" class="secondary" id="deny-approval">Deny</button>
+          </div>
+        </div>
+        <div class="approval-summary">
+          <div class="meta-row">
+            <h3 class="meta-label">Tool</h3>
+            <div class="meta-value" id="approval-tool">Waiting</div>
+          </div>
+          <div class="meta-row">
+            <h3 class="meta-label">Reason</h3>
+            <p class="approval-reason" id="approval-reason">The current tool needs confirmation.</p>
+          </div>
+          <div class="meta-row">
+            <h3 class="meta-label">Arguments</h3>
+            <pre class="approval-args" id="approval-args">{}</pre>
+          </div>
+        </div>
+      </section>
+
+      <div id="chat-tab" class="tab-panel active">
+        <main class="workspace">
+          <section class="panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Chat</h2>
+              <button type="button" class="secondary" id="copy-transcript">Copy transcript</button>
+            </div>
+            <div class="messages" id="messages">
+              <div class="empty">Start with a paste or a prompt. This interface is here to bridge the gap when Xia needs local material that cannot be read directly from disk.</div>
+            </div>
+            <form class="composer" id="composer-form">
+              <div class="field">
+                <textarea id="composer" placeholder="Paste context or type a message... (Cmd+Enter to send)"></textarea>
+              </div>
+              <div class="composer-foot">
+                <div class="hint">Shift+Enter for new line. Cmd+Enter to send.</div>
+                <div class="actions">
+                  <input type="file" id="file-input" hidden multiple>
+                  <button type="button" class="secondary" id="upload-btn" title="Upload text files">📎</button>
+                  <button type="button" class="secondary" id="clear-input" disabled>Clear</button>
+                  <button type="submit" class="primary" id="send" disabled>Send to Xia</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </main>
+      </div>
+
+      <div id="notes-tab" class="tab-panel">
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">Notes</h2>
+            <button type="button" class="secondary" id="new-scratch">New note</button>
+          </div>
+          <div class="scratch-workspace">
+            <div class="scratch-list" id="scratch-list">
+              <div class="scratch-empty">Create a note when you want Xia to keep a persistent draft or intermediate note for this session.</div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="scratch-title">Title</label>
+              <input type="text" id="scratch-title" class="text-input" placeholder="Untitled note" disabled>
+            </div>
+            <div class="field">
+              <label class="field-label" for="scratch-editor">Content</label>
+              <textarea id="scratch-editor" class="scratch-editor" placeholder="Write or paste something..." disabled></textarea>
+            </div>
+            <div class="composer-foot">
+              <div class="scratch-status" id="scratch-status">No note selected.</div>
+              <div class="actions">
+                <button type="button" class="secondary" id="delete-scratch" disabled>Delete</button>
+                <button type="button" class="secondary" id="insert-scratch" disabled>Insert in Chat</button>
+                <button type="button" class="primary" id="save-scratch" disabled>Save</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="settings-tab" class="tab-panel">
+        <section class="panel admin-panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">Settings</h2>
+              <p class="panel-note">Configure AI providers, connections, and automated site logins.</p>
+            </div>
+            <div class="check-row">
+              <input type="checkbox" id="advanced-toggle">
+              <label class="check-label" for="advanced-toggle">Show advanced fields</label>
+            </div>
+          </div>
+
+          <div class="admin-grid">
+            <div class="admin-card">
+              <div class="panel-header">
+                <h3 class="panel-title">AI Models</h3>
+                <button type="button" class="secondary" id="new-provider">New model</button>
+              </div>
+              <div class="admin-list" id="provider-list"></div>
+              <div class="field-grid">
+                <div class="field advanced-only">
+                  <label class="field-label">ID</label>
+                  <input type="text" id="provider-id" class="text-input" placeholder="openai">
+                </div>
+                <div class="field">
+                  <label class="field-label">Name</label>
+                  <input type="text" id="provider-name" class="text-input" placeholder="OpenAI">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Base URL</label>
+                  <input type="text" id="provider-base-url" class="text-input" placeholder="https://api.openai.com/v1">
+                </div>
+                <div class="field">
+                  <label class="field-label">Model Name</label>
+                  <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Workloads</label>
+                  <input type="text" id="provider-workloads" class="text-input" placeholder="assistant, history-compaction">
+                  <p class="secret-note" id="provider-workloads-note"></p>
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">System Prompt Budget</label>
+                  <input type="number" id="provider-system-prompt-budget" class="text-input" min="1" step="1" placeholder="16000">
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">History Budget</label>
+                  <input type="number" id="provider-history-budget" class="text-input" min="1" step="1" placeholder="32000">
+                </div>
+                <div class="check-row">
+                  <input type="checkbox" id="provider-default">
+                  <label class="check-label" for="provider-default">Use as default</label>
+                </div>
+                <div class="field full">
+                  <label class="field-label">API Key</label>
+                  <input type="password" id="provider-api-key" class="text-input" placeholder="sk-...">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="provider-status">Loading providers...</div>
+                <button type="button" class="primary" id="save-provider">Save model</button>
+              </div>
+            </div>
+
+            <div class="admin-card">
+              <div class="panel-header">
+                <h3 class="panel-title">App Connections</h3>
+                <button type="button" class="secondary" id="new-oauth-account">New connection</button>
+              </div>
+              <div class="admin-list" id="oauth-account-list"></div>
+              <div class="field-grid">
+                <div class="field full">
+                  <label class="field-label">Service Preset</label>
+                  <select id="oauth-template" class="text-input"></select>
+                  <p class="secret-note" id="oauth-template-note"></p>
+                  <button type="button" class="secondary" id="apply-oauth-template" style="margin-top:8px">Apply preset</button>
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">Internal ID</label>
+                  <input type="text" id="oauth-account-id" class="text-input" placeholder="github">
+                </div>
+                <div class="field">
+                  <label class="field-label">Display Name</label>
+                  <input type="text" id="oauth-account-name" class="text-input" placeholder="GitHub">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Authorize URL</label>
+                  <input type="text" id="oauth-authorize-url" class="text-input">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Token URL</label>
+                  <input type="text" id="oauth-token-url" class="text-input">
+                </div>
+                <div class="field">
+                  <label class="field-label">Client ID</label>
+                  <input type="text" id="oauth-client-id" class="text-input">
+                </div>
+                <div class="field">
+                  <label class="field-label">Client Secret</label>
+                  <input type="password" id="oauth-client-secret" class="text-input">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Scopes</label>
+                  <input type="text" id="oauth-scopes" class="text-input">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Redirect URI (Optional)</label>
+                  <input type="text" id="oauth-redirect-uri" class="text-input" placeholder="Leave blank for default">
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">Auth Params (JSON)</label>
+                  <input type="text" id="oauth-auth-params" class="text-input" placeholder="{}">
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">Token Params (JSON)</label>
+                  <input type="text" id="oauth-token-params" class="text-input" placeholder="{}">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="oauth-account-status">Loading connections...</div>
+                <div class="actions">
+                  <button type="button" class="secondary" id="delete-oauth-account">Delete</button>
+                  <button type="button" class="secondary" id="oauth-account-create-service">Add to API list</button>
+                  <button type="button" class="secondary" id="refresh-oauth-account">Refresh</button>
+                  <button type="button" class="primary" id="connect-oauth-account">Connect Now</button>
+                  <button type="button" class="primary" id="save-oauth-account">Save details</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="admin-card advanced-only">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">API Services</h3>
+                  <p class="panel-note">Registered API endpoints Xia can call through the service proxy.</p>
+                </div>
+                <button type="button" class="secondary" id="new-service">New service</button>
+              </div>
+              <div class="admin-list" id="service-list"></div>
+              <div class="field-grid">
+                <div class="field">
+                  <label class="field-label">ID</label>
+                  <input type="text" id="service-id" class="text-input" placeholder="github">
+                </div>
+                <div class="field">
+                  <label class="field-label">Name</label>
+                  <input type="text" id="service-name" class="text-input" placeholder="GitHub">
+                </div>
+                <div class="field full">
+                  <label class="field-label">Base URL</label>
+                  <input type="url" id="service-base-url" class="text-input" placeholder="https://api.github.com">
+                </div>
+                <div class="field">
+                  <label class="field-label">Auth Type</label>
+                  <select id="service-auth-type" class="text-input">
+                    <option value="bearer">Bearer token</option>
+                    <option value="basic">Basic auth</option>
+                    <option value="api-key-header">API key header</option>
+                    <option value="query-param">Query parameter</option>
+                    <option value="oauth-account">OAuth account</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="field-label">Header / Param</label>
+                  <input type="text" id="service-auth-header" class="text-input" placeholder="X-API-Key">
+                </div>
+                <div class="field">
+                  <label class="field-label">Rate Limit (req/min)</label>
+                  <input type="number" id="service-rate-limit" class="text-input" min="1" step="1" placeholder="60">
+                  <p class="secret-note">Leave blank to use the default service limit.</p>
+                </div>
+                <div class="field full">
+                  <label class="field-label">OAuth Account</label>
+                  <select id="service-oauth-account" class="text-input"></select>
+                  <p class="secret-note">Pick a connected OAuth account when auth type is OAuth account.</p>
+                </div>
+                <div class="field full">
+                  <label class="field-label">Auth Secret</label>
+                  <input type="password" id="service-auth-key" class="text-input" placeholder="Leave blank to keep stored secret">
+                </div>
+                <div class="field full">
+                  <div class="check-row">
+                    <input type="checkbox" id="service-enabled" checked>
+                    <label class="check-label" for="service-enabled">Enabled for tool calls</label>
+                  </div>
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="service-status">Loading services...</div>
+                <button type="button" class="primary" id="save-service">Save service</button>
+              </div>
+            </div>
+
+            <div class="admin-card">
+              <div class="panel-header">
+                <h3 class="panel-title">Site Logins</h3>
+                <button type="button" class="secondary" id="new-site">New site</button>
+              </div>
+              <div class="admin-list" id="site-list"></div>
+              <div class="field-grid">
+                <div class="field advanced-only">
+                  <label class="field-label">ID</label>
+                  <input type="text" id="site-id" class="text-input" placeholder="github-web">
+                </div>
+                <div class="field">
+                  <label class="field-label">Name</label>
+                  <input type="text" id="site-name" class="text-input" placeholder="GitHub Web">
+                </div>
+                <div class="field full">
+                  <label class="field-label">Login Page URL</label>
+                  <input type="text" id="site-login-url" class="text-input" placeholder="https://github.com/login">
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">Username Field Name</label>
+                  <input type="text" id="site-username-field" class="text-input" value="username">
+                </div>
+                <div class="field advanced-only">
+                  <label class="field-label">Password Field Name</label>
+                  <input type="text" id="site-password-field" class="text-input" value="password">
+                </div>
+                <div class="field">
+                  <label class="field-label">Username</label>
+                  <input type="text" id="site-username" class="text-input">
+                </div>
+                <div class="field">
+                  <label class="field-label">Password</label>
+                  <input type="password" id="site-password" class="text-input">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Form CSS Selector</label>
+                  <input type="text" id="site-form-selector" class="text-input" placeholder="form[action='/login']">
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Extra JSON Fields</label>
+                  <textarea id="site-extra-fields" placeholder='{"remember_me": "1"}'></textarea>
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="site-status">Loading site logins...</div>
+                <div class="actions">
+                  <button type="button" class="secondary" id="delete-site">Delete</button>
+                  <button type="button" class="primary" id="save-site">Save site login</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="admin-card admin-card-wide advanced-only">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Capabilities</h3>
+                  <p class="panel-note">Installed tools and skills currently available to Xia.</p>
+                </div>
+              </div>
+              <div class="capability-grid">
+                <div class="field">
+                  <label class="field-label">Tools</label>
+                  <div class="capability-list" id="tool-list"></div>
+                </div>
+                <div class="field">
+                  <label class="field-label">Skills</label>
+                  <div class="capability-list" id="skill-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <footer class="hero" style="grid-template-columns:1fr; text-align:center; padding:40px 0; opacity:0.6; pointer-events:none;">
+        <p class="lead">Xia v0.1.0 • Built for local work with online power.</p>
+      </footer>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

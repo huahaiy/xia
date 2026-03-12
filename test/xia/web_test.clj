@@ -211,7 +211,7 @@
     (with-redefs-fn {#'web/resolve-host-addresses
                      (fn [_]
                        [(InetAddress/getByAddress "example.com" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))])
-                     #'hato.client/request
+                     #'xia.http-client/request
                      (fn [{:keys [url]}]
                        (swap! calls conj url)
                        (if (= url "https://example.com/start")
@@ -235,7 +235,7 @@
                        [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))]
                        "127.0.0.1"
                        [(InetAddress/getByAddress "127.0.0.1" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))]))
-                   #'hato.client/request
+                   #'xia.http-client/request
                    (fn [{:keys [url]}]
                      (if (= url "https://public.example/start")
                        {:status 302

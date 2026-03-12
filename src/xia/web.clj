@@ -10,20 +10,13 @@
    enforce SSRF protection, rate limiting, and content size limits."
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [hato.client :as hc]
-            [charred.api :as json])
+            [charred.api :as json]
+            [xia.http-client :as http])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
            [org.jsoup.select Elements]
            [java.net InetAddress URI]
            [java.util.concurrent ConcurrentHashMap]))
-
-;; ---------------------------------------------------------------------------
-;; HTTP client
-;; ---------------------------------------------------------------------------
-
-(defonce ^:private http-client
-  (delay (hc/build-http-client {:connect-timeout 10000})))
 
 (def ^:private user-agent "Xia/0.1 (personal AI assistant)")
 (def ^:private max-body-bytes (* 1 1024 1024)) ; 1 MB
@@ -99,15 +92,14 @@
          redirects   0]
     (validate-url! current-url)
     (check-rate-limit! current-url)
-    (let [resp (hc/request {:url              current-url
-                            :method           :get
-                            :headers          {"User-Agent" user-agent
-                                               "Accept"     "text/html,application/xhtml+xml,*/*"}
-                            :throw-exceptions false
-                            :http-client      @http-client})
+    (let [resp (http/request {:url             current-url
+                              :method          :get
+                              :headers         {"User-Agent" user-agent
+                                                "Accept"     "text/html,application/xhtml+xml,*/*"}
+                              :connect-timeout 10000
+                              :request-label   "Web fetch"})
           status (:status resp)
-          location (or (get-in resp [:headers "location"])
-                       (get-in resp [:headers "Location"]))]
+          location (get-in resp [:headers "location"])]
       (if (and (#{301 302 303 307 308} status) (seq location))
         (do
           (when (>= redirects max-redirects)
@@ -418,10 +410,11 @@
   (try
     (let [enc-query (java.net.URLEncoder/encode query "UTF-8")
           url       (str "https://html.duckduckgo.com/html/?q=" enc-query)
-          resp      (hc/request {:url         url
-                                  :method      :get
-                                  :headers     {"User-Agent" user-agent}
-                                  :http-client @http-client})
+          resp      (http/request {:url             url
+                                   :method          :get
+                                   :headers         {"User-Agent" user-agent}
+                                   :connect-timeout 10000
+                                   :request-label   "Web search"})
           doc       (Jsoup/parse ^String (str (:body resp)))
           results   (.select doc ".result")]
       {:query   query

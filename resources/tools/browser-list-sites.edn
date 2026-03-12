@@ -4,6 +4,7 @@
 {:id          :browser-list-sites
  :name        "browser-list-sites"
  :description "List registered site login entries that can be used with browser-login. Returns site ids, names, and login URLs without exposing credentials."
+ :execution-mode :parallel-safe
  :parameters  {"type"       "object"
                "properties" {}
                "required"   []}

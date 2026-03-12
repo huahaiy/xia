@@ -159,7 +159,7 @@
 (deftest test-consolidate-episode-with-mock-llm
   (let [ep-eid (th/seed-episode! "Discussed Clojure web frameworks")]
     (with-redefs [xia.llm/chat-simple
-                  (fn [_messages]
+                  (fn [_messages & _opts]
                     "{\"entities\": [{\"name\": \"Clojure\", \"type\": \"concept\", \"facts\": [\"functional JVM language\"], \"properties\": {\"paradigm\": \"functional\"}}], \"relations\": []}")]
       (hippo/consolidate-episode!
         {:eid     ep-eid
@@ -181,7 +181,7 @@
   (th/seed-episode! "Episode 2")
   (is (= 2 (count (memory/unprocessed-episodes))))
   (with-redefs [xia.llm/chat-simple
-                (fn [_] "{\"entities\": [], \"relations\": []}")]
+                (fn [_messages & _opts] "{\"entities\": [], \"relations\": []}")]
     ;; Consolidate each directly to surface any errors
     (doseq [ep (memory/unprocessed-episodes)]
       (hippo/consolidate-episode! ep))
@@ -233,7 +233,9 @@
   (testing "does nothing below threshold"
     (th/seed-episode! "Only one")
     (let [called? (atom false)]
-      (with-redefs [xia.llm/chat-simple (fn [_] (reset! called? true) "{\"entities\": [], \"relations\": []}")]
+      (with-redefs [xia.llm/chat-simple (fn [_messages & _opts]
+                                          (reset! called? true)
+                                          "{\"entities\": [], \"relations\": []}")]
         (hippo/consolidate-if-pending! :threshold 3)
         (is (false? @called?) "Should not trigger consolidation below threshold")))))
 
@@ -242,6 +244,7 @@
     (th/seed-episode! "One")
     (th/seed-episode! "Two")
     (th/seed-episode! "Three")
-    (with-redefs [xia.llm/chat-simple (fn [_] "{\"entities\": [], \"relations\": []}")]
+    (with-redefs [xia.llm/chat-simple (fn [_messages & _opts]
+                                        "{\"entities\": [], \"relations\": []}")]
       (hippo/consolidate-if-pending! :threshold 3)
       (is (empty? (memory/unprocessed-episodes))))))
