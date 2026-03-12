@@ -23,7 +23,8 @@
    - EDN files containing {:id, :name, :content, ...}
    - Markdown files (the file becomes the content)
    - A skill registry (future)"
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [datalevin.core :as d]
             [xia.db :as db]))
@@ -79,7 +80,7 @@
   [path]
   (cond
     (str/ends-with? path ".edn")
-    (let [data (read-string (slurp path))]
+    (let [data (edn/read-string (slurp path))]
       (if (vector? data)
         (mapv import-skill-edn! data)
         (import-skill-edn! data)))
@@ -111,7 +112,7 @@
         (->> (d/fulltext-datoms db query)
              (filter #(= :skill/content (nth % 1)))
              (take top)
-             (mapv (fn [datom] (into {} (d/entity db (nth datom 0)))))
+             (mapv (fn [datom] (db/entity (nth datom 0))))
              (filter :skill/enabled?)))
       (catch Exception e
         (log/debug "Skill FTS search failed:" (.getMessage e))

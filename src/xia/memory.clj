@@ -280,7 +280,7 @@
        (mapv (fn [{:keys [eid]}]
                (let [e (into {} (d/entity (d/db (db/conn)) eid))]
                  {:eid        eid
-                  :node-eid   (:db/id (:kg.fact/node e))
+                  :node-eid   (:kg.fact/node e)
                   :content    (:kg.fact/content e)
                   :confidence (:kg.fact/confidence e)})))))
 
@@ -306,8 +306,8 @@
        (mapv (fn [{:keys [eid]}]
                (let [e (into {} (d/entity (d/db (db/conn)) eid))]
                  {:eid      eid
-                  :from-eid (:db/id (:kg.edge/from e))
-                  :to-eid   (:db/id (:kg.edge/to e))
+                  :from-eid (:kg.edge/from e)
+                  :to-eid   (:kg.edge/to e)
                   :type     (:kg.edge/type e)
                   :label    (:kg.edge/label e)})))))
 

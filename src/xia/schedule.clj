@@ -11,7 +11,8 @@
 
    This namespace handles data operations only. The background executor
    lives in xia.scheduler (separate to avoid circular deps with agent)."
-  (:require [clojure.tools.logging :as log]
+  (:require [clojure.edn :as edn]
+            [clojure.tools.logging :as log]
             [charred.api :as json]
             [xia.cron :as cron]
             [xia.db :as db]))
@@ -120,7 +121,7 @@
       {:id id :spec spec :next-run next-run})))
 
 (defn- read-spec [s]
-  (when s (read-string s)))
+  (when s (edn/read-string s)))
 
 (defn get-schedule
   "Get a schedule by id. Returns nil if not found."

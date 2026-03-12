@@ -179,20 +179,21 @@
   (let [calls (atom [])]
     (with-redefs [hato.client/request
                   (fn [req]
-                    (swap! calls conj (select-keys req [:uri :method :headers :body]))
-                    (case (:uri req)
-                      "https://github.com/login/oauth/access_token"
-                      {:status 200
-                       :body "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"}
-
-                      "https://api.github.com/user"
-                      (do
-                        (is (= "Bearer new-access" (get-in req [:headers "Authorization"])))
+                    (let [url (or (:url req) (:uri req))]
+                      (swap! calls conj (assoc (select-keys req [:method :headers :body]) :url url))
+                      (case url
+                        "https://github.com/login/oauth/access_token"
                         {:status 200
-                         :headers {"content-type" "application/json"}
-                         :body "{\"login\":\"hyang\"}"})
+                         :body "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"}
 
-                      (throw (ex-info "unexpected request" {:uri (:uri req)}))))]
+                        "https://api.github.com/user"
+                        (do
+                          (is (= "Bearer new-access" (get-in req [:headers "Authorization"])))
+                          {:status 200
+                           :headers {"content-type" "application/json"}
+                           :body "{\"login\":\"hyang\"}"})
+
+                        (throw (ex-info "unexpected request" {:url url})))))]
       (let [response (service/request :github :get "/user")
             account  (db/get-oauth-account :github-oauth)]
         (is (= 200 (:status response)))

@@ -396,15 +396,17 @@
               (decay-slots! session-id)
               (evict-slots! session-id)))))
       ;; Check for topic shift → auto-segment
-      (when (and (> (:turn-count (session-wm session-id)) 3)
-                 (detect-topic-shift? session-id terms))
-        (auto-segment! session-id channel))
-      ;; Periodically update topic summary
-      (let [wm (session-wm session-id)
-            interval (get-in wm [:config :topic-update-interval])
-            turns-since (- (:turn-count wm) (:topic-turn wm))]
-        (when (>= turns-since interval)
-          (future (update-topics! session-id)))))
+      (let [wm (session-wm session-id)]
+        (when (and wm
+                   (> (:turn-count wm) 3)
+                   (detect-topic-shift? session-id terms))
+          (auto-segment! session-id channel))
+        ;; Periodically update topic summary
+        (when wm
+          (let [interval (get-in wm [:config :topic-update-interval])
+                turns-since (- (:turn-count wm) (:topic-turn wm))]
+            (when (and interval (>= turns-since interval))
+              (future (update-topics! session-id)))))))
     (get-wm session-id)))
 
 ;; ============================================================================

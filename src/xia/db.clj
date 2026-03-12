@@ -223,7 +223,7 @@
   (str "attr:" (namespace attr) "/" (name attr)))
 
 (defn- decrypt-secret-attr [attr value]
-  (if (sensitive/secret-attr? attr)
+  (if (and value (sensitive/secret-attr? attr))
     (crypto/decrypt value (attr-aad attr))
     value))
 
@@ -335,7 +335,7 @@
 (defn get-config [k]
   (let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
     (if (sensitive/secret-config-key? k)
-      (crypto/decrypt value (config-aad k))
+      (some-> value (crypto/decrypt (config-aad k)))
       value)))
 
 ;; ---------------------------------------------------------------------------
@@ -419,8 +419,11 @@
   [{:keys [session-id topics slots episode-refs]}]
   (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                   :where [?e :session/id ?sid]]
-                                session-id))
-        wm-id       (random-uuid)
+                                session-id))]
+    (when-not session-eid
+      (throw (ex-info "Cannot save WM snapshot: session not found"
+                      {:session-id session-id})))
+    (let [wm-id       (random-uuid)
         wm-tx       {:wm/id         wm-id
                       :wm/session    session-eid
                       :wm/topics     (or topics "")
@@ -451,7 +454,7 @@
                    :wm.episode-ref/episode   (:episode-eid eref)
                    :wm.episode-ref/relevance (float (:relevance eref))})
                 episode-refs))))
-    wm-id))
+    wm-id)))
 
 (defn load-wm-snapshot
   "Load the most recent WM snapshot for a session."
@@ -689,7 +692,7 @@
                           :oauth.account/client-id     client-id
                           :oauth.account/scopes        (or scopes "")
                           :oauth.account/updated-at    now}]
-                  (contains? #{true false} (some? client-secret))
+                  (some? client-secret)
                   (update 0 assoc :oauth.account/client-secret (or client-secret ""))
 
                   provider-template

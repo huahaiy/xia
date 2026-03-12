@@ -44,21 +44,32 @@
     (is (re-find #"xia-local-session=" (get-in response [:headers "Set-Cookie"])))
     (is (re-find #"HttpOnly" (get-in response [:headers "Set-Cookie"])))
     (is (re-find #"SameSite=Strict" (get-in response [:headers "Set-Cookie"])))
-    (is (re-find #"Paste Input" (:body response)))
+    (is (re-find #"<title>Xia</title>" (:body response)))
     (is (re-find #"Approval Required" (:body response)))
     (is (re-find #"Copy transcript" (:body response)))
-    (is (re-find #"Scratch Pads" (:body response)))
-    (is (re-find #"Admin" (:body response)))
-    (is (re-find #"Providers" (:body response)))
-    (is (re-find #"OAuth Accounts" (:body response)))
-    (is (re-find #"Provider Template" (:body response)))
-    (is (re-find #"Use template" (:body response)))
-    (is (re-find #"Create service" (:body response)))
+    (is (re-find #"Notes" (:body response)))
+    (is (re-find #"Settings" (:body response)))
+    (is (re-find #"AI Models" (:body response)))
+    (is (re-find #"App Connections" (:body response)))
+    (is (re-find #"Service Preset" (:body response)))
+    (is (re-find #"Apply preset" (:body response)))
+    (is (re-find #"Add to API list" (:body response)))
     (is (re-find #"Site Logins" (:body response)))
     (is (re-find #"<textarea" (:body response)))
-    (is (re-find #"pollStatus" (:body response)))
-    (is (re-find #"sessionStorage\.getItem" (:body response)))
-    (is (not (re-find #"localStorage\.setItem\(storageKeys\.messages" (:body response))))))
+    (is (re-find #"src=\"app.js\"" (:body response)))
+    (is (re-find #"href=\"style.css\"" (:body response)))))
+
+(deftest serves-static-resources
+  (testing "serves style.css"
+    (let [response (#'http/router {:uri "/style.css" :request-method :get})]
+      (is (= 200 (:status response)))
+      (is (= "text/css" (get-in response [:headers "Content-Type"])))
+      (is (re-find #":root" (:body response)))))
+  (testing "serves app.js"
+    (let [response (#'http/router {:uri "/app.js" :request-method :get})]
+      (is (= 200 (:status response)))
+      (is (= "text/javascript" (get-in response [:headers "Content-Type"])))
+      (is (re-find #"sessionStorage\.getItem" (:body response))))))
 
 (deftest create-session-route-returns-session-id
   (let [response (#'http/router {:uri            "/sessions"

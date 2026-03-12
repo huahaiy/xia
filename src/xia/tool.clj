@@ -7,7 +7,8 @@
 
    Contrast with skills: a skill is text the LLM reads and follows;
    a tool is code the LLM triggers and gets results from."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.java.io :as io]
             [clojure.tools.logging :as log]
             [charred.api :as json]
@@ -140,7 +141,7 @@
                        :approval    (cond
                                       (keyword? approval) approval
                                       (string? approval) (keyword approval)
-                                      :else approval)})
+                                      :else :auto)})
     (load-tool! id)
     (log/info "Imported tool:" (or name (clojure.core/name id)))
     tool-def))
@@ -183,7 +184,7 @@
 (defn import-tool-file!
   "Import tools from an EDN file."
   [path]
-  (let [data (read-string (slurp path))]
+  (let [data (edn/read-string (slurp path))]
     (if (vector? data)
       (mapv import-tool! data)
       (import-tool! data))))
@@ -193,7 +194,7 @@
   []
   (reduce
     (fn [installed-count resource-path]
-      (let [data (some-> resource-path io/resource slurp read-string)
+      (let [data (some-> resource-path io/resource slurp edn/read-string)
             defs (if (vector? data) data [data])
             missing (filterv #(nil? (db/get-tool (:id %))) defs)]
         (doseq [tool-def missing]

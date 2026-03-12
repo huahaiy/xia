@@ -149,7 +149,7 @@
                    (string? body) body
                    (map? body)    (json/write-json-str body)
                    :else          (str body))
-        req     (cond-> {:uri         url
+        req     (cond-> {:url         url
                          :method      method
                          :http-client @http-client}
                   body-str     (assoc :body body-str)

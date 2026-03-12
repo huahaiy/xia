@@ -14,7 +14,8 @@
 
    Also handles message history compaction: when the conversation history
    exceeds a token budget, older messages are summarized into a recap."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [charred.api :as json]
             [xia.db :as db]
@@ -46,7 +47,7 @@
 
 (defn- get-budget []
   (if-let [custom (db/get-config :context/budget)]
-    (try (read-string custom) (catch Exception _ default-budget))
+    (try (edn/read-string custom) (catch Exception _ default-budget))
     default-budget))
 
 ;; ============================================================================
@@ -165,7 +166,8 @@
    Priority: identity (P0) > topic (P0) > entities (P1) > episodes (P2) > skills (P3)."
   [session-id]
   (let [budget     (get-budget)
-        wm-context (wm/wm->context session-id)
+        wm-context (or (wm/wm->context session-id)
+                       {:topics nil :entities [] :episodes [] :turn-count 0})
         skills     (skill/skills-for-context wm-context)
 
         ;; P0: Identity (always included)
@@ -177,13 +179,14 @@
         topic-tokens  (estimate-tokens (or topic-section ""))
 
         ;; Remaining budget for P1-P3
+        ;; Allocate to highest priority first so lower priorities get cut first
         remaining (- (:total budget) id-tokens topic-tokens)
 
-        ;; P3: Skills (cut first)
-        skill-budget  (min (:skills budget) (max 0 remaining))
-        skill-section (render-skills skills skill-budget)
-        skill-tokens  (estimate-tokens (or skill-section ""))
-        remaining     (- remaining skill-tokens)
+        ;; P1: Entities (highest priority — cut last)
+        ent-budget  (min (:entities budget) (max 0 remaining))
+        ent-section (render-entities (:entities wm-context) ent-budget)
+        ent-tokens  (estimate-tokens (or ent-section ""))
+        remaining   (- remaining ent-tokens)
 
         ;; P2: Episodes (cut second)
         ep-budget  (min (:episodes budget) (max 0 remaining))
@@ -191,9 +194,10 @@
         ep-tokens  (estimate-tokens (or ep-section ""))
         remaining  (- remaining ep-tokens)
 
-        ;; P1: Entities (cut third)
-        ent-budget  (min (:entities budget) (max 0 remaining))
-        ent-section (render-entities (:entities wm-context) ent-budget)]
+        ;; P3: Skills (lowest priority — cut first)
+        skill-budget  (min (:skills budget) (max 0 remaining))
+        skill-section (render-skills skills skill-budget)
+        skill-tokens  (estimate-tokens (or skill-section ""))]
     (str id-section
          (when topic-section (str "## Context\n" topic-section))
          (when ent-section (str ent-section "\n\n"))
@@ -251,7 +255,7 @@
                            history)
         ;; Compact history if needed (budget = half of model context estimate)
         budget       (or (some-> (db/get-config :context/history-budget)
-                                 read-string)
+                                 edn/read-string)
                          8000)
         compacted    (compact-history history-msgs budget)]
     (into [{:role "system" :content sys-prompt}]
