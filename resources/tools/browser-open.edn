@@ -13,5 +13,7 @@
                              "js"  {"type"        "boolean"
                                     "description" "Enable JavaScript (default true)"}}
                "required"   ["url"]}
- :handler     "(fn [{\"url\" url \"js\" js}]
-                 (xia.browser/open-session url :js (if (nil? js) true js)))"}
+ :handler     "(fn [args]
+                 (let [js (get args \"js\")]
+                   (xia.browser/open-session (get args \"url\")
+                                             :js (if (nil? js) true js))))"}

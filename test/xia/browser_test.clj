@@ -1,10 +1,12 @@
 (ns xia.browser-test
   (:require [clojure.test :refer :all]
-            [xia.browser :as browser])
+            [xia.browser :as browser]
+            [xia.test-helpers :refer [with-test-db]])
   (:import [java.net InetAddress URL]
            [org.htmlunit WebRequest]))
 
 (use-fixtures :each
+  with-test-db
   (fn [f]
     (browser/close-all-sessions!)
     (f)
@@ -122,6 +124,18 @@
     (is (string? (:content page)))
     (browser/close-session sid)))
 
+(deftest ^:integration wait-for-page-matches-text
+  (let [result  (browser/open-session "https://example.com")
+        sid     (:session-id result)
+        waited  (browser/wait-for-page sid
+                                       :text "Example Domain"
+                                       :timeout-ms 2000
+                                       :interval-ms 100)]
+    (is (= sid (:session-id waited)))
+    (is (= true (:matched waited)))
+    (is (= false (:timed_out waited)))
+    (browser/close-session sid)))
+
 ;; ---------------------------------------------------------------------------
 ;; List sessions
 ;; ---------------------------------------------------------------------------
@@ -131,6 +145,26 @@
         sid    (:session-id result)
         listing (browser/list-sessions)]
     (is (some #(= sid (:session-id %)) listing))
+    (browser/close-session sid)))
+
+(deftest ^:integration list-sessions-includes-resumable-snapshots
+  (let [result  (browser/open-session "https://example.com")
+        sid     (:session-id result)
+        _       ((var-get #'browser/close-live-session!) sid)
+        listing (browser/list-sessions)
+        entry   (some #(when (= sid (:session-id %)) %) listing)]
+    (is (some? entry))
+    (is (= false (:live? entry)))
+    (is (= true (:resumable? entry)))
+    (browser/close-session sid)))
+
+(deftest ^:integration read-page-restores-from-snapshot
+  (let [result (browser/open-session "https://example.com")
+        sid    (:session-id result)
+        _      ((var-get #'browser/close-live-session!) sid)
+        page   (browser/read-page sid)]
+    (is (= sid (:session-id page)))
+    (is (= "Example Domain" (:title page)))
     (browser/close-session sid)))
 
 ;; ---------------------------------------------------------------------------

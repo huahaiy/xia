@@ -12,8 +12,9 @@
                                        "enum"        ["pause" "resume" "remove" "history" "details"]
                                        "description" "Action to perform"}}
                "required"   ["id" "action"]}
- :handler     "(fn [{\"id\" id \"action\" action}]
-                 (let [sid (keyword id)]
+ :handler     "(fn [args]
+                 (let [sid (keyword (get args \"id\"))
+                       action (get args \"action\")]
                    (case action
                      \"pause\"   (xia.schedule/pause-schedule! sid)
                      \"resume\"  (xia.schedule/resume-schedule! sid)

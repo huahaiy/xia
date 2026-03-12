@@ -54,8 +54,7 @@
   (prompt/register-approval! :terminal terminal-approval)
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
-    (wm/create-wm! session-id)
-    (wm/warm-start!)
+    (wm/ensure-wm! session-id)
     (println)
     (println (str "xia ready. Type your message (or /quit to exit, /help for commands)"))
     (println)
@@ -67,10 +66,10 @@
           (cond
             (or (= trimmed "/quit") (= trimmed "/exit"))
             (do (println "consolidating memories...")
-                (let [topics (:topics (wm/get-wm))]
-                  (wm/snapshot!)
+                (let [topics (:topics (wm/get-wm session-id))]
+                  (wm/snapshot! session-id)
                   (hippo/record-conversation! session-id :terminal :topics topics)
-                  (wm/clear-wm!))
+                  (wm/clear-wm! session-id))
                 (println "goodbye.")
                 (System/exit 0))
 
@@ -126,7 +125,7 @@
                 (recur))
 
             (= trimmed "/context")
-            (do (let [wm-ctx (wm/wm->context)]
+            (do (let [wm-ctx (wm/wm->context session-id)]
                   (if wm-ctx
                     (do (when (:topics wm-ctx)
                           (println (str "  Topic: " (:topics wm-ctx))))
@@ -147,7 +146,7 @@
                             (println (str "    • " (:summary ep)))))
                         (println "  (no relevant episodes)"))
                       (println)
-                      (let [prompt (context/assemble-system-prompt)]
+                      (let [prompt (context/assemble-system-prompt session-id)]
                         (println (str "  System prompt: ~"
                                       (context/estimate-tokens prompt)
                                       " tokens"))))

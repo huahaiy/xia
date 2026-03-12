@@ -8,5 +8,5 @@
                "properties" {"session_id" {"type"        "string"
                                            "description" "The browser session ID to close"}}
                "required"   ["session_id"]}
- :handler     "(fn [{\"session_id\" sid}]
-                 (xia.browser/close-session sid))"}
+ :handler     "(fn [args]
+                 (xia.browser/close-session (get args \"session_id\")))"}

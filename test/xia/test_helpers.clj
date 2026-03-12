@@ -1,6 +1,7 @@
 (ns xia.test-helpers
   "Shared test fixtures and helpers for xia tests."
-  (:require [xia.db :as db])
+  (:require [xia.db :as db]
+            [xia.working-memory :as wm])
   (:import [java.io File]
            [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -13,10 +14,12 @@
   "Fixture: create a temp Datalevin DB for the duration of the test."
   [f]
   (let [path (temp-db-path)]
+    (wm/clear-wm!)
     (db/connect! path {:passphrase-provider (constantly "xia-test-passphrase")})
     (try
       (f)
       (finally
+        (wm/clear-wm!)
         (db/close!)))))
 
 (defn seed-node!

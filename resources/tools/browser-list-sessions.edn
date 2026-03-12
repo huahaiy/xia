@@ -1,0 +1,11 @@
+;; List browser sessions, including resumable snapshots.
+;; Import with: /import-tool resources/tools/browser-list-sessions.edn
+
+{:id          :browser-list-sessions
+ :name        "browser-list-sessions"
+ :description "List browser sessions currently known to Xia. Results include live/resumable status and the current URL so the model can continue multi-step browser work."
+ :parameters  {"type"       "object"
+               "properties" {}
+               "required"   []}
+ :handler     "(fn [_]
+                 (xia.browser/list-sessions))"}

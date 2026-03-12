@@ -23,8 +23,7 @@
   ([] (resolve-provider nil))
   ([provider-id]
    (if provider-id
-     (or (db/get-skill provider-id) ; skills can also be providers
-         (db/get-config provider-id)
+     (or (db/get-provider provider-id)
          (throw (ex-info (str "Unknown provider: " provider-id) {:provider provider-id})))
      (or (db/get-default-provider)
          (throw (ex-info "No default LLM provider configured. Run first-time setup." {}))))))

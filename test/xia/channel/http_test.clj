@@ -48,6 +48,9 @@
     (is (re-find #"Approval Required" (:body response)))
     (is (re-find #"Copy transcript" (:body response)))
     (is (re-find #"Scratch Pads" (:body response)))
+    (is (re-find #"Admin" (:body response)))
+    (is (re-find #"Providers" (:body response)))
+    (is (re-find #"Site Logins" (:body response)))
     (is (re-find #"<textarea" (:body response)))
     (is (re-find #"sessionStorage\.getItem" (:body response)))
     (is (not (re-find #"localStorage\.setItem\(storageKeys\.messages" (:body response))))))
@@ -88,7 +91,7 @@
 
 (deftest chat-route-reuses-provided-session-id
   (let [seen-session (atom nil)
-        sid          (random-uuid)]
+        sid          (db/create-session! :http)]
     (with-redefs [xia.agent/process-message (fn [session-id _user-message & _]
                                               (reset! seen-session session-id)
                                               "ok")]
@@ -278,6 +281,154 @@
         (is (= 200 (:status submit)))
         (is (= "recorded" (get submit-body "status")))))
     (is (= true (deref waiter 2000 ::timeout)))))
+
+(deftest admin-config-route-returns-safe-summaries
+  (db/upsert-provider! {:id       :openai
+                        :name     "OpenAI"
+                        :base-url "https://api.openai.com/v1"
+                        :api-key  "sk-secret"
+                        :model    "gpt-5"})
+  (db/set-default-provider! :openai)
+  (db/register-service! {:id          :github
+                         :name        "GitHub"
+                         :base-url    "https://api.github.com"
+                         :auth-type   :api-key-header
+                         :auth-key    "gh-secret"
+                         :auth-header "X-API-Key"})
+  (db/register-site-cred! {:id             :github
+                           :name           "GitHub login"
+                           :login-url      "https://github.com/login"
+                           :username-field "login"
+                           :password-field "password"
+                           :username       "hyang"
+                           :password       "pw-secret"
+                           :form-selector  "#login"
+                           :extra-fields   "{\"remember_me\":\"1\"}"})
+  (db/install-tool! {:id          :demo-tool
+                     :name        "Demo tool"
+                     :description "desc"
+                     :parameters  "{}"
+                     :handler     "(fn [_] {:ok true})"
+                     :approval    :session})
+  (db/install-skill! {:id          :demo-skill
+                      :name        "Demo skill"
+                      :description "skill desc"
+                      :content     "content"})
+  (let [response (#'http/router {:uri            "/admin/config"
+                                 :request-method :get
+                                 :headers        (ui-headers)})
+        body     (response-json response)
+        provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        service  (first (filter #(= "github" (get % "id")) (get body "services")))
+        site     (first (filter #(= "github" (get % "id")) (get body "sites")))
+        tool     (first (filter #(= "demo-tool" (get % "id")) (get body "tools")))
+        skill    (first (filter #(= "demo-skill" (get % "id")) (get body "skills")))]
+    (is (= 200 (:status response)))
+    (is (= true (get provider "api_key_configured")))
+    (is (not (contains? provider "api_key")))
+    (is (= true (get provider "default")))
+    (is (= true (get service "auth_key_configured")))
+    (is (not (contains? service "auth_key")))
+    (is (= "api-key-header" (get service "auth_type")))
+    (is (= true (get site "username_configured")))
+    (is (= true (get site "password_configured")))
+    (is (not (contains? site "username")))
+    (is (not (contains? site "password")))
+    (is (= "session" (get tool "approval")))
+    (is (= true (get tool "enabled")))
+    (is (= true (get skill "enabled")))))
+
+(deftest admin-provider-route-preserves-secret-and-switches-default
+  (db/upsert-provider! {:id       :anthropic
+                        :name     "Anthropic"
+                        :base-url "https://example.com/a"
+                        :api-key  "anthropic-key"
+                        :model    "claude"})
+  (db/upsert-provider! {:id       :openai
+                        :name     "OpenAI"
+                        :base-url "https://api.openai.com/v1"
+                        :api-key  "openai-key"
+                        :model    "gpt-5"})
+  (db/set-default-provider! :anthropic)
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "openai"
+                                                                "name" "OpenAI"
+                                                                "base_url" "https://api.openai.com/v1"
+                                                                "model" "gpt-5-mini"
+                                                                "api_key" ""
+                                                                "default" true})})
+        body     (response-json response)]
+    (is (= 200 (:status response)))
+    (is (= "openai" (get-in body ["provider" "id"])))
+    (is (= "gpt-5-mini" (get-in body ["provider" "model"])))
+    (is (= "openai-key" (:llm.provider/api-key (db/get-provider :openai))))
+    (is (= true (:llm.provider/default? (db/get-provider :openai))))
+    (is (= false (:llm.provider/default? (db/get-provider :anthropic))))))
+
+(deftest admin-service-route-preserves-secret-and-clears-unused-header
+  (db/register-service! {:id          :github
+                         :name        "GitHub"
+                         :base-url    "https://api.github.com"
+                         :auth-type   :api-key-header
+                         :auth-key    "gh-secret"
+                         :auth-header "X-API-Key"})
+  (let [response (#'http/router {:uri            "/admin/services"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "github"
+                                                                "name" "GitHub"
+                                                                "base_url" "https://api.github.com"
+                                                                "auth_type" "bearer"
+                                                                "auth_header" ""
+                                                                "auth_key" ""
+                                                                "enabled" false})})
+        service  (db/get-service :github)]
+    (is (= 200 (:status response)))
+    (is (= :bearer (:service/auth-type service)))
+    (is (= "gh-secret" (:service/auth-key service)))
+    (is (nil? (:service/auth-header service)))
+    (is (= false (:service/enabled? service)))))
+
+(deftest admin-site-routes-preserve-secrets-and-delete
+  (db/register-site-cred! {:id             :github
+                           :name           "GitHub"
+                           :login-url      "https://github.com/login"
+                           :username-field "login"
+                           :password-field "password"
+                           :username       "hyang"
+                           :password       "pw-secret"
+                           :form-selector  "#login"
+                           :extra-fields   "{\"remember_me\":\"1\"}"})
+  (let [save-response (#'http/router {:uri            "/admin/sites"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"id" "github"
+                                                                     "name" "GitHub"
+                                                                     "login_url" "https://github.com/login"
+                                                                     "username_field" "login"
+                                                                     "password_field" "password"
+                                                                     "username" ""
+                                                                     "password" ""
+                                                                     "form_selector" ""
+                                                                     "extra_fields" ""})})
+        save-body     (response-json save-response)
+        site          (db/get-site-cred :github)]
+    (is (= 200 (:status save-response)))
+    (is (= true (get-in save-body ["site" "username_configured"])))
+    (is (= true (get-in save-body ["site" "password_configured"])))
+    (is (= "hyang" (:site-cred/username site)))
+    (is (= "pw-secret" (:site-cred/password site)))
+    (is (nil? (:site-cred/form-selector site)))
+    (is (nil? (:site-cred/extra-fields site))))
+  (let [delete-response (#'http/router {:uri            "/admin/sites/github"
+                                        :request-method :delete
+                                        :headers        (ui-headers)})
+        delete-body     (response-json delete-response)]
+    (is (= 200 (:status delete-response)))
+    (is (= "deleted" (get delete-body "status")))
+    (is (nil? (db/get-site-cred :github)))))
 
 (deftest start-binds-to-loopback-by-default
   (let [captured (atom nil)]

@@ -11,5 +11,6 @@
                              "selector"   {"type"        "string"
                                            "description" "CSS selector for the element to click (e.g. \"#submit-btn\", \"a.next-page\", \"button[type=submit]\")"}}
                "required"   ["session_id" "selector"]}
- :handler     "(fn [{\"session_id\" sid \"selector\" sel}]
-                 (xia.browser/click sid sel))"}
+ :handler     "(fn [args]
+                 (xia.browser/click (get args \"session_id\")
+                                    (get args \"selector\")))"}

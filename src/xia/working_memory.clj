@@ -21,7 +21,43 @@
 ;; State
 ;; ============================================================================
 
-(defonce ^:private wm-atom (atom nil))
+(def ^:dynamic *session-id*
+  "Current working-memory session for APIs that omit an explicit session id."
+  nil)
+
+(defonce ^:private wm-atom (atom {}))
+
+(declare get-wm warm-start!)
+
+(defn- default-session-id []
+  (when (= 1 (count @wm-atom))
+    (first (keys @wm-atom))))
+
+(defn- resolve-session-id
+  ([] (resolve-session-id nil))
+  ([session-id]
+   (or session-id *session-id* (default-session-id))))
+
+(defn- session-wm
+  ([]
+   (session-wm nil))
+  ([session-id]
+   (when-let [sid (resolve-session-id session-id)]
+     (get @wm-atom sid))))
+
+(defn- update-session-wm!
+  [session-id f]
+  (let [sid (resolve-session-id session-id)
+        result (atom nil)]
+    (when sid
+      (swap! wm-atom
+             (fn [states]
+               (if-let [wm (get states sid)]
+                 (let [updated (f wm)]
+                   (reset! result updated)
+                   (assoc states sid updated))
+                 states))))
+    @result))
 
 (def ^:private default-config
   {:max-slots             15
@@ -64,8 +100,10 @@
   "Extract search terms from a user message.
    Splits words, filters stopwords, extracts proper nouns,
    includes entity names already in working memory."
-  [message]
-  (let [;; Tokenize and clean
+  ([message]
+   (extract-search-terms nil message))
+  ([session-id message]
+   (let [;; Tokenize and clean
         words (->> (str/split (str/lower-case message) #"[^\w'-]+")
                    (remove str/blank?)
                    (remove #(< (count %) 2)))
@@ -75,7 +113,7 @@
         proper-nouns (->> (re-seq #"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*" message)
                          (map str/lower-case))
         ;; Include active entity names from WM
-        wm-names (when-let [wm @wm-atom]
+        wm-names (when-let [wm (session-wm session-id)]
                    (->> (:slots wm)
                         vals
                         (map :name)
@@ -83,7 +121,7 @@
                         (map str/lower-case)))
         ;; Combine, deduplicate
         all-terms (distinct (concat proper-nouns meaningful wm-names))]
-    (vec (take 20 all-terms))))
+     (vec (take 20 all-terms)))))
 
 ;; ============================================================================
 ;; Stage 2: Hybrid Search
@@ -162,8 +200,8 @@
 
 (defn- merge-results!
   "Merge search + expansion results into working memory."
-  [search-results expanded-nodes]
-  (swap! wm-atom
+  [session-id search-results expanded-nodes]
+  (update-session-wm! session-id
     (fn [wm]
       (let [turn (:turn-count wm)
             ;; Merge direct search hits at high relevance
@@ -217,8 +255,10 @@
 
 (defn decay-slots!
   "Apply decay to all non-pinned, non-refreshed slots."
-  []
-  (swap! wm-atom
+  ([]
+   (decay-slots! nil))
+  ([session-id]
+   (update-session-wm! session-id
     (fn [wm]
       (let [factor (get-in wm [:config :decay-factor])]
         (update wm :slots
@@ -230,12 +270,14 @@
                                slot
                                (update slot :relevance * factor))))
                     {}
-                    slots)))))))
+                    slots))))))))
 
 (defn evict-slots!
   "Remove slots below the eviction threshold. Enforce max capacity."
-  []
-  (swap! wm-atom
+  ([]
+   (evict-slots! nil))
+  ([session-id]
+   (update-session-wm! session-id
     (fn [wm]
       (let [threshold (get-in wm [:config :eviction-threshold])
             max-slots (get-in wm [:config :max-slots])
@@ -246,7 +288,7 @@
                            (sort-by (fn [[_ slot]] (:relevance slot)) >)
                            (take max-slots)
                            (into {}))]
-        (assoc wm :slots filtered)))))
+        (assoc wm :slots filtered))))))
 
 ;; ============================================================================
 ;; Topic Tracking
@@ -254,44 +296,50 @@
 
 (defn update-topics!
   "Update the topic summary using the LLM. Called every N turns."
-  []
-  (let [wm @wm-atom
+  ([]
+   (update-topics! nil))
+  ([session-id]
+   (let [sid      (resolve-session-id session-id)
+        wm       (session-wm sid)
         entities (->> (:slots wm) vals (map :name) (remove nil?) (str/join ", "))
         episodes (->> (:episode-refs wm) (map :summary) (str/join "; "))
         prompt   (str "Current entities in focus: " entities
                       "\nRecent relevant episodes: " episodes
                       "\n\nSummarize the current conversation focus in ONE sentence.")]
-    (try
-      (let [summary (llm/chat-simple
-                      [{:role "system"
-                        :content "You are a topic summarizer. Return exactly ONE sentence describing the current conversation focus. Be specific and concise."}
-                       {:role "user" :content prompt}])]
-        (swap! wm-atom
-          (fn [wm]
-            (assoc wm
-                   :prev-topics (:topics wm)
-                   :topics      (str/trim summary)
-                   :topic-turn  (:turn-count wm))))
-        (log/debug "Updated topic summary:" summary))
-      (catch Exception e
-        (log/warn "Failed to update topic summary:" (.getMessage e))))))
+     (when wm
+       (try
+         (let [summary (llm/chat-simple
+                         [{:role "system"
+                           :content "You are a topic summarizer. Return exactly ONE sentence describing the current conversation focus. Be specific and concise."}
+                          {:role "user" :content prompt}])]
+           (update-session-wm! sid
+             (fn [wm]
+               (assoc wm
+                      :prev-topics (:topics wm)
+                      :topics      (str/trim summary)
+                      :topic-turn  (:turn-count wm))))
+           (log/debug "Updated topic summary:" summary))
+         (catch Exception e
+           (log/warn "Failed to update topic summary:" (.getMessage e))))))))
 
 (defn detect-topic-shift?
   "Compare current search terms with previous topic summary.
    Returns true if topics have shifted significantly."
-  [search-terms]
-  (let [wm @wm-atom
+  ([search-terms]
+   (detect-topic-shift? nil search-terms))
+  ([session-id search-terms]
+   (let [wm (session-wm session-id)
         prev-topics (:topics wm)]
-    (when (and prev-topics (seq search-terms))
-      (let [prev-words (->> (str/split (str/lower-case prev-topics) #"[^\w]+")
-                            (remove str/blank?)
-                            set)
-            current-words (set (map str/lower-case search-terms))
-            overlap (count (clojure.set/intersection prev-words current-words))
-            max-possible (max 1 (min (count prev-words) (count current-words)))
-            similarity (/ (double overlap) max-possible)]
-        ;; Shift if less than 20% overlap
-        (< similarity 0.2)))))
+     (when (and prev-topics (seq search-terms))
+       (let [prev-words (->> (str/split (str/lower-case prev-topics) #"[^\w]+")
+                             (remove str/blank?)
+                             set)
+             current-words (set (map str/lower-case search-terms))
+             overlap (count (clojure.set/intersection prev-words current-words))
+             max-possible (max 1 (min (count prev-words) (count current-words)))
+             similarity (/ (double overlap) max-possible)]
+         ;; Shift if less than 20% overlap
+         (< similarity 0.2))))))
 
 ;; ============================================================================
 ;; Auto-segmentation
@@ -301,7 +349,7 @@
   "Close the current episode and start a new one within the same session.
    Called when a significant topic shift is detected."
   [session-id channel]
-  (let [wm @wm-atom]
+  (let [wm (session-wm session-id)]
     (log/info "Topic shift detected — auto-segmenting episode")
     ;; Record current episode with WM topics as context
     (memory/record-episode!
@@ -311,10 +359,12 @@
        :channel    channel
        :session-id session-id})
     ;; Reset topic tracking for new segment
-    (swap! wm-atom assoc
-           :prev-topics (:topics wm)
-           :topics      nil
-           :topic-turn  (:turn-count wm))))
+    (update-session-wm! session-id
+      (fn [wm]
+        (assoc wm
+               :prev-topics (:topics wm)
+               :topics      nil
+               :topic-turn  (:turn-count wm))))))
 
 ;; ============================================================================
 ;; Per-turn Update (orchestrator)
@@ -325,14 +375,14 @@
    1. Extract search terms from user message
    2. Hybrid search across KG nodes, facts, episodes
    3. Graph expansion (spreading activation)
-   4. Merge results, decay, evict
-   5. Check for topic shift → auto-segment if needed
-   6. Periodically update topic summary"
+  4. Merge results, decay, evict
+  5. Check for topic shift → auto-segment if needed
+  6. Periodically update topic summary"
   [user-message session-id channel]
-  (when @wm-atom
-    (swap! wm-atom update :turn-count inc)
+  (when (session-wm session-id)
+    (update-session-wm! session-id #(update % :turn-count inc))
     (let [;; Stage 1: keyword extraction
-          terms (extract-search-terms user-message)]
+          terms (extract-search-terms session-id user-message)]
       (when (seq terms)
         ;; Stage 2: hybrid search
         (let [results (search-knowledge terms)]
@@ -342,20 +392,20 @@
                   expanded     (when (seq matched-eids)
                                  (expand-graph matched-eids))]
               ;; Stage 4: merge + decay + evict
-              (merge-results! results expanded)
-              (decay-slots!)
-              (evict-slots!)))))
+              (merge-results! session-id results expanded)
+              (decay-slots! session-id)
+              (evict-slots! session-id)))))
       ;; Check for topic shift → auto-segment
-      (when (and (> (:turn-count @wm-atom) 3)
-                 (detect-topic-shift? terms))
+      (when (and (> (:turn-count (session-wm session-id)) 3)
+                 (detect-topic-shift? session-id terms))
         (auto-segment! session-id channel))
       ;; Periodically update topic summary
-      (let [wm @wm-atom
+      (let [wm (session-wm session-id)
             interval (get-in wm [:config :topic-update-interval])
             turns-since (- (:turn-count wm) (:topic-turn wm))]
         (when (>= turns-since interval)
-          (future (update-topics!)))))
-    @wm-atom))
+          (future (update-topics! session-id)))))
+    (get-wm session-id)))
 
 ;; ============================================================================
 ;; Lifecycle
@@ -364,54 +414,79 @@
 (defn create-wm!
   "Create a new working memory for a session."
   [session-id]
-  (reset! wm-atom
-    {:session-id   session-id
-     :topics       nil
-     :prev-topics  nil
-     :turn-count   0
-     :topic-turn   0
-     :slots        {}
-     :episode-refs []
-     :config       default-config})
-  @wm-atom)
+  (let [wm {:session-id   session-id
+            :topics       nil
+            :prev-topics  nil
+            :turn-count   0
+            :topic-turn   0
+            :slots        {}
+            :episode-refs []
+            :config       default-config}]
+    (swap! wm-atom assoc session-id wm)
+    wm))
+
+(defn ensure-wm!
+  "Return working memory for the session, creating and warm-starting it if needed."
+  [session-id]
+  (or (get-wm session-id)
+      (do
+        (create-wm! session-id)
+        (warm-start! session-id)
+        (get-wm session-id))))
 
 (defn warm-start!
   "Pre-populate WM from the previous session's topic summary.
    Avoids the 'xia forgot everything' feel on quick restarts."
-  []
-  (when @wm-atom
-    (let [last-episode (db/latest-session-episode)]
-      (when-let [prev-context (or (:context last-episode)
-                                  (:summary last-episode))]
-        (log/info "Warm start from previous session:" prev-context)
-        (swap! wm-atom assoc :prev-topics prev-context)
-        (let [terms (extract-search-terms prev-context)
-              results (when (seq terms) (search-knowledge terms))]
-          (when results
-            (let [matched-eids (mapv :eid (:nodes results))
-                  expanded (when (seq matched-eids) (expand-graph matched-eids))]
-              (merge-results! results expanded)))))))
-  @wm-atom)
+  ([]
+   (warm-start! nil))
+  ([session-id]
+   (when-let [sid (resolve-session-id session-id)]
+     (when (session-wm sid)
+       (let [last-episode (db/latest-session-episode)]
+         (when-let [prev-context (or (:context last-episode)
+                                     (:summary last-episode))]
+           (log/info "Warm start from previous session:" prev-context)
+           (update-session-wm! sid #(assoc % :prev-topics prev-context))
+           (let [terms (extract-search-terms sid prev-context)
+                 results (when (seq terms) (search-knowledge terms))]
+             (when results
+               (let [matched-eids (mapv :eid (:nodes results))
+                     expanded (when (seq matched-eids) (expand-graph matched-eids))]
+                 (merge-results! sid results expanded)))))))
+     (get-wm sid))))
 
 (defn get-wm
   "Return current working memory state."
-  []
-  @wm-atom)
+  ([]
+   (session-wm nil))
+  ([session-id]
+   (session-wm session-id)))
 
 (defn clear-wm!
   "Clear working memory (on session end)."
-  []
-  (reset! wm-atom nil))
+  ([]
+   (reset! wm-atom {}))
+  ([session-id]
+   (when-let [sid (resolve-session-id session-id)]
+     (swap! wm-atom dissoc sid))))
 
 ;; ============================================================================
 ;; Pinning
 ;; ============================================================================
 
-(defn pin! [node-eid]
-  (swap! wm-atom update-in [:slots node-eid :pinned?] (constantly true)))
+(defn pin!
+  ([node-eid]
+   (pin! nil node-eid))
+  ([session-id node-eid]
+   (update-session-wm! session-id
+     #(assoc-in % [:slots node-eid :pinned?] true))))
 
-(defn unpin! [node-eid]
-  (swap! wm-atom update-in [:slots node-eid :pinned?] (constantly false)))
+(defn unpin!
+  ([node-eid]
+   (unpin! nil node-eid))
+  ([session-id node-eid]
+   (update-session-wm! session-id
+     #(assoc-in % [:slots node-eid :pinned?] false))))
 
 ;; ============================================================================
 ;; Export for context assembly
@@ -419,8 +494,10 @@
 
 (defn wm->context
   "Export working memory as context data for prompt assembly."
-  []
-  (when-let [wm @wm-atom]
+  ([]
+   (wm->context nil))
+  ([session-id]
+   (when-let [wm (session-wm session-id)]
     {:topics       (:topics wm)
      :entities     (->> (:slots wm)
                         vals
@@ -439,7 +516,7 @@
                                 {:summary   summary
                                  :timestamp timestamp
                                  :relevance relevance})))
-     :turn-count   (:turn-count wm)}))
+     :turn-count   (:turn-count wm)})))
 
 ;; ============================================================================
 ;; Snapshot (crash-recovery)
@@ -447,9 +524,11 @@
 
 (defn snapshot!
   "Persist current WM state to DB."
-  []
-  (when-let [wm @wm-atom]
+  ([]
+   (snapshot! nil))
+  ([session-id]
+   (when-let [wm (session-wm session-id)]
     (try
       (db/save-wm-snapshot! wm)
       (catch Exception e
-        (log/warn "Failed to save WM snapshot:" (.getMessage e))))))
+        (log/warn "Failed to save WM snapshot:" (.getMessage e)))))))

@@ -1,0 +1,27 @@
+;; Wait for a browser session to settle or for a condition to appear.
+;; Import with: /import-tool resources/tools/browser-wait.edn
+
+{:id          :browser-wait
+ :name        "browser-wait"
+ :description "Wait for JavaScript rendering or polling conditions in a browser session. Optionally wait until a CSS selector appears, text shows up, or the URL contains a substring. Returns the current page with matched/timed_out flags."
+ :parameters  {"type"       "object"
+               "properties" {"session_id"   {"type"        "string"
+                                             "description" "The browser session ID to wait on"}
+                             "timeout_ms"   {"type"        "integer"
+                                             "description" "Maximum total wait time in milliseconds (default 10000)"}
+                             "interval_ms"  {"type"        "integer"
+                                             "description" "Polling interval for conditional waits in milliseconds (default 500)"}
+                             "selector"     {"type"        "string"
+                                             "description" "Optional CSS selector to wait for"}
+                             "text"         {"type"        "string"
+                                             "description" "Optional text snippet to wait for in the page text"}
+                             "url_contains" {"type"        "string"
+                                             "description" "Optional URL substring to wait for"}}
+               "required"   ["session_id"]}
+ :handler     "(fn [args]
+                 (xia.browser/wait-for-page (get args \"session_id\")
+                   :timeout-ms (or (get args \"timeout_ms\") 10000)
+                   :interval-ms (or (get args \"interval_ms\") 500)
+                   :selector (get args \"selector\")
+                   :text (get args \"text\")
+                   :url-contains (get args \"url_contains\")))"}

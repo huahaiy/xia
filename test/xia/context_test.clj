@@ -3,7 +3,8 @@
             [clojure.string :as str]
             [xia.test-helpers :as th]
             [xia.db :as db]
-            [xia.context :as ctx]))
+            [xia.context :as ctx]
+            [xia.working-memory :as wm]))
 
 (use-fixtures :each th/with-test-db)
 
@@ -199,12 +200,16 @@
   (db/set-identity! :description "A test assistant")
 
   ;; No WM active, no skills
-  (let [prompt (ctx/assemble-system-prompt)]
+  (let [sid    (db/create-session! :terminal)
+        _      (wm/create-wm! sid)
+        prompt (ctx/assemble-system-prompt sid)]
     (testing "includes identity"
       (is (str/includes? prompt "TestXia")))
 
     (testing "is a string"
-      (is (string? prompt)))))
+      (is (string? prompt)))
+
+    (wm/clear-wm! sid)))
 
 ;; ---------------------------------------------------------------------------
 ;; compact-history
@@ -248,13 +253,16 @@
     (db/add-message! sid :user "hello")
     (db/add-message! sid :assistant "hi there")
 
-    (let [msgs (ctx/build-messages sid "what's up?")]
+    (db/add-message! sid :user "what's up?")
+
+    (let [msgs (ctx/build-messages sid)]
       (testing "starts with system message"
         (is (= "system" (:role (first msgs)))))
 
-      (testing "ends with user message"
-        (is (= "user" (:role (last msgs))))
-        (is (= "what's up?" (:content (last msgs)))))
+      (testing "preserves the current user turn exactly once"
+        (let [user-msgs (filter #(= "user" (:role %)) msgs)]
+          (is (= 2 (count user-msgs)))
+          (is (= "what's up?" (:content (last user-msgs))))))
 
       (testing "includes history"
         (is (>= (count msgs) 3))))))

@@ -163,9 +163,9 @@
 (defn assemble-system-prompt
   "Build the complete system prompt with budget enforcement.
    Priority: identity (P0) > topic (P0) > entities (P1) > episodes (P2) > skills (P3)."
-  []
+  [session-id]
   (let [budget     (get-budget)
-        wm-context (wm/wm->context)
+        wm-context (wm/wm->context session-id)
         skills     (skill/skills-for-context wm-context)
 
         ;; P0: Identity (always included)
@@ -240,9 +240,9 @@
 
 (defn build-messages
   "Build the full message list for an LLM call:
-   system prompt (identity + WM context + skills) + compacted history + user message."
-  [session-id user-message]
-  (let [sys-prompt   (assemble-system-prompt)
+   system prompt (identity + WM context + skills) + compacted history."
+  [session-id]
+  (let [sys-prompt   (assemble-system-prompt session-id)
         history      (db/session-messages session-id)
         history-msgs (mapv (fn [{:keys [role content tool-calls tool-id]}]
                              (cond-> {:role (name role) :content content}
@@ -255,4 +255,4 @@
                          8000)
         compacted    (compact-history history-msgs budget)]
     (into [{:role "system" :content sys-prompt}]
-          (conj compacted {:role "user" :content user-message}))))
+          compacted)))

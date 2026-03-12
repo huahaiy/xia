@@ -75,8 +75,9 @@
      :type        — :tool or :prompt (required)
      :tool-id     — keyword, required when type = :tool
      :tool-args   — map, optional args for the tool
-     :prompt      — string, required when type = :prompt"
-  [{:keys [id name description spec type tool-id tool-args prompt]}]
+     :prompt      — string, required when type = :prompt
+     :trusted?    — allow privileged tools to run without live approval (default true)"
+  [{:keys [id name description spec type tool-id tool-args prompt trusted?]}]
   (when-not id
     (throw (ex-info "Schedule must have an :id" {})))
   (when-not spec
@@ -106,6 +107,7 @@
                   :schedule/name        (or name (clojure.core/name id))
                   :schedule/spec        (pr-str spec)
                   :schedule/type        type
+                  :schedule/trusted?    (if (nil? trusted?) true (boolean trusted?))
                   :schedule/enabled?    true
                   :schedule/created-at  now}
            description (assoc :schedule/description description)
@@ -132,6 +134,7 @@
          :description (:schedule/description e)
          :spec        (read-spec (:schedule/spec e))
          :type        (:schedule/type e)
+         :trusted?    (:schedule/trusted? e)
          :tool-id     (:schedule/tool-id e)
          :tool-args   (when-let [s (:schedule/tool-args e)]
                         (try (json/read-json s) (catch Exception _ s)))
@@ -152,6 +155,7 @@
                    :name      (:schedule/name e)
                    :spec      (read-spec (:schedule/spec e))
                    :type      (:schedule/type e)
+                   :trusted?  (:schedule/trusted? e)
                    :enabled?  (:schedule/enabled? e)
                    :last-run  (:schedule/last-run e)
                    :next-run  (:schedule/next-run e)})))
@@ -159,7 +163,7 @@
          vec)))
 
 (defn update-schedule!
-  "Update a schedule. Supported keys: :name :description :spec :enabled? :tool-args :prompt"
+  "Update a schedule. Supported keys: :name :description :spec :enabled? :trusted? :tool-args :prompt"
   [schedule-id updates]
   (when-not (get-schedule schedule-id)
     (throw (ex-info "Schedule not found" {:id schedule-id})))
@@ -167,6 +171,7 @@
              (:name updates)        (assoc :schedule/name (:name updates))
              (:description updates) (assoc :schedule/description (:description updates))
              (contains? updates :enabled?) (assoc :schedule/enabled? (:enabled? updates))
+             (contains? updates :trusted?) (assoc :schedule/trusted? (boolean (:trusted? updates)))
              (:tool-args updates)   (assoc :schedule/tool-args
                                            (json/write-json-str (:tool-args updates)))
              (:prompt updates)      (assoc :schedule/prompt (:prompt updates)))]
@@ -310,6 +315,7 @@
             (let [e (into {} (db/entity eid))]
               {:id        (:schedule/id e)
                :type      (:schedule/type e)
+               :trusted?  (:schedule/trusted? e)
                :tool-id   (:schedule/tool-id e)
                :tool-args (when-let [s (:schedule/tool-args e)]
                             (try (json/read-json s) (catch Exception _ {})))

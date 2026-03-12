@@ -74,6 +74,7 @@
    'click             browser/click
    'fill-form         browser/fill-form
    'read-page         browser/read-page
+   'wait-for-page     browser/wait-for-page
    'close-session     browser/close-session
    'list-sessions     browser/list-sessions
    'login             browser/login

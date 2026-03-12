@@ -36,12 +36,13 @@
 
 (defn- execute-tool-schedule
   "Execute a :tool type schedule."
-  [{:keys [id tool-id tool-args]}]
+  [{:keys [id tool-id tool-args trusted?]}]
   (let [started (java.util.Date.)]
     (try
       (let [result (tool/execute-tool tool-id (or tool-args {})
                                       {:channel :scheduler
-                                       :schedule-id id})]
+                                       :schedule-id id
+                                       :approval-bypass? trusted?})]
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
@@ -57,13 +58,15 @@
 
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
-  [{:keys [id prompt]}]
+  [{:keys [id prompt trusted?]}]
   (let [started    (java.util.Date.)
         session-id (db/create-session! :scheduler)]
     (try
-      (wm/create-wm! session-id)
-      (wm/warm-start!)
-      (let [result (agent/process-message session-id prompt :channel :scheduler)]
+      (wm/ensure-wm! session-id)
+      (let [result (agent/process-message session-id prompt
+                                          :channel :scheduler
+                                          :tool-context {:schedule-id id
+                                                         :approval-bypass? trusted?})]
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
@@ -74,7 +77,10 @@
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      :error
-           :error       (.getMessage e)})))))
+           :error       (.getMessage e)}))
+      (finally
+        (wm/snapshot! session-id)
+        (wm/clear-wm! session-id)))))
 
 (defn- execute-schedule!
   "Execute a single schedule, preventing concurrent runs of the same schedule."

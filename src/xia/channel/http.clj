@@ -23,6 +23,7 @@
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
+(def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param})
 (defonce ^:private local-session-secret
   (delay
     (let [bytes (byte-array 32)
@@ -386,6 +387,13 @@
      "      font-family: \"SFMono-Regular\", Consolas, \"Liberation Mono\", monospace;"
      "      font-size: 0.93rem;"
      "    }"
+     "    #site-extra-fields {"
+     "      min-height: 150px;"
+     "      border-radius: 18px;"
+     "      padding: 14px 16px;"
+     "      font-family: \"SFMono-Regular\", Consolas, \"Liberation Mono\", monospace;"
+     "      font-size: 0.9rem;"
+     "    }"
      "    .scratch-status {"
      "      color: var(--muted);"
      "      font-size: 0.86rem;"
@@ -393,14 +401,148 @@
      "    }"
      "    .composer-foot {"
       "      display: flex;"
-      "      justify-content: space-between;"
+     "      justify-content: space-between;"
      "      gap: 12px;"
      "      align-items: center;"
      "      flex-wrap: wrap;"
      "    }"
      "    .hint { color: var(--muted); font-size: 0.9rem; line-height: 1.4; }"
+     "    .admin-panel { gap: 18px; }"
+     "    .admin-grid {"
+     "      display: grid;"
+     "      gap: 16px;"
+     "      grid-template-columns: repeat(2, minmax(0, 1fr));"
+     "    }"
+     "    .admin-card {"
+     "      border: 1px solid rgba(23, 33, 25, 0.12);"
+     "      border-radius: 22px;"
+     "      padding: 18px;"
+     "      background: rgba(255, 255, 255, 0.5);"
+     "      display: grid;"
+     "      gap: 14px;"
+     "      min-height: 0;"
+     "    }"
+     "    .admin-card-wide { grid-column: 1 / -1; }"
+     "    .admin-list {"
+     "      display: grid;"
+     "      gap: 10px;"
+     "      max-height: 220px;"
+     "      overflow: auto;"
+     "      padding-right: 4px;"
+     "    }"
+     "    .admin-list-empty {"
+     "      padding: 16px;"
+     "      border-radius: 16px;"
+     "      border: 1px dashed rgba(23, 33, 25, 0.2);"
+     "      color: var(--muted);"
+     "      background: rgba(255, 255, 255, 0.42);"
+     "      line-height: 1.5;"
+     "    }"
+     "    .admin-item {"
+     "      width: 100%;"
+     "      border-radius: 18px;"
+     "      border: 1px solid rgba(23, 33, 25, 0.12);"
+     "      background: rgba(255, 255, 255, 0.68);"
+     "      padding: 12px 14px;"
+     "      text-align: left;"
+     "      display: grid;"
+     "      gap: 6px;"
+     "    }"
+     "    .admin-item.active {"
+     "      border-color: rgba(178, 76, 50, 0.28);"
+     "      background: rgba(255, 245, 240, 0.92);"
+     "    }"
+     "    .admin-item-title {"
+     "      font-size: 0.95rem;"
+     "      font-weight: 700;"
+     "      color: var(--ink);"
+     "    }"
+     "    .admin-item-meta {"
+     "      color: var(--muted);"
+     "      font-size: 0.82rem;"
+     "      line-height: 1.45;"
+     "    }"
+     "    .field-grid {"
+     "      display: grid;"
+     "      gap: 12px;"
+     "      grid-template-columns: repeat(2, minmax(0, 1fr));"
+     "    }"
+     "    .field-grid .field.full { grid-column: 1 / -1; }"
+     "    .check-row {"
+     "      display: flex;"
+     "      gap: 10px;"
+     "      align-items: center;"
+     "      min-height: 100%;"
+     "    }"
+     "    .check-row input { width: 18px; height: 18px; }"
+     "    .check-label {"
+     "      color: var(--ink);"
+     "      font-size: 0.94rem;"
+     "      font-weight: 600;"
+     "      line-height: 1.4;"
+     "    }"
+     "    .secret-note {"
+     "      color: var(--muted);"
+     "      font-size: 0.84rem;"
+     "      line-height: 1.45;"
+     "    }"
+     "    .admin-status {"
+     "      color: var(--muted);"
+     "      font-size: 0.86rem;"
+     "      line-height: 1.45;"
+     "    }"
+     "    .capability-grid {"
+     "      display: grid;"
+     "      gap: 16px;"
+     "      grid-template-columns: repeat(2, minmax(0, 1fr));"
+     "    }"
+     "    .capability-list {"
+     "      display: grid;"
+     "      gap: 10px;"
+     "      max-height: 260px;"
+     "      overflow: auto;"
+     "      padding-right: 4px;"
+     "    }"
+     "    .capability-item {"
+     "      border: 1px solid rgba(23, 33, 25, 0.12);"
+     "      border-radius: 16px;"
+     "      background: rgba(255, 255, 255, 0.58);"
+     "      padding: 12px 14px;"
+     "      display: grid;"
+     "      gap: 6px;"
+     "    }"
+     "    .capability-title {"
+     "      display: flex;"
+     "      justify-content: space-between;"
+     "      gap: 10px;"
+     "      align-items: center;"
+     "      font-size: 0.92rem;"
+     "      font-weight: 700;"
+     "    }"
+     "    .capability-meta {"
+     "      color: var(--muted);"
+     "      font-size: 0.82rem;"
+     "      line-height: 1.5;"
+     "    }"
+     "    .badge {"
+     "      display: inline-flex;"
+     "      align-items: center;"
+     "      border-radius: 999px;"
+     "      padding: 4px 10px;"
+     "      font-size: 0.76rem;"
+     "      font-weight: 700;"
+     "      letter-spacing: 0.06em;"
+     "      text-transform: uppercase;"
+     "      background: rgba(76, 122, 94, 0.14);"
+     "      color: #35553f;"
+     "    }"
+     "    .badge.off {"
+     "      background: rgba(91, 102, 88, 0.12);"
+     "      color: var(--muted);"
+     "    }"
      "    @media (max-width: 980px) {"
-     "      .hero, .workspace { grid-template-columns: 1fr; }"
+     "      .hero, .workspace, .admin-grid, .capability-grid, .field-grid { grid-template-columns: 1fr; }"
+     "      .admin-card-wide { grid-column: auto; }"
      "      .shell { padding: 16px; }"
      "      textarea { min-height: 240px; }"
      "    }"
@@ -521,6 +663,193 @@
      "          </section>"
      "        </div>"
      "      </main>"
+     "      <section class=\"panel admin-panel\">"
+     "        <div class=\"panel-header\">"
+     "          <div>"
+     "            <h2 class=\"panel-title\">Admin</h2>"
+     "            <p class=\"panel-note\">Configure providers, service credentials, and site logins without dropping to the terminal. Stored secrets never come back to the browser once saved.</p>"
+     "          </div>"
+     "        </div>"
+     "        <div class=\"admin-grid\">"
+     "          <section class=\"admin-card\">"
+     "            <div class=\"panel-header\">"
+     "              <div>"
+     "                <h3 class=\"panel-title\">Providers</h3>"
+     "                <p class=\"panel-note\">LLM endpoints Xia can use for chat.</p>"
+     "              </div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"new-provider\" type=\"button\">New provider</button>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"admin-list\" id=\"provider-list\"></div>"
+     "            <div class=\"field-grid\">"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"provider-id\">Id</label>"
+     "                <input class=\"text-input\" id=\"provider-id\" type=\"text\" placeholder=\"openai\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"provider-name\">Name</label>"
+     "                <input class=\"text-input\" id=\"provider-name\" type=\"text\" placeholder=\"OpenAI\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"provider-base-url\">Base URL</label>"
+     "                <input class=\"text-input\" id=\"provider-base-url\" type=\"url\" placeholder=\"https://api.openai.com/v1\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"provider-model\">Model</label>"
+     "                <input class=\"text-input\" id=\"provider-model\" type=\"text\" placeholder=\"gpt-5\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"provider-api-key\">API Key</label>"
+     "                <input class=\"text-input\" id=\"provider-api-key\" type=\"password\" autocomplete=\"off\" placeholder=\"Leave blank to keep stored key\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"check-row\" for=\"provider-default\">"
+     "                  <input id=\"provider-default\" type=\"checkbox\">"
+     "                  <span class=\"check-label\">Use as Xia's default provider</span>"
+     "                </label>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"composer-foot\">"
+     "              <div class=\"admin-status\" id=\"provider-status\">No provider selected.</div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"primary\" id=\"save-provider\" type=\"button\">Save provider</button>"
+     "              </div>"
+     "            </div>"
+     "          </section>"
+     "          <section class=\"admin-card\">"
+     "            <div class=\"panel-header\">"
+     "              <div>"
+     "                <h3 class=\"panel-title\">Services</h3>"
+     "                <p class=\"panel-note\">Registered API endpoints Xia can call through the service proxy.</p>"
+     "              </div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"new-service\" type=\"button\">New service</button>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"admin-list\" id=\"service-list\"></div>"
+     "            <div class=\"field-grid\">"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"service-id\">Id</label>"
+     "                <input class=\"text-input\" id=\"service-id\" type=\"text\" placeholder=\"github\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"service-name\">Name</label>"
+     "                <input class=\"text-input\" id=\"service-name\" type=\"text\" placeholder=\"GitHub\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"service-base-url\">Base URL</label>"
+     "                <input class=\"text-input\" id=\"service-base-url\" type=\"url\" placeholder=\"https://api.github.com\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"service-auth-type\">Auth Type</label>"
+     "                <select class=\"text-input\" id=\"service-auth-type\">"
+     "                  <option value=\"bearer\">Bearer token</option>"
+     "                  <option value=\"basic\">Basic auth</option>"
+     "                  <option value=\"api-key-header\">API key header</option>"
+     "                  <option value=\"query-param\">Query parameter</option>"
+     "                </select>"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"service-auth-header\">Header / Param</label>"
+     "                <input class=\"text-input\" id=\"service-auth-header\" type=\"text\" placeholder=\"X-API-Key\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"service-auth-key\">Auth Secret</label>"
+     "                <input class=\"text-input\" id=\"service-auth-key\" type=\"password\" autocomplete=\"off\" placeholder=\"Leave blank to keep stored secret\">"
+     "                <div class=\"secret-note\">For bearer/basic auth, the header field can stay blank.</div>"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"check-row\" for=\"service-enabled\">"
+     "                  <input id=\"service-enabled\" type=\"checkbox\" checked>"
+     "                  <span class=\"check-label\">Enabled for tool calls</span>"
+     "                </label>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"composer-foot\">"
+     "              <div class=\"admin-status\" id=\"service-status\">No service selected.</div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"primary\" id=\"save-service\" type=\"button\">Save service</button>"
+     "              </div>"
+     "            </div>"
+     "          </section>"
+     "          <section class=\"admin-card\">"
+     "            <div class=\"panel-header\">"
+     "              <div>"
+     "                <h3 class=\"panel-title\">Site Logins</h3>"
+     "                <p class=\"panel-note\">Stored credentials for browser login flows. Leave secret fields blank to keep what is already stored.</p>"
+     "              </div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"new-site\" type=\"button\">New site</button>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"admin-list\" id=\"site-list\"></div>"
+     "            <div class=\"field-grid\">"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"site-id\">Id</label>"
+     "                <input class=\"text-input\" id=\"site-id\" type=\"text\" placeholder=\"github\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"site-name\">Name</label>"
+     "                <input class=\"text-input\" id=\"site-name\" type=\"text\" placeholder=\"GitHub login\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"site-login-url\">Login URL</label>"
+     "                <input class=\"text-input\" id=\"site-login-url\" type=\"url\" placeholder=\"https://github.com/login\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"site-username-field\">Username Field</label>"
+     "                <input class=\"text-input\" id=\"site-username-field\" type=\"text\" placeholder=\"login\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"site-password-field\">Password Field</label>"
+     "                <input class=\"text-input\" id=\"site-password-field\" type=\"text\" placeholder=\"password\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"site-username\">Username</label>"
+     "                <input class=\"text-input\" id=\"site-username\" type=\"text\" autocomplete=\"off\" placeholder=\"Leave blank to keep stored username\">"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\" for=\"site-password\">Password</label>"
+     "                <input class=\"text-input\" id=\"site-password\" type=\"password\" autocomplete=\"off\" placeholder=\"Leave blank to keep stored password\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"site-form-selector\">Form Selector</label>"
+     "                <input class=\"text-input\" id=\"site-form-selector\" type=\"text\" placeholder=\"Optional CSS selector for the login form\">"
+     "              </div>"
+     "              <div class=\"field full\">"
+     "                <label class=\"field-label\" for=\"site-extra-fields\">Extra Fields JSON</label>"
+     "                <textarea id=\"site-extra-fields\" spellcheck=\"false\" placeholder='{\"remember_me\":\"1\"}'></textarea>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"composer-foot\">"
+     "              <div class=\"admin-status\" id=\"site-status\">No site selected.</div>"
+     "              <div class=\"actions\">"
+     "                <button class=\"secondary\" id=\"delete-site\" type=\"button\">Delete</button>"
+     "                <button class=\"primary\" id=\"save-site\" type=\"button\">Save site</button>"
+     "              </div>"
+     "            </div>"
+     "          </section>"
+     "          <section class=\"admin-card admin-card-wide\">"
+     "            <div class=\"panel-header\">"
+     "              <div>"
+     "                <h3 class=\"panel-title\">Capabilities</h3>"
+     "                <p class=\"panel-note\">Installed tools and skills currently available to Xia.</p>"
+     "              </div>"
+     "            </div>"
+     "            <div class=\"capability-grid\">"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\">Tools</label>"
+     "                <div class=\"capability-list\" id=\"tool-list\"></div>"
+     "              </div>"
+     "              <div class=\"field\">"
+     "                <label class=\"field-label\">Skills</label>"
+     "                <div class=\"capability-list\" id=\"skill-list\"></div>"
+     "              </div>"
+     "            </div>"
+     "          </section>"
+     "        </div>"
+     "      </section>"
      "    </div>"
      "  </div>"
      "  <script>"
@@ -537,7 +866,20 @@
      "      activePadId: '',"
      "      activePad: null,"
      "      scratchDirty: false,"
-     "      scratchSaving: false"
+     "      scratchSaving: false,"
+     "      admin: {"
+     "        providers: [],"
+     "        services: [],"
+     "        sites: [],"
+     "        tools: [],"
+     "        skills: []"
+     "      },"
+     "      activeProviderId: '',"
+     "      activeServiceId: '',"
+     "      activeSiteId: '',"
+     "      providerSaving: false,"
+     "      serviceSaving: false,"
+     "      siteSaving: false"
      "    };"
      "    const statusEl = document.getElementById('status');"
      "    const sessionLabelEl = document.getElementById('session-label');"
@@ -562,6 +904,43 @@
      "    const saveScratchEl = document.getElementById('save-scratch');"
      "    const deleteScratchEl = document.getElementById('delete-scratch');"
      "    const insertScratchEl = document.getElementById('insert-scratch');"
+     "    const providerListEl = document.getElementById('provider-list');"
+     "    const providerIdEl = document.getElementById('provider-id');"
+     "    const providerNameEl = document.getElementById('provider-name');"
+     "    const providerBaseUrlEl = document.getElementById('provider-base-url');"
+     "    const providerModelEl = document.getElementById('provider-model');"
+     "    const providerApiKeyEl = document.getElementById('provider-api-key');"
+     "    const providerDefaultEl = document.getElementById('provider-default');"
+     "    const providerStatusEl = document.getElementById('provider-status');"
+     "    const newProviderEl = document.getElementById('new-provider');"
+     "    const saveProviderEl = document.getElementById('save-provider');"
+     "    const serviceListEl = document.getElementById('service-list');"
+     "    const serviceIdEl = document.getElementById('service-id');"
+     "    const serviceNameEl = document.getElementById('service-name');"
+     "    const serviceBaseUrlEl = document.getElementById('service-base-url');"
+     "    const serviceAuthTypeEl = document.getElementById('service-auth-type');"
+     "    const serviceAuthHeaderEl = document.getElementById('service-auth-header');"
+     "    const serviceAuthKeyEl = document.getElementById('service-auth-key');"
+     "    const serviceEnabledEl = document.getElementById('service-enabled');"
+     "    const serviceStatusEl = document.getElementById('service-status');"
+     "    const newServiceEl = document.getElementById('new-service');"
+     "    const saveServiceEl = document.getElementById('save-service');"
+     "    const siteListEl = document.getElementById('site-list');"
+     "    const siteIdEl = document.getElementById('site-id');"
+     "    const siteNameEl = document.getElementById('site-name');"
+     "    const siteLoginUrlEl = document.getElementById('site-login-url');"
+     "    const siteUsernameFieldEl = document.getElementById('site-username-field');"
+     "    const sitePasswordFieldEl = document.getElementById('site-password-field');"
+     "    const siteUsernameEl = document.getElementById('site-username');"
+     "    const sitePasswordEl = document.getElementById('site-password');"
+     "    const siteFormSelectorEl = document.getElementById('site-form-selector');"
+     "    const siteExtraFieldsEl = document.getElementById('site-extra-fields');"
+     "    const siteStatusEl = document.getElementById('site-status');"
+     "    const newSiteEl = document.getElementById('new-site');"
+     "    const saveSiteEl = document.getElementById('save-site');"
+     "    const deleteSiteEl = document.getElementById('delete-site');"
+     "    const toolListEl = document.getElementById('tool-list');"
+     "    const skillListEl = document.getElementById('skill-list');"
      ""
      "    function persistSession() {"
      "      if (state.sessionId) {"
@@ -605,6 +984,432 @@
      "        document.execCommand('copy');"
      "        document.body.removeChild(fallback);"
      "        setStatus(successLabel || 'Copied');"
+     "      }"
+     "    }"
+     ""
+     "    async function fetchJson(url, options) {"
+     "      const response = await fetch(url, options || {});"
+     "      const data = await response.json();"
+     "      if (!response.ok) {"
+     "        throw new Error(data.error || 'Request failed');"
+     "      }"
+     "      return data;"
+     "    }"
+     ""
+     "    function firstNonEmpty(value, fallback) {"
+     "      return value && String(value).trim() ? String(value).trim() : (fallback || '');"
+     "    }"
+     ""
+     "    function renderSelectableList(target, items, activeId, emptyText, titleFn, metaFn, onSelect) {"
+     "      target.innerHTML = '';"
+     "      if (!items.length) {"
+     "        const empty = document.createElement('div');"
+     "        empty.className = 'admin-list-empty';"
+     "        empty.textContent = emptyText;"
+     "        target.appendChild(empty);"
+     "        return;"
+     "      }"
+     "      items.forEach((item) => {"
+     "        const button = document.createElement('button');"
+     "        button.type = 'button';"
+     "        button.className = 'admin-item' + (item.id === activeId ? ' active' : '');"
+     "        const title = document.createElement('div');"
+     "        title.className = 'admin-item-title';"
+     "        title.textContent = titleFn(item);"
+     "        const meta = document.createElement('div');"
+     "        meta.className = 'admin-item-meta';"
+     "        meta.textContent = metaFn(item);"
+     "        button.appendChild(title);"
+     "        button.appendChild(meta);"
+     "        button.addEventListener('click', () => onSelect(item));"
+     "        target.appendChild(button);"
+     "      });"
+     "    }"
+     ""
+     "    function renderCapabilityList(target, items, emptyText, detailFn) {"
+     "      target.innerHTML = '';"
+     "      if (!items.length) {"
+     "        const empty = document.createElement('div');"
+     "        empty.className = 'admin-list-empty';"
+     "        empty.textContent = emptyText;"
+     "        target.appendChild(empty);"
+     "        return;"
+     "      }"
+     "      items.forEach((item) => {"
+     "        const card = document.createElement('div');"
+     "        card.className = 'capability-item';"
+     "        const title = document.createElement('div');"
+     "        title.className = 'capability-title';"
+     "        const name = document.createElement('span');"
+     "        name.textContent = firstNonEmpty(item.name, item.id);"
+     "        const badge = document.createElement('span');"
+     "        badge.className = 'badge' + (item.enabled ? '' : ' off');"
+     "        badge.textContent = item.enabled ? 'Enabled' : 'Disabled';"
+     "        title.appendChild(name);"
+     "        title.appendChild(badge);"
+     "        const meta = document.createElement('div');"
+     "        meta.className = 'capability-meta';"
+     "        meta.textContent = detailFn(item);"
+     "        card.appendChild(title);"
+     "        card.appendChild(meta);"
+     "        target.appendChild(card);"
+     "      });"
+     "    }"
+     ""
+     "    function providerMeta(provider) {"
+     "      const bits = [];"
+     "      if (provider.model) bits.push(provider.model);"
+     "      if (provider.default) bits.push('Default');"
+     "      bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');"
+     "      return bits.join(' • ');"
+     "    }"
+     ""
+     "    function serviceMeta(service) {"
+     "      const bits = [];"
+     "      if (service.auth_type) bits.push(service.auth_type);"
+     "      bits.push(service.enabled ? 'Enabled' : 'Disabled');"
+     "      bits.push(service.auth_key_configured ? 'Secret stored' : 'No secret');"
+     "      return bits.join(' • ');"
+     "    }"
+     ""
+     "    function siteMeta(site) {"
+     "      const bits = [];"
+     "      if (site.login_url) bits.push(site.login_url);"
+     "      bits.push(site.username_configured ? 'Username stored' : 'No username');"
+     "      bits.push(site.password_configured ? 'Password stored' : 'No password');"
+     "      return bits.join(' • ');"
+     "    }"
+     ""
+     "    function updateAdminButtons() {"
+     "      providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;"
+     "      saveProviderEl.disabled = state.providerSaving;"
+     "      newProviderEl.disabled = state.providerSaving;"
+     "      serviceIdEl.disabled = state.serviceSaving || !!state.activeServiceId;"
+     "      saveServiceEl.disabled = state.serviceSaving;"
+     "      newServiceEl.disabled = state.serviceSaving;"
+     "      siteIdEl.disabled = state.siteSaving || !!state.activeSiteId;"
+     "      saveSiteEl.disabled = state.siteSaving;"
+     "      newSiteEl.disabled = state.siteSaving;"
+     "      deleteSiteEl.disabled = state.siteSaving || !state.activeSiteId;"
+     "    }"
+     ""
+     "    function renderProviderList() {"
+     "      renderSelectableList("
+     "        providerListEl,"
+     "        state.admin.providers,"
+     "        state.activeProviderId,"
+     "        'No providers configured yet. Add one so Xia can talk to an LLM.',"
+     "        (provider) => firstNonEmpty(provider.name, provider.id),"
+     "        providerMeta,"
+     "        selectProvider"
+     "      );"
+     "    }"
+     ""
+     "    function renderServiceList() {"
+     "      renderSelectableList("
+     "        serviceListEl,"
+     "        state.admin.services,"
+     "        state.activeServiceId,"
+     "        'No services configured yet. Add one when Xia needs an authenticated API.',"
+     "        (service) => firstNonEmpty(service.name, service.id),"
+     "        serviceMeta,"
+     "        selectService"
+     "      );"
+     "    }"
+     ""
+     "    function renderSiteList() {"
+     "      renderSelectableList("
+     "        siteListEl,"
+     "        state.admin.sites,"
+     "        state.activeSiteId,"
+     "        'No site logins configured yet. Add one when browser automation needs stored credentials.',"
+     "        (site) => firstNonEmpty(site.name, site.id),"
+     "        siteMeta,"
+     "        selectSite"
+     "      );"
+     "    }"
+     ""
+     "    function renderCapabilities() {"
+     "      renderCapabilityList("
+     "        toolListEl,"
+     "        state.admin.tools,"
+     "        'No tools installed.',"
+     "        (tool) => [tool.id, tool.approval ? ('approval: ' + tool.approval) : '', tool.description || '']"
+     "          .filter(Boolean)"
+     "          .join(' • ')"
+     "      );"
+     "      renderCapabilityList("
+     "        skillListEl,"
+     "        state.admin.skills,"
+     "        'No skills installed.',"
+     "        (skill) => [skill.id, skill.version ? ('version ' + skill.version) : '', skill.description || '']"
+     "          .filter(Boolean)"
+     "          .join(' • ')"
+     "      );"
+     "    }"
+     ""
+     "    function resetProviderForm(statusText) {"
+     "      state.activeProviderId = '';"
+     "      providerIdEl.value = '';"
+     "      providerNameEl.value = '';"
+     "      providerBaseUrlEl.value = '';"
+     "      providerModelEl.value = '';"
+     "      providerApiKeyEl.value = '';"
+     "      providerDefaultEl.checked = !state.admin.providers.some((provider) => provider.default);"
+     "      providerStatusEl.textContent = statusText || 'Create a provider or select an existing one.';"
+     "      renderProviderList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
+     "    function resetServiceForm(statusText) {"
+     "      state.activeServiceId = '';"
+     "      serviceIdEl.value = '';"
+     "      serviceNameEl.value = '';"
+     "      serviceBaseUrlEl.value = '';"
+     "      serviceAuthTypeEl.value = 'bearer';"
+     "      serviceAuthHeaderEl.value = '';"
+     "      serviceAuthKeyEl.value = '';"
+     "      serviceEnabledEl.checked = true;"
+     "      serviceStatusEl.textContent = statusText || 'Create a service or select an existing one.';"
+     "      renderServiceList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
+     "    function resetSiteForm(statusText) {"
+     "      state.activeSiteId = '';"
+     "      siteIdEl.value = '';"
+     "      siteNameEl.value = '';"
+     "      siteLoginUrlEl.value = '';"
+     "      siteUsernameFieldEl.value = 'username';"
+     "      sitePasswordFieldEl.value = 'password';"
+     "      siteUsernameEl.value = '';"
+     "      sitePasswordEl.value = '';"
+     "      siteFormSelectorEl.value = '';"
+     "      siteExtraFieldsEl.value = '';"
+     "      siteStatusEl.textContent = statusText || 'Create a site login or select an existing one.';"
+     "      renderSiteList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
+     "    function selectProvider(provider) {"
+     "      state.activeProviderId = provider.id || '';"
+     "      providerIdEl.value = provider.id || '';"
+     "      providerNameEl.value = provider.name || '';"
+     "      providerBaseUrlEl.value = provider.base_url || '';"
+     "      providerModelEl.value = provider.model || '';"
+     "      providerApiKeyEl.value = '';"
+     "      providerDefaultEl.checked = !!provider.default;"
+     "      providerStatusEl.textContent = provider.api_key_configured"
+     "        ? 'API key stored. Leave the field blank to keep it, or enter a new one to replace it.'"
+     "        : 'No API key stored yet.';"
+     "      renderProviderList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
+     "    function selectService(service) {"
+     "      state.activeServiceId = service.id || '';"
+     "      serviceIdEl.value = service.id || '';"
+     "      serviceNameEl.value = service.name || '';"
+     "      serviceBaseUrlEl.value = service.base_url || '';"
+     "      serviceAuthTypeEl.value = service.auth_type || 'bearer';"
+     "      serviceAuthHeaderEl.value = service.auth_header || '';"
+     "      serviceAuthKeyEl.value = '';"
+     "      serviceEnabledEl.checked = !!service.enabled;"
+     "      serviceStatusEl.textContent = service.auth_key_configured"
+     "        ? 'Auth secret stored. Leave the field blank to keep it, or enter a new one to replace it.'"
+     "        : 'No auth secret stored yet.';"
+     "      renderServiceList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
+     "    function selectSite(site) {"
+     "      state.activeSiteId = site.id || '';"
+     "      siteIdEl.value = site.id || '';"
+     "      siteNameEl.value = site.name || '';"
+     "      siteLoginUrlEl.value = site.login_url || '';"
+     "      siteUsernameFieldEl.value = site.username_field || 'username';"
+     "      sitePasswordFieldEl.value = site.password_field || 'password';"
+     "      siteUsernameEl.value = '';"
+     "      sitePasswordEl.value = '';"
+     "      siteFormSelectorEl.value = site.form_selector || '';"
+     "      siteExtraFieldsEl.value = site.extra_fields || '';"
+     "      siteStatusEl.textContent = ["
+     "        site.username_configured ? 'Username stored.' : 'No username stored.',"
+     "        site.password_configured ? 'Password stored. Leave both fields blank to keep current secrets.' : 'No password stored yet.'"
+     "      ].join(' ');"
+     "      renderSiteList();"
+     "      updateAdminButtons();"
+     "    }"
+     ""
+     "    async function loadAdminConfig() {"
+     "      try {"
+     "        const data = await fetchJson('/admin/config');"
+     "        state.admin.providers = Array.isArray(data.providers) ? data.providers : [];"
+     "        state.admin.services = Array.isArray(data.services) ? data.services : [];"
+     "        state.admin.sites = Array.isArray(data.sites) ? data.sites : [];"
+     "        state.admin.tools = Array.isArray(data.tools) ? data.tools : [];"
+     "        state.admin.skills = Array.isArray(data.skills) ? data.skills : [];"
+     "        const provider = state.admin.providers.find((entry) => entry.id === state.activeProviderId);"
+     "        const service = state.admin.services.find((entry) => entry.id === state.activeServiceId);"
+     "        const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);"
+     "        if (provider) {"
+     "          selectProvider(provider);"
+     "        } else if (!state.activeProviderId) {"
+     "          resetProviderForm('Create a provider or select an existing one.');"
+     "        } else {"
+     "          resetProviderForm('Selected provider no longer exists.');"
+     "        }"
+     "        if (service) {"
+     "          selectService(service);"
+     "        } else if (!state.activeServiceId) {"
+     "          resetServiceForm('Create a service or select an existing one.');"
+     "        } else {"
+     "          resetServiceForm('Selected service no longer exists.');"
+     "        }"
+     "        if (site) {"
+     "          selectSite(site);"
+     "        } else if (!state.activeSiteId) {"
+     "          resetSiteForm('Create a site login or select an existing one.');"
+     "        } else {"
+     "          resetSiteForm('Selected site login no longer exists.');"
+     "        }"
+     "        renderCapabilities();"
+     "      } catch (err) {"
+     "        providerStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
+     "        serviceStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
+     "        siteStatusEl.textContent = err.message || 'Failed to load admin configuration.';"
+     "      }"
+     "    }"
+     ""
+     "    async function saveProvider() {"
+     "      if (state.providerSaving) {"
+     "        return;"
+     "      }"
+     "      state.providerSaving = true;"
+     "      providerStatusEl.textContent = 'Saving provider...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        const data = await fetchJson('/admin/providers', {"
+     "          method: 'POST',"
+     "          headers: { 'Content-Type': 'application/json' },"
+     "          body: JSON.stringify({"
+     "            id: providerIdEl.value,"
+     "            name: providerNameEl.value,"
+     "            base_url: providerBaseUrlEl.value,"
+     "            model: providerModelEl.value,"
+     "            api_key: providerApiKeyEl.value,"
+     "            default: providerDefaultEl.checked"
+     "          })"
+     "        });"
+     "        const provider = data.provider || null;"
+     "        state.activeProviderId = provider && provider.id ? provider.id : state.activeProviderId;"
+     "        providerApiKeyEl.value = '';"
+     "        providerStatusEl.textContent = 'Provider saved.';"
+     "        await loadAdminConfig();"
+     "        setStatus('Provider saved');"
+     "      } catch (err) {"
+     "        providerStatusEl.textContent = err.message || 'Failed to save provider.';"
+     "      } finally {"
+     "        state.providerSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
+     "    async function saveService() {"
+     "      if (state.serviceSaving) {"
+     "        return;"
+     "      }"
+     "      state.serviceSaving = true;"
+     "      serviceStatusEl.textContent = 'Saving service...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        const data = await fetchJson('/admin/services', {"
+     "          method: 'POST',"
+     "          headers: { 'Content-Type': 'application/json' },"
+     "          body: JSON.stringify({"
+     "            id: serviceIdEl.value,"
+     "            name: serviceNameEl.value,"
+     "            base_url: serviceBaseUrlEl.value,"
+     "            auth_type: serviceAuthTypeEl.value,"
+     "            auth_header: serviceAuthHeaderEl.value,"
+     "            auth_key: serviceAuthKeyEl.value,"
+     "            enabled: serviceEnabledEl.checked"
+     "          })"
+     "        });"
+     "        const service = data.service || null;"
+     "        state.activeServiceId = service && service.id ? service.id : state.activeServiceId;"
+     "        serviceAuthKeyEl.value = '';"
+     "        serviceStatusEl.textContent = 'Service saved.';"
+     "        await loadAdminConfig();"
+     "        setStatus('Service saved');"
+     "      } catch (err) {"
+     "        serviceStatusEl.textContent = err.message || 'Failed to save service.';"
+     "      } finally {"
+     "        state.serviceSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
+     "    async function saveSite() {"
+     "      if (state.siteSaving) {"
+     "        return;"
+     "      }"
+     "      state.siteSaving = true;"
+     "      siteStatusEl.textContent = 'Saving site login...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        const data = await fetchJson('/admin/sites', {"
+     "          method: 'POST',"
+     "          headers: { 'Content-Type': 'application/json' },"
+     "          body: JSON.stringify({"
+     "            id: siteIdEl.value,"
+     "            name: siteNameEl.value,"
+     "            login_url: siteLoginUrlEl.value,"
+     "            username_field: siteUsernameFieldEl.value,"
+     "            password_field: sitePasswordFieldEl.value,"
+     "            username: siteUsernameEl.value,"
+     "            password: sitePasswordEl.value,"
+     "            form_selector: siteFormSelectorEl.value,"
+     "            extra_fields: siteExtraFieldsEl.value"
+     "          })"
+     "        });"
+     "        const site = data.site || null;"
+     "        state.activeSiteId = site && site.id ? site.id : state.activeSiteId;"
+     "        siteUsernameEl.value = '';"
+     "        sitePasswordEl.value = '';"
+     "        siteStatusEl.textContent = 'Site login saved.';"
+     "        await loadAdminConfig();"
+     "        setStatus('Site login saved');"
+     "      } catch (err) {"
+     "        siteStatusEl.textContent = err.message || 'Failed to save site login.';"
+     "      } finally {"
+     "        state.siteSaving = false;"
+     "        updateAdminButtons();"
+     "      }"
+     "    }"
+     ""
+     "    async function deleteSite() {"
+     "      if (!state.activeSiteId || state.siteSaving) {"
+     "        return;"
+     "      }"
+     "      if (!window.confirm('Delete this stored site login?')) {"
+     "        return;"
+     "      }"
+     "      state.siteSaving = true;"
+     "      siteStatusEl.textContent = 'Deleting site login...';"
+     "      updateAdminButtons();"
+     "      try {"
+     "        await fetchJson('/admin/sites/' + encodeURIComponent(state.activeSiteId), { method: 'DELETE' });"
+     "        const deletedId = state.activeSiteId;"
+     "        state.activeSiteId = '';"
+     "        resetSiteForm('Site login deleted.');"
+     "        await loadAdminConfig();"
+     "        setStatus('Deleted site login ' + deletedId);"
+     "      } catch (err) {"
+     "        siteStatusEl.textContent = err.message || 'Failed to delete site login.';"
+     "      } finally {"
+     "        state.siteSaving = false;"
+     "        updateAdminButtons();"
      "      }"
      "    }"
      ""
@@ -1143,6 +1948,37 @@
      "      insertScratchIntoComposer();"
      "    });"
      ""
+     "    newProviderEl.addEventListener('click', () => {"
+     "      resetProviderForm('Create a new provider.');"
+     "      providerIdEl.focus();"
+     "    });"
+     ""
+     "    saveProviderEl.addEventListener('click', () => {"
+     "      saveProvider();"
+     "    });"
+     ""
+     "    newServiceEl.addEventListener('click', () => {"
+     "      resetServiceForm('Create a new service.');"
+     "      serviceIdEl.focus();"
+     "    });"
+     ""
+     "    saveServiceEl.addEventListener('click', () => {"
+     "      saveService();"
+     "    });"
+     ""
+     "    newSiteEl.addEventListener('click', () => {"
+     "      resetSiteForm('Create a new site login.');"
+     "      siteIdEl.focus();"
+     "    });"
+     ""
+     "    saveSiteEl.addEventListener('click', () => {"
+     "      saveSite();"
+     "    });"
+     ""
+     "    deleteSiteEl.addEventListener('click', () => {"
+     "      deleteSite();"
+     "    });"
+     ""
      "    newChatEl.addEventListener('click', () => {"
      "      if (!discardScratchChanges()) {"
      "        return;"
@@ -1173,10 +2009,16 @@
      "    renderApproval();"
      "    renderMessages();"
      "    syncScratchEditor('No scratch pad selected.');"
+     "    resetProviderForm('Loading providers...');"
+     "    resetServiceForm('Loading services...');"
+     "    resetSiteForm('Loading site logins...');"
+     "    renderCapabilities();"
+     "    updateAdminButtons();"
      "    updateComposerState();"
      "    composerEl.focus();"
      "    loadSessionMessages();"
      "    loadScratchPads();"
+     "    loadAdminConfig();"
      "    window.setInterval(() => {"
      "      if (state.sessionId) {"
      "        pollApproval();"
@@ -1196,8 +2038,7 @@
      (fn [ch]
        (let [sid (db/create-session! :websocket)]
          (swap! ws-sessions assoc ch sid)
-         (wm/create-wm! sid)
-         (wm/warm-start!)
+         (wm/ensure-wm! sid)
          (log/info "WebSocket connected, session:" sid)
          (http/send! ch (json/write-json-str {:type "connected" :session-id (str sid)}))))
 
@@ -1218,8 +2059,9 @@
 
      :on-close
      (fn [ch _status]
-       (wm/snapshot!)
-       (wm/clear-wm!)
+       (when-let [sid (get @ws-sessions ch)]
+         (wm/snapshot! sid)
+         (wm/clear-wm! sid))
        (swap! ws-sessions dissoc ch)
        (log/info "WebSocket disconnected"))}))
 
@@ -1404,6 +2246,100 @@
   [pad]
   (dissoc (scratch-pad->body pad) :content))
 
+(defn- nonblank-str
+  [value]
+  (let [s (some-> value str str/trim)]
+    (when (seq s)
+      s)))
+
+(defn- parse-keyword-id
+  [value field-name]
+  (let [id-str (nonblank-str value)]
+    (cond
+      (nil? id-str)
+      (throw (ex-info (str "missing '" field-name "' field") {:field field-name}))
+
+      (re-find #"\s" id-str)
+      (throw (ex-info (str "'" field-name "' must not contain whitespace")
+                      {:field field-name
+                       :value value}))
+
+      :else
+      (keyword id-str))))
+
+(defn- parse-extra-fields
+  [value]
+  (let [text (nonblank-str value)]
+    (when text
+      (try
+        (json/write-json-str (json/read-json text))
+        (catch Exception _
+          (throw (ex-info "extra_fields must be valid JSON"
+                          {:field "extra_fields"})))))))
+
+(defn- parse-auth-type
+  [value]
+  (let [auth-type (some-> value nonblank-str keyword)]
+    (when-not (contains? service-auth-types auth-type)
+      (throw (ex-info "invalid auth_type"
+                      {:field "auth_type"
+                       :value value})))
+    auth-type))
+
+(defn- sort-by-name
+  [entries]
+  (->> entries
+       (sort-by (fn [entry]
+                  (str/lower-case (or (:name entry) (:id entry) ""))))
+       vec))
+
+(defn- provider->admin-body
+  [provider]
+  {:id                 (some-> (:llm.provider/id provider) name)
+   :name               (:llm.provider/name provider)
+   :base_url           (:llm.provider/base-url provider)
+   :model              (:llm.provider/model provider)
+   :default            (boolean (:llm.provider/default? provider))
+   :api_key_configured (boolean (nonblank-str (:llm.provider/api-key provider)))})
+
+(defn- service->admin-body
+  [service]
+  {:id                  (some-> (:service/id service) name)
+   :name                (:service/name service)
+   :base_url            (:service/base-url service)
+   :auth_type           (some-> (:service/auth-type service) name)
+   :auth_header         (:service/auth-header service)
+   :enabled             (boolean (:service/enabled? service))
+   :auth_key_configured (boolean (nonblank-str (:service/auth-key service)))})
+
+(defn- site->admin-body
+  [site]
+  {:id                  (some-> (:site-cred/id site) name)
+   :name                (:site-cred/name site)
+   :login_url           (:site-cred/login-url site)
+   :username_field      (:site-cred/username-field site)
+   :password_field      (:site-cred/password-field site)
+   :form_selector       (:site-cred/form-selector site)
+   :extra_fields        (:site-cred/extra-fields site)
+   :username_configured (boolean (nonblank-str (:site-cred/username site)))
+   :password_configured (boolean (nonblank-str (:site-cred/password site)))})
+
+(defn- tool->admin-body
+  [tool]
+  {:id          (some-> (:tool/id tool) name)
+   :name        (:tool/name tool)
+   :description (:tool/description tool)
+   :approval    (some-> (:tool/approval tool) name)
+   :enabled     (boolean (:tool/enabled? tool))})
+
+(defn- skill->admin-body
+  [skill]
+  {:id          (some-> (:skill/id skill) name)
+   :name        (:skill/name skill)
+   :description (:skill/description skill)
+   :version     (:skill/version skill)
+   :enabled     (boolean (:skill/enabled? skill))})
+
 (defn- session-scratch-pad
   [session-id pad-id]
   (let [pad (scratch/get-pad pad-id)]
@@ -1414,6 +2350,7 @@
 
 (defn- handle-create-session []
   (let [sid (db/create-session! :http)]
+    (wm/ensure-wm! sid)
     (json-response 200 {:session_id (str sid)})))
 
 (defn- handle-chat [req]
@@ -1422,14 +2359,16 @@
         session-id (get data "session_id")]
     (if-not message
       (json-response 400 {:error "missing 'message' field"})
-      (let [sid      (if session-id
-                       (java.util.UUID/fromString session-id)
-                       (db/create-session! :http))
-            _        (do (wm/create-wm! sid) (wm/warm-start!))
+      (if (and session-id (not (session-exists? session-id)))
+        (json-response 404 {:error "unknown session id"})
+        (let [sid      (if session-id
+                         (java.util.UUID/fromString session-id)
+                         (db/create-session! :http))
+              _        (wm/ensure-wm! sid)
             response (agent/process-message sid message :channel :http)]
-        (json-response 200 {:session_id (str sid)
-                            :role       "assistant"
-                            :content    response})))))
+          (json-response 200 {:session_id (str sid)
+                              :role       "assistant"
+                              :content    response}))))))
 
 (defn- handle-get-approval [session-id]
   (if-not (parse-session-id session-id)
@@ -1623,6 +2562,139 @@
                           :session_id session-id
                           :pad_id pad-id}))))
 
+(defn- handle-admin-config [_req]
+  (json-response
+    200
+    {:providers (->> (db/list-providers)
+                     (map provider->admin-body)
+                     sort-by-name)
+     :services  (->> (db/list-services)
+                     (map service->admin-body)
+                     sort-by-name)
+     :sites     (->> (db/list-site-creds)
+                     (map site->admin-body)
+                     sort-by-name)
+     :tools     (->> (db/list-tools)
+                     (map tool->admin-body)
+                     sort-by-name)
+     :skills    (->> (db/list-skills)
+                     (map skill->admin-body)
+                     sort-by-name)}))
+
+(defn- handle-save-provider [req]
+  (try
+    (let [data         (or (read-body req) {})
+          provider-id  (parse-keyword-id (get data "id") "id")
+          base-url     (nonblank-str (get data "base_url"))
+          model        (nonblank-str (get data "model"))
+          name         (or (nonblank-str (get data "name"))
+                           (name provider-id))
+          api-key      (nonblank-str (get data "api_key"))
+          make-default (true? (get data "default"))
+          has-default? (some? (db/get-default-provider))]
+      (when-not base-url
+        (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
+      (when-not model
+        (throw (ex-info "missing 'model' field" {:field "model"})))
+      (db/upsert-provider! (cond-> {:id       provider-id
+                                    :name     name
+                                    :base-url base-url
+                                    :model    model}
+                             api-key
+                             (assoc :api-key api-key)))
+      (when (or make-default (not has-default?))
+        (db/set-default-provider! provider-id))
+      (json-response 200 {:provider (provider->admin-body (db/get-provider provider-id))}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-save-service [req]
+  (try
+    (let [data              (or (read-body req) {})
+          service-id        (parse-keyword-id (get data "id") "id")
+          existing          (db/get-service service-id)
+          base-url          (nonblank-str (get data "base_url"))
+          name              (or (nonblank-str (get data "name"))
+                                (name service-id))
+          auth-type         (parse-auth-type (get data "auth_type"))
+          entered-auth-key  (nonblank-str (get data "auth_key"))
+          enabled?          (if (contains? data "enabled")
+                              (true? (get data "enabled"))
+                              true)
+          entered-header    (nonblank-str (get data "auth_header"))
+          auth-header       (when (#{:api-key-header :query-param} auth-type)
+                              (or entered-header
+                                  (:service/auth-header existing)))]
+      (when-not base-url
+        (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
+      (when (and (#{:api-key-header :query-param} auth-type)
+                 (nil? auth-header))
+        (throw (ex-info "auth_header is required for the selected auth_type"
+                        {:field "auth_header"})))
+      (db/save-service! {:id          service-id
+                         :name        name
+                         :base-url    base-url
+                         :auth-type   auth-type
+                         :auth-key    (or entered-auth-key
+                                          (:service/auth-key existing)
+                                          "")
+                         :auth-header auth-header
+                         :enabled?    enabled?})
+      (json-response 200 {:service (service->admin-body (db/get-service service-id))}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-save-site [req]
+  (try
+    (let [data            (or (read-body req) {})
+          site-id         (parse-keyword-id (get data "id") "id")
+          existing        (db/get-site-cred site-id)
+          login-url       (nonblank-str (get data "login_url"))
+          name            (or (nonblank-str (get data "name"))
+                              (name site-id))
+          username-field  (or (nonblank-str (get data "username_field"))
+                              "username")
+          password-field  (or (nonblank-str (get data "password_field"))
+                              "password")
+          username        (or (nonblank-str (get data "username"))
+                              (:site-cred/username existing)
+                              "")
+          password        (or (nonblank-str (get data "password"))
+                              (:site-cred/password existing)
+                              "")
+          form-selector   (nonblank-str (get data "form_selector"))
+          extra-fields    (parse-extra-fields (get data "extra_fields"))]
+      (when-not login-url
+        (throw (ex-info "missing 'login_url' field" {:field "login_url"})))
+      (db/save-site-cred! {:id             site-id
+                           :name           name
+                           :login-url      login-url
+                           :username-field username-field
+                           :password-field password-field
+                           :username       username
+                           :password       password
+                           :form-selector  form-selector
+                           :extra-fields   extra-fields})
+      (json-response 200 {:site (site->admin-body (db/get-site-cred site-id))}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-delete-site [site-id]
+  (try
+    (let [site-key (parse-keyword-id site-id "site_id")]
+      (if (db/get-site-cred site-key)
+        (do
+          (db/remove-site-cred! site-key)
+          (json-response 200 {:status "deleted"
+                              :site_id (name site-key)}))
+        (json-response 404 {:error "site credential not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
 (defn- handle-skills [_req]
   (json-response 200 {:skills (mapv (fn [s]
                                       {:id          (name (:skill/id s))
@@ -1651,7 +2723,8 @@
         approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
         scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
         scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
-        scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)]
+        scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)
+        admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)]
     (cond
       (and (= method :get) (= uri "/"))
       (handle-home req)
@@ -1706,6 +2779,21 @@
       (protected-route-response req #(handle-edit-scratch-pad (second scratch-edit-match)
                                                               (nth scratch-edit-match 2)
                                                               req))
+
+      (and (= method :get) (= uri "/admin/config"))
+      (protected-route-response req #(handle-admin-config req))
+
+      (and (= method :post) (= uri "/admin/providers"))
+      (protected-route-response req #(handle-save-provider req))
+
+      (and (= method :post) (= uri "/admin/services"))
+      (protected-route-response req #(handle-save-service req))
+
+      (and (= method :post) (= uri "/admin/sites"))
+      (protected-route-response req #(handle-save-site req))
+
+      (and (= method :delete) admin-site-match)
+      (protected-route-response req #(handle-delete-site (second admin-site-match)))
 
       (and (= method :get) (= uri "/skills"))
       (protected-route-response req #(handle-skills req))

@@ -1,0 +1,11 @@
+;; List registered site credentials without exposing secrets.
+;; Import with: /import-tool resources/tools/browser-list-sites.edn
+
+{:id          :browser-list-sites
+ :name        "browser-list-sites"
+ :description "List registered site login entries that can be used with browser-login. Returns site ids, names, and login URLs without exposing credentials."
+ :parameters  {"type"       "object"
+               "properties" {}
+               "required"   []}
+ :handler     "(fn [_]
+                 (xia.browser/list-sites))"}

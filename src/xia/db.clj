@@ -139,6 +139,7 @@
    :schedule/tool-id     {:db/valueType :db.type/keyword}    ; for :tool type
    :schedule/tool-args   {:db/valueType :db.type/string}     ; JSON for :tool args
    :schedule/prompt      {:db/valueType :db.type/string}     ; for :prompt type
+   :schedule/trusted?    {:db/valueType :db.type/boolean}    ; user-approved to run privileged tools without live prompts
    :schedule/enabled?    {:db/valueType :db.type/boolean}
    :schedule/last-run    {:db/valueType :db.type/instant}
    :schedule/next-run    {:db/valueType :db.type/instant}
@@ -361,9 +362,28 @@
     (when-let [eid (ffirst results)]
       (decrypt-entity (raw-entity eid)))))
 
+(defn get-provider [provider-id]
+  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.provider/id ?id]]
+                       provider-id))]
+    (when eid
+      (decrypt-entity (raw-entity eid)))))
+
 (defn list-providers []
   (let [eids (q '[:find ?e :where [?e :llm.provider/id _]])]
     (mapv #(decrypt-entity (raw-entity (first %))) eids)))
+
+(defn set-default-provider!
+  "Mark exactly one provider as the default."
+  [provider-id]
+  (let [providers (list-providers)
+        tx-data   (mapv (fn [provider]
+                          {:llm.provider/id       (:llm.provider/id provider)
+                           :llm.provider/default? (= provider-id
+                                                     (:llm.provider/id provider))})
+                        providers)]
+    (when (seq tx-data)
+      (transact! tx-data))
+    provider-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Memory — episodic and knowledge graph operations are in xia.memory
@@ -533,18 +553,42 @@
 ;; Site Credentials (website login credentials)
 ;; ---------------------------------------------------------------------------
 
-(defn register-site-cred!
+(defn save-site-cred!
   [{:keys [id name login-url username-field password-field
            username password form-selector extra-fields]}]
-  (transact! [(cond-> {:site-cred/id             id
-                        :site-cred/name           (or name (clojure.core/name id))
-                        :site-cred/login-url      login-url
-                        :site-cred/username-field (or username-field "username")
-                        :site-cred/password-field (or password-field "password")
-                        :site-cred/username       (or username "")
-                        :site-cred/password       (or password "")}
-                form-selector (assoc :site-cred/form-selector form-selector)
-                extra-fields  (assoc :site-cred/extra-fields extra-fields))]))
+  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] id))
+        current (when eid (raw-entity eid))
+        tx-data (cond-> [{:site-cred/id             id
+                          :site-cred/name           (or name (clojure.core/name id))
+                          :site-cred/login-url      login-url
+                          :site-cred/username-field (or username-field "username")
+                          :site-cred/password-field (or password-field "password")
+                          :site-cred/username       (or username "")
+                          :site-cred/password       (or password "")}]
+                  form-selector
+                  (update 0 assoc :site-cred/form-selector form-selector)
+
+                  extra-fields
+                  (update 0 assoc :site-cred/extra-fields extra-fields)
+
+                  (and eid
+                       (nil? form-selector)
+                       (contains? current :site-cred/form-selector))
+                  (conj [:db/retract eid
+                         :site-cred/form-selector
+                         (:site-cred/form-selector current)])
+
+                  (and eid
+                       (nil? extra-fields)
+                       (contains? current :site-cred/extra-fields))
+                  (conj [:db/retract eid
+                         :site-cred/extra-fields
+                         (:site-cred/extra-fields current)]))]
+    (transact! tx-data)))
+
+(defn register-site-cred!
+  [site-cred]
+  (save-site-cred! site-cred))
 
 (defn get-site-cred [site-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
@@ -562,14 +606,29 @@
 ;; Services (external service registrations)
 ;; ---------------------------------------------------------------------------
 
-(defn register-service! [{:keys [id name base-url auth-type auth-key auth-header]}]
-  (transact! [(cond-> {:service/id        id
-                        :service/name      (or name (clojure.core/name id))
-                        :service/base-url  base-url
-                        :service/auth-type (or auth-type :bearer)
-                        :service/auth-key  (or auth-key "")
-                        :service/enabled?  true}
-                auth-header (assoc :service/auth-header auth-header))]))
+(defn save-service!
+  [{:keys [id name base-url auth-type auth-key auth-header enabled?]}]
+  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
+        current (when eid (raw-entity eid))
+        tx-data (cond-> [{:service/id        id
+                          :service/name      (or name (clojure.core/name id))
+                          :service/base-url  base-url
+                          :service/auth-type (or auth-type :bearer)
+                          :service/auth-key  (or auth-key "")
+                          :service/enabled?  (if (nil? enabled?) true enabled?)}]
+                  auth-header
+                  (update 0 assoc :service/auth-header auth-header)
+
+                  (and eid
+                       (nil? auth-header)
+                       (contains? current :service/auth-header))
+                  (conj [:db/retract eid
+                         :service/auth-header
+                         (:service/auth-header current)]))]
+    (transact! tx-data)))
+
+(defn register-service! [service]
+  (save-service! service))
 
 (defn get-service [service-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] service-id))]

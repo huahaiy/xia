@@ -10,5 +10,6 @@
                              "selectors" {"type"        "object"
                                           "description" "Map of output names to CSS selector strings, e.g. {\"links\": \"a[href]\", \"headings\": \"h1, h2\"}"}}
                "required"   ["url" "selectors"]}
- :handler     "(fn [{\"url\" url \"selectors\" selectors}]
-                 (xia.web/extract-data url selectors))"}
+ :handler     "(fn [args]
+                 (xia.web/extract-data (get args \"url\")
+                                       (get args \"selectors\")))"}

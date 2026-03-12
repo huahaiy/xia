@@ -41,12 +41,14 @@
    3. Calls the LLM with available tools (function-calling)
    4. If the LLM wants to use tools, executes them and loops
    5. Returns the final text response"
-  [session-id user-message & {:keys [channel] :or {channel :terminal}}]
+  [session-id user-message & {:keys [channel tool-context]
+                              :or   {channel :terminal
+                                     tool-context {}}}]
   (db/add-message! session-id :user user-message)
   ;; Update working memory before building context
   (wm/update-wm! user-message session-id channel)
   (let [tools (tool/tool-definitions)]
-    (loop [messages (context/build-messages session-id user-message)
+    (loop [messages (context/build-messages session-id)
            round    0]
       (when (>= round max-tool-rounds)
         (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
@@ -59,8 +61,10 @@
                 assistant-msg {:role       "assistant"
                                :content    (get response "content" "")
                                :tool_calls tool-calls}
-                tool-results  (execute-tool-calls tool-calls {:session-id session-id
-                                                              :channel    channel})]
+                tool-results  (execute-tool-calls tool-calls
+                                                  (merge {:session-id session-id
+                                                          :channel    channel}
+                                                         tool-context))]
             ;; Store assistant message with tool calls
             (db/add-message! session-id :assistant
                              (get response "content" "")

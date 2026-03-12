@@ -114,6 +114,7 @@
     (is (= #{0} (:minute (:spec sched))))
     (is (= #{9} (:hour (:spec sched))))
     (is (= :tool (:type sched)))
+    (is (true? (:trusted? sched)))
     (is (= :web-fetch (:tool-id sched)))
     (is (= {"url" "https://example.com"} (:tool-args sched)))
     (is (true? (:enabled? sched)))
@@ -145,6 +146,12 @@
     {:id :upd-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
   (let [updated (schedule/update-schedule! :upd-test {:name "New Name"})]
     (is (= "New Name" (:name updated)))))
+
+(deftest update-schedule-trust
+  (schedule/create-schedule!
+    {:id :trust-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
+  (let [updated (schedule/update-schedule! :trust-test {:trusted? false})]
+    (is (false? (:trusted? updated)))))
 
 (deftest update-schedule-spec-recalculates-next-run
   (schedule/create-schedule!

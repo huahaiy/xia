@@ -10,5 +10,6 @@
                              "max_tokens" {"type"        "integer"
                                            "description" "Max content length in estimated tokens (default 2000)"}}
                "required"   ["url"]}
- :handler     "(fn [{\"url\" url \"max_tokens\" max-tokens}]
-                 (xia.web/fetch-page url :max-tokens (or max-tokens 2000)))"}
+ :handler     "(fn [args]
+                 (xia.web/fetch-page (get args \"url\")
+                                     :max-tokens (or (get args \"max_tokens\") 2000)))"}

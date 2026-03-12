@@ -8,11 +8,13 @@
    Contrast with skills: a skill is text the LLM reads and follows;
    a tool is code the LLM triggers and gets results from."
   (:require [clojure.string :as str]
+            [clojure.java.io :as io]
             [clojure.tools.logging :as log]
             [charred.api :as json]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.sci-env :as sci-env]))
+            [xia.sci-env :as sci-env]
+            [xia.working-memory :as wm]))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool registry (runtime — compiled handlers)
@@ -20,6 +22,25 @@
 
 (defonce ^:private registry (atom {}))
 (defonce ^:private session-approvals (atom {}))
+
+(def ^:private bundled-tool-resources
+  ["tools/web-search.edn"
+   "tools/web-fetch.edn"
+   "tools/web-extract.edn"
+   "tools/browser-open.edn"
+   "tools/browser-navigate.edn"
+   "tools/browser-read-page.edn"
+   "tools/browser-wait.edn"
+   "tools/browser-click.edn"
+   "tools/browser-fill-form.edn"
+   "tools/browser-list-sessions.edn"
+   "tools/browser-list-sites.edn"
+   "tools/browser-close.edn"
+   "tools/browser-login.edn"
+   "tools/browser-login-interactive.edn"
+   "tools/schedule-list.edn"
+   "tools/schedule-create.edn"
+   "tools/schedule-manage.edn"])
 
 (def ^:private approval-note
   " Requires user approval before execution.")
@@ -167,6 +188,20 @@
       (mapv import-tool! data)
       (import-tool! data))))
 
+(defn ensure-bundled-tools!
+  "Install bundled tool definitions that are not already present in the DB."
+  []
+  (reduce
+    (fn [installed-count resource-path]
+      (let [data (some-> resource-path io/resource slurp read-string)
+            defs (if (vector? data) data [data])
+            missing (filterv #(nil? (db/get-tool (:id %))) defs)]
+        (doseq [tool-def missing]
+          (import-tool! tool-def))
+        (+ installed-count (clojure.core/count missing))))
+    0
+    bundled-tool-resources))
+
 ;; ---------------------------------------------------------------------------
 ;; OpenAI function-calling format
 ;; ---------------------------------------------------------------------------
@@ -201,41 +236,44 @@
   [tool-id tool arguments context]
   (let [{:keys [policy reason]} (tool-approval-policy tool)
         session-id              (:session-id context)
+        bypass?                 (:approval-bypass? context)
         request                 {:tool-id     tool-id
                                  :tool-name   (:tool/name tool)
                                  :description (:tool/description tool)
                                  :arguments   arguments
                                  :policy      policy
                                  :reason      reason}]
-    (case policy
-      :auto
+    (if bypass?
       {:allowed? true}
-
-      :session
-      (if (and session-id (approved-for-session? session-id tool-id))
+      (case policy
+        :auto
         {:allowed? true}
+
+        :session
+        (if (and session-id (approved-for-session? session-id tool-id))
+          {:allowed? true}
+          (try
+            (if (prompt/approve! request)
+              (do
+                (remember-session-approval! session-id tool-id)
+                {:allowed? true})
+              {:allowed? false
+               :error    (str "user denied approval for privileged tool "
+                              (name tool-id))})
+            (catch Exception e
+              {:allowed? false :error (.getMessage e)})))
+
+        :always
         (try
           (if (prompt/approve! request)
-            (do
-              (remember-session-approval! session-id tool-id)
-              {:allowed? true})
+            {:allowed? true}
             {:allowed? false
              :error    (str "user denied approval for privileged tool "
                             (name tool-id))})
           (catch Exception e
-            {:allowed? false :error (.getMessage e)})))
+            {:allowed? false :error (.getMessage e)}))
 
-      :always
-      (try
-        (if (prompt/approve! request)
-          {:allowed? true}
-          {:allowed? false
-           :error    (str "user denied approval for privileged tool "
-                          (name tool-id))})
-        (catch Exception e
-          {:allowed? false :error (.getMessage e)}))
-
-      {:allowed? true})))
+        {:allowed? true}))))
 
 (defn execute-tool
   "Execute a tool by id with the given arguments map."
@@ -245,7 +283,8 @@
    (if-let [{:keys [tool handler]} (get @registry tool-id)]
     (if (fn? handler)
       (try
-        (binding [prompt/*interaction-context* context]
+        (binding [prompt/*interaction-context* context
+                  wm/*session-id*            (:session-id context)]
           (let [{:keys [allowed? error]} (ensure-approved tool-id tool arguments context)]
             (if allowed?
               (handler arguments)

@@ -1,0 +1,12 @@
+;; Read the current page in a browser session.
+;; Import with: /import-tool resources/tools/browser-read-page.edn
+
+{:id          :browser-read-page
+ :name        "browser-read-page"
+ :description "Read the current page in a browser session without clicking or navigating. Use after browser-wait or when you want a fresh snapshot of the current page state."
+ :parameters  {"type"       "object"
+               "properties" {"session_id" {"type"        "string"
+                                           "description" "The browser session ID to inspect"}}
+               "required"   ["session_id"]}
+ :handler     "(fn [args]
+                 (xia.browser/read-page (get args \"session_id\")))"}
