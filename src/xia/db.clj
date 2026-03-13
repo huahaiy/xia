@@ -40,6 +40,7 @@
    :episode/channel      {:db/valueType :db.type/string}
    :episode/session-id   {:db/valueType :db.type/string}  ; link back to session
    :episode/timestamp    {:db/valueType :db.type/instant}
+   :episode/importance   {:db/valueType :db.type/float}
    :episode/processed?   {:db/valueType :db.type/boolean}  ; consolidated by hippocampus?
 
    ;; --- Knowledge Graph: Nodes ---
@@ -65,10 +66,12 @@
    :kg.fact/node       {:db/valueType :db.type/ref}     ; → kg.node
    :kg.fact/content    {:db/valueType :db.type/string  :db/fulltext true}
    :kg.fact/confidence {:db/valueType :db.type/float}
+   :kg.fact/utility    {:db/valueType :db.type/float}
    :kg.fact/source     {:db/valueType :db.type/ref}     ; → episode (provenance)
    :kg.fact/created-at {:db/valueType :db.type/instant}
    :kg.fact/updated-at {:db/valueType :db.type/instant}
    :kg.fact/decayed-at {:db/valueType :db.type/instant}
+   :kg.fact/bottomed-at {:db/valueType :db.type/instant}
 
    ;; --- Session ---
    :session/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
@@ -342,6 +345,12 @@
 
 (defn set-config! [k v]
   (transact! [{:config/key k :config/value (str v)}]))
+
+(defn delete-config! [k]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?k
+                              :where [?e :config/key ?k]]
+                            k))]
+    (transact! [[:db/retractEntity eid]])))
 
 (defn get-config [k]
   (let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]

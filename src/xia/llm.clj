@@ -23,9 +23,15 @@
    {:id :memory-summary
     :label "Memory Summary"
     :description "Conversation summarization for episodic memory."}
+   {:id :memory-importance
+    :label "Memory Importance"
+    :description "Batch rating episodic-memory importance for retention."}
    {:id :memory-extraction
     :label "Memory Extraction"
-    :description "Knowledge extraction during hippocampus consolidation."}])
+    :description "Knowledge extraction during hippocampus consolidation."}
+   {:id :fact-utility
+    :label "Fact Utility"
+    :description "Post-response rating of which retrieved facts were useful."}])
 (def ^:private workload-id-set (set (map :id workload-options)))
 (defonce ^:private workload-counters (atom {}))
 (defonce ^:private provider-health (atom {}))

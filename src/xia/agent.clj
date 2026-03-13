@@ -40,6 +40,16 @@
                           :message message}
                          extra)))
 
+(defn schedule-fact-utility-review!
+  [fact-eids user-message assistant-response]
+  (when (and (seq fact-eids)
+             (seq assistant-response))
+    (future
+      (try
+        (wm/review-fact-utility! fact-eids user-message assistant-response)
+        (catch Exception e
+          (log/warn "Failed to review fact utility:" (.getMessage e)))))))
+
 (defn- prepare-tool-call
   [tc]
   (let [func-name (get-in tc ["function" "name"])
@@ -120,11 +130,13 @@
             execution-context (merge {:session-id session-id
                                       :channel    channel}
                                      tool-context)
-            tools (tool/tool-definitions execution-context)]
-        (loop [messages (context/build-messages session-id
-                                                {:provider            assistant-provider
-                                                 :provider-id         assistant-provider-id
-                                                 :compaction-workload :history-compaction})
+            tools (tool/tool-definitions execution-context)
+            {:keys [messages used-fact-eids]}
+            (context/build-messages-data session-id
+                                         {:provider            assistant-provider
+                                          :provider-id         assistant-provider-id
+                                          :compaction-workload :history-compaction})]
+        (loop [messages messages
                round    0]
           (when (>= round max-tool-rounds)
             (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
@@ -171,6 +183,7 @@
                 (report-status! "Preparing response"
                                 :phase :finalizing)
                 (db/add-message! session-id :assistant text)
+                (schedule-fact-utility-review! used-fact-eids user-message text)
                 (prompt/status! {:state :done
                                  :phase :complete
                                  :message "Ready"})

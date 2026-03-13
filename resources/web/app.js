@@ -14,6 +14,8 @@ const state = {
   scratchSaving: false,
   admin: {
     providers: [],
+    memoryRetention: null,
+    knowledgeDecay: null,
     llmWorkloads: [],
     oauthProviderTemplates: [],
     oauthAccounts: [],
@@ -35,6 +37,8 @@ const state = {
   activeServiceId: '',
   activeSiteId: '',
   providerSaving: false,
+  retentionSaving: false,
+  knowledgeDecaySaving: false,
   oauthSaving: false,
   serviceSaving: false,
   siteSaving: false,
@@ -86,6 +90,18 @@ const providerDefaultEl = document.getElementById('provider-default');
 const providerStatusEl = document.getElementById('provider-status');
 const newProviderEl = document.getElementById('new-provider');
 const saveProviderEl = document.getElementById('save-provider');
+const retentionFullResolutionDaysEl = document.getElementById('retention-full-resolution-days');
+const retentionDecayHalfLifeDaysEl = document.getElementById('retention-decay-half-life-days');
+const retentionRetainedCountEl = document.getElementById('retention-retained-count');
+const retentionStatusEl = document.getElementById('retention-status');
+const saveRetentionEl = document.getElementById('save-retention');
+const knowledgeGracePeriodDaysEl = document.getElementById('knowledge-grace-period-days');
+const knowledgeHalfLifeDaysEl = document.getElementById('knowledge-half-life-days');
+const knowledgeMinConfidenceEl = document.getElementById('knowledge-min-confidence');
+const knowledgeMaintenanceIntervalDaysEl = document.getElementById('knowledge-maintenance-interval-days');
+const knowledgeArchiveAfterBottomDaysEl = document.getElementById('knowledge-archive-after-bottom-days');
+const knowledgeStatusEl = document.getElementById('knowledge-status');
+const saveKnowledgeDecayEl = document.getElementById('save-knowledge-decay');
 const oauthAccountListEl = document.getElementById('oauth-account-list');
 const oauthTemplateEl = document.getElementById('oauth-template');
 const oauthTemplateNoteEl = document.getElementById('oauth-template-note');
@@ -576,6 +592,8 @@ function updateAdminButtons() {
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   saveProviderEl.disabled = state.providerSaving;
   newProviderEl.disabled = state.providerSaving;
+  saveRetentionEl.disabled = state.retentionSaving;
+  saveKnowledgeDecayEl.disabled = state.knowledgeDecaySaving;
   oauthAccountIdEl.disabled = state.oauthSaving || !!state.activeOauthAccountId;
   saveOauthAccountEl.disabled = state.oauthSaving;
   newOauthAccountEl.disabled = state.oauthSaving;
@@ -717,6 +735,34 @@ function resetProviderForm(statusText) {
   providerStatusEl.textContent = statusText || 'Create a model or select an existing one.';
   renderProviderWorkloadNote();
   renderProviderList();
+  updateAdminButtons();
+}
+
+function renderMemoryRetentionSettings() {
+  const settings = state.admin.memoryRetention || {};
+  retentionFullResolutionDaysEl.value = settings.full_resolution_days || '';
+  retentionDecayHalfLifeDaysEl.value = settings.decay_half_life_days || '';
+  retentionRetainedCountEl.value = settings.retained_count || '';
+  retentionStatusEl.textContent = 'Tune how aggressively processed episodes are thinned after the full-resolution window.';
+  updateAdminButtons();
+}
+
+function resetMemoryRetentionForm(statusText) {
+  retentionFullResolutionDaysEl.value = '';
+  retentionDecayHalfLifeDaysEl.value = '';
+  retentionRetainedCountEl.value = '';
+  retentionStatusEl.textContent = statusText || 'Configure retention for consolidated episodes.';
+  updateAdminButtons();
+}
+
+function renderKnowledgeDecaySettings() {
+  const settings = state.admin.knowledgeDecay || {};
+  knowledgeGracePeriodDaysEl.value = settings.grace_period_days || '';
+  knowledgeHalfLifeDaysEl.value = settings.half_life_days || '';
+  knowledgeMinConfidenceEl.value = settings.min_confidence ?? '';
+  knowledgeMaintenanceIntervalDaysEl.value = settings.maintenance_interval_days || '';
+  knowledgeArchiveAfterBottomDaysEl.value = settings.archive_after_bottom_days || '';
+  knowledgeStatusEl.textContent = 'Tune how quickly stale fact confidence fades after the grace period.';
   updateAdminButtons();
 }
 
@@ -1006,6 +1052,8 @@ async function loadAdminConfig() {
   try {
     const data = await fetchJson('/admin/config');
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
+    state.admin.memoryRetention = data.memory_retention || null;
+    state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.llmWorkloads = Array.isArray(data.llm_workloads) ? data.llm_workloads : [];
     state.admin.oauthProviderTemplates = Array.isArray(data.oauth_provider_templates) ? data.oauth_provider_templates : [];
     state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];
@@ -1020,6 +1068,8 @@ async function loadAdminConfig() {
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
     renderProviderWorkloadNote();
+    renderMemoryRetentionSettings();
+    renderKnowledgeDecaySettings();
     if (provider) {
       selectProvider(provider);
     } else if (!state.activeProviderId) {
@@ -1129,6 +1179,62 @@ async function saveProvider() {
     providerStatusEl.textContent = err.message || 'Failed to save.';
   } finally {
     state.providerSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveMemoryRetention() {
+  if (state.retentionSaving) return;
+  state.retentionSaving = true;
+  retentionStatusEl.textContent = 'Saving...';
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/memory-retention', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        full_resolution_days: retentionFullResolutionDaysEl.value,
+        decay_half_life_days: retentionDecayHalfLifeDaysEl.value,
+        retained_count: retentionRetainedCountEl.value
+      })
+    });
+    state.admin.memoryRetention = data.memory_retention || state.admin.memoryRetention;
+    renderMemoryRetentionSettings();
+    retentionStatusEl.textContent = 'Retention settings saved.';
+    setStatus('Retention settings saved');
+  } catch (err) {
+    retentionStatusEl.textContent = err.message || 'Failed to save.';
+  } finally {
+    state.retentionSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveKnowledgeDecay() {
+  if (state.knowledgeDecaySaving) return;
+  state.knowledgeDecaySaving = true;
+  knowledgeStatusEl.textContent = 'Saving...';
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/knowledge-decay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grace_period_days: knowledgeGracePeriodDaysEl.value,
+        half_life_days: knowledgeHalfLifeDaysEl.value,
+        min_confidence: knowledgeMinConfidenceEl.value,
+        maintenance_interval_days: knowledgeMaintenanceIntervalDaysEl.value,
+        archive_after_bottom_days: knowledgeArchiveAfterBottomDaysEl.value
+      })
+    });
+    state.admin.knowledgeDecay = data.knowledge_decay || state.admin.knowledgeDecay;
+    renderKnowledgeDecaySettings();
+    knowledgeStatusEl.textContent = 'Knowledge decay settings saved.';
+    setStatus('Knowledge decay settings saved');
+  } catch (err) {
+    knowledgeStatusEl.textContent = err.message || 'Failed to save.';
+  } finally {
+    state.knowledgeDecaySaving = false;
     updateAdminButtons();
   }
 }
@@ -1835,6 +1941,8 @@ newProviderEl.addEventListener('click', () => {
 });
 
 saveProviderEl.addEventListener('click', () => saveProvider());
+saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
+saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 
 newOauthAccountEl.addEventListener('click', () => {
   resetOauthAccountForm('Create a connection.');
@@ -1905,6 +2013,7 @@ renderApproval();
 renderMessages();
 syncScratchEditor('No note selected.');
 resetProviderForm('Loading...');
+resetMemoryRetentionForm('Loading...');
 resetOauthAccountForm('Loading...');
 resetServiceForm('Loading...');
 resetSiteForm('Loading...');

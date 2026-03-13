@@ -35,24 +35,32 @@
 
 (defn seed-episode!
   "Helper: create an episode and return its entity id."
-  [summary & {:keys [context processed?] :or {processed? false}}]
+  [summary & {:keys [context processed? timestamp session-id channel type importance]
+              :or {processed? false
+                   timestamp  (java.util.Date.)
+                   type       :conversation}}]
   (let [id (java.util.UUID/randomUUID)]
     (db/transact! [(cond-> {:episode/id         id
-                            :episode/type       :conversation
+                            :episode/type       type
                             :episode/summary    summary
-                            :episode/timestamp  (java.util.Date.)
+                            :episode/timestamp  timestamp
                             :episode/processed? processed?}
-                     context (assoc :episode/context context))])
+                     context    (assoc :episode/context context)
+                     importance (assoc :episode/importance (float importance))
+                     session-id (assoc :episode/session-id (str session-id))
+                     channel    (assoc :episode/channel (name channel)))])
     (ffirst (db/q '[:find ?e :in $ ?id :where [?e :episode/id ?id]] id))))
 
 (defn seed-fact!
   "Helper: add a fact to a node and return the fact entity id."
-  [node-eid content & {:keys [confidence] :or {confidence 1.0}}]
+  [node-eid content & {:keys [confidence utility] :or {confidence 1.0}}]
   (let [id (java.util.UUID/randomUUID)]
-    (db/transact! [{:kg.fact/id         id
-                    :kg.fact/node       node-eid
-                    :kg.fact/content    content
-                    :kg.fact/confidence (float confidence)
-                    :kg.fact/created-at (java.util.Date.)
-                    :kg.fact/updated-at (java.util.Date.)}])
+    (db/transact! [(cond-> {:kg.fact/id         id
+                            :kg.fact/node       node-eid
+                            :kg.fact/content    content
+                            :kg.fact/confidence (float confidence)
+                            :kg.fact/created-at (java.util.Date.)
+                            :kg.fact/updated-at (java.util.Date.)}
+                     (some? utility)
+                     (assoc :kg.fact/utility (float utility)))])
     (ffirst (db/q '[:find ?e :in $ ?id :where [?e :kg.fact/id ?id]] id))))

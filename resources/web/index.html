@@ -231,6 +231,68 @@
               </div>
             </div>
 
+            <div class="admin-card advanced-only">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Episode Retention</h3>
+                  <p class="panel-note">Keep all processed episodes for the full-resolution window, then retain the highest-scoring older episodes by importance-decay rank.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label class="field-label">Full Resolution (Days)</label>
+                  <input type="number" id="retention-full-resolution-days" class="text-input" min="1" step="1" placeholder="182">
+                </div>
+                <div class="field">
+                  <label class="field-label">Decay Half-Life (Days)</label>
+                  <input type="number" id="retention-decay-half-life-days" class="text-input" min="1" step="1" placeholder="365">
+                </div>
+                <div class="field">
+                  <label class="field-label">Retained Older Episodes</label>
+                  <input type="number" id="retention-retained-count" class="text-input" min="1" step="1" placeholder="8">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="retention-status">Loading retention settings...</div>
+                <button type="button" class="primary" id="save-retention">Save retention</button>
+              </div>
+            </div>
+
+            <div class="admin-card advanced-only">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Knowledge Decay</h3>
+                  <p class="panel-note">Control how fact confidence decays over time after the grace period. Higher-utility facts still decay more slowly than low-utility ones.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label class="field-label">Grace Period (Days)</label>
+                  <input type="number" id="knowledge-grace-period-days" class="text-input" min="1" step="1" placeholder="182">
+                </div>
+                <div class="field">
+                  <label class="field-label">Half-Life (Days)</label>
+                  <input type="number" id="knowledge-half-life-days" class="text-input" min="1" step="1" placeholder="730">
+                </div>
+                <div class="field">
+                  <label class="field-label">Min Confidence</label>
+                  <input type="number" id="knowledge-min-confidence" class="text-input" min="0" max="1" step="0.01" placeholder="0.1">
+                </div>
+                <div class="field">
+                  <label class="field-label">Maintenance Interval (Days)</label>
+                  <input type="number" id="knowledge-maintenance-interval-days" class="text-input" min="1" step="1" placeholder="1">
+                </div>
+                <div class="field">
+                  <label class="field-label">Archive After Bottom (Days)</label>
+                  <input type="number" id="knowledge-archive-after-bottom-days" class="text-input" min="1" step="1" placeholder="365">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="knowledge-status">Loading knowledge decay settings...</div>
+                <button type="button" class="primary" id="save-knowledge-decay">Save decay</button>
+              </div>
+            </div>
+
             <div class="admin-card">
               <div class="panel-header">
                 <h3 class="panel-title">App Connections</h3>

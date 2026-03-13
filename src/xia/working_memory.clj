@@ -10,8 +10,9 @@
    2. Updated each turn before the LLM call (retrieval pipeline)
    3. Cleared on session end (topic summary feeds into episodic recording)
 
-   Runtime: in-memory atom. Snapshot to DB only on session events."
-  (:require [clojure.string :as str]
+  Runtime: in-memory atom. Snapshot to DB only on session events."
+  (:require [charred.api :as json]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -106,6 +107,25 @@
    :decay-factor          0.85
    :eviction-threshold    0.1
    :topic-update-interval 5})   ; update topic summary every N turns
+
+(def ^:private fact-utility-batch-size 20)
+(def ^:private fact-utility-prompt
+  "You are rating how useful retrieved memory facts were for answering the user.
+
+Return a JSON object with this exact shape:
+{
+  \"facts\": [
+    {\"index\": 0, \"utility\": 0.0},
+    {\"index\": 1, \"utility\": 0.0}
+  ]
+}
+
+Rules:
+- utility must be a number between 0.0 and 1.0
+- higher = the fact clearly helped answer the user, guide tool use, disambiguate context, or personalize the response
+- lower = the fact was irrelevant, redundant, or not meaningfully used
+- rate every fact in the batch
+- return ONLY valid JSON, no markdown fencing")
 
 ;; ============================================================================
 ;; Stopwords for keyword extraction
@@ -375,6 +395,73 @@
                 (log/debug "Updated topic summary:" summary))
              (catch Exception e
                (log/warn "Failed to update topic summary:" (.getMessage e))))))))))
+
+(defn- parse-fact-utility
+  [value]
+  (cond
+    (number? value) (double value)
+    (string? value) (try
+                      (Double/parseDouble (str/trim value))
+                      (catch Exception _ 0.5))
+    :else 0.5))
+
+(defn- normalize-fact-utility
+  [value]
+  (memory/normalize-fact-utility (parse-fact-utility value)))
+
+(defn- fact-utility-defaults
+  [facts]
+  (into {}
+        (map (fn [{:keys [eid utility]}]
+               [eid (memory/normalize-fact-utility utility)]))
+        facts))
+
+(defn- rate-fact-utility-batch
+  [facts user-message assistant-response]
+  (let [user-msg  (str "User message:\n" (or user-message "")
+                       "\n\nAssistant response:\n" (or assistant-response "")
+                       "\n\nFacts:\n"
+                       (->> facts
+                            (map-indexed
+                              (fn [idx {:keys [content confidence utility]}]
+                                (str "Fact " idx
+                                     "\nContent: " content
+                                     "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
+                                     "\nUtility: " (format "%.3f" (double (or utility 0.5))))))
+                            (str/join "\n\n---\n\n")))
+        defaults  (fact-utility-defaults facts)]
+    (try
+      (let [response (llm/chat-simple
+                       [{:role "system" :content fact-utility-prompt}
+                        {:role "user" :content user-msg}]
+                       :workload :fact-utility)
+            parsed   (json/read-json response)]
+        (reduce
+          (fn [scores entry]
+            (let [idx (get entry "index")]
+              (if (and (number? idx)
+                       (<= 0 (long idx))
+                       (< (long idx) (count facts)))
+                (assoc scores
+                       (:eid (nth facts (long idx)))
+                       (normalize-fact-utility (get entry "utility")))
+                scores)))
+          defaults
+          (get parsed "facts" [])))
+      (catch Exception e
+        (log/warn "Failed to rate fact utility batch:" (.getMessage e))
+        defaults))))
+
+(defn review-fact-utility!
+  [fact-eids user-message assistant-response]
+  (let [facts (memory/facts-by-eids fact-eids)]
+    (when (and (seq facts)
+               (seq (str/trim (or assistant-response ""))))
+      (doseq [batch (partition-all fact-utility-batch-size facts)]
+        (let [ratings (rate-fact-utility-batch (vec batch) user-message assistant-response)]
+          (doseq [[fact-eid utility] ratings]
+            (memory/update-fact-utility! fact-eid utility)))))
+    (count facts)))
 
 (defn detect-topic-shift?
   "Compare current search terms with previous topic summary.

@@ -96,14 +96,25 @@
                       :edges      {:outgoing [] :incoming []}})]
         (is (str/includes? line "works remotely"))))
 
-    (testing "low-confidence facts are filtered"
+    (testing "facts below the prompt floor are filtered"
       (let [line (re {:name  "Test"
                       :type  :concept
                       :facts [{:content "high conf" :confidence 0.8}
-                              {:content "low conf"  :confidence 0.2}]
+                              {:content "floor conf" :confidence 0.1}
+                              {:content "too low"    :confidence 0.05}]
                       :edges {:outgoing [] :incoming []}})]
         (is (str/includes? line "high conf"))
-        (is (not (str/includes? line "low conf")))))
+        (is (str/includes? line "floor conf"))
+        (is (not (str/includes? line "too low")))))
+
+    (testing "utility influences fact ordering"
+      (let [line (re {:name  "Ranked"
+                      :type  :concept
+                      :facts [{:content "high confidence" :confidence 0.85 :utility 0.0}
+                              {:content "high utility" :confidence 0.7 :utility 1.0}]
+                      :edges {:outgoing [] :incoming []}})]
+        (is (< (.indexOf line "high utility")
+               (.indexOf line "high confidence")))))
 
     (testing "entity with no detail"
       (let [line (re {:name "Empty"
@@ -308,6 +319,20 @@
         (is (= "call_1" (:tool_call_id tool-msg)))
         (is (= "{\"status\":200,\"title\":\"Example Domain\"}"
                (:content tool-msg)))))))
+
+(deftest test-build-messages-data-returns-used-fact-eids
+  (let [sid (db/create-session! :terminal)]
+    (with-redefs [xia.context/assemble-system-prompt-data (fn [_sid _opts]
+                                                            {:prompt "system"
+                                                             :used-fact-eids [1 2 3]})
+                  xia.context/compact-history             (fn [messages _budget & _]
+                                                            messages)]
+      (let [result (#'xia.context/build-messages-data
+                     sid
+                     {:provider {:llm.provider/id :default}})]
+        (is (map? result))
+        (is (vector? (:messages result)))
+        (is (= [1 2 3] (:used-fact-eids result)))))))
 
 (deftest test-build-messages-uses-provider-history-budget
   (db/set-identity! :name "TestXia")

@@ -227,6 +227,18 @@
 
     (wm/clear-wm! sid)))
 
+(deftest test-review-fact-utility
+  (let [node-eid (th/seed-node! "UtilityTest" "concept")
+        fact-eid (th/seed-fact! node-eid "likes Clojure" :utility 0.5)]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [_messages & opts]
+                    (is (= [:workload :fact-utility] opts))
+                    "{\"facts\":[{\"index\":0,\"utility\":1.0}]}")]
+      (is (= 1 (wm/review-fact-utility! [fact-eid] "What does Hong like?" "Hong likes Clojure."))))
+    (is (< (Math/abs (- 0.7
+                        (double (:kg.fact/utility (db/entity fact-eid)))))
+           1.0e-6))))
+
 ;; ---------------------------------------------------------------------------
 ;; Topic shift detection
 ;; ---------------------------------------------------------------------------

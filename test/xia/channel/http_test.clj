@@ -53,6 +53,9 @@
     (is (re-find #"Scheduled Runs" (:body response)))
     (is (re-find #"Settings" (:body response)))
     (is (re-find #"AI Models" (:body response)))
+    (is (re-find #"Episode Retention" (:body response)))
+    (is (re-find #"Knowledge Decay" (:body response)))
+    (is (re-find #"Archive After Bottom \(Days\)" (:body response)))
     (is (re-find #"Workloads" (:body response)))
     (is (re-find #"System Prompt Budget" (:body response)))
     (is (re-find #"App Connections" (:body response)))
@@ -474,6 +477,8 @@
                                  :headers        (ui-headers)})
         body     (response-json response)
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        memory-retention (get body "memory_retention")
+        knowledge-decay (get body "knowledge_decay")
         llm-workloads (get body "llm_workloads")
         templates (get body "oauth_provider_templates")
         oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
@@ -488,8 +493,16 @@
     (is (= ["assistant" "history-compaction"] (get provider "workloads")))
     (is (= 16000 (get provider "system_prompt_budget")))
     (is (= 32000 (get provider "history_budget")))
+    (is (= 182 (get memory-retention "full_resolution_days")))
+    (is (= 365 (get memory-retention "decay_half_life_days")))
+    (is (= 8 (get memory-retention "retained_count")))
+    (is (= 182 (get knowledge-decay "grace_period_days")))
+    (is (= 730 (get knowledge-decay "half_life_days")))
+    (is (= 0.1 (get knowledge-decay "min_confidence")))
+    (is (= 1 (get knowledge-decay "maintenance_interval_days")))
+    (is (= 365 (get knowledge-decay "archive_after_bottom_days")))
     (is (= "healthy" (get provider "health_status")))
-    (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-extraction"}
+    (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
     (is (= #{"github" "google" "microsoft"}
            (set (map #(get % "id") templates))))
@@ -517,6 +530,84 @@
     (is (= "session" (get tool "approval")))
     (is (= true (get tool "enabled")))
     (is (= true (get skill "enabled")))))
+
+(deftest admin-memory-retention-route-saves-and-clears-settings
+  (let [save-response (#'http/router {:uri            "/admin/memory-retention"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"full_resolution_days" "730"
+                                                                     "decay_half_life_days" "180"
+                                                                     "retained_count" "12"})})
+        save-body     (response-json save-response)]
+    (is (= 200 (:status save-response)))
+    (is (= 730 (get-in save-body ["memory_retention" "full_resolution_days"])))
+    (is (= 180 (get-in save-body ["memory_retention" "decay_half_life_days"])))
+    (is (= 12 (get-in save-body ["memory_retention" "retained_count"])))
+    (is (= (str (* 730 24 60 60 1000))
+           (db/get-config :memory/episode-full-resolution-ms)))
+    (is (= (str (* 180 24 60 60 1000))
+           (db/get-config :memory/episode-decay-half-life-ms)))
+    (is (= "12" (db/get-config :memory/episode-retained-decayed-count))))
+  (let [clear-response (#'http/router {:uri            "/admin/memory-retention"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"full_resolution_days" ""
+                                                                      "decay_half_life_days" ""
+                                                                      "retained_count" ""})})
+        clear-body     (response-json clear-response)]
+    (is (= 200 (:status clear-response)))
+    (is (= 182 (get-in clear-body ["memory_retention" "full_resolution_days"])))
+    (is (= 365 (get-in clear-body ["memory_retention" "decay_half_life_days"])))
+    (is (= 8 (get-in clear-body ["memory_retention" "retained_count"])))
+    (is (nil? (db/get-config :memory/episode-full-resolution-ms)))
+    (is (nil? (db/get-config :memory/episode-decay-half-life-ms)))
+    (is (nil? (db/get-config :memory/episode-retained-decayed-count)))))
+
+(deftest admin-knowledge-decay-route-saves-and-clears-settings
+  (let [save-response (#'http/router {:uri            "/admin/knowledge-decay"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"grace_period_days" "14"
+                                                                     "half_life_days" "120"
+                                                                     "min_confidence" "0.25"
+                                                                     "maintenance_interval_days" "3"
+                                                                     "archive_after_bottom_days" "45"})})
+        save-body     (response-json save-response)]
+    (is (= 200 (:status save-response)))
+    (is (= 14 (get-in save-body ["knowledge_decay" "grace_period_days"])))
+    (is (= 120 (get-in save-body ["knowledge_decay" "half_life_days"])))
+    (is (= 0.25 (get-in save-body ["knowledge_decay" "min_confidence"])))
+    (is (= 3 (get-in save-body ["knowledge_decay" "maintenance_interval_days"])))
+    (is (= 45 (get-in save-body ["knowledge_decay" "archive_after_bottom_days"])))
+    (is (= (str (* 14 24 60 60 1000))
+           (db/get-config :memory/knowledge-decay-grace-period-ms)))
+    (is (= (str (* 120 24 60 60 1000))
+           (db/get-config :memory/knowledge-decay-half-life-ms)))
+    (is (= "0.25" (db/get-config :memory/knowledge-decay-min-confidence)))
+    (is (= (str (* 3 24 60 60 1000))
+           (db/get-config :memory/knowledge-decay-maintenance-step-ms)))
+    (is (= (str (* 45 24 60 60 1000))
+           (db/get-config :memory/knowledge-decay-archive-after-bottom-ms))))
+  (let [clear-response (#'http/router {:uri            "/admin/knowledge-decay"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"grace_period_days" ""
+                                                                      "half_life_days" ""
+                                                                      "min_confidence" ""
+                                                                      "maintenance_interval_days" ""
+                                                                      "archive_after_bottom_days" ""})})
+        clear-body     (response-json clear-response)]
+    (is (= 200 (:status clear-response)))
+    (is (= 182 (get-in clear-body ["knowledge_decay" "grace_period_days"])))
+    (is (= 730 (get-in clear-body ["knowledge_decay" "half_life_days"])))
+    (is (= 0.1 (get-in clear-body ["knowledge_decay" "min_confidence"])))
+    (is (= 1 (get-in clear-body ["knowledge_decay" "maintenance_interval_days"])))
+    (is (= 365 (get-in clear-body ["knowledge_decay" "archive_after_bottom_days"])))
+    (is (nil? (db/get-config :memory/knowledge-decay-grace-period-ms)))
+    (is (nil? (db/get-config :memory/knowledge-decay-half-life-ms)))
+    (is (nil? (db/get-config :memory/knowledge-decay-min-confidence)))
+    (is (nil? (db/get-config :memory/knowledge-decay-maintenance-step-ms)))
+    (is (nil? (db/get-config :memory/knowledge-decay-archive-after-bottom-ms)))))
 
 (deftest admin-oauth-account-routes-save-connect-and-delete
   (db/register-oauth-account! {:id            :google

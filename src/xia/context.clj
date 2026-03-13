@@ -22,6 +22,7 @@
             [xia.identity :as identity]
             [xia.skill :as skill]
             [xia.llm :as llm]
+            [xia.memory :as memory]
             [xia.working-memory :as wm]))
 
 ;; ============================================================================
@@ -151,41 +152,64 @@
      []
      m)))
 
-(defn- render-entity [{:keys [name type facts edges properties]}]
+(defn- select-facts-for-entity
+  [facts]
+  (->> facts
+       (filter #(>= (memory/normalize-fact-confidence (:confidence %)) 0.1))
+       (sort-by memory/fact-prompt-score >)
+       (take 5)
+       vec))
+
+(defn- render-entity-data [{:keys [name type facts edges properties]}]
   (let [type-str (when type (str " (" (clojure.core/name type) ")"))
         ;; Properties as compact key: value pairs
         prop-strs (when (and properties (map? properties) (seq properties))
                     (flatten-props properties))
-        ;; Top facts by confidence
-        fact-strs (->> facts
-                       (filter #(> (:confidence % 0) 0.3))
-                       (take 5)
-                       (map :content))
+        selected-facts (select-facts-for-entity facts)
+        fact-strs (map :content selected-facts)
         ;; Outgoing edges
         edge-strs (->> (:outgoing edges)
                        (take 3)
                        (map (fn [{:keys [type target]}]
                               (str (clojure.core/name type) "→" target))))
         detail (str/join "; " (concat prop-strs fact-strs edge-strs))]
-    (str "- " name type-str
-         (when-not (str/blank? detail) (str ": " detail)))))
+    {:content       (str "- " name type-str
+                         (when-not (str/blank? detail) (str ": " detail)))
+     :used-fact-eids (->> selected-facts
+                          (keep :eid)
+                          vec)}))
 
-(defn render-entities
+(defn- render-entity
+  [entity]
+  (:content (render-entity-data entity)))
+
+(defn- render-entities-data
   "Render active entities + facts into compact format, within token budget."
   [entities budget]
   (when (seq entities)
     (loop [ents entities
            lines ["### Known"]
-           tokens 8] ; "### Known\n"
+           tokens 8
+           used-fact-eids []] ; "### Known\n"
       (if (empty? ents)
-        (str/join "\n" lines)
-        (let [line (render-entity (first ents))
+        {:content        (str/join "\n" lines)
+         :used-fact-eids used-fact-eids}
+        (let [{:keys [content] :as entity-data
+               entity-used-fact-eids :used-fact-eids}
+              (render-entity-data (first ents))
+              line       (:content entity-data)
               line-tokens (estimate-tokens line)]
           (if (> (+ tokens line-tokens) budget)
-            (str/join "\n" lines) ; budget exceeded, stop
+            {:content        (str/join "\n" lines)
+             :used-fact-eids used-fact-eids}
             (recur (rest ents)
                    (conj lines line)
-                   (+ tokens line-tokens))))))))
+                   (+ tokens line-tokens)
+                   (into used-fact-eids entity-used-fact-eids))))))))
+
+(defn render-entities
+  [entities budget]
+  (:content (render-entities-data entities budget)))
 
 (defn- format-date [^java.util.Date d]
   (when d
@@ -237,11 +261,11 @@
 ;; System prompt assembly
 ;; ============================================================================
 
-(defn assemble-system-prompt
-  "Build the complete system prompt with budget enforcement.
+(defn assemble-system-prompt-data
+  "Build the complete system prompt with budget enforcement and return prompt metadata.
    Priority: identity (P0) > topic (P0) > entities (P1) > episodes (P2) > skills (P3)."
   ([session-id]
-   (assemble-system-prompt session-id nil))
+   (assemble-system-prompt-data session-id nil))
   ([session-id opts]
    (let [budget     (resolve-system-prompt-budget (resolve-context-provider opts))
         wm-context (or (wm/wm->context session-id)
@@ -262,7 +286,8 @@
 
         ;; P1: Entities (highest priority — cut last)
         ent-budget  (min (:entities budget) (max 0 remaining))
-        ent-section (render-entities (:entities wm-context) ent-budget)
+        ent-data    (render-entities-data (:entities wm-context) ent-budget)
+        ent-section (:content ent-data)
         ent-tokens  (estimate-tokens (or ent-section ""))
         remaining   (- remaining ent-tokens)
 
@@ -276,11 +301,18 @@
         skill-budget  (min (:skills budget) (max 0 remaining))
         skill-section (render-skills skills skill-budget)
         skill-tokens  (estimate-tokens (or skill-section ""))]
-    (str id-section
-         (when topic-section (str "## Context\n" topic-section))
-         (when ent-section (str ent-section "\n\n"))
-         (when ep-section (str ep-section "\n\n"))
-         (when skill-section (str skill-section "\n\n"))))))
+    {:prompt         (str id-section
+                          (when topic-section (str "## Context\n" topic-section))
+                          (when ent-section (str ent-section "\n\n"))
+                          (when ep-section (str ep-section "\n\n"))
+                          (when skill-section (str skill-section "\n\n")))
+     :used-fact-eids (:used-fact-eids ent-data)})))
+
+(defn assemble-system-prompt
+  ([session-id]
+   (:prompt (assemble-system-prompt-data session-id nil)))
+  ([session-id opts]
+   (:prompt (assemble-system-prompt-data session-id opts))))
 
 ;; ============================================================================
 ;; Message history compaction
@@ -330,17 +362,18 @@
 ;; Build messages (moved from agent.clj)
 ;; ============================================================================
 
-(defn build-messages
+(defn build-messages-data
   "Build the full message list for an LLM call:
    system prompt (identity + WM context + skills) + compacted history."
   ([session-id]
-   (build-messages session-id nil))
+   (build-messages-data session-id nil))
   ([session-id opts]
    (let [provider     (resolve-context-provider opts)
          compaction-provider-id (:compaction-provider-id opts)
          compaction-workload    (or (:compaction-workload opts)
                                     :history-compaction)
-        sys-prompt   (assemble-system-prompt session-id (assoc opts :provider provider))
+        {:keys [prompt used-fact-eids]}
+        (assemble-system-prompt-data session-id (assoc opts :provider provider))
         history      (db/session-messages session-id)
         history-msgs (mapv (fn [{:keys [role content tool-calls tool-id tool-result]}]
                              (cond-> {:role (name role)
@@ -360,5 +393,12 @@
                                         (and (not compaction-provider-id)
                                              compaction-workload)
                                         (assoc :workload compaction-workload)))]
-    (into [{:role "system" :content sys-prompt}]
-          compacted))))
+    {:messages      (into [{:role "system" :content prompt}]
+                          compacted)
+     :used-fact-eids used-fact-eids})))
+
+(defn build-messages
+  ([session-id]
+   (:messages (build-messages-data session-id nil)))
+  ([session-id opts]
+   (:messages (build-messages-data session-id opts))))

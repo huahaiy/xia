@@ -206,6 +206,22 @@
               props    (memory/node-properties node-eid)]
           (is (= "functional" (:paradigm props))))))))
 
+(deftest test-consolidate-episode-triggers-episode-pruning
+  (let [ep-eid  (th/seed-episode! "Prunable episode")
+        called? (atom false)]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [_messages & _opts]
+                    "{\"entities\": [], \"relations\": []}")
+                  xia.memory/prune-processed-episodes!
+                  (fn []
+                    (reset! called? true)
+                    0)]
+      (hippo/consolidate-episode!
+        {:eid     ep-eid
+         :summary "Prunable episode"
+         :type    :conversation}))
+    (is @called?)))
+
 (deftest test-consolidate-episode-rolls-back-on-write-failure
   (let [ep-eid  (th/seed-episode! "Atomic rollback")
         seen-tx (atom nil)]
@@ -255,20 +271,64 @@
     ;; All episodes should be marked processed
     (is (empty? (memory/unprocessed-episodes)))))
 
+(deftest test-consolidate-pending-rates-importance-in-one-batched-call
+  (let [now               (System/currentTimeMillis)
+        ep-1              (th/seed-episode! "Episode 1" :timestamp (java.util.Date. (- now 2000)))
+        ep-2              (th/seed-episode! "Episode 2" :timestamp (java.util.Date. (- now 1000)))
+        importance-calls   (atom 0)
+        extraction-calls   (atom 0)]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [_messages & opts]
+                    (case (first (drop 1 opts))
+                      :memory-importance (do
+                                           (swap! importance-calls inc)
+                                           "{\"episodes\":[{\"index\":0,\"importance\":0.9},{\"index\":1,\"importance\":0.2}]}")
+                      :memory-extraction (do
+                                           (swap! extraction-calls inc)
+                                           "{\"entities\": [], \"relations\": []}")
+                      "{\"entities\": [], \"relations\": []}"))
+                  xia.memory/prune-processed-episodes!
+                  (fn []
+                    0)]
+      (hippo/consolidate-pending!))
+    (is (= 1 @importance-calls))
+    (is (= 2 @extraction-calls))
+    (is (< (Math/abs (- 0.9
+                        (double (:episode/importance (db/entity ep-1)))))
+           1.0e-6))
+    (is (< (Math/abs (- 0.2
+                        (double (:episode/importance (db/entity ep-2)))))
+           1.0e-6))))
+
 ;; ---------------------------------------------------------------------------
 ;; maintain-knowledge! — confidence decay
 ;; ---------------------------------------------------------------------------
 
+(deftest test-knowledge-decay-settings-use-config-overrides
+  (db/set-config! :memory/knowledge-decay-grace-period-ms (* 14 24 60 60 1000))
+  (db/set-config! :memory/knowledge-decay-half-life-ms (* 120 24 60 60 1000))
+  (db/set-config! :memory/knowledge-decay-min-confidence 0.25)
+  (db/set-config! :memory/knowledge-decay-maintenance-step-ms (* 3 24 60 60 1000))
+  (db/set-config! :memory/knowledge-decay-archive-after-bottom-ms (* 45 24 60 60 1000))
+  (let [settings (hippo/knowledge-decay-settings)]
+    (is (= (* 14 24 60 60 1000) (:grace-period-ms settings)))
+    (is (= (* 120 24 60 60 1000) (:half-life-ms settings)))
+    (is (= 0.25 (:min-confidence settings)))
+    (is (= (* 3 24 60 60 1000) (:maintenance-step-ms settings)))
+    (is (= (* 45 24 60 60 1000) (:archive-after-bottom-ms settings)))))
+
 (deftest test-maintain-knowledge
-  (let [node-eid      (th/seed-node! "TestEntity" "concept")
+  (let [settings      (hippo/knowledge-decay-settings)
+        node-eid      (th/seed-node! "TestEntity" "concept")
         fact-eid      (th/seed-fact! node-eid "some fact" :confidence 1.0)
         now-ms        (System/currentTimeMillis)
-        ninety-days   (* 90 24 60 60 1000)
+        elapsed-ms    (+ (:grace-period-ms settings)
+                         (* 2 (:half-life-ms settings)))
         now           (java.util.Date. now-ms)
-        old-updated   (java.util.Date. (- now-ms ninety-days))
-        expected-conf (max 0.1
-                           (Math/pow 0.5 (/ (- ninety-days (* 7 24 60 60 1000))
-                                            (double (* 60 24 60 60 1000)))))]
+        old-updated   (java.util.Date. (- now-ms elapsed-ms))
+        expected-conf (max (:min-confidence settings)
+                           (Math/pow 0.5 (/ (- elapsed-ms (:grace-period-ms settings))
+                                            (double (:half-life-ms settings)))))]
     (db/transact! [[:db/add fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
     (let [updated-conf (:kg.fact/confidence (db/entity fact-eid))
@@ -279,18 +339,72 @@
       (is (= now decayed-at) "Maintenance should record when decay was applied"))))
 
 (deftest test-maintain-knowledge-is-idempotent-for-same-time
-  (let [node-eid    (th/seed-node! "StableEntity" "concept")
+  (let [settings    (hippo/knowledge-decay-settings)
+        node-eid    (th/seed-node! "StableEntity" "concept")
         fact-eid    (th/seed-fact! node-eid "stable fact" :confidence 1.0)
         now-ms      (System/currentTimeMillis)
         now         (java.util.Date. now-ms)
-        thirty-days (java.util.Date. (- now-ms (* 30 24 60 60 1000)))]
-    (db/transact! [[:db/add fact-eid :kg.fact/updated-at thirty-days]])
+        old-updated (java.util.Date. (- now-ms
+                                        (+ (:grace-period-ms settings)
+                                           (* 30 24 60 60 1000))))]
+    (db/transact! [[:db/add fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
     (let [once-conf (:kg.fact/confidence (db/entity fact-eid))]
       (hippo/maintain-knowledge! now)
       (let [twice-conf (:kg.fact/confidence (db/entity fact-eid))]
         (is (= once-conf twice-conf)
             "The same elapsed time should not be charged twice")))))
+
+(deftest test-maintain-knowledge-slows-decay-for-high-utility-facts
+  (let [settings      (hippo/knowledge-decay-settings)
+        node-eid      (th/seed-node! "UsefulEntity" "concept")
+        low-fact-eid  (th/seed-fact! node-eid "low utility fact" :confidence 1.0 :utility 0.0)
+        high-fact-eid (th/seed-fact! node-eid "high utility fact" :confidence 1.0 :utility 1.0)
+        now-ms        (System/currentTimeMillis)
+        now           (java.util.Date. now-ms)
+        old-updated   (java.util.Date. (- now-ms
+                                          (+ (:grace-period-ms settings)
+                                             (* 2 (:half-life-ms settings)))))]
+    (db/transact! [[:db/add low-fact-eid :kg.fact/updated-at old-updated]
+                   [:db/add high-fact-eid :kg.fact/updated-at old-updated]])
+    (hippo/maintain-knowledge! now)
+    (is (> (:kg.fact/confidence (db/entity high-fact-eid))
+           (:kg.fact/confidence (db/entity low-fact-eid)))
+        "High-utility facts should decay more slowly than low-utility facts")))
+
+(deftest test-maintain-knowledge-archives-bottomed-out-facts
+  (let [settings   (hippo/knowledge-decay-settings)
+        node-eid   (th/seed-node! "ArchiveEntity" "concept")
+        fact-eid   (th/seed-fact! node-eid "stale archived fact"
+                                  :confidence (:min-confidence settings)
+                                  :utility 0.5)
+        now-ms     (System/currentTimeMillis)
+        now        (java.util.Date. now-ms)
+        bottomed   (java.util.Date. (- now-ms
+                                       (:archive-after-bottom-ms settings)
+                                       (* 2 24 60 60 1000)))
+        updated-at (java.util.Date. (- (.getTime bottomed)
+                                       (* 30 24 60 60 1000)))]
+    (db/transact! [[:db/add fact-eid :kg.fact/updated-at updated-at]
+                   [:db/add fact-eid :kg.fact/decayed-at bottomed]
+                   [:db/add fact-eid :kg.fact/bottomed-at bottomed]])
+    (hippo/maintain-knowledge! now)
+    (is (empty? (into {} (db/entity fact-eid)))
+        "Facts that have stayed at the confidence floor past the archive window should be removed")))
+
+(deftest test-dedup-refresh-clears-bottomed-at
+  (let [settings   (hippo/knowledge-decay-settings)
+        node-eid   (th/seed-node! "RefreshEntity" "concept")
+        fact-eid   (th/seed-fact! node-eid "prefers tea"
+                                  :confidence (:min-confidence settings)
+                                  :utility 0.5)
+        bottomed   (java.util.Date. (- (System/currentTimeMillis)
+                                       (:archive-after-bottom-ms settings)
+                                       (* 2 24 60 60 1000)))]
+    (db/transact! [[:db/add fact-eid :kg.fact/bottomed-at bottomed]])
+    (#'xia.hippocampus/dedup-fact! node-eid "prefers tea" nil)
+    (is (nil? (:kg.fact/bottomed-at (db/entity fact-eid)))
+        "Refreshing a similar fact should clear the archival timer")))
 
 ;; ---------------------------------------------------------------------------
 ;; consolidate-if-pending!

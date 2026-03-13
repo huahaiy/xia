@@ -52,9 +52,10 @@
                                                        (swap! selection-calls inc)
                                                        {:provider {:llm.provider/id :router-a}
                                                         :provider-id :router-a})
-                  xia.context/build-messages         (fn [_session-id opts]
+                  xia.context/build-messages-data    (fn [_session-id opts]
                                                        (reset! build-messages-opts opts)
-                                                       [{:role "system" :content "test"}])
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
                   xia.llm/chat-simple                (fn [_messages & opts]
                                                        (reset! llm-opts opts)
                                                        "All set.")]
@@ -75,8 +76,9 @@
                                                        [])
                   xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
                                                                   :provider-id :default})
-                  xia.context/build-messages         (fn [_session-id _opts]
-                                                       [{:role "system" :content "test"}])
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
                   xia.llm/chat-simple                (fn [_messages & _opts] "All set.")]
       (is (= "All set."
              (agent/process-message session-id
@@ -93,6 +95,29 @@
            (select-keys @context-seen
                         [:session-id :channel :schedule-id
                          :autonomous-run? :approval-bypass?])))))
+
+(deftest process-message-schedules-fact-utility-review
+  (let [session-id (db/create-session! :terminal)
+        reviewed   (atom nil)]
+    (with-redefs [xia.tool/tool-definitions             (constantly [])
+                  xia.working-memory/update-wm!         (fn [& _] nil)
+                  xia.llm/resolve-provider-selection    (constantly {:provider {:llm.provider/id :default}
+                                                                     :provider-id :default})
+                  xia.context/build-messages-data       (fn [_session-id _opts]
+                                                          {:messages [{:role "system" :content "test"}]
+                                                           :used-fact-eids [11 22]})
+                  xia.llm/chat-simple                   (fn [_messages & _opts] "All set.")
+                  xia.agent/schedule-fact-utility-review!
+                  (fn [fact-eids user-message assistant-response]
+                    (reset! reviewed {:fact-eids fact-eids
+                                      :user-message user-message
+                                      :assistant-response assistant-response}))]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (is (= {:fact-eids [11 22]
+            :user-message "hello"
+            :assistant-response "All set."}
+           @reviewed))))
 
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)

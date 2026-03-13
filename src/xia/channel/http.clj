@@ -8,7 +8,9 @@
             [xia.scratch :as scratch]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
+            [xia.hippocampus :as hippo]
             [xia.llm :as llm]
+            [xia.memory :as memory]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
             [xia.service :as service-proxy]
@@ -32,6 +34,7 @@
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
+(def ^:private ms-per-day (* 24 60 60 1000))
 (defonce ^:private local-session-secret
   (delay
     (let [bytes (byte-array 32)
@@ -503,6 +506,30 @@
      :default               (boolean (:llm.provider/default? provider))
      :api_key_configured    (boolean (nonblank-str (:llm.provider/api-key provider)))}))
 
+(defn- memory-retention->admin-body
+  []
+  (let [{:keys [full-resolution-ms decay-half-life-ms retained-decayed-count]}
+        (memory/episode-retention-settings)]
+    {:full_resolution_days (long (/ full-resolution-ms ms-per-day))
+     :decay_half_life_days (long (/ decay-half-life-ms ms-per-day))
+     :retained_count       (long retained-decayed-count)}))
+
+(defn- knowledge-decay->admin-body
+  []
+  (let [{:keys [grace-period-ms half-life-ms min-confidence maintenance-step-ms archive-after-bottom-ms]}
+        (hippo/knowledge-decay-settings)]
+    {:grace_period_days         (long (/ grace-period-ms ms-per-day))
+     :half_life_days            (long (/ half-life-ms ms-per-day))
+     :min_confidence            min-confidence
+     :maintenance_interval_days (long (/ maintenance-step-ms ms-per-day))
+     :archive_after_bottom_days (long (/ archive-after-bottom-ms ms-per-day))}))
+
+(defn- save-config-override!
+  [config-key value]
+  (if (some? value)
+    (db/set-config! config-key value)
+    (db/delete-config! config-key)))
+
 (defn- service->admin-body
   [service]
   (let [oauth-account (some-> (:service/oauth-account service) db/get-oauth-account)]
@@ -858,6 +885,8 @@
     {:providers (->> (db/list-providers)
                      (map provider->admin-body)
                      sort-by-name)
+     :memory_retention (memory-retention->admin-body)
+     :knowledge_decay (knowledge-decay->admin-body)
      :llm_workloads (mapv (fn [{:keys [id label description]}]
                             {:id          (name id)
                              :label       label
@@ -916,6 +945,86 @@
       (when (or make-default (not has-default?))
         (db/set-default-provider! provider-id))
       (json-response 200 {:provider (provider->admin-body (db/get-provider provider-id))}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- handle-save-memory-retention [req]
+  (try
+    (let [data                 (or (read-body req) {})
+          full-resolution-days (when (contains? data "full_resolution_days")
+                                 (parse-optional-positive-long (get data "full_resolution_days")
+                                                               "full_resolution_days"))
+          decay-half-life-days (when (contains? data "decay_half_life_days")
+                                 (parse-optional-positive-long (get data "decay_half_life_days")
+                                                               "decay_half_life_days"))
+          retained-count       (when (contains? data "retained_count")
+                                 (parse-optional-positive-long (get data "retained_count")
+                                                               "retained_count"))]
+      (when (contains? data "full_resolution_days")
+        (save-config-override! :memory/episode-full-resolution-ms
+                               (some-> full-resolution-days (* ms-per-day))))
+      (when (contains? data "decay_half_life_days")
+        (save-config-override! :memory/episode-decay-half-life-ms
+                               (some-> decay-half-life-days (* ms-per-day))))
+      (when (contains? data "retained_count")
+        (save-config-override! :memory/episode-retained-decayed-count
+                               retained-count))
+      (json-response 200 {:memory_retention (memory-retention->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
+
+(defn- parse-optional-bounded-double
+  [value field-name]
+  (let [text (nonblank-str value)]
+    (when text
+      (try
+        (let [parsed (Double/parseDouble text)]
+          (when-not (<= 0.0 parsed 1.0)
+            (throw (ex-info (str "'" field-name "' must be between 0.0 and 1.0")
+                            {:field field-name
+                             :value value})))
+          parsed)
+        (catch NumberFormatException _
+          (throw (ex-info (str "'" field-name "' must be between 0.0 and 1.0")
+                          {:field field-name
+                           :value value})))))))
+
+(defn- handle-save-knowledge-decay [req]
+  (try
+    (let [data                      (or (read-body req) {})
+          grace-period-days         (when (contains? data "grace_period_days")
+                                      (parse-optional-positive-long (get data "grace_period_days")
+                                                                    "grace_period_days"))
+          half-life-days            (when (contains? data "half_life_days")
+                                      (parse-optional-positive-long (get data "half_life_days")
+                                                                    "half_life_days"))
+          min-confidence            (when (contains? data "min_confidence")
+                                      (parse-optional-bounded-double (get data "min_confidence")
+                                                                     "min_confidence"))
+          maintenance-interval-days (when (contains? data "maintenance_interval_days")
+                                      (parse-optional-positive-long (get data "maintenance_interval_days")
+                                                                    "maintenance_interval_days"))
+          archive-after-bottom-days (when (contains? data "archive_after_bottom_days")
+                                      (parse-optional-positive-long (get data "archive_after_bottom_days")
+                                                                    "archive_after_bottom_days"))]
+      (when (contains? data "grace_period_days")
+        (save-config-override! :memory/knowledge-decay-grace-period-ms
+                               (some-> grace-period-days (* ms-per-day))))
+      (when (contains? data "half_life_days")
+        (save-config-override! :memory/knowledge-decay-half-life-ms
+                               (some-> half-life-days (* ms-per-day))))
+      (when (contains? data "min_confidence")
+        (save-config-override! :memory/knowledge-decay-min-confidence
+                               min-confidence))
+      (when (contains? data "maintenance_interval_days")
+        (save-config-override! :memory/knowledge-decay-maintenance-step-ms
+                               (some-> maintenance-interval-days (* ms-per-day))))
+      (when (contains? data "archive_after_bottom_days")
+        (save-config-override! :memory/knowledge-decay-archive-after-bottom-ms
+                               (some-> archive-after-bottom-days (* ms-per-day))))
+      (json-response 200 {:knowledge_decay (knowledge-decay->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (json-response 400 {:error (.getMessage e)
                           :details (ex-data e)}))))
@@ -1308,6 +1417,12 @@
 
       (and (= method :post) (= uri "/admin/providers"))
       (protected-route-response req #(handle-save-provider req))
+
+      (and (= method :post) (= uri "/admin/memory-retention"))
+      (protected-route-response req #(handle-save-memory-retention req))
+
+      (and (= method :post) (= uri "/admin/knowledge-decay"))
+      (protected-route-response req #(handle-save-knowledge-decay req))
 
       (and (= method :post) (= uri "/admin/oauth-accounts"))
       (protected-route-response req #(handle-save-oauth-account req))

@@ -53,6 +53,27 @@ Rules:
 - If nothing meaningful to extract, return {\"entities\": [], \"relations\": []}
 - Return ONLY valid JSON, no markdown fencing")
 
+(def ^:private importance-batch-size 20)
+(def ^:private default-episode-importance 0.5)
+
+(def ^:private importance-prompt
+  "You are rating which episodic memories deserve longer retention.
+
+Return a JSON object with this exact shape:
+{
+  \"episodes\": [
+    {\"index\": 0, \"importance\": 0.0},
+    {\"index\": 1, \"importance\": 0.0}
+  ]
+}
+
+Rules:
+- importance must be a number between 0.0 and 1.0
+- higher = retain longer because the episode contains durable personal facts, major decisions, commitments, recurring responsibilities, emotionally significant events, or unusually informative context
+- lower = routine chatter, transient status, or disposable operational detail
+- rate every episode in the batch
+- return ONLY valid JSON, no markdown fencing")
+
 ;; ---------------------------------------------------------------------------
 ;; LLM extraction
 ;; ---------------------------------------------------------------------------
@@ -73,6 +94,72 @@ Rules:
       (catch Exception e
         (log/warn "Failed to parse extraction response:" (.getMessage e))
         nil))))
+
+(defn- parse-importance
+  [value]
+  (cond
+    (number? value) (double value)
+    (string? value) (try
+                      (Double/parseDouble (str/trim value))
+                      (catch Exception _ default-episode-importance))
+    :else default-episode-importance))
+
+(defn- normalize-importance
+  [value]
+  (-> value
+      parse-importance
+      (max 0.0)
+      (min 1.0)))
+
+(defn- episode-importance-defaults
+  [episodes]
+  (into {}
+        (map (fn [{:keys [eid]}]
+               [eid default-episode-importance]))
+        episodes))
+
+(defn- rate-importance-batch
+  [episodes]
+  (let [user-msg (->> episodes
+                      (map-indexed
+                        (fn [idx {:keys [timestamp type summary context]}]
+                          (str "Episode " idx
+                               "\nTimestamp: " (some-> timestamp .toInstant str)
+                               "\nType: " (name type)
+                               "\nSummary: " summary
+                               (when context
+                                 (str "\nContext: " context)))))
+                      (str/join "\n\n---\n\n"))
+        defaults (episode-importance-defaults episodes)
+        response (llm/chat-simple
+                   [{:role "system" :content importance-prompt}
+                    {:role "user"   :content user-msg}]
+                   :workload :memory-importance)]
+    (try
+      (let [parsed (json/read-json response)]
+        (reduce
+          (fn [scores entry]
+            (let [idx (get entry "index")]
+              (if (and (number? idx)
+                       (<= 0 (long idx))
+                       (< (long idx) (count episodes)))
+                (assoc scores
+                       (:eid (nth episodes (long idx)))
+                       (normalize-importance (get entry "importance")))
+                scores)))
+          defaults
+          (get parsed "episodes" [])))
+      (catch Exception e
+        (log/warn "Failed to parse episode importance batch:" (.getMessage e))
+        defaults))))
+
+(defn- rate-episode-importance
+  [episodes]
+  (->> episodes
+       (sort-by :timestamp)
+       (partition-all importance-batch-size)
+       (map #(rate-importance-batch (vec %)))
+       (reduce merge {})))
 
 ;; ---------------------------------------------------------------------------
 ;; Knowledge graph merging
@@ -143,8 +230,11 @@ Rules:
         now      (java.util.Date.)]
     (if similar
       ;; Update existing fact (refresh timestamp, keep higher confidence)
-      (db/transact! [[:db/add (:eid similar) :kg.fact/updated-at now]
-                     [:db/add (:eid similar) :kg.fact/decayed-at now]])
+      (let [bottomed-at (:kg.fact/bottomed-at (db/entity (:eid similar)))]
+        (db/transact! (cond-> [[:db/add (:eid similar) :kg.fact/updated-at now]
+                               [:db/add (:eid similar) :kg.fact/decayed-at now]]
+                        bottomed-at
+                        (conj [:db/retract (:eid similar) :kg.fact/bottomed-at bottomed-at]))))
       ;; No similar fact — add new
       (memory/add-fact! {:node-eid   node-eid
                          :content    content
@@ -216,10 +306,13 @@ Rules:
         (cond
           (and similar (:eid similar))
           (when-not (contains? @refreshed-facts (:eid similar))
-            (swap! refreshed-facts conj (:eid similar))
-            (swap! fact-tx* into
-                   [[:db/add (:eid similar) :kg.fact/updated-at now]
-                    [:db/add (:eid similar) :kg.fact/decayed-at now]]))
+            (let [bottomed-at (:kg.fact/bottomed-at (db/entity (:eid similar)))]
+              (swap! refreshed-facts conj (:eid similar))
+              (swap! fact-tx* into
+                     (cond-> [[:db/add (:eid similar) :kg.fact/updated-at now]
+                              [:db/add (:eid similar) :kg.fact/decayed-at now]]
+                       bottomed-at
+                       (conj [:db/retract (:eid similar) :kg.fact/bottomed-at bottomed-at])))))
 
           similar
           nil
@@ -231,6 +324,7 @@ Rules:
                     :kg.fact/node       (:ref node)
                     :kg.fact/content    normalized
                     :kg.fact/confidence 1.0
+                    :kg.fact/utility    0.5
                     :kg.fact/source     episode-eid
                     :kg.fact/created-at now
                     :kg.fact/updated-at now
@@ -240,7 +334,7 @@ Rules:
 (declare keywordize-props)
 
 (defn- build-merge-tx
-  [extraction episode-eid & {:keys [mark-processed?]}]
+  [extraction episode-eid & {:keys [mark-processed? importance]}]
   (when extraction
     (let [entities        (get extraction "entities" [])
           relations       (get extraction "relations" [])
@@ -307,7 +401,9 @@ Rules:
           @fact-tx*
           @edge-tx*
           (when mark-processed?
-            [[:db/add episode-eid :episode/processed? true]]))))))
+            [[:db/add episode-eid :episode/processed? true]
+             [:db/add episode-eid :episode/importance
+              (float (normalize-importance importance))]]))))))
 
 (defn- keywordize-props
   "Convert string-keyed JSON map from LLM to keyword-keyed map for idoc storage.
@@ -333,14 +429,19 @@ Rules:
 
 (defn consolidate-episode!
   "Process a single episode: extract knowledge and merge into the graph."
-  [{:keys [eid summary] :as episode}]
+  [{:keys [eid summary importance] :as episode}]
   (log/info "Consolidating episode:" summary)
   (let [extraction (extract-knowledge episode)]
     (when-not extraction
       (throw (ex-info "knowledge extraction returned invalid JSON"
                       {:episode-eid eid
                        :summary     summary})))
-    (db/transact! (build-merge-tx extraction eid :mark-processed? true))
+    (db/transact! (build-merge-tx extraction
+                                  eid
+                                  :mark-processed? true
+                                  :importance (or importance
+                                                  default-episode-importance)))
+    (memory/prune-processed-episodes!)
     (log/info "Consolidated episode, extracted"
               (count (get extraction "entities" []))
               "entities and"
@@ -352,12 +453,16 @@ Rules:
   []
   (let [episodes (memory/unprocessed-episodes)]
     (when (seq episodes)
-      (log/info "Consolidating" (count episodes) "pending episodes")
-      (doseq [ep episodes]
-        (try
-          (consolidate-episode! ep)
-          (catch Exception e
-            (log/error e "Failed to consolidate episode:" (:summary ep))))))))
+      (let [importance-by-eid (rate-episode-importance episodes)]
+        (log/info "Consolidating" (count episodes) "pending episodes")
+        (doseq [ep episodes]
+          (try
+            (consolidate-episode! (assoc ep :importance
+                                         (get importance-by-eid
+                                              (:eid ep)
+                                              default-episode-importance)))
+            (catch Exception e
+              (log/error e "Failed to consolidate episode:" (:summary ep)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Episode creation from conversation
@@ -401,18 +506,70 @@ Rules:
 ;; Knowledge maintenance
 ;; ---------------------------------------------------------------------------
 
-(def ^:private knowledge-decay-config
-  {:grace-period-ms      (* 7 24 60 60 1000)
-   :half-life-ms         (* 60 24 60 60 1000)
+(def ^:private default-knowledge-decay-config
+  {:grace-period-ms      (* 182 24 60 60 1000)
+   :half-life-ms         (* 730 24 60 60 1000)
    :min-confidence       0.1
-   :maintenance-step-ms  (* 24 60 60 1000)})
+   :maintenance-step-ms  (* 24 60 60 1000)
+   :archive-after-bottom-ms (* 365 24 60 60 1000)})
+
+(def ^:private knowledge-decay-config-keys
+  {:grace-period-ms     :memory/knowledge-decay-grace-period-ms
+   :half-life-ms        :memory/knowledge-decay-half-life-ms
+   :min-confidence      :memory/knowledge-decay-min-confidence
+   :maintenance-step-ms :memory/knowledge-decay-maintenance-step-ms
+   :archive-after-bottom-ms :memory/knowledge-decay-archive-after-bottom-ms})
+
+(defn- configured-positive-long
+  [config-key default-value]
+  (if-let [raw (db/get-config config-key)]
+    (try
+      (let [parsed (Long/parseLong (str raw))]
+        (if (pos? parsed)
+          parsed
+          default-value))
+      (catch Exception _
+        default-value))
+    default-value))
+
+(defn- configured-bounded-double
+  [config-key default-value]
+  (if-let [raw (db/get-config config-key)]
+    (try
+      (let [parsed (Double/parseDouble (str raw))]
+        (if (<= 0.0 parsed 1.0)
+          parsed
+          default-value))
+      (catch Exception _
+        default-value))
+    default-value))
+
+(defn knowledge-decay-settings
+  "Return the effective fact-confidence decay settings."
+  []
+  (assoc default-knowledge-decay-config
+         :grace-period-ms
+         (configured-positive-long (:grace-period-ms knowledge-decay-config-keys)
+                                   (:grace-period-ms default-knowledge-decay-config))
+         :half-life-ms
+         (configured-positive-long (:half-life-ms knowledge-decay-config-keys)
+                                   (:half-life-ms default-knowledge-decay-config))
+         :min-confidence
+         (configured-bounded-double (:min-confidence knowledge-decay-config-keys)
+                                    (:min-confidence default-knowledge-decay-config))
+         :maintenance-step-ms
+         (configured-positive-long (:maintenance-step-ms knowledge-decay-config-keys)
+                                   (:maintenance-step-ms default-knowledge-decay-config))
+         :archive-after-bottom-ms
+         (configured-positive-long (:archive-after-bottom-ms knowledge-decay-config-keys)
+                                   (:archive-after-bottom-ms default-knowledge-decay-config))))
 
 (defn- decay-window-ms
-  [^java.util.Date updated-at ^java.util.Date as-of]
+  [^java.util.Date updated-at ^java.util.Date as-of decay-config]
   (max 0
        (- (.getTime as-of)
           (.getTime updated-at)
-          (:grace-period-ms knowledge-decay-config))))
+          (:grace-period-ms decay-config))))
 
 (defn- decayed-at
   [fact-entity ^java.util.Date updated-at]
@@ -421,47 +578,99 @@ Rules:
       updated-at
       (or last-decayed updated-at))))
 
+(defn- bottomed-out-confidence?
+  [confidence decay-config]
+  (<= (memory/normalize-fact-confidence confidence)
+      (+ (double (:min-confidence decay-config)) 1.0e-9)))
+
+(defn- inferred-bottomed-at
+  [fact-entity previous-confidence effective-confidence ^java.util.Date updated-at ^java.util.Date last-decayed ^java.util.Date as-of decay-config]
+  (when (bottomed-out-confidence? effective-confidence decay-config)
+    (or (:kg.fact/bottomed-at fact-entity)
+        (when-not (bottomed-out-confidence? previous-confidence decay-config)
+          as-of)
+        last-decayed
+        updated-at
+        as-of)))
+
+(defn- archive-bottomed-fact?
+  [confidence ^java.util.Date bottomed-at ^java.util.Date as-of decay-config]
+  (and bottomed-at
+       (bottomed-out-confidence? confidence decay-config)
+       (>= (- (.getTime as-of) (.getTime bottomed-at))
+           (:archive-after-bottom-ms decay-config))))
+
 (defn- next-confidence
-  [confidence ^java.util.Date updated-at ^java.util.Date last-decayed ^java.util.Date as-of]
-  (let [previous-window (decay-window-ms updated-at last-decayed)
-        current-window  (decay-window-ms updated-at as-of)
-        delta-window    (- current-window previous-window)]
+  [confidence utility ^java.util.Date updated-at ^java.util.Date last-decayed ^java.util.Date as-of decay-config]
+  (let [previous-window (decay-window-ms updated-at last-decayed decay-config)
+        current-window  (decay-window-ms updated-at as-of decay-config)
+        delta-window    (- current-window previous-window)
+        utility-factor  (memory/fact-utility-half-life-factor utility)]
     (when (pos? delta-window)
-      (max (:min-confidence knowledge-decay-config)
+      (max (:min-confidence decay-config)
            (* confidence
               (Math/pow 0.5
                         (/ delta-window
-                           (double (:half-life-ms knowledge-decay-config)))))))))
+                           (double (* (:half-life-ms decay-config)
+                                      utility-factor)))))))))
 
 (defn maintain-knowledge!
   "Periodic maintenance: apply time-based exponential decay to stale facts.
-   Facts get a 7-day grace period, then decay toward a floor using a 60-day half-life."
+   Facts get a grace period, then decay toward a floor using the configured half-life.
+   Facts that remain at the confidence floor long enough are archived out of the live DB."
   ([] (maintain-knowledge! (java.util.Date.)))
   ([^java.util.Date as-of]
-   (let [facts (db/q '[:find ?f ?confidence ?updated
+   (let [decay-config (knowledge-decay-settings)
+         facts (db/q '[:find ?f ?confidence ?utility ?updated
                        :where
                        [?f :kg.fact/confidence ?confidence]
+                       [(get-else $ ?f :kg.fact/utility 0.5) ?utility]
                        [?f :kg.fact/updated-at ?updated]])
-         step-ms (:maintenance-step-ms knowledge-decay-config)
-         stale   (reduce
-                   (fn [acc [eid confidence updated]]
-                     (let [fact-entity   (db/entity eid)
-                           last-decayed (decayed-at fact-entity updated)
-                           due?         (>= (- (.getTime as-of) (.getTime last-decayed))
-                                            step-ms)]
-                       (if due?
-                         (if-let [new-conf (next-confidence confidence updated last-decayed as-of)]
-                           (conj acc [eid new-conf])
-                           acc)
-                         acc)))
-                   []
-                   facts)]
-     (when (seq stale)
-       (log/info "Exponentially decaying confidence of" (count stale) "stale facts")
-       (doseq [[eid new-conf] stale]
-         (db/transact! [[:db/add eid :kg.fact/confidence (float new-conf)]
-                        [:db/add eid :kg.fact/decayed-at as-of]])))
-     (count stale))))
+         step-ms (:maintenance-step-ms decay-config)
+         {:keys [decay-tx archive-eids]}
+         (reduce
+           (fn [{:keys [decay-tx archive-eids] :as acc} [eid confidence utility updated]]
+             (let [fact-entity    (db/entity eid)
+                   last-decayed   (decayed-at fact-entity updated)
+                   due?           (>= (- (.getTime as-of) (.getTime last-decayed))
+                                      step-ms)
+                   decayed-conf   (when due?
+                                    (next-confidence confidence utility updated last-decayed as-of decay-config))
+                   effective-conf (double (or decayed-conf confidence))
+                   bottomed-at    (inferred-bottomed-at fact-entity
+                                                       confidence
+                                                       effective-conf
+                                                       updated
+                                                       last-decayed
+                                                       as-of
+                                                       decay-config)]
+               (cond
+                 (archive-bottomed-fact? effective-conf bottomed-at as-of decay-config)
+                 (update acc :archive-eids conj eid)
+
+                 :else
+                 (let [new-tx (cond-> []
+                                (and decayed-conf
+                                     (> (Math/abs (- effective-conf (double confidence)))
+                                        1.0e-9))
+                                (into [[:db/add eid :kg.fact/confidence (float effective-conf)]
+                                       [:db/add eid :kg.fact/decayed-at as-of]])
+
+                                (and bottomed-at
+                                     (not= bottomed-at (:kg.fact/bottomed-at fact-entity)))
+                                (conj [:db/add eid :kg.fact/bottomed-at bottomed-at]))]
+                   (if (seq new-tx)
+                     (update acc :decay-tx into new-tx)
+                     acc)))))
+           {:decay-tx [] :archive-eids []}
+           facts)]
+     (when (seq decay-tx)
+       (log/info "Updated confidence of" (count (filter #(= :kg.fact/confidence (nth % 2 nil)) decay-tx)) "stale fact fields")
+       (db/transact! decay-tx))
+     (when (seq archive-eids)
+       (log/info "Archiving" (count archive-eids) "bottomed-out facts")
+       (db/transact! (mapv (fn [eid] [:db/retractEntity eid]) archive-eids)))
+     (+ (count decay-tx) (count archive-eids)))))
 
 (defn consolidate-if-pending!
   "Idle consolidation: if pending episodes exceed threshold, consolidate."
