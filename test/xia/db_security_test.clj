@@ -76,13 +76,16 @@
     (is (crypto/encrypted? raw-value))
     (is (= "gho_secret" (db/get-config :token/github)))))
 
-(deftest transcripts-and-tool-payloads-are-encrypted-at-rest
+(deftest transcripts-keep-structured-tool-payloads
   (let [sid        (db/create-session! :terminal)
-        tool-calls "[{\"id\":\"call_1\",\"function\":{\"name\":\"service-request\",\"arguments\":\"{\\\"query\\\":\\\"secret\\\"}\"}}]"]
+        tool-calls [{"id"       "call_1"
+                     "function" {"name"      "service-request"
+                                 "arguments" "{\"query\":\"secret\"}"}}]]
     (db/add-message! sid :user "pasted local secret")
     (db/add-message! sid :assistant "checking service"
                      :tool-calls tool-calls)
-    (db/add-message! sid :tool "{\"token\":\"top-secret\"}"
+    (db/add-message! sid :tool nil
+                     :tool-result {"token" "top-secret"}
                      :tool-id "call_1")
     (let [raw-messages (->> (db/q '[:find ?e ?role
                                     :in $ ?sid
@@ -96,22 +99,27 @@
           messages     (db/session-messages sid)]
       (is (crypto/encrypted? (:message/content (:user raw-messages))))
       (is (crypto/encrypted? (:message/content (:assistant raw-messages))))
-      (is (crypto/encrypted? (:message/tool-calls (:assistant raw-messages))))
-      (is (crypto/encrypted? (:message/content (:tool raw-messages))))
+      (is (= {:calls tool-calls}
+             (:message/tool-calls (:assistant raw-messages))))
+      (is (= {:result {"token" "top-secret"}}
+             (:message/tool-result (:tool raw-messages))))
       (is (= [{:role :user
                :content "pasted local secret"
                :created-at (:created-at (first messages))
                :tool-calls nil
+               :tool-result nil
                :tool-id nil}
               {:role :assistant
                :content "checking service"
                :created-at (:created-at (second messages))
                :tool-calls tool-calls
+               :tool-result nil
                :tool-id nil}
               {:role :tool
-               :content "{\"token\":\"top-secret\"}"
+               :content nil
                :created-at (:created-at (nth messages 2))
                :tool-calls nil
+               :tool-result {"token" "top-secret"}
                :tool-id "call_1"}]
              messages)))))
 
@@ -125,6 +133,9 @@
     {:started-at  (java.util.Date.)
      :finished-at (java.util.Date.)
      :status      :error
+     :actions     [{:tool-id "service-call"
+                    :status "blocked"
+                    :arguments {"endpoint" "/gmail/v1/messages"}}]
      :result      "{\"records\":[\"secret\"]}"
      :error       "token leak"})
   (let [eid     (ffirst (db/q '[:find ?e :where
@@ -133,6 +144,14 @@
         history (schedule/schedule-history :security-hist)]
     (is (crypto/encrypted? (:schedule-run/result raw)))
     (is (crypto/encrypted? (:schedule-run/error raw)))
+    (is (= {:events [{:tool-id "service-call"
+                      :status "blocked"
+                      :arguments {"endpoint" "/gmail/v1/messages"}}]}
+           (:schedule-run/actions raw)))
+    (is (= [{:tool-id "service-call"
+             :status "blocked"
+             :arguments {"endpoint" "/gmail/v1/messages"}}]
+           (:actions (first history))))
     (is (= "{\"records\":[\"secret\"]}" (:result (first history))))
     (is (= "token leak" (:error (first history))))))
 
@@ -161,7 +180,7 @@
                    :message/session    session-eid
                    :message/role       :assistant
                    :message/content    "legacy transcript"
-                   :message/tool-calls "[{\"id\":\"call_1\"}]"
+                   :message/tool-calls {:calls [{"id" "call_1"}]}
                    :message/created-at (java.util.Date.)}])
     (#'xia.db/migrate-secrets!)
     (let [eid      (ffirst (db/q '[:find ?e :in $ ?id :where [?e :message/id ?id]]
@@ -169,6 +188,6 @@
           raw      (raw-entity eid)
           messages (db/session-messages sid)]
       (is (crypto/encrypted? (:message/content raw)))
-      (is (crypto/encrypted? (:message/tool-calls raw)))
+      (is (= {:calls [{"id" "call_1"}]} (:message/tool-calls raw)))
       (is (= "legacy transcript" (:content (first messages))))
-      (is (= "[{\"id\":\"call_1\"}]" (:tool-calls (first messages)))))))
+      (is (= [{"id" "call_1"}] (:tool-calls (first messages)))))))

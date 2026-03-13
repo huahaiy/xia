@@ -10,10 +10,9 @@
    - Interval: {:interval-minutes 30}
 
    This namespace handles data operations only. The background executor
-   lives in xia.scheduler (separate to avoid circular deps with agent)."
+  lives in xia.scheduler (separate to avoid circular deps with agent)."
   (:require [clojure.edn :as edn]
             [clojure.tools.logging :as log]
-            [charred.api :as json]
             [xia.cron :as cron]
             [xia.db :as db]))
 
@@ -23,6 +22,17 @@
 
 (def ^:private max-schedules 50)
 (def ^:private min-interval-minutes 5)
+
+(defn- actions-doc
+  [actions]
+  {:events (vec actions)})
+
+(defn- read-actions-doc
+  [value]
+  (cond
+    (map? value)    (vec (or (:events value) []))
+    (sequential? value) (vec value)
+    :else           value))
 
 ;; ---------------------------------------------------------------------------
 ;; Spec coercion (from tool JSON params to internal data)
@@ -77,7 +87,7 @@
      :tool-id     — keyword, required when type = :tool
      :tool-args   — map, optional args for the tool
      :prompt      — string, required when type = :prompt
-     :trusted?    — allow privileged tools to run without live approval (default true)"
+     :trusted?    — allow autonomous-approved privileged tools to run without live approval (default true)"
   [{:keys [id name description spec type tool-id tool-args prompt trusted?]}]
   (when-not id
     (throw (ex-info "Schedule must have an :id" {})))
@@ -114,7 +124,7 @@
            description (assoc :schedule/description description)
            next-run    (assoc :schedule/next-run next-run)
            tool-id     (assoc :schedule/tool-id tool-id)
-           tool-args   (assoc :schedule/tool-args (json/write-json-str tool-args))
+           tool-args   (assoc :schedule/tool-args tool-args)
            prompt      (assoc :schedule/prompt prompt))])
       (log/info "Created schedule:" (clojure.core/name id)
                 "spec:" (cron/describe spec))
@@ -137,8 +147,7 @@
          :type        (:schedule/type e)
          :trusted?    (:schedule/trusted? e)
          :tool-id     (:schedule/tool-id e)
-         :tool-args   (when-let [s (:schedule/tool-args e)]
-                        (try (json/read-json s) (catch Exception _ s)))
+         :tool-args   (:schedule/tool-args e)
          :prompt      (:schedule/prompt e)
          :enabled?    (:schedule/enabled? e)
          :last-run    (:schedule/last-run e)
@@ -173,8 +182,7 @@
              (:description updates) (assoc :schedule/description (:description updates))
              (contains? updates :enabled?) (assoc :schedule/enabled? (:enabled? updates))
              (contains? updates :trusted?) (assoc :schedule/trusted? (boolean (:trusted? updates)))
-             (:tool-args updates)   (assoc :schedule/tool-args
-                                           (json/write-json-str (:tool-args updates)))
+             (:tool-args updates)   (assoc :schedule/tool-args (:tool-args updates))
              (:prompt updates)      (assoc :schedule/prompt (:prompt updates)))]
     ;; If spec changed, re-validate and update next-run
     (if-let [new-spec (:spec updates)]
@@ -229,7 +237,7 @@
 
 (defn record-run!
   "Record a schedule execution result."
-  [schedule-id {:keys [started-at finished-at status result error]}]
+  [schedule-id {:keys [started-at finished-at status result error actions]}]
   (db/transact!
     [(cond-> {:schedule-run/id          (random-uuid)
               :schedule-run/schedule-id schedule-id
@@ -243,7 +251,8 @@
        error       (assoc :schedule-run/error
                           (if (> (count (str error)) 2000)
                             (subs (str error) 0 2000)
-                            (str error))))])
+                            (str error)))
+       (some? actions) (assoc :schedule-run/actions (actions-doc actions)))])
   ;; Update schedule's last-run and next-run
   (let [now      (java.util.Date.)
         sched    (get-schedule schedule-id)
@@ -272,6 +281,8 @@
                      :started-at  (:schedule-run/started-at e)
                      :finished-at (:schedule-run/finished-at e)
                      :status      (:schedule-run/status e)
+                     :actions     (some-> (:schedule-run/actions e)
+                                          read-actions-doc)
                      :result      (:schedule-run/result e)
                      :error       (:schedule-run/error e)})))))))
 
@@ -280,7 +291,7 @@
    Omits result bodies and error text, which may contain sensitive data."
   ([schedule-id] (safe-schedule-history schedule-id 10))
   ([schedule-id limit]
-   (mapv #(dissoc % :result :error)
+   (mapv #(dissoc % :result :error :actions)
          (schedule-history schedule-id limit))))
 
 (defn trim-history!
@@ -318,8 +329,7 @@
                :type      (:schedule/type e)
                :trusted?  (:schedule/trusted? e)
                :tool-id   (:schedule/tool-id e)
-               :tool-args (when-let [s (:schedule/tool-args e)]
-                            (try (json/read-json s) (catch Exception _ {})))
+               :tool-args (:schedule/tool-args e)
                :prompt    (:schedule/prompt e)
                :spec      (read-spec (:schedule/spec e))}))
           eids)))

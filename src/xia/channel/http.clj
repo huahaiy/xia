@@ -6,11 +6,13 @@
             [charred.api :as json]
             [clojure.tools.logging :as log]
             [xia.scratch :as scratch]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
             [xia.service :as service-proxy]
+            [xia.schedule :as schedule]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.working-memory :as wm])
@@ -295,6 +297,54 @@
 (defn- instant->str [value]
   (some-> value .toInstant str))
 
+(def ^:private history-session-channels #{:http :websocket :terminal})
+
+(defn- truncate-text
+  [value limit]
+  (let [text (some-> value str str/trim)]
+    (when (seq text)
+      (if (> (count text) limit)
+        (str (subs text 0 (max 0 (- limit 1))) "…")
+        text))))
+
+(defn- history-run->body
+  [run]
+  {:id          (some-> (:id run) str)
+   :schedule_id (some-> (:schedule-id run) name)
+   :started_at  (instant->str (:started-at run))
+   :finished_at (instant->str (:finished-at run))
+   :status      (some-> (:status run) name)
+   :actions     (:actions run)
+   :result      (:result run)
+   :error       (:error run)})
+
+(defn- history-schedule->body
+  [sched]
+  (let [latest-run (first (schedule/schedule-history (:id sched) 1))]
+    {:id            (some-> (:id sched) name)
+     :name          (:name sched)
+     :type          (some-> (:type sched) name)
+     :trusted       (boolean (:trusted? sched))
+     :enabled       (boolean (:enabled? sched))
+     :last_run      (instant->str (:last-run sched))
+     :next_run      (instant->str (:next-run sched))
+     :latest_status (some-> (:status latest-run) name)
+     :latest_error  (truncate-text (:error latest-run) 160)}))
+
+(defn- history-session->body
+  [session]
+  (let [messages     (->> (db/session-messages (:id session))
+                          (filter #(#{:user :assistant} (:role %)))
+                          vec)
+        last-message (last messages)]
+    {:id              (some-> (:id session) str)
+     :channel         (some-> (:channel session) name)
+     :created_at      (instant->str (:created-at session))
+     :active          (boolean (:active? session))
+     :message_count   (count messages)
+     :last_message_at (instant->str (:created-at last-message))
+     :preview         (truncate-text (:content last-message) 160)}))
+
 (defn- status->body
   [status]
   (when status
@@ -464,8 +514,11 @@
      :oauth_account          (some-> (:service/oauth-account service) name)
      :oauth_account_name     (:oauth.account/name oauth-account)
      :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
+     :oauth_account_autonomous_approved (boolean (and oauth-account
+                                                     (autonomous/oauth-account-autonomous-approved? oauth-account)))
      :rate_limit_per_minute  (:service/rate-limit-per-minute service)
      :effective_rate_limit_per_minute (service-proxy/effective-rate-limit-per-minute service)
+     :autonomous_approved    (boolean (autonomous/service-autonomous-approved? service))
      :enabled                (boolean (:service/enabled? service))
      :auth_key_configured    (boolean (nonblank-str (:service/auth-key service)))}))
 
@@ -484,6 +537,7 @@
    :client_secret_configured (boolean (nonblank-str (:oauth.account/client-secret account)))
    :access_token_configured  (boolean (nonblank-str (:oauth.account/access-token account)))
    :refresh_token_configured (boolean (nonblank-str (:oauth.account/refresh-token account)))
+   :autonomous_approved      (boolean (autonomous/oauth-account-autonomous-approved? account))
    :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
    :expires_at               (instant->str (:oauth.account/expires-at account))
    :connected_at             (instant->str (:oauth.account/connected-at account))})
@@ -512,6 +566,7 @@
    :password_field      (:site-cred/password-field site)
    :form_selector       (:site-cred/form-selector site)
    :extra_fields        (:site-cred/extra-fields site)
+   :autonomous_approved (boolean (autonomous/site-autonomous-approved? site))
    :username_configured (boolean (nonblank-str (:site-cred/username site)))
    :password_configured (boolean (nonblank-str (:site-cred/password site)))})
 
@@ -622,6 +677,37 @@
                           :messages   messages}))
     (catch IllegalArgumentException _
       (json-response 400 {:error "invalid session id"}))))
+
+(defn- handle-history-sessions []
+  (json-response 200
+                 {:sessions (->> (db/list-sessions)
+                                 (filter #(contains? history-session-channels (:channel %)))
+                                 (mapv history-session->body))}))
+
+(defn- handle-history-schedules []
+  (json-response 200
+                 {:schedules (->> (schedule/list-schedules)
+                                  (sort-by (fn [sched]
+                                             (or (some-> (:last-run sched) .getTime)
+                                                 (some-> (:next-run sched) .getTime)
+                                                 Long/MIN_VALUE))
+                                           >)
+                                  (mapv history-schedule->body))}))
+
+(defn- handle-history-schedule-runs
+  [schedule-id]
+  (try
+    (let [sid   (parse-keyword-id schedule-id "schedule_id")
+          sched (schedule/get-schedule sid)]
+      (if-not sched
+        (json-response 404 {:error "schedule not found"})
+        (json-response 200
+                       {:schedule (history-schedule->body sched)
+                        :runs     (mapv history-run->body
+                                        (schedule/schedule-history sid 20))})))
+    (catch clojure.lang.ExceptionInfo e
+      (json-response 400 {:error (.getMessage e)
+                          :details (ex-data e)}))))
 
 (defn- handle-list-scratch-pads [session-id]
   (cond
@@ -846,6 +932,8 @@
           entered-auth-key  (nonblank-str (get data "auth_key"))
           rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
                                                               "rate_limit_per_minute")
+          autonomous-approved? (when (contains? data "autonomous_approved")
+                                 (true? (get data "autonomous_approved")))
           enabled?          (if (contains? data "enabled")
                               (true? (get data "enabled"))
                               true)
@@ -883,6 +971,7 @@
                          :auth-header auth-header
                          :oauth-account oauth-account-id
                          :rate-limit-per-minute rate-limit-per-minute
+                         :autonomous-approved? autonomous-approved?
                          :enabled?    enabled?})
       (json-response 200 {:service (service->admin-body (db/get-service service-id))}))
     (catch clojure.lang.ExceptionInfo e
@@ -908,7 +997,9 @@
           scopes         (or (nonblank-str (get data "scopes")) "")
           redirect-uri   (nonblank-str (get data "redirect_uri"))
           auth-params    (parse-json-object-string (get data "auth_params") "auth_params")
-          token-params   (parse-json-object-string (get data "token_params") "token_params")]
+          token-params   (parse-json-object-string (get data "token_params") "token_params")
+          autonomous-approved? (when (contains? data "autonomous_approved")
+                                 (true? (get data "autonomous_approved")))]
       (when-not authorize-url
         (throw (ex-info "missing 'authorize_url' field" {:field "authorize_url"})))
       (when-not token-url
@@ -931,6 +1022,7 @@
                                :redirect-uri  redirect-uri
                                :auth-params   auth-params
                                :token-params  token-params
+                               :autonomous-approved? autonomous-approved?
                                :access-token  (:oauth.account/access-token existing)
                                :refresh-token (:oauth.account/refresh-token existing)
                                :token-type    (:oauth.account/token-type existing)
@@ -1065,7 +1157,9 @@
                               (:site-cred/password existing)
                               "")
           form-selector   (nonblank-str (get data "form_selector"))
-          extra-fields    (parse-extra-fields (get data "extra_fields"))]
+          extra-fields    (parse-extra-fields (get data "extra_fields"))
+          autonomous-approved? (when (contains? data "autonomous_approved")
+                                 (true? (get data "autonomous_approved")))]
       (when-not login-url
         (throw (ex-info "missing 'login_url' field" {:field "login_url"})))
       (db/save-site-cred! {:id             site-id
@@ -1076,7 +1170,8 @@
                            :username       username
                            :password       password
                            :form-selector  form-selector
-                           :extra-fields   extra-fields})
+                           :extra-fields   extra-fields
+                           :autonomous-approved? autonomous-approved?})
       (json-response 200 {:site (site->admin-body (db/get-site-cred site-id))}))
     (catch clojure.lang.ExceptionInfo e
       (json-response 400 {:error (.getMessage e)
@@ -1124,6 +1219,7 @@
         session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
         status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
         approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
+        history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
         scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
         scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
         scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)
@@ -1173,6 +1269,15 @@
 
       (and (= method :get) session-match)
       (protected-route-response req #(handle-session-messages (second session-match)))
+
+      (and (= method :get) (= uri "/history/sessions"))
+      (protected-route-response req handle-history-sessions)
+
+      (and (= method :get) (= uri "/history/schedules"))
+      (protected-route-response req handle-history-schedules)
+
+      (and (= method :get) history-schedule-match)
+      (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
 
       (and (= method :get) scratch-list-match)
       (protected-route-response req #(handle-list-scratch-pads (second scratch-list-match)))

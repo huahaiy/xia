@@ -28,17 +28,47 @@
     (is (= "Tool privileged-tool blocked: No approval handler available for current channel"
            (:error result)))))
 
-(deftest privileged-tool-allows-preapproved-context
-  (db/install-tool! {:id          :scheduled-tool
-                     :name        "scheduled-tool"
-                     :description "Scheduled privileged tool"
+(deftest autonomous-service-tools-require-approved-services
+  (db/register-service! {:id                   :gmail
+                         :name                 "Gmail"
+                         :base-url             "https://gmail.googleapis.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? false})
+  (db/install-tool! {:id          :service-tool
+                     :name        "service-tool"
+                     :description "Service tool"
                      :approval    :session
-                     :handler     "(fn [_] {\"status\" \"ok\"})"})
-  (tool/load-tool! :scheduled-tool)
-  (is (= {"status" "ok"}
-         (tool/execute-tool :scheduled-tool {}
-                            {:channel :scheduler
-                             :approval-bypass? true}))))
+                     :handler     "(fn [_] (xia.service/request :gmail :get \"/messages\"))"})
+  (tool/load-tool! :service-tool)
+  (is (= "Tool service-tool blocked: no approved services are available for autonomous execution"
+         (:error (tool/execute-tool :service-tool {}
+                                    {:channel          :scheduler
+                                     :autonomous-run?  true
+                                     :approval-bypass? true})))))
+
+(deftest autonomous-service-tools-run-through-approved-service
+  (db/register-service! {:id                   :github
+                         :name                 "GitHub"
+                         :base-url             "https://api.github.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? true})
+  (db/install-tool! {:id          :service-tool
+                     :name        "service-tool"
+                     :description "Service tool"
+                     :approval    :session
+                     :handler     "(fn [_] (xia.service/request :github :get \"/user\"))"})
+  (tool/load-tool! :service-tool)
+  (with-redefs [xia.http-client/request (fn [_]
+                                          {:status 200
+                                           :headers {"content-type" "application/json"}
+                                           :body "{\"login\":\"hyang\"}"})]
+    (is (= 200
+           (:status (tool/execute-tool :service-tool {}
+                                       {:channel          :scheduler
+                                        :autonomous-run?  true
+                                        :approval-bypass? true}))))))
 
 (deftest privileged-tool-approval-is-cached-per-session
   (db/install-tool! {:id          :session-tool
@@ -116,6 +146,109 @@
                         defs)]
     (is (= "Annotated tool Requires user approval before execution."
            (get-in tool-def [:function :description])))))
+
+(deftest autonomous-tool-definitions-hide-unavailable-privileged-tools
+  (db/register-service! {:id                   :github
+                         :name                 "GitHub"
+                         :base-url             "https://api.github.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? true})
+  (db/register-site-cred! {:id                     :portal
+                           :name                   "Portal"
+                           :login-url              "https://portal.example/login"
+                           :username               "hyang"
+                           :password               "pw"
+                           :autonomous-approved?   false})
+  (db/install-tool! {:id          :auto-tool
+                     :name        "auto-tool"
+                     :description "Automatic tool"
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (db/install-tool! {:id          :manual-tool
+                     :name        "manual-tool"
+                     :description "Manual tool"
+                     :approval    :session
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (db/install-tool! {:id          :service-tool
+                     :name        "service-tool"
+                     :description "Service tool"
+                     :approval    :session
+                     :handler     "(fn [_] (xia.service/request :github :get \"/user\"))"})
+  (db/install-tool! {:id          :site-tool
+                     :name        "site-tool"
+                     :description "Site tool"
+                     :approval    :session
+                     :handler     "(fn [_] (xia.browser/login :portal))"})
+  (tool/load-tool! :auto-tool)
+  (tool/load-tool! :manual-tool)
+  (tool/load-tool! :service-tool)
+  (tool/load-tool! :site-tool)
+  (let [trusted-defs   (tool/tool-definitions {:channel          :scheduler
+                                               :autonomous-run?  true
+                                               :approval-bypass? true})
+        untrusted-defs (tool/tool-definitions {:channel         :scheduler
+                                               :autonomous-run? true})
+        trusted-names  (set (map #(get-in % [:function :name]) trusted-defs))
+        untrusted-names (set (map #(get-in % [:function :name]) untrusted-defs))]
+    (is (contains? trusted-names "auto-tool"))
+    (is (contains? trusted-names "service-tool"))
+    (is (not (contains? trusted-names "manual-tool")))
+    (is (not (contains? trusted-names "site-tool")))
+    (is (contains? untrusted-names "auto-tool"))
+    (is (not (contains? untrusted-names "service-tool")))
+    (is (not (contains? untrusted-names "site-tool")))
+    (is (not (contains? untrusted-names "manual-tool"))))
+  (db/register-site-cred! {:id                     :portal
+                           :name                   "Portal"
+                           :login-url              "https://portal.example/login"
+                           :username               "hyang"
+                           :password               "pw"
+                           :autonomous-approved?   true})
+  (let [trusted-names (set (map #(get-in % [:function :name])
+                                (tool/tool-definitions {:channel          :scheduler
+                                                        :autonomous-run?  true
+                                                        :approval-bypass? true})))]
+    (is (contains? trusted-names "site-tool"))))
+
+(deftest tool-execution-audit-is-recorded
+  (db/register-service! {:id                   :github
+                         :name                 "GitHub"
+                         :base-url             "https://api.github.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? true})
+  (db/install-tool! {:id          :audited-tool
+                     :name        "audited-tool"
+                     :description "Audited tool"
+                     :approval    :session
+                     :handler     "(fn [_] (xia.service/request :github :get \"/user\"))"})
+  (tool/load-tool! :audited-tool)
+  (let [audit-log (atom [])]
+    (with-redefs [xia.http-client/request (fn [_]
+                                            {:status 200
+                                             :headers {"content-type" "application/json"}
+                                             :body "{\"login\":\"hyang\"}"})]
+      (is (= 200
+             (:status (tool/execute-tool :audited-tool {}
+                              {:channel          :scheduler
+                               :autonomous-run?  true
+                               :approval-bypass? true
+                               :audit-log        audit-log})))))
+    (is (= [{:type "service-request"
+             :service-id "github"
+             :method "get"
+             :path "/user"
+             :status "success"
+             :http-status 200}
+            {:type "tool"
+             :tool-id "audited-tool"
+             :tool-name "audited-tool"
+             :arguments {}
+             :status "success"
+             :approval-policy "session"
+             :approval-mode "autonomous-bypass"}]
+           (mapv #(dissoc % :at) @audit-log)))))
 
 (deftest execution-mode-controls-parallel-safety
   (db/install-tool! {:id             :parallel-tool

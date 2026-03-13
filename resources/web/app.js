@@ -22,6 +22,14 @@ const state = {
     tools: [],
     skills: []
   },
+  history: {
+    sessions: [],
+    schedules: [],
+    activeSessionId: '',
+    activeScheduleId: '',
+    sessionMessages: [],
+    scheduleRuns: []
+  },
   activeProviderId: '',
   activeOauthAccountId: '',
   activeServiceId: '',
@@ -56,6 +64,14 @@ const newScratchEl = document.getElementById('new-scratch');
 const saveScratchEl = document.getElementById('save-scratch');
 const deleteScratchEl = document.getElementById('delete-scratch');
 const insertScratchEl = document.getElementById('insert-scratch');
+const historySessionListEl = document.getElementById('history-session-list');
+const historySessionStatusEl = document.getElementById('history-session-status');
+const historySessionMessagesEl = document.getElementById('history-session-messages');
+const historyScheduleListEl = document.getElementById('history-schedule-list');
+const historyScheduleStatusEl = document.getElementById('history-schedule-status');
+const historyScheduleRunsEl = document.getElementById('history-schedule-runs');
+const refreshHistorySessionsEl = document.getElementById('refresh-history-sessions');
+const refreshHistorySchedulesEl = document.getElementById('refresh-history-schedules');
 const providerListEl = document.getElementById('provider-list');
 const providerIdEl = document.getElementById('provider-id');
 const providerNameEl = document.getElementById('provider-name');
@@ -84,6 +100,7 @@ const oauthScopesEl = document.getElementById('oauth-scopes');
 const oauthRedirectUriEl = document.getElementById('oauth-redirect-uri');
 const oauthAuthParamsEl = document.getElementById('oauth-auth-params');
 const oauthTokenParamsEl = document.getElementById('oauth-token-params');
+const oauthAccountAutonomousApprovedEl = document.getElementById('oauth-account-autonomous-approved');
 const oauthAccountStatusEl = document.getElementById('oauth-account-status');
 const newOauthAccountEl = document.getElementById('new-oauth-account');
 const saveOauthAccountEl = document.getElementById('save-oauth-account');
@@ -100,6 +117,7 @@ const serviceAuthHeaderEl = document.getElementById('service-auth-header');
 const serviceOauthAccountEl = document.getElementById('service-oauth-account');
 const serviceRateLimitEl = document.getElementById('service-rate-limit');
 const serviceAuthKeyEl = document.getElementById('service-auth-key');
+const serviceAutonomousApprovedEl = document.getElementById('service-autonomous-approved');
 const serviceEnabledEl = document.getElementById('service-enabled');
 const serviceStatusEl = document.getElementById('service-status');
 const newServiceEl = document.getElementById('new-service');
@@ -114,6 +132,7 @@ const siteUsernameEl = document.getElementById('site-username');
 const sitePasswordEl = document.getElementById('site-password');
 const siteFormSelectorEl = document.getElementById('site-form-selector');
 const siteExtraFieldsEl = document.getElementById('site-extra-fields');
+const siteAutonomousApprovedEl = document.getElementById('site-autonomous-approved');
 const siteStatusEl = document.getElementById('site-status');
 const newSiteEl = document.getElementById('new-site');
 const saveSiteEl = document.getElementById('save-site');
@@ -363,6 +382,7 @@ function oauthAccountMeta(account) {
   const bits = [];
   bits.push(account.connected ? 'Connected' : 'Not connected');
   if (account.refresh_token_configured) bits.push('Refresh token stored');
+  if (account.autonomous_approved) bits.push('Autonomous approved');
   if (account.expires_at) bits.push('Expires ' + formatStamp(account.expires_at));
   return bits.join(' • ');
 }
@@ -380,6 +400,7 @@ function serviceMeta(service) {
   if (service.effective_rate_limit_per_minute) bits.push('Rate ' + service.effective_rate_limit_per_minute + '/min');
   if (service.oauth_account_name) bits.push(service.oauth_account_name);
   if (service.auth_type === 'oauth-account') bits.push(service.oauth_account_connected ? 'OAuth connected' : 'OAuth not connected');
+  if (service.autonomous_approved) bits.push('Autonomous approved');
   bits.push(service.enabled ? 'Enabled' : 'Disabled');
   bits.push(service.auth_type === 'oauth-account'
     ? (service.oauth_account ? 'Account linked' : 'No account linked')
@@ -390,9 +411,165 @@ function serviceMeta(service) {
 function siteMeta(site) {
   const bits = [];
   if (site.login_url) bits.push(site.login_url);
+  if (site.autonomous_approved) bits.push('Autonomous approved');
   bits.push(site.username_configured ? 'Username stored' : 'No username');
   bits.push(site.password_configured ? 'Password stored' : 'No password');
   return bits.join(' • ');
+}
+
+function historySessionMeta(session) {
+  const bits = [];
+  if (session.channel) bits.push(session.channel);
+  if (session.last_message_at) bits.push('Last ' + formatDateTime(session.last_message_at));
+  else if (session.created_at) bits.push('Created ' + formatDateTime(session.created_at));
+  bits.push((session.message_count || 0) + ' msgs');
+  if (session.preview) bits.push(session.preview);
+  return bits.join(' • ');
+}
+
+function historyScheduleMeta(schedule) {
+  const bits = [];
+  if (schedule.type) bits.push(schedule.type);
+  bits.push(schedule.enabled ? 'Enabled' : 'Disabled');
+  if (schedule.latest_status) bits.push('Last run ' + schedule.latest_status);
+  if (schedule.last_run) bits.push('Ran ' + formatDateTime(schedule.last_run));
+  else if (schedule.next_run) bits.push('Next ' + formatDateTime(schedule.next_run));
+  if (schedule.latest_error) bits.push(schedule.latest_error);
+  return bits.join(' • ');
+}
+
+function renderHistorySessionList() {
+  renderSelectableList(
+    historySessionListEl,
+    state.history.sessions,
+    state.history.activeSessionId,
+    'No chat sessions recorded yet.',
+    (session) => firstNonEmpty(session.preview, session.id),
+    historySessionMeta,
+    selectHistorySession
+  );
+}
+
+function renderHistoryScheduleList() {
+  renderSelectableList(
+    historyScheduleListEl,
+    state.history.schedules,
+    state.history.activeScheduleId,
+    'No schedules recorded yet.',
+    (schedule) => firstNonEmpty(schedule.name, schedule.id),
+    historyScheduleMeta,
+    selectHistorySchedule
+  );
+}
+
+function renderHistorySessionMessages() {
+  historySessionMessagesEl.innerHTML = '';
+  if (!state.history.activeSessionId) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Select a prior session to view its transcript.';
+    historySessionMessagesEl.appendChild(empty);
+    return;
+  }
+  if (!state.history.sessionMessages.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'This session has no user/assistant transcript yet.';
+    historySessionMessagesEl.appendChild(empty);
+    return;
+  }
+  state.history.sessionMessages.forEach((message) => {
+    historySessionMessagesEl.appendChild(buildMessageEl(message));
+  });
+  historySessionMessagesEl.scrollTop = historySessionMessagesEl.scrollHeight;
+}
+
+function buildHistoryRunEl(run) {
+  const card = document.createElement('article');
+  card.className = 'history-run';
+
+  const head = document.createElement('div');
+  head.className = 'history-run-head';
+
+  const titleWrap = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'history-run-title';
+  title.textContent = (run.status || 'unknown').toUpperCase();
+  const meta = document.createElement('div');
+  meta.className = 'history-run-meta';
+  meta.textContent = [
+    run.started_at ? ('Started ' + formatDateTime(run.started_at)) : '',
+    run.finished_at ? ('Finished ' + formatDateTime(run.finished_at)) : ''
+  ].filter(Boolean).join(' • ');
+  titleWrap.appendChild(title);
+  titleWrap.appendChild(meta);
+  head.appendChild(titleWrap);
+  card.appendChild(head);
+
+  if (run.error) {
+    const block = document.createElement('div');
+    block.className = 'history-block';
+    const label = document.createElement('div');
+    label.className = 'history-block-label';
+    label.textContent = 'Error';
+    const body = document.createElement('pre');
+    body.className = 'history-code';
+    body.textContent = run.error;
+    block.appendChild(label);
+    block.appendChild(body);
+    card.appendChild(block);
+  }
+
+  if (run.result) {
+    const block = document.createElement('div');
+    block.className = 'history-block';
+    const label = document.createElement('div');
+    label.className = 'history-block-label';
+    label.textContent = 'Result';
+    const body = document.createElement('pre');
+    body.className = 'history-code';
+    body.textContent = run.result;
+    block.appendChild(label);
+    block.appendChild(body);
+    card.appendChild(block);
+  }
+
+  if (Array.isArray(run.actions) && run.actions.length) {
+    const block = document.createElement('div');
+    block.className = 'history-block';
+    const label = document.createElement('div');
+    label.className = 'history-block-label';
+    label.textContent = 'Actions';
+    const body = document.createElement('pre');
+    body.className = 'history-code';
+    body.textContent = prettyJson(run.actions);
+    block.appendChild(label);
+    block.appendChild(body);
+    card.appendChild(block);
+  }
+
+  return card;
+}
+
+function renderHistoryScheduleRuns() {
+  historyScheduleRunsEl.innerHTML = '';
+  if (!state.history.activeScheduleId) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = 'Select a schedule to inspect recent runs.';
+    historyScheduleRunsEl.appendChild(empty);
+    return;
+  }
+  if (!state.history.scheduleRuns.length) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = 'No runs recorded for this schedule yet.';
+    historyScheduleRunsEl.appendChild(empty);
+    return;
+  }
+  state.history.scheduleRuns.forEach((run) => {
+    historyScheduleRunsEl.appendChild(buildHistoryRunEl(run));
+  });
 }
 
 function updateAdminButtons() {
@@ -555,6 +732,7 @@ function resetOauthAccountForm(statusText) {
   oauthRedirectUriEl.value = '';
   oauthAuthParamsEl.value = '';
   oauthTokenParamsEl.value = '';
+  oauthAccountAutonomousApprovedEl.checked = true;
   oauthTemplateEl.value = '';
   renderOauthTemplateOptions();
   oauthAccountStatusEl.textContent = statusText || 'Create a connection or select an existing one.';
@@ -572,6 +750,7 @@ function resetServiceForm(statusText) {
   serviceOauthAccountEl.value = '';
   serviceRateLimitEl.value = '';
   serviceAuthKeyEl.value = '';
+  serviceAutonomousApprovedEl.checked = true;
   serviceEnabledEl.checked = true;
   serviceStatusEl.textContent = statusText || 'Create a service or select an existing one.';
   renderServiceList();
@@ -590,6 +769,7 @@ function resetSiteForm(statusText) {
   sitePasswordEl.value = '';
   siteFormSelectorEl.value = '';
   siteExtraFieldsEl.value = '';
+  siteAutonomousApprovedEl.checked = true;
   siteStatusEl.textContent = statusText || 'Create a site login or select an existing one.';
   renderSiteList();
   updateAdminButtons();
@@ -632,6 +812,7 @@ function selectOauthAccount(account) {
   oauthRedirectUriEl.value = account.redirect_uri || '';
   oauthAuthParamsEl.value = account.auth_params || '';
   oauthTokenParamsEl.value = account.token_params || '';
+  oauthAccountAutonomousApprovedEl.checked = !!account.autonomous_approved;
   oauthTemplateEl.value = account.provider_template || '';
   renderOauthTemplateOptions();
   oauthAccountStatusEl.textContent = [
@@ -653,6 +834,7 @@ function selectService(service) {
   serviceOauthAccountEl.value = service.oauth_account || '';
   serviceRateLimitEl.value = service.rate_limit_per_minute || '';
   serviceAuthKeyEl.value = '';
+  serviceAutonomousApprovedEl.checked = !!service.autonomous_approved;
   serviceEnabledEl.checked = !!service.enabled;
   serviceStatusEl.textContent = service.auth_type === 'oauth-account'
     ? ((service.oauth_account_name || 'No OAuth account') + (service.oauth_account_connected ? ' is connected.' : ' is not connected yet.'))
@@ -676,9 +858,148 @@ function selectSite(site) {
   sitePasswordEl.value = '';
   siteFormSelectorEl.value = '';
   siteExtraFieldsEl.value = '';
+  siteAutonomousApprovedEl.checked = !!site.autonomous_approved;
   siteStatusEl.textContent = site.username_configured ? 'Credentials stored.' : 'No credentials stored.';
   renderSiteList();
   updateAdminButtons();
+}
+
+async function selectHistorySession(session) {
+  const sessionId = (session && session.id) || '';
+  state.history.activeSessionId = sessionId;
+  state.history.sessionMessages = [];
+  renderHistorySessionList();
+  renderHistorySessionMessages();
+  if (sessionId) {
+    await loadHistorySessionMessages(sessionId);
+  } else {
+    historySessionStatusEl.textContent = 'No chat session selected.';
+  }
+}
+
+async function loadHistorySessionMessages(sessionId) {
+  if (!sessionId) {
+    state.history.sessionMessages = [];
+    renderHistorySessionMessages();
+    historySessionStatusEl.textContent = 'No chat session selected.';
+    return;
+  }
+  historySessionStatusEl.textContent = 'Loading transcript...';
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(sessionId) + '/messages');
+    if (state.history.activeSessionId !== sessionId) return;
+    state.history.sessionMessages = Array.isArray(data.messages)
+      ? data.messages.map(normalizeMessage).filter(Boolean)
+      : [];
+    renderHistorySessionMessages();
+    historySessionStatusEl.textContent = state.history.sessionMessages.length
+      ? ('Showing ' + state.history.sessionMessages.length + ' messages.')
+      : 'This session has no user/assistant transcript yet.';
+  } catch (err) {
+    if (state.history.activeSessionId !== sessionId) return;
+    state.history.sessionMessages = [];
+    renderHistorySessionMessages();
+    historySessionStatusEl.textContent = err.message || 'Failed to load transcript.';
+  }
+}
+
+async function loadHistorySessions() {
+  historySessionStatusEl.textContent = 'Loading sessions...';
+  try {
+    const data = await fetchJson('/history/sessions');
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    state.history.sessions = sessions;
+    const keepActive = sessions.some((session) => session.id === state.history.activeSessionId)
+      ? state.history.activeSessionId
+      : '';
+    const preferCurrent = state.sessionId && sessions.some((session) => session.id === state.sessionId)
+      ? state.sessionId
+      : '';
+    const nextId = keepActive || preferCurrent || ((sessions[0] && sessions[0].id) || '');
+    state.history.activeSessionId = nextId;
+    renderHistorySessionList();
+    if (!nextId) {
+      state.history.sessionMessages = [];
+      renderHistorySessionMessages();
+      historySessionStatusEl.textContent = 'No chat sessions recorded yet.';
+      return;
+    }
+    historySessionStatusEl.textContent = sessions.length + (sessions.length === 1 ? ' session found.' : ' sessions found.');
+    await loadHistorySessionMessages(nextId);
+  } catch (err) {
+    state.history.sessions = [];
+    state.history.activeSessionId = '';
+    state.history.sessionMessages = [];
+    renderHistorySessionList();
+    renderHistorySessionMessages();
+    historySessionStatusEl.textContent = err.message || 'Failed to load sessions.';
+  }
+}
+
+async function selectHistorySchedule(schedule) {
+  const scheduleId = (schedule && schedule.id) || '';
+  state.history.activeScheduleId = scheduleId;
+  state.history.scheduleRuns = [];
+  renderHistoryScheduleList();
+  renderHistoryScheduleRuns();
+  if (scheduleId) {
+    await loadHistoryScheduleRuns(scheduleId);
+  } else {
+    historyScheduleStatusEl.textContent = 'No schedule selected.';
+  }
+}
+
+async function loadHistoryScheduleRuns(scheduleId) {
+  if (!scheduleId) {
+    state.history.scheduleRuns = [];
+    renderHistoryScheduleRuns();
+    historyScheduleStatusEl.textContent = 'No schedule selected.';
+    return;
+  }
+  historyScheduleStatusEl.textContent = 'Loading runs...';
+  try {
+    const data = await fetchJson('/history/schedules/' + encodeURIComponent(scheduleId) + '/runs');
+    if (state.history.activeScheduleId !== scheduleId) return;
+    state.history.scheduleRuns = Array.isArray(data.runs) ? data.runs : [];
+    renderHistoryScheduleRuns();
+    historyScheduleStatusEl.textContent = state.history.scheduleRuns.length
+      ? ('Showing ' + state.history.scheduleRuns.length + ' recent runs.')
+      : 'No runs recorded for this schedule yet.';
+  } catch (err) {
+    if (state.history.activeScheduleId !== scheduleId) return;
+    state.history.scheduleRuns = [];
+    renderHistoryScheduleRuns();
+    historyScheduleStatusEl.textContent = err.message || 'Failed to load schedule runs.';
+  }
+}
+
+async function loadHistorySchedules() {
+  historyScheduleStatusEl.textContent = 'Loading schedules...';
+  try {
+    const data = await fetchJson('/history/schedules');
+    const schedules = Array.isArray(data.schedules) ? data.schedules : [];
+    state.history.schedules = schedules;
+    const nextId = schedules.some((schedule) => schedule.id === state.history.activeScheduleId)
+      ? state.history.activeScheduleId
+      : ((schedules[0] && schedules[0].id) || '');
+    state.history.activeScheduleId = nextId;
+    renderHistoryScheduleList();
+    if (!nextId) {
+      state.history.scheduleRuns = [];
+      renderHistoryScheduleRuns();
+      historyScheduleStatusEl.textContent = 'No schedules recorded yet.';
+      return;
+    }
+    historyScheduleStatusEl.textContent = schedules.length + (schedules.length === 1 ? ' schedule found.' : ' schedules found.');
+    await loadHistoryScheduleRuns(nextId);
+  } catch (err) {
+    state.history.schedules = [];
+    state.history.activeScheduleId = '';
+    state.history.scheduleRuns = [];
+    renderHistoryScheduleList();
+    renderHistoryScheduleRuns();
+    historyScheduleStatusEl.textContent = err.message || 'Failed to load schedules.';
+  }
 }
 
 async function loadAdminConfig() {
@@ -770,6 +1091,7 @@ function createServiceFromOauthAccount() {
   serviceOauthAccountEl.value = account.id || '';
   serviceRateLimitEl.value = '';
   serviceAuthKeyEl.value = '';
+  serviceAutonomousApprovedEl.checked = true;
   serviceEnabledEl.checked = true;
   serviceStatusEl.textContent = 'Service prefilled. Review and save it.';
   updateAdminButtons();
@@ -831,7 +1153,8 @@ async function saveOauthAccount() {
         scopes: oauthScopesEl.value,
         redirect_uri: oauthRedirectUriEl.value,
         auth_params: oauthAuthParamsEl.value,
-        token_params: oauthTokenParamsEl.value
+        token_params: oauthTokenParamsEl.value,
+        autonomous_approved: oauthAccountAutonomousApprovedEl.checked
       })
     });
     const account = data.oauth_account || null;
@@ -929,6 +1252,7 @@ async function saveService() {
         oauth_account: serviceOauthAccountEl.value,
         rate_limit_per_minute: serviceRateLimitEl.value,
         auth_key: serviceAuthKeyEl.value,
+        autonomous_approved: serviceAutonomousApprovedEl.checked,
         enabled: serviceEnabledEl.checked
       })
     });
@@ -964,7 +1288,8 @@ async function saveSite() {
         username: siteUsernameEl.value,
         password: sitePasswordEl.value,
         form_selector: siteFormSelectorEl.value,
-        extra_fields: siteExtraFieldsEl.value
+        extra_fields: siteExtraFieldsEl.value,
+        autonomous_approved: siteAutonomousApprovedEl.checked
       })
     });
     const site = data.site || null;
@@ -1013,10 +1338,29 @@ function renderApproval() {
   approvalArgsEl.textContent = prettyJson(approval.arguments || {});
 }
 
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
 function formatStamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function normalizeMessage(message) {
+  if (!message) return null;
+  return Object.assign({}, message, {
+    createdAt: message.createdAt || message.created_at || ''
+  });
 }
 
 function buildMessageEl(message) {
@@ -1398,6 +1742,7 @@ async function sendMessage(text) {
       persistSession();
     }
     addMessage('assistant', data.content || '');
+    await loadHistorySessions();
     state.liveStatus = null;
     setStatus('Ready');
   } catch (err) {
@@ -1421,7 +1766,9 @@ async function loadSessionMessages() {
     const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/messages');
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load');
-    state.messages = Array.isArray(data.messages) ? data.messages : [];
+    state.messages = Array.isArray(data.messages)
+      ? data.messages.map(normalizeMessage).filter(Boolean)
+      : [];
     renderMessages();
   } catch (err) {
     state.messages = [];
@@ -1479,6 +1826,8 @@ newScratchEl.addEventListener('click', () => createScratchPad());
 saveScratchEl.addEventListener('click', () => saveScratchPad());
 deleteScratchEl.addEventListener('click', () => deleteScratchPad());
 insertScratchEl.addEventListener('click', () => insertScratchIntoComposer());
+refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
+refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
 
 newProviderEl.addEventListener('click', () => {
   resetProviderForm('Create a model.');
@@ -1529,6 +1878,7 @@ newChatEl.addEventListener('click', () => {
   renderApproval();
   renderMessages();
   syncScratchEditor('No note selected.');
+  loadHistorySessions();
   setStatus('Ready');
   composerEl.focus();
 });
@@ -1565,6 +1915,8 @@ composerEl.focus();
 loadSessionMessages();
 loadScratchPads();
 loadAdminConfig();
+loadHistorySessions();
+loadHistorySchedules();
 window.setInterval(() => {
   if (state.sessionId) {
     pollApproval();

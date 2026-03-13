@@ -21,12 +21,14 @@
     {:started-at  (java.util.Date.)
      :finished-at (java.util.Date.)
      :status      :error
+     :actions     [{:tool-id "service-call" :status "blocked"}]
      :result      "{\"secret\":true}"
      :error       "sensitive failure"})
   (let [history (sci-env/eval-string "(xia.schedule/schedule-history :sandbox-history 1)")
         run     (first history)]
     (is (= 1 (count history)))
     (is (= :error (:status run)))
+    (is (not (contains? run :actions)))
     (is (not (contains? run :result)))
     (is (not (contains? run :error)))))
 

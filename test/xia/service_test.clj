@@ -1,6 +1,7 @@
 (ns xia.service-test
   (:require [clojure.test :refer :all]
             [xia.db :as db]
+            [xia.prompt :as prompt]
             [xia.secret :as secret]
             [xia.service :as service]
             [xia.test-helpers :refer [with-test-db]])
@@ -133,6 +134,25 @@
       (is (not (contains? svc :auth-key)))
       (is (not (contains? svc :auth-type))))))
 
+(deftest list-services-filters-unapproved-services-during-autonomous-runs
+  (db/register-service! {:id                   :gmail
+                         :name                 "Gmail"
+                         :base-url             "https://gmail.googleapis.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? false})
+  (db/register-service! {:id                   :github
+                         :name                 "GitHub"
+                         :base-url             "https://api.github.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? true})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true}]
+    (is (= [:github]
+           (mapv :id (service/list-services))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Service resolution
 ;; ---------------------------------------------------------------------------
@@ -182,6 +202,58 @@
             clojure.lang.ExceptionInfo #"Rate limit exceeded for service limited"
             (service/request :limited :get "/three")))
       (is (= 2 @request-count)))))
+
+(deftest request-blocks-unapproved-service-during-autonomous-runs
+  (db/register-service! {:id                   :gmail
+                         :base-url             "https://gmail.googleapis.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? false})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true
+                                          :audit-log        (atom [])}]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"not approved for autonomous execution"
+          (service/request :gmail :get "/messages")))))
+
+(deftest request-allows-implicitly-approved-service-during-autonomous-runs
+  (db/register-service! {:id        :github
+                         :base-url  "https://api.github.com"
+                         :auth-type :bearer
+                         :auth-key  "tok"})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true
+                                          :audit-log        (atom [])}]
+    (with-redefs [xia.http-client/request (fn [_req]
+                                            {:status 200
+                                             :headers {"content-type" "application/json"}
+                                             :body "{\"ok\":true}"})]
+      (is (= 200 (:status (service/request :github :get "/user")))))))
+
+(deftest request-blocks-oauth-service-when-account-is-unapproved
+  (db/register-oauth-account! {:id                    :github-oauth
+                               :name                  "GitHub OAuth"
+                               :authorize-url         "https://github.com/login/oauth/authorize"
+                               :token-url             "https://github.com/login/oauth/access_token"
+                               :client-id             "client-id"
+                               :client-secret         "client-secret"
+                               :autonomous-approved?  false
+                               :access-token          "oauth-token"
+                               :token-type            "Bearer"})
+  (db/register-service! {:id                   :github
+                         :base-url             "https://api.github.com"
+                         :auth-type            :oauth-account
+                         :oauth-account        :github-oauth
+                         :autonomous-approved? true})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true
+                                          :audit-log        (atom [])}]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"OAuth account github-oauth is not approved"
+          (service/request :github :get "/user")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Secret module protects service/auth-key

@@ -34,49 +34,62 @@
 ;; Execution
 ;; ---------------------------------------------------------------------------
 
+(defn- schedule-tool-context
+  [schedule-id trusted? audit-log]
+  {:channel          :scheduler
+   :schedule-id      schedule-id
+   :autonomous-run?  true
+   :approval-bypass? trusted?
+   :audit-log        audit-log})
+
 (defn- execute-tool-schedule
   "Execute a :tool type schedule."
   [{:keys [id tool-id tool-args trusted?]}]
-  (let [started (java.util.Date.)]
+  (let [started   (java.util.Date.)
+        audit-log (atom [])
+        context   (schedule-tool-context id trusted? audit-log)]
     (try
-      (let [result (tool/execute-tool tool-id (or tool-args {})
-                                      {:channel :scheduler
-                                       :schedule-id id
-                                       :approval-bypass? trusted?})]
+      (let [result (tool/execute-tool tool-id (or tool-args {}) context)]
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      (if (:error result) :error :success)
            :result      (str result)
+           :actions     @audit-log
            :error       (:error result)}))
       (catch Exception e
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      :error
+           :actions     @audit-log
            :error       (.getMessage e)})))))
 
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
   [{:keys [id prompt trusted?]}]
   (let [started    (java.util.Date.)
-        session-id (db/create-session! :scheduler)]
+        session-id (db/create-session! :scheduler)
+        audit-log  (atom [])]
     (try
       (wm/ensure-wm! session-id)
       (let [result (agent/process-message session-id prompt
                                           :channel :scheduler
-                                          :tool-context {:schedule-id id
-                                                         :approval-bypass? trusted?})]
+                                          :tool-context (schedule-tool-context id
+                                                                              trusted?
+                                                                              audit-log))]
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      :success
+           :actions     @audit-log
            :result      (str result)}))
       (catch Exception e
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      :error
+           :actions     @audit-log
            :error       (.getMessage e)}))
       (finally
         (wm/snapshot! session-id)

@@ -13,6 +13,7 @@
             [clojure.tools.logging :as log]
             [charred.api :as json]
             [datalevin.core :as d]
+            [xia.autonomous :as autonomous]
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.prompt :as prompt])
@@ -730,7 +731,7 @@
    Arguments:
      site-id — keyword id of a registered site credential
 
-   Returns:
+  Returns:
      The logged-in page content with session-id for further browsing."
   [site-id]
   (let [cred (db/get-site-cred site-id)]
@@ -738,6 +739,26 @@
       (throw (ex-info (str "No site credentials registered for: " (name site-id)
                            ". Register with xia.db/register-site-cred!")
                       {:site-id site-id})))
+    (when (autonomous/autonomous-run?)
+      (cond
+        (not (autonomous/trusted?))
+        (do
+          (autonomous/audit! {:type    "site-login"
+                              :site-id (name site-id)
+                              :status  "blocked"
+                              :error   "trusted autonomous execution is required for site login"})
+          (throw (ex-info "site login requires trusted autonomous execution"
+                          {:site-id site-id})))
+
+        (not (autonomous/site-autonomous-approved? cred))
+        (do
+          (autonomous/audit! {:type    "site-login"
+                              :site-id (name site-id)
+                              :status  "blocked"
+                              :error   "site account is not approved for autonomous execution"})
+          (throw (ex-info (str "Site account " (name site-id)
+                               " is not approved for autonomous execution")
+                          {:site-id site-id})))))
     (let [login-url (:site-cred/login-url cred)
           username-field (:site-cred/username-field cred)
           password-field (:site-cred/password-field cred)
@@ -753,10 +774,23 @@
           page (current-page client)]
       (when-not page
         (throw (ex-info "Failed to load login page" {:url login-url})))
-      (do-login session-id page
-                username-field password-field
-                username password
-                form-selector extra-fields))))
+      (try
+        (let [login-result (do-login session-id page
+                                     username-field password-field
+                                     username password
+                                     form-selector extra-fields)]
+          (autonomous/audit! {:type       "site-login"
+                              :site-id    (name site-id)
+                              :session-id session-id
+                              :status     "success"})
+          login-result)
+        (catch Exception e
+          (autonomous/audit! {:type       "site-login"
+                              :site-id    (name site-id)
+                              :session-id session-id
+                              :status     "error"
+                              :error      (.getMessage e)})
+          (throw e))))))
 
 (defn login-interactive
   "Log into a site by prompting the user for credentials.
@@ -770,9 +804,15 @@
                 {:name \"email\" :label \"Email\" :mask? false}
                 {:name \"password\" :label \"Password\" :mask? true}
 
-   Returns:
+  Returns:
      The logged-in page content with session-id."
   [url fields]
+  (when (autonomous/autonomous-run?)
+    (autonomous/audit! {:type   "site-login-interactive"
+                        :url    url
+                        :status "blocked"
+                        :error  "interactive login is unavailable during autonomous execution"})
+    (throw (ex-info "interactive login is unavailable during autonomous execution" {:url url})))
   (when-not (prompt/prompt-available?)
     (throw (ex-info "Interactive login requires a terminal session" {})))
   (println)
@@ -830,8 +870,12 @@
 (defn list-sites
   "List registered site credentials. Returns names and URLs — never credentials."
   []
-  (mapv (fn [cred]
-          {:id (:site-cred/id cred)
-           :name (:site-cred/name cred)
-           :login-url (:site-cred/login-url cred)})
-        (db/list-site-creds)))
+  (->> (db/list-site-creds)
+       (filter (fn [cred]
+                 (or (not (autonomous/autonomous-run?))
+                     (autonomous/site-autonomous-approved? cred))))
+       (mapv (fn [cred]
+               {:id (:site-cred/id cred)
+                :name (:site-cred/name cred)
+                :login-url (:site-cred/login-url cred)
+                :autonomous-approved? (autonomous/site-autonomous-approved? cred)}))))

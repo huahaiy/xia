@@ -119,6 +119,13 @@
       (long override)
       (configured-history-budget))))
 
+(defn- tool-result->content
+  [tool-result content]
+  (cond
+    (string? tool-result) tool-result
+    (some? tool-result)   (json/write-json-str tool-result)
+    :else                 content))
+
 ;; ============================================================================
 ;; Renderers
 ;; ============================================================================
@@ -333,11 +340,14 @@
          compaction-provider-id (:compaction-provider-id opts)
          compaction-workload    (or (:compaction-workload opts)
                                     :history-compaction)
-         sys-prompt   (assemble-system-prompt session-id (assoc opts :provider provider))
+        sys-prompt   (assemble-system-prompt session-id (assoc opts :provider provider))
         history      (db/session-messages session-id)
-        history-msgs (mapv (fn [{:keys [role content tool-calls tool-id]}]
-                             (cond-> {:role (name role) :content content}
-                               tool-calls (assoc :tool_calls (json/read-json tool-calls))
+        history-msgs (mapv (fn [{:keys [role content tool-calls tool-id tool-result]}]
+                             (cond-> {:role (name role)
+                                      :content (if (= role :tool)
+                                                 (tool-result->content tool-result content)
+                                                 content)}
+                               tool-calls (assoc :tool_calls tool-calls)
                                tool-id    (assoc :tool_call_id tool-id)))
                            history)
         budget       (resolve-history-budget provider)

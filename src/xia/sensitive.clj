@@ -2,8 +2,8 @@
   "Shared classification for sensitive attributes and config keys."
   (:require [clojure.string :as str]))
 
-(def secret-attrs
-  "DB attributes that must never be exposed to sandboxed code and should be encrypted at rest."
+(def encrypted-attrs
+  "DB attributes that should be encrypted at rest."
   #{:llm.provider/api-key
     :service/auth-key
     :oauth.account/client-secret
@@ -12,9 +12,14 @@
     :site-cred/username
     :site-cred/password
     :message/content
-    :message/tool-calls
     :schedule-run/result
     :schedule-run/error})
+
+(def sandbox-only-secret-attrs
+  "DB attributes that are redacted from sandboxed code but not encrypted at rest."
+  #{:message/tool-calls
+    :message/tool-result
+    :schedule-run/actions})
 
 (def secret-attr-namespaces
   "Attribute namespace prefixes that are always treated as secret."
@@ -24,12 +29,18 @@
   "Config key namespace prefixes that are secret."
   #{"credential" "secret" "api-key" "oauth" "token"})
 
-(defn secret-attr?
-  "True if the given attribute keyword is secret."
+(defn encrypted-attr?
+  "True if the given attribute keyword should be encrypted at rest."
   [attr]
-  (or (contains? secret-attrs attr)
+  (or (contains? encrypted-attrs attr)
       (when-let [ns (namespace attr)]
         (some #(str/starts-with? ns %) secret-attr-namespaces))))
+
+(defn secret-attr?
+  "True if the given attribute keyword is secret to sandboxed code."
+  [attr]
+  (or (encrypted-attr? attr)
+      (contains? sandbox-only-secret-attrs attr)))
 
 (defn secret-config-key?
   "True if the given config key should be treated as secret."

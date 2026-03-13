@@ -82,7 +82,8 @@
    :message/role       {:db/valueType :db.type/keyword} ; :user :assistant :system :tool
    :message/content    {:db/valueType :db.type/string}
    :message/created-at {:db/valueType :db.type/instant}
-   :message/tool-calls {:db/valueType :db.type/string}  ; JSON-encoded tool calls
+   :message/tool-calls {:db/valueType :db.type/idoc :db/domain "message-tool-calls"}
+   :message/tool-result {:db/valueType :db.type/idoc :db/domain "message-tool-result"}
    :message/tool-id    {:db/valueType :db.type/string}  ; for tool-result messages
 
    ;; --- Skill (markdown/text instructions the LLM follows) ---
@@ -124,6 +125,7 @@
    :site-cred/password        {:db/valueType :db.type/string}  ; actual password — SECRET
    :site-cred/form-selector   {:db/valueType :db.type/string}  ; optional CSS selector for the form
    :site-cred/extra-fields    {:db/valueType :db.type/string}  ; JSON: additional fields to fill
+   :site-cred/autonomous-approved? {:db/valueType :db.type/boolean}
 
    ;; --- Service (registered external services with auth credentials) ---
    :service/id          {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
@@ -134,6 +136,7 @@
    :service/auth-header {:db/valueType :db.type/string}    ; custom header/param name (for :api-key-header / :query-param)
    :service/oauth-account {:db/valueType :db.type/keyword} ; linked OAuth account for :oauth-account auth
    :service/rate-limit-per-minute {:db/valueType :db.type/long}
+   :service/autonomous-approved? {:db/valueType :db.type/boolean}
    :service/enabled?    {:db/valueType :db.type/boolean}
 
    ;; --- OAuth Accounts (authorization-code + PKCE / refresh-token auth) ---
@@ -153,6 +156,7 @@
    :oauth.account/token-type    {:db/valueType :db.type/string}
    :oauth.account/expires-at    {:db/valueType :db.type/instant}
    :oauth.account/connected-at  {:db/valueType :db.type/instant}
+   :oauth.account/autonomous-approved? {:db/valueType :db.type/boolean}
    :oauth.account/updated-at    {:db/valueType :db.type/instant}
 
    ;; --- Schedule (cron-based task scheduling) ---
@@ -162,9 +166,9 @@
    :schedule/spec        {:db/valueType :db.type/string}     ; EDN schedule spec
    :schedule/type        {:db/valueType :db.type/keyword}    ; :tool or :prompt
    :schedule/tool-id     {:db/valueType :db.type/keyword}    ; for :tool type
-   :schedule/tool-args   {:db/valueType :db.type/string}     ; JSON for :tool args
+   :schedule/tool-args   {:db/valueType :db.type/idoc :db/domain "schedule-tool-args"}
    :schedule/prompt      {:db/valueType :db.type/string}     ; for :prompt type
-   :schedule/trusted?    {:db/valueType :db.type/boolean}    ; user-approved to run privileged tools without live prompts
+   :schedule/trusted?    {:db/valueType :db.type/boolean}    ; user-approved to bypass approval for autonomous-approved tools
    :schedule/enabled?    {:db/valueType :db.type/boolean}
    :schedule/last-run    {:db/valueType :db.type/instant}
    :schedule/next-run    {:db/valueType :db.type/instant}
@@ -178,12 +182,13 @@
    :schedule-run/status      {:db/valueType :db.type/keyword} ; :success :error
    :schedule-run/result      {:db/valueType :db.type/string}
    :schedule-run/error       {:db/valueType :db.type/string}
+   :schedule-run/actions     {:db/valueType :db.type/idoc :db/domain "schedule-run-actions"}
 
    ;; --- Tool (executable code the LLM can call via function-calling) ---
    :tool/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :tool/name          {:db/valueType :db.type/string}
    :tool/description   {:db/valueType :db.type/string}
-   :tool/parameters    {:db/valueType :db.type/string}  ; JSON schema for parameters
+   :tool/parameters    {:db/valueType :db.type/idoc :db/domain "tool-parameters"}
    :tool/handler       {:db/valueType :db.type/string}  ; SCI code → fn
    :tool/approval      {:db/valueType :db.type/keyword} ; :auto :session :always
    :tool/execution-mode {:db/valueType :db.type/keyword} ; :sequential :parallel-safe
@@ -229,7 +234,7 @@
   (str "attr:" (namespace attr) "/" (name attr)))
 
 (defn- decrypt-secret-attr [attr value]
-  (if (and value (sensitive/secret-attr? attr))
+  (if (and value (sensitive/encrypted-attr? attr))
     (crypto/decrypt value (attr-aad attr))
     value))
 
@@ -242,7 +247,7 @@
   (reduce-kv
     (fn [acc k v]
       (assoc acc k
-             (if (sensitive/secret-attr? k)
+             (if (sensitive/encrypted-attr? k)
                (crypto/encrypt v (attr-aad k))
                v)))
     record
@@ -260,7 +265,7 @@
          (= :db/add (first item))
          (= 4 (count item))
          (keyword? (nth item 2))
-         (sensitive/secret-attr? (nth item 2)))
+         (sensitive/encrypted-attr? (nth item 2)))
     (let [[op eid attr value] item]
       [op eid attr (crypto/encrypt value (attr-aad attr))])
 
@@ -292,7 +297,7 @@
 (defn- migrate-secret-attr! [eid attr value]
   (when (and (string? value)
              (not (str/blank? value))
-             (not (crypto/encrypted? value)))
+                (not (crypto/encrypted? value)))
     (transact! [[:db/add eid attr (crypto/encrypt value (attr-aad attr))]])
     1))
 
@@ -322,7 +327,7 @@
         (reduce
           +
           0
-          (for [attr sensitive/secret-attrs
+          (for [attr sensitive/encrypted-attrs
                 [eid value] (d/q '[:find ?e ?v
                                    :in $ ?attr
                                    :where
@@ -548,7 +553,47 @@
                  :session/active?    true}])
     id))
 
-(defn add-message! [session-id role content & {:keys [tool-calls tool-id]}]
+(defn list-sessions
+  "List all sessions with basic metadata, newest first."
+  []
+  (->> (q '[:find ?sid ?channel ?created ?active
+            :where
+            [?s :session/id ?sid]
+            [?s :session/channel ?channel]
+            [?s :session/created-at ?created]
+            [(get-else $ ?s :session/active? false) ?active]])
+       (map (fn [[sid channel created-at active?]]
+              {:id         sid
+               :channel    channel
+               :created-at created-at
+               :active?    active?}))
+       (sort-by :created-at #(compare %2 %1))
+       vec))
+
+(defn- tool-calls-doc
+  [tool-calls]
+  {:calls (vec tool-calls)})
+
+(defn- read-tool-calls-doc
+  [value]
+  (cond
+    (map? value)        (vec (or (:calls value) []))
+    (sequential? value) (vec value)
+    (= "" value)        nil
+    :else               value))
+
+(defn- tool-result-doc
+  [tool-result]
+  {:result tool-result})
+
+(defn- read-tool-result-doc
+  [value]
+  (cond
+    (map? value)        (if (contains? value :result) (:result value) value)
+    (= "" value)        nil
+    :else               value))
+
+(defn add-message! [session-id role content & {:keys [tool-calls tool-id tool-result]}]
   (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                  :where [?e :session/id ?sid]]
                                session-id))]
@@ -557,7 +602,8 @@
                          :message/role       role
                          :message/content    (or content "")
                          :message/created-at (java.util.Date.)}
-                  tool-calls (assoc :message/tool-calls tool-calls)
+                  tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
+                  (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
                   tool-id    (assoc :message/tool-id tool-id))])))
 
 (defn- empty->nil [s] (when-not (= "" s) s))
@@ -566,15 +612,16 @@
   "Get all messages for a session, ordered by creation time."
   [session-id]
   (sort-by :created-at
-           (map (fn [[content role created tool-calls tool-id]]
-                  {:role       role
-                   :content    (decrypt-secret-attr :message/content content)
-                   :created-at created
-                   :tool-calls (some->> tool-calls
-                                         (decrypt-secret-attr :message/tool-calls)
-                                         empty->nil)
-                   :tool-id    (empty->nil tool-id)})
-                (q '[:find ?content ?role ?created ?tc ?tid
+           (map (fn [[content role created tool-calls tool-result tool-id]]
+                  (let [tool-result* (read-tool-result-doc tool-result)]
+                    {:role        role
+                     :content     (when-not (and (= role :tool) (some? tool-result*))
+                                    (decrypt-secret-attr :message/content content))
+                     :created-at  created
+                     :tool-calls  (read-tool-calls-doc tool-calls)
+                     :tool-result tool-result*
+                     :tool-id     (empty->nil tool-id)}))
+                (q '[:find ?content ?role ?created ?tc ?tr ?tid
                      :in $ ?sid
                      :where
                      [?s :session/id ?sid]
@@ -583,6 +630,7 @@
                      [?m :message/content ?content]
                      [?m :message/created-at ?created]
                      [(get-else $ ?m :message/tool-calls "") ?tc]
+                     [(get-else $ ?m :message/tool-result "") ?tr]
                      [(get-else $ ?m :message/tool-id "") ?tid]]
                    session-id))))
 
@@ -629,7 +677,7 @@
 
 (defn save-site-cred!
   [{:keys [id name login-url username-field password-field
-           username password form-selector extra-fields]}]
+           username password form-selector extra-fields autonomous-approved?]}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] id))
         current (when eid (raw-entity eid))
         tx-data (cond-> [{:site-cred/id             id
@@ -638,7 +686,12 @@
                           :site-cred/username-field (or username-field "username")
                           :site-cred/password-field (or password-field "password")
                           :site-cred/username       (or username "")
-                          :site-cred/password       (or password "")}]
+                          :site-cred/password       (or password "")
+                          :site-cred/autonomous-approved? (if (some? autonomous-approved?)
+                                                            autonomous-approved?
+                                                            (if (contains? current :site-cred/autonomous-approved?)
+                                                              (:site-cred/autonomous-approved? current)
+                                                              true))}]
                   form-selector
                   (update 0 assoc :site-cred/form-selector form-selector)
 
@@ -681,7 +734,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn save-service!
-  [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?] :as service}]
+  [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?
+           autonomous-approved?] :as service}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current (when eid (raw-entity eid))
         rate-limit-per-minute (or (:service/rate-limit-per-minute service)
@@ -693,6 +747,11 @@
                           :service/base-url  base-url
                           :service/auth-type (or auth-type :bearer)
                           :service/auth-key  (or auth-key "")
+                          :service/autonomous-approved? (if (some? autonomous-approved?)
+                                                           autonomous-approved?
+                                                           (if (contains? current :service/autonomous-approved?)
+                                                             (:service/autonomous-approved? current)
+                                                             true))
                           :service/enabled?  (if (nil? enabled?) true enabled?)}]
                   auth-header
                   (update 0 assoc :service/auth-header auth-header)
@@ -748,7 +807,7 @@
 (defn save-oauth-account!
   [{:keys [id name authorize-url token-url client-id client-secret scopes
            provider-template redirect-uri auth-params token-params access-token refresh-token
-           token-type expires-at connected-at]}]
+           token-type expires-at connected-at autonomous-approved?]}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] id))
         current (when eid (raw-entity eid))
         now     (java.util.Date.)
@@ -758,6 +817,11 @@
                           :oauth.account/token-url     token-url
                           :oauth.account/client-id     client-id
                           :oauth.account/scopes        (or scopes "")
+                          :oauth.account/autonomous-approved? (if (some? autonomous-approved?)
+                                                                autonomous-approved?
+                                                                (if (contains? current :oauth.account/autonomous-approved?)
+                                                                  (:oauth.account/autonomous-approved? current)
+                                                                  true))
                           :oauth.account/updated-at    now}]
                   (some? client-secret)
                   (update 0 assoc :oauth.account/client-secret (or client-secret ""))
@@ -896,7 +960,7 @@
                                                 "")
                          :tool/parameters   (or parameters
                                                 (:tool/parameters existing)
-                                                "{}")
+                                                {})
                          :tool/handler      (or handler
                                                 (:tool/handler existing)
                                                 "")

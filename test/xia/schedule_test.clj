@@ -215,6 +215,38 @@
     (is (= :error (:status (first history))))
     (is (= :success (:status (second history))))))
 
+(deftest record-run-persists-audit-actions
+  (schedule/create-schedule!
+    {:id :audit-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
+  (schedule/record-run! :audit-test
+    {:started-at  (java.util.Date.)
+     :finished-at (java.util.Date.)
+     :status      :success
+     :actions     [{:tool-id "web-fetch"
+                    :status "success"
+                    :arguments {"url" "https://example.com"}}]
+     :result      "done"})
+  (let [run (first (schedule/schedule-history :audit-test))]
+    (is (= [{:tool-id "web-fetch"
+             :status "success"
+             :arguments {"url" "https://example.com"}}]
+           (:actions run)))
+    (is (= "done" (:result run)))))
+
+(deftest safe-schedule-history-redacts-audit-actions
+  (schedule/create-schedule!
+    {:id :audit-safe :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
+  (schedule/record-run! :audit-safe
+    {:started-at  (java.util.Date.)
+     :finished-at (java.util.Date.)
+     :status      :error
+     :actions     [{:tool-id "browser-login" :status "blocked"}]
+     :error       "sensitive failure"})
+  (let [run (first (schedule/safe-schedule-history :audit-safe 1))]
+    (is (= :error (:status run)))
+    (is (not (contains? run :actions)))
+    (is (not (contains? run :error)))))
+
 (deftest record-run-updates-last-run
   (schedule/create-schedule!
     {:id :last-run-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})

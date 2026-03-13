@@ -11,7 +11,7 @@
             [clojure.string :as str]
             [clojure.java.io :as io]
             [clojure.tools.logging :as log]
-            [charred.api :as json]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]
@@ -49,33 +49,43 @@
 (def ^:private privileged-handler-rules
   [{:match "xia.service/request"
     :policy :session
+    :autonomous-scope :service
     :reason "uses stored service credentials"}
    {:match "xia.browser/login-interactive"
     :policy :session
+    :autonomous-scope nil
     :reason "prompts for interactive credentials"}
    {:match "xia.browser/login"
     :policy :session
+    :autonomous-scope :site
     :reason "uses stored site credentials"}
    {:match "xia.browser/fill-form"
     :policy :session
+    :autonomous-scope nil
     :reason "submits data into live browser sessions"}
    {:match "xia.browser/click"
     :policy :session
+    :autonomous-scope nil
     :reason "can trigger live browser actions"}
    {:match "xia.schedule/create-schedule!"
     :policy :session
+    :autonomous-scope nil
     :reason "creates autonomous background tasks"}
    {:match "xia.schedule/update-schedule!"
     :policy :session
+    :autonomous-scope nil
     :reason "changes autonomous background tasks"}
    {:match "xia.schedule/remove-schedule!"
     :policy :session
+    :autonomous-scope nil
     :reason "changes autonomous background tasks"}
    {:match "xia.schedule/pause-schedule!"
     :policy :session
+    :autonomous-scope nil
     :reason "changes autonomous background tasks"}
    {:match "xia.schedule/resume-schedule!"
     :policy :session
+    :autonomous-scope nil
     :reason "changes autonomous background tasks"}])
 
 (defn registered-tools
@@ -87,6 +97,8 @@
   "Clear cached approval decisions for a session."
   [session-id]
   (swap! session-approvals dissoc session-id))
+
+(declare matching-privileged-rules autonomous-tool-allowed?)
 
 ;; ---------------------------------------------------------------------------
 ;; Tool loading
@@ -134,9 +146,7 @@
     (db/install-tool! {:id          id
                        :name        (or name (clojure.core/name id))
                        :description (or description "")
-                       :parameters  (if (map? parameters)
-                                      (json/write-json-str parameters)
-                                      (or parameters "{}"))
+                       :parameters  (or parameters {})
                        :handler     (if (string? handler) handler (pr-str handler))
                        :approval    (cond
                                       (keyword? approval) approval
@@ -160,12 +170,15 @@
 
 (defn- inferred-approval-policy
   [tool]
+  (or (first (matching-privileged-rules tool))
+      {:policy :auto}))
+
+(defn- matching-privileged-rules
+  [tool]
   (let [handler (or (:tool/handler tool) "")]
-    (or (some (fn [{:keys [match] :as rule}]
-                (when (str/includes? handler match)
-                  rule))
-              privileged-handler-rules)
-        {:policy :auto})))
+    (filterv (fn [{:keys [match]}]
+               (str/includes? handler match))
+             privileged-handler-rules)))
 
 (defn- tool-approval-policy
   [tool]
@@ -178,12 +191,72 @@
                               :auto))))
 
 (defn- tool-description-for-llm
-  [tool]
+  [tool context]
   (let [{:keys [policy]} (tool-approval-policy tool)
         desc             (:tool/description tool)]
-    (if (= :auto policy)
+    (if (or (= :auto policy)
+            (autonomous-tool-allowed? tool context))
       desc
       (str desc approval-note))))
+
+(defn- autonomous-run?
+  [context]
+  (autonomous/autonomous-run? context))
+
+(defn- autonomous-supported-scope?
+  [scope]
+  (contains? #{:service :site} scope))
+
+(defn- autonomous-tool-scopes
+  [tool]
+  (->> (matching-privileged-rules tool)
+       (map :autonomous-scope)
+       set))
+
+(defn- autonomous-tool-allowed?
+  [tool context]
+  (let [scopes (autonomous-tool-scopes tool)]
+    (and (autonomous/trusted? context)
+         (seq scopes)
+         (every? autonomous-supported-scope? scopes)
+         (every? autonomous/scope-available? scopes))))
+
+(defn- autonomous-block-message
+  [tool context]
+  (let [scopes (autonomous-tool-scopes tool)
+        unavailable (remove autonomous/scope-available? (filter autonomous-supported-scope? scopes))]
+    (cond
+      (not (autonomous/trusted? context))
+      "tool requires live approval and is unavailable during autonomous execution"
+
+      (empty? scopes)
+      (str "trusted autonomous execution is not allowed for tool "
+           (name (:tool/id tool)))
+
+      (some (complement autonomous-supported-scope?) scopes)
+      (str "trusted autonomous execution is not allowed for tool "
+           (name (:tool/id tool)))
+
+      (= unavailable '(:service))
+      "no approved services are available for autonomous execution"
+
+      (= unavailable '(:site))
+      "no approved site accounts are available for autonomous execution"
+
+      (seq unavailable)
+      "required services or site accounts are not approved for autonomous execution"
+
+      :else
+      (str "trusted autonomous execution is not allowed for tool "
+           (name (:tool/id tool))))))
+
+(defn- tool-visible?
+  [tool context]
+  (if-not (autonomous-run? context)
+    true
+    (let [{:keys [policy]} (tool-approval-policy tool)]
+      (or (= :auto policy)
+          (autonomous-tool-allowed? tool context)))))
 
 (defn- execution-mode
   [tool]
@@ -241,20 +314,30 @@
 
 (defn tool-definitions
   "Return all loaded tools formatted as OpenAI tool definitions."
-  []
-  (->> @registry
-       vals
-       (filter :handler)
-       (mapv (fn [{:keys [tool]}]
-               {:type     "function"
-                :function {:name        (name (:tool/id tool))
-                           :description (tool-description-for-llm tool)
-                           :parameters  (json/read-json
-                                          (or (:tool/parameters tool) "{}"))}}))))
+  ([] (tool-definitions nil))
+  ([context]
+   (->> @registry
+        vals
+        (filter :handler)
+        (filter #(tool-visible? (:tool %) context))
+        (mapv (fn [{:keys [tool]}]
+                {:type     "function"
+                 :function {:name        (name (:tool/id tool))
+                            :description (tool-description-for-llm tool context)
+                            :parameters  (or (:tool/parameters tool) {})}})))))
 
 (defn- approval-error
   [tool-id message]
   {:error (str "Tool " (name tool-id) " blocked: " message)})
+
+(defn- audit-entry!
+  [context tool-id tool arguments details]
+  (autonomous/audit! context
+                     (merge {:type      "tool"
+                             :tool-id   (name tool-id)
+                             :tool-name (or (:tool/name tool) (name tool-id))
+                             :arguments arguments}
+                            details)))
 
 (defn- approved-for-session?
   [session-id tool-id]
@@ -269,7 +352,8 @@
   [tool-id tool arguments context]
   (let [{:keys [policy reason]} (tool-approval-policy tool)
         session-id              (:session-id context)
-        bypass?                 (:approval-bypass? context)
+        autonomous?             (autonomous-run? context)
+        bypass?                 (autonomous-tool-allowed? tool context)
         tool-name               (or (:tool/name tool) (name tool-id))
         request                 {:tool-id     tool-id
                                  :tool-name   tool-name
@@ -277,15 +361,30 @@
                                  :arguments   arguments
                                  :policy      policy
                                  :reason      reason}]
-    (if bypass?
-      {:allowed? true}
+    (cond
+      bypass?
+      {:allowed? true
+       :policy   policy
+       :mode     :autonomous-bypass}
+
+      (and autonomous? (not= :auto policy))
+      {:allowed? false
+       :policy   policy
+       :mode     :autonomous-blocked
+       :error    (autonomous-block-message tool context)}
+
+      :else
       (case policy
         :auto
-        {:allowed? true}
+        {:allowed? true
+         :policy   policy
+         :mode     :not-required}
 
         :session
         (if (and session-id (approved-for-session? session-id tool-id))
-          {:allowed? true}
+          {:allowed? true
+           :policy   policy
+           :mode     :session-cached}
           (try
             (prompt/status! {:state    :waiting
                              :phase    :approval
@@ -295,12 +394,19 @@
             (if (prompt/approve! request)
               (do
                 (remember-session-approval! session-id tool-id)
-                {:allowed? true})
+                {:allowed? true
+                 :policy   policy
+                 :mode     :interactive})
               {:allowed? false
+               :policy   policy
+               :mode     :denied
                :error    (str "user denied approval for privileged tool "
                               (name tool-id))})
             (catch Exception e
-              {:allowed? false :error (.getMessage e)})))
+              {:allowed? false
+               :policy   policy
+               :mode     :approval-error
+               :error    (.getMessage e)})))
 
         :always
         (try
@@ -310,14 +416,23 @@
                            :tool-id  tool-id
                            :tool-name tool-name})
           (if (prompt/approve! request)
-            {:allowed? true}
+            {:allowed? true
+             :policy   policy
+             :mode     :interactive}
             {:allowed? false
+             :policy   policy
+             :mode     :denied
              :error    (str "user denied approval for privileged tool "
                             (name tool-id))})
           (catch Exception e
-            {:allowed? false :error (.getMessage e)}))
+            {:allowed? false
+             :policy   policy
+             :mode     :approval-error
+             :error    (.getMessage e)}))
 
-        {:allowed? true}))))
+        {:allowed? true
+         :policy   policy
+         :mode     :not-required}))))
 
 (defn execute-tool
   "Execute a tool by id with the given arguments map."
@@ -325,43 +440,74 @@
    (execute-tool tool-id arguments {}))
   ([tool-id arguments context]
    (if-let [{:keys [tool handler]} (get @registry tool-id)]
-    (if (fn? handler)
-      (try
-        (binding [prompt/*interaction-context* context
-                  wm/*session-id*            (:session-id context)]
-          (let [{:keys [allowed? error]} (ensure-approved tool-id tool arguments context)]
-            (if allowed?
-              (do
-                (prompt/status! {:state    :running
-                                 :phase    :tool
-                                 :message  (str "Running tool " (or (:tool/name tool)
-                                                                    (name tool-id)))
-                                 :tool-id  tool-id
-                                 :tool-name (or (:tool/name tool) (name tool-id))})
-                (let [result (handler arguments)]
-                  (prompt/status! {:state    :running
-                                   :phase    :tool
-                                   :message  (str "Finished tool " (or (:tool/name tool)
-                                                                       (name tool-id)))
-                                   :tool-id  tool-id
-                                   :tool-name (or (:tool/name tool) (name tool-id))})
-                  result))
-              (do
-                (prompt/status! {:state    :running
-                                 :phase    :approval
-                                 :message  (str "Skipped tool " (or (:tool/name tool)
-                                                                    (name tool-id))
-                                                ": " error)
-                                 :tool-id  tool-id
-                                 :tool-name (or (:tool/name tool) (name tool-id))})
-                (approval-error tool-id error)))))
-        (catch Exception e
-          (prompt/status! {:state   :error
-                           :phase   :tool
-                           :message (str "Tool " (name tool-id) " failed: " (.getMessage e))
-                           :tool-id tool-id
-                           :tool-name (or (:tool/name tool) (name tool-id))})
-          (log/error e "Tool execution failed:" tool-id)
-          {:error (str "Tool execution failed: " (.getMessage e))}))
-      {:error (str "Tool " tool-id " has no callable handler")})
-    {:error (str "Unknown tool: " tool-id)})))
+     (if (fn? handler)
+       (try
+         (binding [prompt/*interaction-context* context
+                   wm/*session-id*            (:session-id context)]
+           (let [{:keys [allowed? error policy mode]} (ensure-approved tool-id
+                                                                       tool
+                                                                       arguments
+                                                                       context)]
+             (if allowed?
+               (do
+                 (prompt/status! {:state    :running
+                                  :phase    :tool
+                                  :message  (str "Running tool " (or (:tool/name tool)
+                                                                     (name tool-id)))
+                                  :tool-id  tool-id
+                                  :tool-name (or (:tool/name tool) (name tool-id))})
+                 (try
+                   (let [result (handler arguments)]
+                     (audit-entry! context tool-id tool arguments
+                                   {:status          "success"
+                                    :approval-policy (name policy)
+                                    :approval-mode   (name mode)})
+                     (prompt/status! {:state    :running
+                                      :phase    :tool
+                                      :message  (str "Finished tool " (or (:tool/name tool)
+                                                                          (name tool-id)))
+                                      :tool-id  tool-id
+                                      :tool-name (or (:tool/name tool) (name tool-id))})
+                     result)
+                   (catch Exception e
+                     (audit-entry! context tool-id tool arguments
+                                   {:status          "error"
+                                    :approval-policy (name policy)
+                                    :approval-mode   (name mode)
+                                    :error           (.getMessage e)})
+                     (throw e))))
+               (do
+                 (audit-entry! context tool-id tool arguments
+                               {:status          "blocked"
+                                :approval-policy (name policy)
+                                :approval-mode   (name mode)
+                                :error           error})
+                 (prompt/status! {:state    :running
+                                  :phase    :approval
+                                  :message  (str "Skipped tool " (or (:tool/name tool)
+                                                                     (name tool-id))
+                                                 ": " error)
+                                  :tool-id  tool-id
+                                  :tool-name (or (:tool/name tool) (name tool-id))})
+                 (approval-error tool-id error)))))
+         (catch Exception e
+           (prompt/status! {:state   :error
+                            :phase   :tool
+                            :message (str "Tool " (name tool-id) " failed: " (.getMessage e))
+                            :tool-id tool-id
+                            :tool-name (or (:tool/name tool) (name tool-id))})
+           (log/error e "Tool execution failed:" tool-id)
+           {:error (str "Tool execution failed: " (.getMessage e))}))
+       (do
+         (audit-entry! context tool-id tool arguments
+                       {:status "error"
+                        :error  (str "Tool " tool-id " has no callable handler")})
+         {:error (str "Tool " tool-id " has no callable handler")}))
+     (do
+       (when-let [audit-log (:audit-log context)]
+         (swap! audit-log conj {:at      (str (java.time.Instant/now))
+                                :tool-id (name tool-id)
+                                :status  "error"
+                                :error   (str "Unknown tool: " tool-id)
+                                :arguments arguments}))
+       {:error (str "Unknown tool: " tool-id)}))))

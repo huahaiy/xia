@@ -66,6 +66,34 @@
     (is (= :history-compaction (:compaction-workload @build-messages-opts)))
     (is (= [:provider-id :router-a] @llm-opts))))
 
+(deftest process-message-passes-execution-context-to-tool-definitions
+  (let [session-id    (db/create-session! :scheduler)
+        context-seen  (atom nil)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (fn [context]
+                                                       (reset! context-seen context)
+                                                       [])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages         (fn [_session-id _opts]
+                                                       [{:role "system" :content "test"}])
+                  xia.llm/chat-simple                (fn [_messages & _opts] "All set.")]
+      (is (= "All set."
+             (agent/process-message session-id
+                                    "hello"
+                                    :channel :scheduler
+                                    :tool-context {:schedule-id      :nightly
+                                                   :autonomous-run?  true
+                                                   :approval-bypass? true}))))
+    (is (= {:session-id        session-id
+            :channel           :scheduler
+            :schedule-id       :nightly
+            :autonomous-run?   true
+            :approval-bypass?  true}
+           (select-keys @context-seen
+                        [:session-id :channel :schedule-id
+                         :autonomous-run? :approval-bypass?])))))
+
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)
         max-active (atom 0)

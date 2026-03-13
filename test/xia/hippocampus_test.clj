@@ -152,6 +152,40 @@
     (testing "nil extraction is a no-op"
       (#'xia.hippocampus/merge-extraction! nil ep-eid))))
 
+(deftest test-merge-extraction-replaces-same-episode-partials
+  (let [ep-eid    (th/seed-episode! "retry episode")
+        alice-eid (th/seed-node! "Alice" "person")
+        acme-eid  (th/seed-node! "Acme" "thing")
+        now       (java.util.Date.)]
+    (db/transact!
+      [{:kg.fact/id         (random-uuid)
+        :kg.fact/node       alice-eid
+        :kg.fact/content    "old retry fact"
+        :kg.fact/confidence 1.0
+        :kg.fact/source     ep-eid
+        :kg.fact/created-at now
+        :kg.fact/updated-at now
+        :kg.fact/decayed-at now}
+       {:kg.edge/id         (random-uuid)
+        :kg.edge/from       alice-eid
+        :kg.edge/to         acme-eid
+        :kg.edge/type       :works-at
+        :kg.edge/label      "old retry edge"
+        :kg.edge/source     ep-eid
+        :kg.edge/created-at now}])
+    (#'xia.hippocampus/merge-extraction!
+      {"entities"  [{"name" "Alice" "type" "person" "facts" ["new retry fact"]}
+                    {"name" "Acme" "type" "thing" "facts" []}]
+       "relations" [{"from" "Alice" "to" "Acme"
+                      "type" "works-at" "label" "new retry edge"}]}
+      ep-eid)
+    (let [facts (memory/node-facts alice-eid)
+          edges (memory/node-edges alice-eid)]
+      (is (= ["new retry fact"] (mapv :content facts)))
+      (is (= 1 (count (:outgoing edges))))
+      (is (= "Acme" (:target (first (:outgoing edges)))))
+      (is (= "new retry edge" (:label (first (:outgoing edges))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; consolidate-episode! (requires LLM mock)
 ;; ---------------------------------------------------------------------------
@@ -171,6 +205,39 @@
         (let [node-eid (:eid (first nodes))
               props    (memory/node-properties node-eid)]
           (is (= "functional" (:paradigm props))))))))
+
+(deftest test-consolidate-episode-rolls-back-on-write-failure
+  (let [ep-eid  (th/seed-episode! "Atomic rollback")
+        seen-tx (atom nil)]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [_messages & _opts]
+                    "{\"entities\": [{\"name\": \"RollbackNode\", \"type\": \"concept\", \"facts\": [\"should not persist\"]}], \"relations\": []}")
+                  xia.db/transact!
+                  (fn [tx-data]
+                    (reset! seen-tx tx-data)
+                    (throw (ex-info "synthetic failure" {:tx-count (count tx-data)})))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"synthetic failure"
+            (hippo/consolidate-episode!
+              {:eid     ep-eid
+               :summary "Atomic rollback"
+               :type    :conversation}))))
+    (is (some? @seen-tx))
+    (is (some #(= [:db/add ep-eid :episode/processed? true] %) @seen-tx))
+    (is (false? (:episode/processed? (db/entity ep-eid))))
+    (is (empty? (memory/find-node "RollbackNode")))))
+
+(deftest test-consolidate-episode-leaves-invalid-extractions-pending
+  (let [ep-eid (th/seed-episode! "Bad extraction")]
+    (with-redefs [xia.hippocampus/extract-knowledge
+                  (fn [_episode] nil)]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+            #"knowledge extraction returned invalid JSON"
+            (hippo/consolidate-episode!
+              {:eid     ep-eid
+               :summary "Bad extraction"
+               :type    :conversation}))))
+    (is (false? (:episode/processed? (db/entity ep-eid))))
+    (is (empty? (memory/find-node "Bad extraction")))))
 
 ;; ---------------------------------------------------------------------------
 ;; consolidate-pending!

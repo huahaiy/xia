@@ -15,7 +15,9 @@
     (is (secret/secret-attr? :llm.provider/api-key))
     (is (secret/secret-attr? :oauth.account/client-secret))
     (is (secret/secret-attr? :message/content))
-    (is (secret/secret-attr? :schedule-run/result)))
+    (is (secret/secret-attr? :message/tool-result))
+    (is (secret/secret-attr? :schedule-run/result))
+    (is (secret/secret-attr? :schedule-run/actions)))
   (testing "secret namespace prefixes"
     (is (secret/secret-attr? :credential/gmail-token))
     (is (secret/secret-attr? :secret/my-key)))
@@ -166,11 +168,22 @@
                     :schedule-run/schedule-id :hist
                     :schedule-run/started-at  (java.util.Date.)
                     :schedule-run/status      :success
-                    :schedule-run/result      "{\"token\":\"secret\"}"}])
+                    :schedule-run/result      "{\"token\":\"secret\"}"}
+                   {:message/id          (random-uuid)
+                    :message/session     session-eid
+                    :message/role        :tool
+                    :message/content     ""
+                    :message/tool-result {:result {"token" "secret"}}
+                    :message/tool-id     "call_1"
+                    :message/created-at  (java.util.Date.)}])
 
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"Access denied"
           (secret/safe-q '[:find ?content :where [?m :message/content ?content]])))
+
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?result :where [?m :message/tool-result ?result]])))
 
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"Access denied"

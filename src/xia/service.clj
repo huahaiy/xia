@@ -18,6 +18,7 @@
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [charred.api :as json]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.http-client :as http]
             [xia.oauth :as oauth])
@@ -131,16 +132,19 @@
     (let [auth-type (:service/auth-type svc)
           oauth-account-id (:service/oauth-account svc)]
       {:base-url      (:service/base-url svc)
+       :service-id    service-id
+       :service-name  (:service/name svc)
        :auth-type     auth-type
        :auth-key      (:service/auth-key svc)
        :auth-header   (:service/auth-header svc)
+       :autonomous-approved? (autonomous/service-autonomous-approved? svc)
        :rate-limit-per-minute (effective-rate-limit-per-minute svc)
-       :oauth-account (when (= :oauth-account auth-type)
-                        (when-not oauth-account-id
-                          (throw (ex-info (str "Service " (name service-id)
-                                               " is missing an OAuth account")
-                                          {:service-id service-id})))
-                        (oauth/ensure-account-ready! oauth-account-id))})))
+       :oauth-account-id (when (= :oauth-account auth-type)
+                           (when-not oauth-account-id
+                             (throw (ex-info (str "Service " (name service-id)
+                                                  " is missing an OAuth account")
+                                             {:service-id service-id})))
+                           oauth-account-id)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API — exposed to SCI sandbox
@@ -149,13 +153,59 @@
 (defn list-services
   "List registered services. Returns safe metadata only, never credentials."
   []
-  (mapv (fn [svc]
-          {:id       (:service/id svc)
-           :name     (:service/name svc)
-           :base-url (:service/base-url svc)
-           :rate-limit-per-minute (effective-rate-limit-per-minute svc)
-           :enabled? (:service/enabled? svc)})
-        (db/list-services)))
+  (->> (db/list-services)
+       (filter (fn [svc]
+                 (or (not (autonomous/autonomous-run?))
+                     (autonomous/service-approved? (:service/id svc)))))
+       (mapv (fn [svc]
+               {:id       (:service/id svc)
+                :name     (:service/name svc)
+                :base-url (:service/base-url svc)
+                :rate-limit-per-minute (effective-rate-limit-per-minute svc)
+                :autonomous-approved? (autonomous/service-autonomous-approved? svc)
+                :enabled? (:service/enabled? svc)}))))
+
+(defn- ensure-autonomous-service-access!
+  [service-id {:keys [auth-type oauth-account-id autonomous-approved?]} method path]
+  (when (autonomous/autonomous-run?)
+    (cond
+      (not (autonomous/trusted?))
+      (do
+        (autonomous/audit! {:type       "service-request"
+                            :service-id (name service-id)
+                            :method     (name method)
+                            :path       path
+                            :status     "blocked"
+                            :error      "trusted autonomous execution is required for service access"})
+        (throw (ex-info "service access requires trusted autonomous execution"
+                        {:service-id service-id})))
+
+      (not autonomous-approved?)
+      (do
+        (autonomous/audit! {:type       "service-request"
+                            :service-id (name service-id)
+                            :method     (name method)
+                            :path       path
+                            :status     "blocked"
+                            :error      "service is not approved for autonomous execution"})
+        (throw (ex-info (str "Service " (name service-id)
+                             " is not approved for autonomous execution")
+                        {:service-id service-id})))
+
+      (and (= :oauth-account auth-type)
+           (not (autonomous/oauth-account-approved? oauth-account-id)))
+      (do
+        (autonomous/audit! {:type             "service-request"
+                            :service-id       (name service-id)
+                            :oauth-account-id (some-> oauth-account-id name)
+                            :method           (name method)
+                            :path             path
+                            :status           "blocked"
+                            :error            "oauth account is not approved for autonomous execution"})
+        (throw (ex-info (str "OAuth account " (name oauth-account-id)
+                             " is not approved for autonomous execution")
+                        {:service-id service-id
+                         :oauth-account-id oauth-account-id}))))))
 
 (defn request
   "Make an authenticated HTTP request to a registered service.
@@ -184,6 +234,11 @@
                    (string? body) body
                    (map? body)    (json/write-json-str body)
                    :else          (str body))
+        _       (ensure-autonomous-service-access! service-id svc method path)
+        oauth-account (when (= :oauth-account (:auth-type svc))
+                        (oauth/ensure-account-ready! (:oauth-account-id svc)))
+        svc     (cond-> svc
+                  oauth-account (assoc :oauth-account oauth-account))
         req     (cond-> {:url         url
                          :method      method
                          :request-label (str "Service request " (name service-id))}
@@ -198,13 +253,32 @@
                   (update req :headers #(merge headers %))
                   req)
         _       (check-rate-limit! service-id svc)
-        _       (log/debug "Service request:" (name service-id) method path)
-        resp    (http/request req)]
-    {:status  (:status resp)
-     :headers (into {} (:headers resp))
-     :body    (case as
-               :json   (try (json/read-json (:body resp))
-                            (catch Exception _ (:body resp)))
-               :string (:body resp)
-               :raw    (:body resp)
-               (:body resp))}))
+        _       (log/debug "Service request:" (name service-id) method path)]
+    (try
+      (let [resp (http/request req)]
+        (autonomous/audit! (cond-> {:type        "service-request"
+                                    :service-id  (name service-id)
+                                    :method      (name method)
+                                    :path        path
+                                    :status      "success"
+                                    :http-status (:status resp)}
+                             (:oauth-account-id svc)
+                             (assoc :oauth-account-id (name (:oauth-account-id svc)))))
+        {:status  (:status resp)
+         :headers (into {} (:headers resp))
+         :body    (case as
+                    :json   (try (json/read-json (:body resp))
+                                 (catch Exception _ (:body resp)))
+                    :string (:body resp)
+                    :raw    (:body resp)
+                    (:body resp))})
+      (catch Exception e
+        (autonomous/audit! (cond-> {:type       "service-request"
+                                    :service-id (name service-id)
+                                    :method     (name method)
+                                    :path       path
+                                    :status     "error"
+                                    :error      (.getMessage e)}
+                             (:oauth-account-id svc)
+                             (assoc :oauth-account-id (name (:oauth-account-id svc)))))
+        (throw e)))))

@@ -76,6 +76,32 @@
       (is (not (contains? site :username)))
       (is (not (contains? site :password))))))
 
+(deftest list-sites-filters-unapproved-sites-during-autonomous-runs
+  (db/register-site-cred!
+    {:id :approved :name "Approved" :login-url "https://approved.example"
+     :username "u" :password "p" :autonomous-approved? true})
+  (db/register-site-cred!
+    {:id :blocked :name "Blocked" :login-url "https://blocked.example"
+     :username "u" :password "p" :autonomous-approved? false})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true}]
+    (is (= [:approved]
+           (mapv :id (browser/list-sites))))))
+
+(deftest list-sites-includes-implicitly-approved-sites-during-autonomous-runs
+  (db/register-site-cred!
+    {:id :implicit :name "Implicit" :login-url "https://implicit.example"
+     :username "u" :password "p"})
+  (db/register-site-cred!
+    {:id :blocked :name "Blocked" :login-url "https://blocked.example"
+     :username "u" :password "p" :autonomous-approved? false})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true}]
+    (is (= [:implicit]
+           (mapv :id (browser/list-sites))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Login with stored credentials — unknown site
 ;; ---------------------------------------------------------------------------
@@ -84,6 +110,42 @@
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo #"No site credentials"
         (browser/login :nonexistent))))
+
+(deftest autonomous-login-requires-approved-site-account
+  (db/register-site-cred!
+    {:id :portal :login-url "https://portal.example/login"
+     :username "hyang" :password "pw" :autonomous-approved? false})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true
+                                          :audit-log        (atom [])}]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"not approved for autonomous execution"
+          (browser/login :portal)))))
+
+(deftest autonomous-login-allows-implicitly-approved-site-account
+  (db/register-site-cred!
+    {:id :portal :login-url "https://portal.example/login"
+     :username "hyang" :password "pw"})
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true
+                                          :audit-log        (atom [])}]
+    (with-redefs [xia.browser/open-session (fn [_url] {:session-id "sess-1"})
+                  xia.browser/get-session  (fn [_session-id] {:client ::client})
+                  xia.browser/current-page (fn [_client] ::page)
+                  xia.browser/do-login     (fn [session-id _page username-field password-field username password form-selector extra-fields]
+                                             (is (= "sess-1" session-id))
+                                             (is (= "username" username-field))
+                                             (is (= "password" password-field))
+                                             (is (= "hyang" username))
+                                             (is (= "pw" password))
+                                             (is (nil? form-selector))
+                                             (is (nil? extra-fields))
+                                             {:session-id session-id
+                                              :content "ok"})]
+      (is (= {:session-id "sess-1" :content "ok"}
+             (browser/login :portal))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt mechanism
@@ -107,6 +169,16 @@
         clojure.lang.ExceptionInfo #"(?i)interactive login requires a terminal"
         (browser/login-interactive "https://example.com"
           [{"name" "user" "label" "User"}]))))
+
+(deftest login-interactive-is-blocked-during-autonomous-runs
+  (binding [prompt/*interaction-context* {:channel          :scheduler
+                                          :autonomous-run?  true
+                                          :approval-bypass? true
+                                          :audit-log        (atom [])}]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"unavailable during autonomous execution"
+          (browser/login-interactive "https://example.com"
+            [{"name" "user" "label" "User"}])))))
 
 ;; ---------------------------------------------------------------------------
 ;; Integration: login with stored credentials

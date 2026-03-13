@@ -5,6 +5,7 @@
             [xia.agent]
             [xia.channel.http :as http]
             [xia.db :as db]
+            [xia.schedule :as schedule]
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.io ByteArrayInputStream]
            [java.nio.charset StandardCharsets]
@@ -48,6 +49,8 @@
     (is (re-find #"Approval Required" (:body response)))
     (is (re-find #"Copy transcript" (:body response)))
     (is (re-find #"Notes" (:body response)))
+    (is (re-find #"History" (:body response)))
+    (is (re-find #"Scheduled Runs" (:body response)))
     (is (re-find #"Settings" (:body response)))
     (is (re-find #"AI Models" (:body response)))
     (is (re-find #"Workloads" (:body response)))
@@ -212,6 +215,98 @@
     (is (= 401 (:status response)))
     (is (= "missing or invalid local session secret" (get body "error")))))
 
+(deftest history-sessions-route-returns-chat-session-summaries
+  (let [visible-sid (db/create-session! :http)
+        hidden-sid  (db/create-session! :api)]
+    (db/add-message! visible-sid :user "hello")
+    (db/add-message! visible-sid :assistant "latest reply")
+    (db/add-message! hidden-sid :user "should stay hidden")
+    (let [response (#'http/router {:uri            "/history/sessions"
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          sessions (get body "sessions")
+          session  (first sessions)]
+      (is (= 200 (:status response)))
+      (is (= 1 (count sessions)))
+      (is (= (str visible-sid) (get session "id")))
+      (is (= "http" (get session "channel")))
+      (is (= true (get session "active")))
+      (is (= 2 (get session "message_count")))
+      (is (= "latest reply" (get session "preview")))
+      (is (string? (get session "created_at")))
+      (is (string? (get session "last_message_at"))))))
+
+(deftest history-schedules-route-returns-schedule-summaries
+  (schedule/create-schedule!
+    {:id :daily-brief
+     :name "Daily Brief"
+     :spec {:interval-minutes 5}
+     :type :prompt
+     :prompt "Summarize the morning inbox."})
+  (schedule/record-run! :daily-brief
+    {:started-at  (java.util.Date. 1000)
+     :finished-at (java.util.Date. 2000)
+     :status      :error
+     :error       "temporary upstream failure"})
+  (let [response (#'http/router {:uri            "/history/schedules"
+                                 :request-method :get
+                                 :headers        (ui-headers)})
+        body     (response-json response)
+        schedules (get body "schedules")
+        sched    (first schedules)]
+    (is (= 200 (:status response)))
+    (is (= 1 (count schedules)))
+    (is (= "daily-brief" (get sched "id")))
+    (is (= "Daily Brief" (get sched "name")))
+    (is (= "prompt" (get sched "type")))
+    (is (= true (get sched "trusted")))
+    (is (= true (get sched "enabled")))
+    (is (= "error" (get sched "latest_status")))
+    (is (= "temporary upstream failure" (get sched "latest_error")))
+    (is (string? (get sched "last_run")))
+    (is (string? (get sched "next_run")))))
+
+(deftest history-schedule-runs-route-returns-audit-and-result
+  (schedule/create-schedule!
+    {:id :weekly-review
+     :name "Weekly Review"
+     :spec {:interval-minutes 5}
+     :type :tool
+     :tool-id :schedule-list})
+  (schedule/record-run! :weekly-review
+    {:started-at  (java.util.Date. 1000)
+     :finished-at (java.util.Date. 2000)
+     :status      :success
+     :actions     [{:tool-id "schedule-list" :status "success"}]
+     :result      "done"})
+  (schedule/record-run! :weekly-review
+    {:started-at  (java.util.Date. 3000)
+     :finished-at (java.util.Date. 4000)
+     :status      :error
+     :actions     [{:tool-id "schedule-list" :status "error"}]
+     :error       "boom"})
+  (let [response (#'http/router {:uri            "/history/schedules/weekly-review/runs"
+                                 :request-method :get
+                                 :headers        (ui-headers)})
+        body     (response-json response)
+        sched    (get body "schedule")
+        runs     (get body "runs")
+        latest   (first runs)
+        older    (second runs)]
+    (is (= 200 (:status response)))
+    (is (= "weekly-review" (get sched "id")))
+    (is (= "error" (get sched "latest_status")))
+    (is (= 2 (count runs)))
+    (is (= "error" (get latest "status")))
+    (is (= "boom" (get latest "error")))
+    (is (= [{"tool-id" "schedule-list" "status" "error"}]
+           (get latest "actions")))
+    (is (= "success" (get older "status")))
+    (is (= "done" (get older "result")))
+    (is (= [{"tool-id" "schedule-list" "status" "success"}]
+           (get older "actions")))))
+
 (deftest session-status-route-returns-live-status
   (let [sid (str (db/create-session! :http))]
     (#'http/http-status-handler {:session-id sid
@@ -343,6 +438,7 @@
                          :auth-type   :api-key-header
                          :auth-key    "gh-secret"
                          :auth-header "X-API-Key"
+                         :autonomous-approved? true
                          :rate-limit-per-minute 90})
   (db/register-oauth-account! {:id            :google
                                :name          "Google"
@@ -350,6 +446,7 @@
                                :token-url     "https://oauth2.googleapis.com/token"
                                :client-id     "client-id"
                                :client-secret "client-secret"
+                               :autonomous-approved? true
                                :access-token  "access-123"
                                :refresh-token "refresh-123"})
   (db/register-site-cred! {:id             :github
@@ -359,12 +456,13 @@
                            :password-field "password"
                            :username       "hyang"
                            :password       "pw-secret"
+                           :autonomous-approved? true
                            :form-selector  "#login"
                            :extra-fields   "{\"remember_me\":\"1\"}"})
   (db/install-tool! {:id          :demo-tool
                      :name        "Demo tool"
                      :description "desc"
-                     :parameters  "{}"
+                     :parameters  {}
                      :handler     "(fn [_] {:ok true})"
                      :approval    :session})
   (db/install-skill! {:id          :demo-skill
@@ -401,13 +499,17 @@
            (get (first (filter #(= "github" (get % "id")) templates)) "service_name")))
     (is (= true (get oauth "client_secret_configured")))
     (is (= true (get oauth "access_token_configured")))
+    (is (= true (get oauth "autonomous_approved")))
     (is (not (contains? oauth "client_secret")))
     (is (not (contains? oauth "access_token")))
     (is (= true (get service "auth_key_configured")))
     (is (not (contains? service "auth_key")))
     (is (= "api-key-header" (get service "auth_type")))
+    (is (= true (get service "autonomous_approved")))
+    (is (= false (get service "oauth_account_autonomous_approved")))
     (is (= 90 (get service "rate_limit_per_minute")))
     (is (= 90 (get service "effective_rate_limit_per_minute")))
+    (is (= true (get site "autonomous_approved")))
     (is (= true (get site "username_configured")))
     (is (= true (get site "password_configured")))
     (is (not (contains? site "username")))
@@ -436,13 +538,16 @@
                                                                      "scopes" "openid email"
                                                                      "redirect_uri" ""
                                                                      "auth_params" "{\"access_type\":\"offline\"}"
-                                                                     "token_params" ""})})
+                                                                     "token_params" ""
+                                                                     "autonomous_approved" true})})
         save-body     (response-json save-response)
         account       (db/get-oauth-account :google)]
     (is (= 200 (:status save-response)))
     (is (= "Google Workspace" (get-in save-body ["oauth_account" "name"])))
     (is (= "google" (get-in save-body ["oauth_account" "provider_template"])))
+    (is (= true (get-in save-body ["oauth_account" "autonomous_approved"])))
     (is (= "client-secret" (:oauth.account/client-secret account)))
+    (is (= true (:oauth.account/autonomous-approved? account)))
     (is (= :google (:oauth.account/provider-template account)))
     (is (= "{\"access_type\":\"offline\"}" (:oauth.account/auth-params account))))
   (with-redefs [xia.oauth/start-authorization!
@@ -469,6 +574,59 @@
         delete-body     (response-json delete-response)]
     (is (= 409 (:status delete-response)))
     (is (= "oauth account is still referenced by a service" (get delete-body "error")))))
+
+(deftest admin-resource-routes-default-autonomous-approval-to-true
+  (let [oauth-response (#'http/router {:uri            "/admin/oauth-accounts"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"id" "google"
+                                                                      "name" "Google"
+                                                                      "authorize_url" "https://accounts.google.com/o/oauth2/v2/auth"
+                                                                      "token_url" "https://oauth2.googleapis.com/token"
+                                                                      "client_id" "client-id"
+                                                                      "client_secret" "client-secret"
+                                                                      "provider_template" ""
+                                                                      "scopes" "openid email"
+                                                                      "redirect_uri" ""
+                                                                      "auth_params" ""
+                                                                      "token_params" ""})})
+        service-response (#'http/router {:uri            "/admin/services"
+                                         :request-method :post
+                                         :headers        (ui-headers)
+                                         :body           (request-body {"id" "gmail"
+                                                                        "name" "Gmail"
+                                                                        "base_url" "https://gmail.googleapis.com"
+                                                                        "auth_type" "oauth-account"
+                                                                        "oauth_account" "google"
+                                                                        "auth_header" ""
+                                                                        "rate_limit_per_minute" ""
+                                                                        "auth_key" ""
+                                                                        "enabled" true})})
+        site-response (#'http/router {:uri            "/admin/sites"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"id" "portal"
+                                                                     "name" "Portal"
+                                                                     "login_url" "https://portal.example/login"
+                                                                     "username_field" "username"
+                                                                     "password_field" "password"
+                                                                     "username" "hyang"
+                                                                     "password" "pw"
+                                                                     "form_selector" ""
+                                                                     "extra_fields" ""})})
+        oauth-account (db/get-oauth-account :google)
+        service       (db/get-service :gmail)
+        site          (db/get-site-cred :portal)]
+    (is (= 200 (:status oauth-response)))
+    (is (= 200 (:status service-response)))
+    (is (= 200 (:status site-response)))
+    (is (= true (get-in (response-json oauth-response) ["oauth_account" "autonomous_approved"])))
+    (is (= true (get-in (response-json service-response) ["service" "autonomous_approved"])))
+    (is (= true (get-in (response-json service-response) ["service" "oauth_account_autonomous_approved"])))
+    (is (= true (get-in (response-json site-response) ["site" "autonomous_approved"])))
+    (is (= true (:oauth.account/autonomous-approved? oauth-account)))
+    (is (= true (:service/autonomous-approved? service)))
+    (is (= true (:site-cred/autonomous-approved? site)))))
 
 (deftest oauth-callback-route-renders-success-page
   (with-redefs [xia.oauth/callback-account-id (fn [_state] :google)
@@ -569,6 +727,7 @@
                                                                 "auth_header" ""
                                                                 "rate_limit_per_minute" "120"
                                                                 "auth_key" ""
+                                                                "autonomous_approved" true
                                                                 "enabled" false})})
         service  (db/get-service :github)]
     (is (= 200 (:status response)))
@@ -576,6 +735,7 @@
     (is (= "gh-secret" (:service/auth-key service)))
     (is (nil? (:service/auth-header service)))
     (is (= 120 (:service/rate-limit-per-minute service)))
+    (is (= true (:service/autonomous-approved? service)))
     (is (= false (:service/enabled? service)))))
 
 (deftest admin-site-routes-preserve-secrets-and-delete
@@ -599,12 +759,15 @@
                                                                      "username" ""
                                                                      "password" ""
                                                                      "form_selector" ""
-                                                                     "extra_fields" ""})})
+                                                                     "extra_fields" ""
+                                                                     "autonomous_approved" true})})
         save-body     (response-json save-response)
         site          (db/get-site-cred :github)]
     (is (= 200 (:status save-response)))
+    (is (= true (get-in save-body ["site" "autonomous_approved"])))
     (is (= true (get-in save-body ["site" "username_configured"])))
     (is (= true (get-in save-body ["site" "password_configured"])))
+    (is (= true (:site-cred/autonomous-approved? site)))
     (is (= "hyang" (:site-cred/username site)))
     (is (= "pw-secret" (:site-cred/password site)))
     (is (nil? (:site-cred/form-selector site)))

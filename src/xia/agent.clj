@@ -58,6 +58,7 @@
     (log/debug "Tool call completed:" func-name)
     {:role         "tool"
      :tool_call_id (get tool-call "id")
+     :result       result
      :content      (if (string? result) result (json/write-json-str result))}))
 
 (defn- tool-call-batches
@@ -116,7 +117,10 @@
               (cond-> {:workload :assistant}
                 provider-id
                 (assoc :provider-id provider-id)))
-            tools (tool/tool-definitions)]
+            execution-context (merge {:session-id session-id
+                                      :channel    channel}
+                                     tool-context)
+            tools (tool/tool-definitions execution-context)]
         (loop [messages (context/build-messages session-id
                                                 {:provider            assistant-provider
                                                  :provider-id         assistant-provider-id
@@ -146,17 +150,16 @@
                                                     :round round
                                                     :tool-count tool-count)
                                     (execute-tool-calls tool-calls
-                                                        (merge {:session-id session-id
-                                                                :channel    channel}
-                                                               tool-context)))]
+                                                        execution-context))]
                 ;; Store assistant message with tool calls
                 (db/add-message! session-id :assistant
                                  (get response "content" "")
-                                 :tool-calls (json/write-json-str tool-calls))
+                                 :tool-calls tool-calls)
                 ;; Store tool results
                 (doseq [tr tool-results]
                   (db/add-message! session-id :tool
-                                   (:content tr)
+                                   nil
+                                   :tool-result (:result tr)
                                    :tool-id (:tool_call_id tr)))
                 ;; Continue with updated messages
                 (recur (-> messages
