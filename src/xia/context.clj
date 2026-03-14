@@ -194,10 +194,10 @@
       (if (empty? ents)
         {:content        (str/join "\n" lines)
          :used-fact-eids used-fact-eids}
-        (let [{:keys [content] :as entity-data
+        (let [{:keys [content]
                entity-used-fact-eids :used-fact-eids}
               (render-entity-data (first ents))
-              line       (:content entity-data)
+              line       content
               line-tokens (estimate-tokens line)]
           (if (> (+ tokens line-tokens) budget)
             {:content        (str/join "\n" lines)

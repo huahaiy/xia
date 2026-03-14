@@ -342,3 +342,19 @@
       (is (= 2 @max-active)))
     (wm/clear-wm! sid-a)
     (wm/clear-wm! sid-b)))
+
+(deftest clear-wm-cleans-up-session-op-agents
+  (let [sid-a   (random-uuid)
+        sid-b   (random-uuid)
+        agents  @#'xia.working-memory/session-op-agents]
+    (wm/create-wm! sid-a)
+    (wm/create-wm! sid-b)
+    (is (.containsKey agents sid-a))
+    (is (.containsKey agents sid-b))
+
+    (wm/clear-wm! sid-a)
+    (is (not (.containsKey agents sid-a)))
+    (is (.containsKey agents sid-b))
+
+    (wm/clear-wm!)
+    (is (= 0 (.size agents)))))

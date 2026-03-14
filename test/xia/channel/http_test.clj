@@ -428,6 +428,23 @@
       (is (= 200 (:status response)))
       (is (nil? (get body "status"))))))
 
+(deftest session-status-route-clears-terminal-error-status
+  (let [sid (str (db/create-session! :http))]
+    (#'http/http-status-handler {:session-id sid
+                                 :state      :running
+                                 :phase      :tool
+                                 :message    "Calling upstream"})
+    (#'http/http-status-handler {:session-id sid
+                                 :state      :error
+                                 :phase      :error
+                                 :message    "Request failed: boom"})
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/status")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (nil? (get body "status"))))))
+
 (deftest scratch-pad-routes-round-trip
   (let [sid         (str (db/create-session! :http))
         create-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads")

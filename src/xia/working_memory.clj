@@ -59,6 +59,17 @@
                     (reify Function
                       (apply [_ _] (agent nil)))))
 
+(defn- remove-session-op-agent!
+  [session-id]
+  (when session-id
+    (.remove session-op-agents session-id))
+  nil)
+
+(defn- clear-session-op-agents!
+  []
+  (.clear session-op-agents)
+  nil)
+
 (defn- in-session-op?
   [session-id]
   (and session-id
@@ -617,12 +628,14 @@ Rules:
 (defn clear-wm!
   "Clear working memory (on session end)."
   ([]
-   (reset! wm-atom {}))
+   (reset! wm-atom {})
+   (clear-session-op-agents!))
   ([session-id]
    (run-session-op! session-id
      (fn [sid]
        (when sid
-         (swap! wm-atom dissoc sid))))))
+         (swap! wm-atom dissoc sid)
+         (remove-session-op-agent! sid))))))
 
 ;; ============================================================================
 ;; Pinning

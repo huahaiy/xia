@@ -86,10 +86,14 @@
   [provider-id]
   (get @provider-health provider-id))
 
+(defn- default-provider-id
+  []
+  (some-> (db/get-default-provider) provider-key))
+
 (defn provider-health-summary
   "Return the current in-memory health status for a provider."
   [provider-id]
-  (let [provider-id          (or provider-id)
+  (let [provider-id          (or provider-id (default-provider-id))
         {:keys [consecutive-failures cooldown-until-ms last-success-ms last-failure-ms last-error]}
         (provider-health-entry provider-id)
         current-ms           (now-ms)

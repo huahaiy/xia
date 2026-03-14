@@ -62,6 +62,19 @@
     (is (= :default
            (:provider-id (llm/resolve-provider-selection {:workload :memory-summary}))))))
 
+(deftest provider-health-summary-falls-back-to-configured-default-provider
+  (let [future-ms (+ (System/currentTimeMillis) 60000)]
+    (with-redefs [xia.db/get-default-provider (constantly {:llm.provider/id :fallback})
+                  xia.llm/provider-health
+                  (atom {:fallback {:consecutive-failures 2
+                                    :cooldown-until-ms future-ms
+                                    :last-error "rate limited"}})]
+      (let [health (llm/provider-health-summary nil)]
+        (is (= :fallback (:provider-id health)))
+        (is (= :cooling-down (:status health)))
+        (is (= 2 (:consecutive-failures health)))
+        (is (= "rate limited" (:last-error health)))))))
+
 (deftest chat-uses-workload-routed-provider
   (with-redefs [xia.db/list-providers
                 (constantly [{:llm.provider/id :router-a

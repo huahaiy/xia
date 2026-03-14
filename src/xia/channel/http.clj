@@ -445,10 +445,14 @@
   (when session-id
     (swap! session-statuses dissoc (str session-id))))
 
+(defn- terminal-status-state?
+  [state]
+  (contains? #{:done :error} state))
+
 (defn- http-status-handler
   [{:keys [session-id state] :as status}]
   (when-let [sid (some-> session-id str)]
-    (if (= :done state)
+    (if (terminal-status-state? state)
       (clear-session-status! sid)
       (swap! session-statuses assoc sid (assoc status :updated-at (java.util.Date.))))))
 
