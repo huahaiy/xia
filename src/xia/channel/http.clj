@@ -78,6 +78,25 @@
      :body    content}
     {:status 404 :body "Not Found"}))
 
+(def ^:private web-static-assets
+  {"/style.css"                     {:path "style.css" :content-type "text/css"}
+   "/app.js"                        {:path "app.js" :content-type "text/javascript"}
+   "/favicon.ico"                   {:path "favicon/favicon.ico" :content-type "image/x-icon" :binary? true}
+   "/favicon/favicon-16x16.png"     {:path "favicon/favicon-16x16.png" :content-type "image/png" :binary? true}
+   "/favicon/favicon-32x32.png"     {:path "favicon/favicon-32x32.png" :content-type "image/png" :binary? true}
+   "/favicon/apple-touch-icon.png"  {:path "favicon/apple-touch-icon.png" :content-type "image/png" :binary? true}
+   "/favicon/android-chrome-192x192.png" {:path "favicon/android-chrome-192x192.png" :content-type "image/png" :binary? true}
+   "/favicon/android-chrome-512x512.png" {:path "favicon/android-chrome-512x512.png" :content-type "image/png" :binary? true}
+   "/favicon/site.webmanifest"      {:path "favicon/site.webmanifest"
+                                     :content-type "application/manifest+json; charset=utf-8"}})
+
+(defn- static-asset-response
+  [uri]
+  (when-let [{:keys [path content-type binary?]} (get web-static-assets uri)]
+    (if binary?
+      (binary-resource-response path content-type)
+      (resource-response path content-type))))
+
 ;; ---------------------------------------------------------------------------
 ;; WebSocket handler
 ;; ---------------------------------------------------------------------------
@@ -1476,14 +1495,8 @@
         (and (= method :get) (= uri "/"))
         (handle-home req)
 
-        (and (= method :get) (= uri "/style.css"))
-        (resource-response "style.css" "text/css")
-
-        (and (= method :get) (= uri "/app.js"))
-        (resource-response "app.js" "text/javascript")
-
-        (and (= method :get) (= uri "/xia-logo.png"))
-        (binary-resource-response "xia-logo.png" "image/png")
+        (and (= method :get) (contains? web-static-assets uri))
+        (static-asset-response uri)
 
         (and (= method :get) (= uri "/oauth/callback"))
         (handle-oauth-callback req)
