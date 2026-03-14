@@ -201,3 +201,44 @@
       (let [results (#'agent/execute-tool-calls tool-calls {:channel :terminal})]
         (is (= 1 @max-active))
         (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))))))
+
+(deftest execute-tool-calls-waits-for-all-parallel-futures-before-rethrowing
+  (let [started       (atom [])
+        release-slow  (promise)
+        slow-finished (promise)
+        tool-calls    [{"id"       "call-1"
+                        "function" {"name"      "web-fetch"
+                                    "arguments" "{}"}}
+                       {"id"       "call-2"
+                        "function" {"name"      "web-search"
+                                    "arguments" "{}"}}]]
+    (with-redefs [tool/parallel-safe? (constantly true)
+                  tool/execute-tool   (fn [tool-id _args _context]
+                                        (swap! started conj tool-id)
+                                        (case tool-id
+                                          :web-fetch
+                                          (throw (ex-info "boom" {:tool-id tool-id}))
+
+                                          :web-search
+                                          (do
+                                            @release-slow
+                                            (deliver slow-finished true)
+                                            {:tool (name tool-id)})))]
+      (let [batch-future (future
+                           (try
+                             (#'agent/execute-tool-calls tool-calls {:channel :terminal})
+                             (catch Exception e
+                               e)))]
+        (loop [attempt 0]
+          (when (and (< attempt 20)
+                     (not= #{:web-fetch :web-search} (set @started)))
+            (Thread/sleep 10)
+            (recur (inc attempt))))
+        (is (= #{:web-fetch :web-search} (set @started)))
+        (is (= ::pending (deref batch-future 100 ::pending)))
+        (deliver release-slow true)
+        (is (= true (deref slow-finished 1000 ::timeout)))
+        (let [err (deref batch-future 1000 ::timeout)]
+          (is (instance? clojure.lang.ExceptionInfo err))
+          (is (re-find #"Parallel tool execution failed: web-fetch"
+                       (.getMessage ^Exception err))))))))

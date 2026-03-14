@@ -1,8 +1,10 @@
-# xia
+# Xia
 
 ![Xia logo](xia-logo.png)
 
-> "There is an old Chinese story about the 田螺姑娘, a gentle spirit who appears each day to care for a home before anyone returns. Xia (虾) is a modern echo of that tale—an autonomous AI assistant that quietly tends to the details of your digital life."
+> "There is an old Chinese story about a Sail Maden(田螺姑娘), a gentle spirit
+> who appears each day to care for a home before anyone returns. Xia is a modern
+> echo of that tale: an autonomous AI assistant that quietly tends to the details of your digital life."
 
 Portable personal AI assistant. Single native binary + embedded DB = zero install friction. Everything is in the database: you can take the DB file to any computer, start Xia, and resume your exact experience. Works with any OpenAI-compatible LLM (Qwen, Ollama, OpenAI, Anthropic via proxy).
 

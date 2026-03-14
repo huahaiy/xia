@@ -105,10 +105,32 @@
                       :parallel true
                       :tool-count (count calls))
       (log/debug "Executing tool batch in parallel:" (mapv :func-name calls))
-      (->> calls
-           (mapv (fn [call]
-                   (future (execute-tool-call call context))))
-           (mapv deref)))
+      (let [results (->> calls
+                         (mapv (fn [call]
+                                 (future
+                                   (try
+                                     {:call   call
+                                      :result (execute-tool-call call context)}
+                                     (catch Throwable t
+                                       {:call      call
+                                        :exception t})))))
+                         (mapv deref))
+            failures (keep #(when-let [t (:exception %)]
+                              (assoc % :throwable t))
+                           results)]
+        (when-let [{:keys [call throwable]} (first failures)]
+          (doseq [{suppressed :throwable} (rest failures)]
+            (.addSuppressed ^Throwable throwable ^Throwable suppressed))
+          (throw (ex-info (str "Parallel tool execution failed: " (:func-name call))
+                          {:tool-id   (:tool-id call)
+                           :func-name (:func-name call)
+                           :failures  (mapv (fn [{:keys [call throwable]}]
+                                              {:tool-id   (:tool-id call)
+                                               :func-name (:func-name call)
+                                               :message   (.getMessage ^Throwable throwable)})
+                                            failures)}
+                          throwable)))
+        (mapv :result results)))
     (mapv #(execute-tool-call % context) calls)))
 
 (defn- execute-tool-calls
