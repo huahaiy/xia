@@ -184,6 +184,65 @@
       (is (= 200 (:status response)))
       (is (= "ok" (get body "content"))))))
 
+(deftest chat-route-offloads-async-http-requests
+  (let [release-turn (promise)
+        seen-turn    (promise)
+        sent-response (promise)
+        req          {:uri            "/chat"
+                      :request-method :post
+                      :headers        (ui-headers)
+                      :body           (request-body {"message" "hello"})
+                      :async-channel  ::chat-channel}]
+    (with-redefs [org.httpkit.server/as-channel (fn [ring-req handlers]
+                                                  (is (= ::chat-channel (:async-channel ring-req)))
+                                                  ((:on-open handlers) ::chat-channel)
+                                                  ::async-response)
+                  org.httpkit.server/send! (fn [ch response]
+                                             (deliver sent-response [ch response])
+                                             true)
+                  xia.agent/process-message (fn [session-id user-message & _]
+                                              (deliver seen-turn [session-id user-message])
+                                              (deref release-turn 2000 ::timeout)
+                                              (str "echo: " user-message))]
+      (let [route-result (deref (future (#'http/router req)) 200 ::timeout)
+            [sid user-message] (deref seen-turn 200 ::timeout)]
+        (is (= ::async-response route-result))
+        (is (instance? UUID sid))
+        (is (= "hello" user-message))
+        (is (= ::pending (deref sent-response 100 ::pending)))
+        (deliver release-turn true)
+        (let [[ch response] (deref sent-response 2000 ::timeout)
+              body          (response-json response)]
+          (is (= ::chat-channel ch))
+          (is (= 200 (:status response)))
+          (is (= (str sid) (get body "session_id")))
+          (is (= "assistant" (get body "role")))
+          (is (= "echo: hello" (get body "content"))))))))
+
+(deftest chat-route-sends-async-json-errors
+  (let [sent-response (promise)
+        req           {:uri            "/chat"
+                       :request-method :post
+                       :headers        (ui-headers)
+                       :body           (request-body {"message" "hello"})
+                       :async-channel  ::chat-channel}]
+    (with-redefs [org.httpkit.server/as-channel (fn [_req handlers]
+                                                  ((:on-open handlers) ::chat-channel)
+                                                  ::async-response)
+                  org.httpkit.server/send! (fn [_ch response]
+                                             (deliver sent-response response)
+                                             true)
+                  xia.agent/process-message (fn [_session-id _user-message & _]
+                                              (throw (ex-info "rate limited"
+                                                              {:status 429
+                                                               :error  "rate limited"})))]
+      (is (= ::async-response
+             (deref (future (#'http/router req)) 200 ::timeout)))
+      (let [response (deref sent-response 2000 ::timeout)
+            body     (response-json response)]
+        (is (= 429 (:status response)))
+        (is (= "rate limited" (get body "error")))))))
+
 (deftest websocket-route-blocks-non-local-origins
   (let [as-channel-called? (atom false)]
     (with-redefs [org.httpkit.server/websocket-handshake-check (constantly true)

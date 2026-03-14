@@ -710,23 +710,69 @@
     (wm/ensure-wm! sid)
     (json-response 200 {:session_id (str sid)})))
 
-(defn- handle-chat [req]
+(defn- internal-server-error-response
+  [e]
+  (json-response 500 {:error (or (.getMessage e) "internal server error")}))
+
+(defn- chat-request
+  [req]
   (let [data       (read-body req)
         message    (get data "message")
         session-id (get data "session_id")]
-    (if-not message
-      (json-response 400 {:error "missing 'message' field"})
-      (if (and session-id (not (session-exists? session-id)))
-        (json-response 404 {:error "unknown session id"})
-        (let [sid      (if session-id
-                         (java.util.UUID/fromString session-id)
-                         (db/create-session! :http))
-              _wm      (wm/ensure-wm! sid)
-              _status  (clear-session-status! sid)
-              response (agent/process-message sid message :channel :http)]
-          (json-response 200 {:session_id (str sid)
-                              :role       "assistant"
-                              :content    response}))))))
+    (cond
+      (not message)
+      {:response (json-response 400 {:error "missing 'message' field"})}
+
+      (and session-id (not (session-exists? session-id)))
+      {:response (json-response 404 {:error "unknown session id"})}
+
+      :else
+      (let [sid (if session-id
+                  (java.util.UUID/fromString session-id)
+                  (db/create-session! :http))]
+        (wm/ensure-wm! sid)
+        (clear-session-status! sid)
+        {:session-id sid
+         :message    message}))))
+
+(defn- process-chat!
+  [{:keys [session-id message]}]
+  (let [response (agent/process-message session-id message :channel :http)]
+    (json-response 200 {:session_id (str session-id)
+                        :role       "assistant"
+                        :content    response})))
+
+(defn- handle-chat-sync
+  [chat]
+  (process-chat! chat))
+
+(defn- handle-chat-async
+  [req chat]
+  (http/as-channel
+    req
+    {:on-open
+     (fn [ch]
+       (future
+         (let [response (try
+                          (process-chat! chat)
+                          (catch clojure.lang.ExceptionInfo e
+                            (exception-response e))
+                          (catch Exception e
+                            (log/error e "Async HTTP chat request failed")
+                            (internal-server-error-response e)))]
+           (http/send! ch response))))}))
+
+(defn- handle-chat [req]
+  (let [{:keys [response] :as chat} (chat-request req)]
+    (cond
+      response
+      response
+
+      (:async-channel req)
+      (handle-chat-async req chat)
+
+      :else
+      (handle-chat-sync chat))))
 
 (defn- handle-get-status [session-id]
   (cond
