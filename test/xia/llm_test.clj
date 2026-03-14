@@ -75,6 +75,14 @@
         (is (= 2 (:consecutive-failures health)))
         (is (= "rate limited" (:last-error health)))))))
 
+(deftest provider-cooldown-ms-saturates-at-max-with-large-failure-counts
+  (is (= (var-get #'llm/provider-health-base-cooldown-ms)
+         (#'llm/provider-cooldown-ms 1)))
+  (is (= (var-get #'llm/provider-health-max-cooldown-ms)
+         (#'llm/provider-cooldown-ms 64)))
+  (is (= (var-get #'llm/provider-health-max-cooldown-ms)
+         (#'llm/provider-cooldown-ms 1000))))
+
 (deftest chat-uses-workload-routed-provider
   (with-redefs [xia.db/list-providers
                 (constantly [{:llm.provider/id :router-a

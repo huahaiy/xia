@@ -78,9 +78,13 @@
 
 (defn- provider-cooldown-ms
   [consecutive-failures]
-  (min provider-health-max-cooldown-ms
-       (* provider-health-base-cooldown-ms
-          (bit-shift-left 1 (max 0 (dec (long consecutive-failures)))))))
+  (loop [cooldown provider-health-base-cooldown-ms
+         remaining (max 0 (dec (long consecutive-failures)))]
+    (if (zero? remaining)
+      cooldown
+      (recur (min provider-health-max-cooldown-ms
+                  (* 2 cooldown))
+             (dec remaining)))))
 
 (defn- provider-health-entry
   [provider-id]

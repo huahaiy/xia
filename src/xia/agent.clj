@@ -67,11 +67,29 @@
         (catch Exception e
           (log/warn "Failed to review fact utility:" (.getMessage e)))))))
 
+(defn- parse-tool-args
+  [func-name args-str]
+  (cond
+    (nil? args-str)
+    {}
+
+    (string? args-str)
+    (try
+      (json/read-json args-str)
+      (catch Exception e
+        (log/warn e "Failed to parse tool arguments for" func-name "- using empty args map")
+        {}))
+
+    :else
+    (do
+      (log/warn "Tool arguments for" func-name "were not a JSON string - using empty args map")
+      {})))
+
 (defn- prepare-tool-call
   [tc]
   (let [func-name (get-in tc ["function" "name"])
         args-str  (get-in tc ["function" "arguments"])
-        args      (try (json/read-json args-str) (catch Exception _ {}))
+        args      (parse-tool-args func-name args-str)
         tool-id   (keyword func-name)]
     {:tool-call   tc
      :func-name   func-name

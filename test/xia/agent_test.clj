@@ -202,6 +202,24 @@
         (is (= 1 @max-active))
         (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))))))
 
+(deftest prepare-tool-call-warns-on-malformed-json-arguments
+  (let [logged   (atom nil)
+        tool-call {"id"       "call-1"
+                   "function" {"name"      "web-search"
+                               "arguments" "{not-json"}}]
+    (with-redefs [clojure.tools.logging/log*
+                  (fn [_logger level throwable message]
+                    (reset! logged {:level level
+                                    :throwable throwable
+                                    :message message}))]
+      (let [prepared (#'agent/prepare-tool-call tool-call)]
+        (is (= {} (:args prepared)))
+        (is (= :web-search (:tool-id prepared)))
+        (is (= :warn (:level @logged)))
+        (is (instance? Exception (:throwable @logged)))
+        (is (re-find #"Failed to parse tool arguments for web-search"
+                     (:message @logged)))))))
+
 (deftest execute-tool-calls-waits-for-all-parallel-futures-before-rethrowing
   (let [started       (atom [])
         release-slow  (promise)
