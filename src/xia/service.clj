@@ -51,29 +51,67 @@
 ;; Auth injection
 ;; ---------------------------------------------------------------------------
 
+(defn- map-key-name
+  [k]
+  (cond
+    (keyword? k) (name k)
+    (string? k)  k
+    (symbol? k)  (name k)
+    :else        (str k)))
+
+(defn- normalize-query-params
+  [query-params]
+  (reduce-kv (fn [m k v]
+               (assoc m (map-key-name k) v))
+             {}
+             (or query-params {})))
+
+(defn- merge-protected-headers
+  [headers protected-headers]
+  (let [protected-names (into #{}
+                              (map (comp str/lower-case map-key-name key))
+                              protected-headers)
+        sanitized-headers
+        (reduce-kv (fn [m k v]
+                     (let [header-name (map-key-name k)]
+                       (if (contains? protected-names (str/lower-case header-name))
+                         m
+                         (assoc m header-name v))))
+                   {}
+                   (or headers {}))]
+    (merge sanitized-headers protected-headers)))
+
+(defn- with-protected-header
+  [req header-name header-value]
+  (update req :headers merge-protected-headers {header-name header-value}))
+
 (defn- inject-auth
   "Add authentication to a request map based on the service's auth-type."
   [req {:keys [auth-type auth-key auth-header oauth-account]}]
   (case auth-type
     :bearer
-    (assoc-in req [:headers "Authorization"] (str "Bearer " auth-key))
+    (with-protected-header req "Authorization" (str "Bearer " auth-key))
 
     :basic
     (let [encoded (.encodeToString (Base64/getEncoder) (.getBytes ^String auth-key "UTF-8"))]
-      (assoc-in req [:headers "Authorization"] (str "Basic " encoded)))
+      (with-protected-header req "Authorization" (str "Basic " encoded)))
 
     :api-key-header
     (do (when-not auth-header
           (throw (ex-info "auth-header required for :api-key-header auth type" {})))
-        (assoc-in req [:headers auth-header] auth-key))
+        (with-protected-header req (map-key-name auth-header) auth-key))
 
     :query-param
     (do (when-not auth-header
           (throw (ex-info "auth-header required for :query-param auth type" {})))
-        (update req :query-params assoc auth-header auth-key))
+        (update req :query-params
+                (fn [query-params]
+                  (assoc (normalize-query-params query-params)
+                         (map-key-name auth-header)
+                         auth-key))))
 
     :oauth-account
-    (assoc-in req [:headers "Authorization"] (oauth/oauth-header oauth-account))
+    (with-protected-header req "Authorization" (oauth/oauth-header oauth-account))
 
     ;; No auth / unknown — pass through
     req))
@@ -247,10 +285,10 @@
                   query-params (assoc :query-params query-params))
         ;; Inject service auth — this is the key security boundary
         req     (inject-auth req svc)
-        ;; Merge any extra headers from the tool (AFTER auth, so tools can't
-        ;; override Authorization — auth headers take precedence)
+        ;; Merge any extra headers from the tool under existing request headers.
+        ;; This preserves auth/content headers, even if the tool changes case.
         req     (if headers
-                  (update req :headers #(merge headers %))
+                  (update req :headers #(merge-protected-headers headers %))
                   req)
         _       (check-rate-limit! service-id svc)
         _       (log/debug "Service request:" (name service-id) method path)]

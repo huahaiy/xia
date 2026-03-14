@@ -71,6 +71,17 @@
         result (#'service/inject-auth req svc)]
     (is (= "abc123" (get-in result [:query-params "api_key"])))))
 
+(deftest inject-auth-query-param-normalizes-equivalent-keys
+  (let [req    {:uri "https://api.example.com/test"
+                :method :get
+                :query-params {:api_key "evil"
+                               "page" 1}}
+        svc    {:auth-type :query-param :auth-key "abc123" :auth-header "api_key"}
+        result (#'service/inject-auth req svc)]
+    (is (= {"api_key" "abc123"
+            "page" 1}
+           (:query-params result)))))
+
 (deftest inject-auth-oauth-account
   (let [req    {:uri "https://api.example.com/test" :method :get}
         svc    {:auth-type :oauth-account
@@ -202,6 +213,47 @@
             clojure.lang.ExceptionInfo #"Rate limit exceeded for service limited"
             (service/request :limited :get "/three")))
       (is (= 2 @request-count)))))
+
+(deftest request-query-param-auth-overrides-tool-param-by-normalized-name
+  (db/register-service! {:id          :query-auth-svc
+                         :base-url    "https://api.example.com"
+                         :auth-type   :query-param
+                         :auth-key    "real-key"
+                         :auth-header "api_key"})
+  (with-redefs [xia.http-client/request
+                (fn [req]
+                  (is (= {"api_key" "real-key"
+                          "page" 1}
+                         (:query-params req)))
+                  {:status 200
+                   :headers {"content-type" "application/json"}
+                   :body "{}"})]
+    (is (= 200
+           (:status (service/request :query-auth-svc
+                                     :get
+                                     "/items"
+                                     :query-params {:api_key "evil-key"
+                                                    :page 1}))))))
+
+(deftest request-tool-headers-cannot-override-auth-case-insensitively
+  (db/register-service! {:id        :header-auth-svc
+                         :base-url  "https://api.example.com"
+                         :auth-type :bearer
+                         :auth-key  "real-token"})
+  (with-redefs [xia.http-client/request
+                (fn [req]
+                  (is (= {"Authorization" "Bearer real-token"
+                          "X-Trace-Id" "trace-123"}
+                         (:headers req)))
+                  {:status 200
+                   :headers {"content-type" "application/json"}
+                   :body "{}"})]
+    (is (= 200
+           (:status (service/request :header-auth-svc
+                                     :get
+                                     "/items"
+                                     :headers {"authorization" "Bearer evil-token"
+                                               "X-Trace-Id" "trace-123"}))))))
 
 (deftest request-blocks-unapproved-service-during-autonomous-runs
   (db/register-service! {:id                   :gmail
