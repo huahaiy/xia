@@ -1,5 +1,7 @@
 (ns xia.web-test
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
+            [charred.api :as json]
             [xia.ssrf :as ssrf]
             [xia.web :as web])
   (:import [java.net InetAddress]
@@ -185,6 +187,118 @@
   (testing "returns plain URL as-is"
     (is (= "https://example.com/page"
            (#'web/extract-ddg-url "https://example.com/page")))))
+
+;; ---------------------------------------------------------------------------
+;; Web search
+;; ---------------------------------------------------------------------------
+
+(deftest search-web-parses-duckduckgo-html-results
+  (with-redefs-fn {#'web/fetch-raw
+                   (fn
+                     ([url]
+                      {:status 200
+                       :headers {"content-type" "text/html"}
+                       :body "<html><body>
+                              <div class='result'>
+                                <a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fclojure.org%2F&rut=abc'>Clojure</a>
+                                <a class='result__snippet'>Functional Lisp for the JVM</a>
+                              </div>
+                              </body></html>"
+                       :final-url url})
+                     ([url _headers]
+                      (is (= "https://html.duckduckgo.com/html/?q=clojure" url))
+                      {:status 200
+                       :headers {"content-type" "text/html"}
+                       :body "<html><body>
+                              <div class='result'>
+                                <a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fclojure.org%2F&rut=abc'>Clojure</a>
+                                <a class='result__snippet'>Functional Lisp for the JVM</a>
+                              </div>
+                              </body></html>"
+                       :final-url url}))}
+    #(let [result (web/search-web "clojure" :backend :duckduckgo-html)]
+       (is (= "duckduckgo-html" (:backend result)))
+       (is (= [{:title "Clojure"
+                :url "https://clojure.org/"
+                :snippet "Functional Lisp for the JVM"}]
+              (:results result)))
+       (is (nil? (:error result))))))
+
+(deftest search-web-ddg-health-check-errors-on-parser-mismatch
+  (with-redefs-fn {#'web/fetch-raw
+                   (fn
+                     ([url]
+                      {:status 200
+                       :headers {"content-type" "text/html"}
+                       :body "<html><body><div class='unexpected'>markup changed</div></body></html>"
+                       :final-url url})
+                     ([url _headers]
+                      {:status 200
+                       :headers {"content-type" "text/html"}
+                       :body "<html><body><div class='unexpected'>markup changed</div></body></html>"
+                       :final-url url}))}
+    #(let [result (web/search-web "clojure" :backend :duckduckgo-html)]
+       (is (nil? (:results result)))
+       (is (re-find #"markup changed" (:error result))))))
+
+(deftest search-web-ddg-allows-empty-no-results-pages
+  (with-redefs-fn {#'web/fetch-raw
+                   (fn
+                     ([url]
+                      {:status 200
+                       :headers {"content-type" "text/html"}
+                       :body "<html><body><div>No results found for test query</div></body></html>"
+                       :final-url url})
+                     ([url _headers]
+                      {:status 200
+                       :headers {"content-type" "text/html"}
+                       :body "<html><body><div>No results found for test query</div></body></html>"
+                       :final-url url}))}
+    #(let [result (web/search-web "test query" :backend :duckduckgo-html)]
+       (is (= [] (:results result)))
+       (is (= "duckduckgo-html" (:backend result)))
+       (is (nil? (:error result))))))
+
+(deftest search-web-falls-back-to-searxng-json
+  (let [calls (atom [])
+        response-for-url
+        (fn [url]
+          (swap! calls conj url)
+          (cond
+            (str/includes? url "html.duckduckgo.com")
+            {:status 200
+             :headers {"content-type" "text/html"}
+             :body "<html><body><div class='unexpected'>markup changed</div></body></html>"
+             :final-url url}
+
+            (str/includes? url "search.example/search")
+            {:status 200
+             :headers {"content-type" "application/json"}
+             :body (json/write-json-str
+                    {"results" [{"title" "Clojure"
+                                 "url" "https://clojure.org/"
+                                 "content" "A dynamic Lisp."}]})
+             :final-url url}))]
+    (with-redefs-fn {#'web/configured-search-backend-raw (constantly nil)
+                     #'web/configured-searxng-url (constantly "https://search.example/search")
+                     #'web/fetch-raw
+                     (fn
+                       ([url]
+                        (response-for-url url))
+                       ([url _headers]
+                        (response-for-url url)))}
+      #(let [result (web/search-web "clojure")]
+         (is (= ["https://html.duckduckgo.com/html/?q=clojure"
+                 "https://search.example/search?q=clojure&format=json"]
+                @calls))
+         (is (= "searxng-json" (:backend result)))
+         (is (= [{:title "Clojure"
+                  :url "https://clojure.org/"
+                  :snippet "A dynamic Lisp."}]
+                (:results result)))
+         (is (= [{:backend "duckduckgo-html"
+                  :error "DuckDuckGo HTML markup changed; search results could not be parsed"}]
+                (:fallbacks result)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Integration: fetch-page (live HTTP)

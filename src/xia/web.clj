@@ -9,7 +9,8 @@
    All HTTP requests go through this module (not raw hato) so we can
    enforce SSRF protection, rate limiting, and content size limits."
   (:require [clojure.string :as str]
-            [xia.http-client :as http]
+            [charred.api :as json]
+            [xia.db :as db]
             [xia.ssrf :as ssrf])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
@@ -27,6 +28,18 @@
 (def ^:private max-redirects 5)
 (def ^:private connect-timeout-ms 10000)
 (def ^:private request-timeout-ms 120000)
+(def ^:private default-search-backend :duckduckgo-html)
+(def ^:private supported-search-backends
+  {:ddg              :duckduckgo-html
+   :duckduckgo       :duckduckgo-html
+   :duckduckgo-html  :duckduckgo-html
+   :searx            :searxng-json
+   :searxng          :searxng-json
+   :searxng-json     :searxng-json})
+(def ^:private ddg-no-results-pattern
+  #"(?i)\bno results\b|\bno more results\b")
+(def ^:private ddg-blocked-pattern
+  #"(?i)automated traffic|unusual traffic|captcha|verify you are human")
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -137,14 +150,17 @@
 
 (defn- fetch-raw
   "Fetch a URL, return {:status :headers :body :final-url}."
-  [url]
+  ([url]
+   (fetch-raw url {}))
+  ([url extra-headers]
   (loop [current-url url
          redirects   0]
     (let [resolution (resolve-url! current-url)]
       (check-rate-limit! current-url)
       (let [resp (fetch-url! current-url
-                             {"User-Agent" user-agent
-                              "Accept"     "text/html,application/xhtml+xml,*/*"}
+                             (merge {"User-Agent" user-agent
+                                     "Accept"     "text/html,application/xhtml+xml,*/*"}
+                                    extra-headers)
                              resolution)
             status (:status resp)
             location (get-in resp [:headers "location"])]
@@ -161,7 +177,7 @@
             {:status    status
              :headers   (:headers resp)
              :body      body
-             :final-url current-url}))))))
+             :final-url current-url})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion
@@ -435,42 +451,222 @@
         (str "https:" href)
         href))))
 
+(defn- safe-get-config
+  [config-key]
+  (try
+    (db/get-config config-key)
+    (catch Exception _
+      nil)))
+
+(defn- normalize-search-backend
+  [backend]
+  (when backend
+    (let [value (cond
+                  (keyword? backend) backend
+                  (string? backend)  (-> backend
+                                         str/trim
+                                         str/lower-case
+                                         (str/replace #"[_\s]+" "-")
+                                         keyword)
+                  :else nil)]
+      (get supported-search-backends value))))
+
+(defn- configured-search-backend-raw []
+  (safe-get-config :web/search-backend))
+
+(defn- configured-searxng-url []
+  (let [value (some-> (safe-get-config :web/search-searxng-url)
+                      str
+                      str/trim)]
+    (when (seq value)
+      value)))
+
+(defn- resolve-search-backend!
+  [backend]
+  (or (normalize-search-backend backend)
+      (throw (ex-info (str "Unsupported search backend: " backend)
+                      {:backend backend
+                       :supported-backends (mapv name (distinct (vals supported-search-backends)))}))))
+
+(defn- append-query-params
+  [base-url params]
+  (let [query-string (->> params
+                          (map (fn [[k v]]
+                                 (str (java.net.URLEncoder/encode (name k) "UTF-8")
+                                      "="
+                                      (java.net.URLEncoder/encode (str v) "UTF-8"))))
+                          (str/join "&"))
+        separator    (cond
+                       (str/ends-with? base-url "?") ""
+                       (str/ends-with? base-url "&") ""
+                       (str/includes? base-url "?") "&"
+                       :else "?")]
+    (str base-url separator query-string)))
+
+(defn- select-first-any
+  [root selectors]
+  (some (fn [selector]
+          (.selectFirst root ^String selector))
+        selectors))
+
+(defn- fetch-search-body!
+  [url headers]
+  (let [{:keys [status body]} (fetch-raw url headers)]
+    (when-not (<= 200 status 299)
+      (throw (ex-info (str "Search backend HTTP " status)
+                      {:type :search/backend-http
+                       :url url
+                       :status status})))
+    (or body "")))
+
+(defn- parse-ddg-html-result
+  [result-el]
+  (let [title-el (select-first-any result-el
+                                   ["a.result__a"
+                                    ".result__title a"
+                                    "h2 a"
+                                    "a[href]"])
+        snip-el  (select-first-any result-el
+                                   [".result__snippet"
+                                    ".result__body"
+                                    ".result__extras__snippet"
+                                    ".result__content"])
+        title    (some-> title-el .text str/trim)
+        raw-href (some-> title-el (.attr "href"))
+        url      (some-> raw-href extract-ddg-url str/trim)
+        snippet  (some-> snip-el .text str/trim)]
+    (when (and (seq title) (seq url))
+      {:title title
+       :url url
+       :snippet (or snippet "")})))
+
+(defn- parse-ddg-html-results
+  [body max-results]
+  (let [doc          (Jsoup/parse ^String body)
+        result-nodes (.select doc ".result, .results_links, .web-result")
+        parsed       (->> result-nodes
+                          (map parse-ddg-html-result)
+                          (filter some?)
+                          distinct
+                          (take max-results)
+                          vec)
+        page-text    (some-> doc .body .text)]
+    (cond
+      (seq parsed)
+      parsed
+
+      (and page-text (re-find ddg-no-results-pattern page-text))
+      []
+
+      (and page-text (re-find ddg-blocked-pattern page-text))
+      (throw (ex-info "DuckDuckGo blocked or challenged the search request"
+                      {:type :search/backend-blocked
+                       :backend :duckduckgo-html}))
+
+      :else
+      (throw (ex-info "DuckDuckGo HTML markup changed; search results could not be parsed"
+                      {:type :search/backend-unhealthy
+                       :backend :duckduckgo-html})))))
+
+(defn- parse-searxng-results
+  [body max-results]
+  (let [parsed  (json/read-json body)
+        results (get parsed "results")]
+    (when-not (sequential? results)
+      (throw (ex-info "SearxNG JSON response did not include a results array"
+                      {:type :search/backend-unhealthy
+                       :backend :searxng-json})))
+    (->> results
+         (map (fn [result]
+                {:title   (or (get result "title") "")
+                 :url     (or (get result "url") "")
+                 :snippet (or (get result "content")
+                              (get result "snippet")
+                              "")}))
+         (filter (fn [{:keys [title url]}]
+                   (or (seq title) (seq url))))
+         (take max-results)
+         vec)))
+
+(defn- search-via-backend!
+  [backend query max-results]
+  (case backend
+    :duckduckgo-html
+    (let [url  (str "https://html.duckduckgo.com/html/?q="
+                    (java.net.URLEncoder/encode query "UTF-8"))
+          body (fetch-search-body! url {"Accept" "text/html,application/xhtml+xml,*/*"})]
+      (parse-ddg-html-results body max-results))
+
+    :searxng-json
+    (let [base-url (or (configured-searxng-url)
+                       (throw (ex-info "SearxNG search backend is not configured"
+                                       {:type :search/backend-unconfigured
+                                        :backend :searxng-json
+                                        :config-key :web/search-searxng-url})))
+          url      (append-query-params base-url {:q query :format "json"})
+          body     (fetch-search-body! url {"Accept" "application/json,text/json,*/*"})]
+      (parse-searxng-results body max-results))
+
+    (throw (ex-info (str "Unsupported search backend: " backend)
+                    {:backend backend}))))
+
+(defn- search-backend-order
+  [backend]
+  (if backend
+    [(resolve-search-backend! backend)]
+    (if-let [configured (configured-search-backend-raw)]
+      [(resolve-search-backend! configured)]
+      (cond-> [default-search-backend]
+        (configured-searxng-url) (conj :searxng-json)))))
+
 (defn search-web
   "Search the web. Returns structured results.
 
-   Uses DuckDuckGo HTML search as the default backend (no API key needed).
+   Uses DuckDuckGo HTML by default, with parser health checks so markup changes
+   fail loudly instead of silently returning empty results. The backend can be
+   selected explicitly or configured via :web/search-backend. A configured
+   public SearxNG JSON endpoint can be used via :web/search-searxng-url.
 
    Arguments:
      query — the search query
 
    Options:
      :max-results — max number of results (default 5)
+     :backend     — one of :duckduckgo-html or :searxng-json
 
    Returns:
      {:query   \"search terms\"
+      :backend \"duckduckgo-html\"
       :results [{:title \"...\" :url \"...\" :snippet \"...\"}]}"
-  [query & {:keys [max-results]
+  [query & {:keys [max-results backend]
             :or   {max-results 5}}]
   (try
-    (let [enc-query (java.net.URLEncoder/encode query "UTF-8")
-          url       (str "https://html.duckduckgo.com/html/?q=" enc-query)
-          resp      (http/request {:url             url
-                                   :method          :get
-                                   :headers         {"User-Agent" user-agent}
-                                   :connect-timeout 10000
-                                   :request-label   "Web search"})
-          doc       (Jsoup/parse ^String (str (:body resp)))
-          results   (.select doc ".result")]
-      {:query   query
-       :results (->> results
-                     (take max-results)
-                     (mapv (fn [^Element r]
-                             (let [title-el (.selectFirst r ".result__a")
-                                   snip-el  (.selectFirst r ".result__snippet")
-                                   raw-href (when title-el (.attr title-el "href"))]
-                               {:title   (if title-el (.text title-el) "")
-                                :url     (or (extract-ddg-url raw-href) "")
-                                :snippet (if snip-el (.text snip-el) "")}))))})
+    (loop [[backend-id & more] (search-backend-order backend)
+           failures            []]
+      (when-not backend-id
+        (throw (ex-info "No search backend is available"
+                        {:type :search/backend-unavailable
+                         :failures failures})))
+      (let [attempt (try
+                      {:results (search-via-backend! backend-id query max-results)}
+                      (catch Exception e
+                        {:exception e}))]
+        (if-let [results (:results attempt)]
+          {:query     query
+           :backend   (name backend-id)
+           :results   results
+           :fallbacks (when (seq failures) failures)}
+          (let [e       (:exception attempt)
+                failure {:backend (name backend-id)
+                         :error   (.getMessage e)}]
+            (if (seq more)
+              (recur more (conj failures failure))
+              (throw (ex-info (.getMessage e)
+                              {:type     (or (:type (ex-data e))
+                                             :search/backend-failed)
+                               :backend  (name backend-id)
+                               :failures (conj failures failure)}
+                              e)))))))
     (catch Exception e
       {:query query
        :error (.getMessage e)})))
