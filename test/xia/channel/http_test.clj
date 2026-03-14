@@ -17,6 +17,14 @@
   (ByteArrayInputStream.
     (.getBytes (json/write-json-str payload) StandardCharsets/UTF_8)))
 
+(defn- oversized-request-body []
+  (let [size (inc (var-get #'http/max-request-body-bytes))
+        sb   (StringBuilder. size)]
+    (dotimes [_ size]
+      (.append sb "x"))
+    (ByteArrayInputStream.
+      (.getBytes (.toString sb) StandardCharsets/UTF_8))))
+
 (defn- response-json [response]
   (json/read-json (:body response)))
 
@@ -176,6 +184,43 @@
       (is (= 200 (:status response)))
       (is (= "ok" (get body "content"))))))
 
+(deftest websocket-route-blocks-non-local-origins
+  (let [as-channel-called? (atom false)]
+    (with-redefs [org.httpkit.server/websocket-handshake-check (constantly true)
+                  org.httpkit.server/as-channel (fn [_req _handlers]
+                                                  (reset! as-channel-called? true)
+                                                  ::websocket-upgraded)]
+      (let [response (#'http/router {:uri            "/ws"
+                                     :request-method :get
+                                     :headers        {"origin" "https://evil.example"}})
+            body     (response-json response)]
+        (is (= 403 (:status response)))
+        (is (= "forbidden origin" (get body "error")))
+        (is (false? @as-channel-called?))))))
+
+(deftest websocket-route-blocks-missing-session-secret
+  (let [as-channel-called? (atom false)]
+    (with-redefs [org.httpkit.server/websocket-handshake-check (constantly true)
+                  org.httpkit.server/as-channel (fn [_req _handlers]
+                                                  (reset! as-channel-called? true)
+                                                  ::websocket-upgraded)]
+      (let [response (#'http/router {:uri            "/ws"
+                                     :request-method :get
+                                     :headers        {"origin" "http://localhost:18790"}})
+            body     (response-json response)]
+        (is (= 401 (:status response)))
+        (is (= "missing or invalid local session secret" (get body "error")))
+        (is (false? @as-channel-called?))))))
+
+(deftest websocket-route-allows-local-origin-with-session-secret
+  (with-redefs [org.httpkit.server/websocket-handshake-check (constantly true)
+                org.httpkit.server/as-channel (fn [_req _handlers]
+                                                ::websocket-upgraded)]
+    (is (= ::websocket-upgraded
+           (#'http/router {:uri            "/ws"
+                           :request-method :get
+                           :headers        (ui-headers)})))))
+
 (deftest chat-route-validates-required-message
   (let [response (#'http/router {:uri            "/chat"
                                  :request-method :post
@@ -184,6 +229,15 @@
         body     (response-json response)]
     (is (= 400 (:status response)))
     (is (= "missing 'message' field" (get body "error")))))
+
+(deftest chat-route-rejects-oversized-request-body
+  (let [response (#'http/router {:uri            "/chat"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (oversized-request-body)})
+        body     (response-json response)]
+    (is (= 413 (:status response)))
+    (is (= "request body too large" (get body "error")))))
 
 (deftest session-messages-route-returns-transcript
   (let [sid (db/create-session! :http)]
@@ -773,6 +827,15 @@
     (is (= 32000 (:llm.provider/history-budget (db/get-provider :openai))))
     (is (= true (:llm.provider/default? (db/get-provider :openai))))
     (is (= false (:llm.provider/default? (db/get-provider :anthropic))))))
+
+(deftest admin-provider-route-rejects-oversized-request-body
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (oversized-request-body)})
+        body     (response-json response)]
+    (is (= 413 (:status response)))
+    (is (= "request body too large" (get body "error")))))
 
 (deftest admin-provider-route-clears-model-budgets
   (db/upsert-provider! {:id                   :openai

@@ -16,8 +16,9 @@
             [xia.autonomous :as autonomous]
             [xia.crypto :as crypto]
             [xia.db :as db]
-            [xia.prompt :as prompt])
-  (:import [org.htmlunit WebClient BrowserVersion WebRequest]
+            [xia.prompt :as prompt]
+            [xia.ssrf :as ssrf])
+  (:import [org.htmlunit WebClient BrowserVersion WebRequest HttpWebConnection]
            [org.htmlunit.html HtmlPage HtmlElement HtmlForm
             HtmlInput HtmlTextArea HtmlSelect
             HtmlOption HtmlAnchor
@@ -40,6 +41,8 @@
 
 (defonce ^:private sessions (ConcurrentHashMap.))
 
+(declare resolve-url!)
+(declare send-browser-request!)
 (declare validate-url!)
 (declare current-page)
 (declare evict-expired!)
@@ -176,8 +179,8 @@
    client
    (proxy [WebConnectionWrapper] [client]
      (getResponse [^WebRequest request]
-       (validate-url! (str (.getUrl request)))
-       (proxy-super getResponse request))))
+       (let [resolution (resolve-url! (str (.getUrl request)))]
+         (send-browser-request! client request resolution)))))
   client)
 
 (defn- make-client
@@ -374,30 +377,34 @@
 ;; SSRF protection (reuse pattern from xia.web)
 ;; ---------------------------------------------------------------------------
 
-(defn- private-ip?
-  [^java.net.InetAddress addr]
-  (or (.isLoopbackAddress addr)
-      (.isLinkLocalAddress addr)
-      (.isSiteLocalAddress addr)
-      (.isAnyLocalAddress addr)))
-
 (defn- resolve-host-addresses
   [host]
-  (seq (java.net.InetAddress/getAllByName host)))
+  (ssrf/resolve-host-addresses host))
+
+(defn- resolve-url!
+  [url]
+  (ssrf/resolve-public-url! resolve-host-addresses url))
 
 (defn- validate-url!
   [url]
-  (let [uri (java.net.URI. url)]
-    (when-not (#{"http" "https"} (.getScheme uri))
-      (throw (ex-info "Only http:// and https:// URLs are allowed"
-                      {:url url})))
-    (let [host (.getHost uri)]
-      (when (str/blank? host)
-        (throw (ex-info "URL has no host" {:url url})))
-      (let [addrs (resolve-host-addresses host)]
-        (when (some private-ip? addrs)
-          (throw (ex-info "Access to private/internal addresses is blocked"
-                          {:url url :host host})))))))
+  (ssrf/validate-url! resolve-host-addresses url))
+
+(defn- new-pinned-web-connection
+  [^WebClient client resolution]
+  ;; HttpWebConnection caches its Apache connection manager, so create a fresh
+  ;; instance per request to ensure the pinned DNS resolver is applied.
+  (proxy [HttpWebConnection] [client]
+    (createHttpClientBuilder []
+      (doto (proxy-super createHttpClientBuilder)
+        (.setDnsResolver (ssrf/pinned-dns-resolver resolution))))))
+
+(defn- send-browser-request!
+  [^WebClient client ^WebRequest request resolution]
+  (let [connection (new-pinned-web-connection client resolution)]
+    (try
+      (.getResponse connection request)
+      (finally
+        (.close connection)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API — exposed to SCI sandbox
@@ -478,6 +485,24 @@
                          {:content "Click performed but no HTML page resulted."
                           :forms [] :links []})))))))
 
+(defn- find-form-field-element
+  [^HtmlForm form field-name]
+  (or
+    ;; Prefer HtmlUnit's exact-name lookups for standard controls.
+    (try (.getInputByName form ^String field-name)
+         (catch Exception _ nil))
+    (try (first (.getTextAreasByName form ^String field-name))
+         (catch Exception _ nil))
+    (try (first (.getSelectsByName form ^String field-name))
+         (catch Exception _ nil))
+    ;; Fall back to exact attribute matching for id-based addressing without
+    ;; interpreting the field name as a CSS selector.
+    (some (fn [^HtmlElement el]
+            (when (or (= field-name (.getAttribute el "name"))
+                      (= field-name (.getAttribute el "id")))
+              el))
+          (.getFormElements form))))
+
 (defn fill-form
   "Fill form fields and optionally submit.
 
@@ -503,20 +528,7 @@
                         {:form-selector form-selector})))
       ;; Fill each field
       (doseq [[field-name value] fields]
-        (let [el (or
-                   ;; Try by name attribute
-                  (try (.getInputByName ^HtmlForm form ^String field-name)
-                       (catch Exception _ nil))
-                   ;; Try textarea by name
-                  (try (first (.getTextAreasByName ^HtmlForm form ^String field-name))
-                       (catch Exception _ nil))
-                   ;; Try select by name
-                  (try (first (.getSelectsByName ^HtmlForm form ^String field-name))
-                       (catch Exception _ nil))
-                   ;; Try by CSS selector within the form
-                  (try (.querySelector ^HtmlForm form
-                                       (str "[name=\"" field-name "\"], #" field-name))
-                       (catch Exception _ nil)))]
+        (let [el (find-form-field-element form field-name)]
           (when-not el
             (log/warn "Form field not found:" field-name))
           (when el

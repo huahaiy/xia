@@ -209,21 +209,34 @@
 (deftest fetch-raw-follows-redirects-hop-by-hop
   (let [calls (atom [])]
     (with-redefs-fn {#'web/resolve-host-addresses
-                     (fn [_]
-                       [(InetAddress/getByAddress "example.com" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))])
-                     #'xia.http-client/request
-                     (fn [{:keys [url]}]
-                       (swap! calls conj url)
+                     (fn [host]
+                       (case host
+                         "example.com"
+                         [(InetAddress/getByAddress "example.com" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))]
+                         "next.example"
+                         [(InetAddress/getByAddress "next.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 21)]))]))
+                     #'web/fetch-url!
+                     (fn [url _headers resolution]
+                       (swap! calls conj {:url url
+                                          :host (:host resolution)
+                                          :addresses (mapv #(.getHostAddress ^InetAddress %)
+                                                           (:addresses resolution))})
                        (if (= url "https://example.com/start")
                          {:status 302
-                          :headers {"location" "/next"}
+                          :headers {"location" "https://next.example/next"}
                           :body ""}
                          {:status 200
                           :headers {"content-type" "text/plain"}
                           :body "ok"}))}
       #(let [result (#'web/fetch-raw "https://example.com/start")]
-         (is (= ["https://example.com/start" "https://example.com/next"] @calls))
-         (is (= "https://example.com/next" (:final-url result)))
+         (is (= [{:url "https://example.com/start"
+                  :host "example.com"
+                  :addresses ["93.184.34.20"]}
+                 {:url "https://next.example/next"
+                  :host "next.example"
+                  :addresses ["93.184.34.21"]}]
+                @calls))
+         (is (= "https://next.example/next" (:final-url result)))
          (is (= 200 (:status result)))
          (is (= "ok" (:body result)))))))
 
@@ -235,8 +248,8 @@
                        [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))]
                        "127.0.0.1"
                        [(InetAddress/getByAddress "127.0.0.1" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))]))
-                   #'xia.http-client/request
-                   (fn [{:keys [url]}]
+                   #'web/fetch-url!
+                   (fn [url _headers _resolution]
                      (if (= url "https://public.example/start")
                        {:status 302
                         :headers {"location" "http://127.0.0.1/secret"}

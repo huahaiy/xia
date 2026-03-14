@@ -9,7 +9,7 @@
   (:require [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files LinkOption Path Paths StandardCopyOption]
-           [java.nio.file.attribute PosixFilePermissions]
+           [java.nio.file.attribute PosixFilePermission PosixFilePermissions]
            [java.security.spec KeySpec]
            [java.security SecureRandom]
            [java.util Arrays Base64]
@@ -67,10 +67,73 @@
     (catch UnsupportedOperationException _)
     (catch Exception _)))
 
-(defn- read-key-file [file-path]
-  (let [path (Paths/get file-path (make-array String 0))]
+(def ^:private disallowed-secret-file-perms
+  #{PosixFilePermission/OWNER_EXECUTE
+    PosixFilePermission/GROUP_READ
+    PosixFilePermission/GROUP_WRITE
+    PosixFilePermission/GROUP_EXECUTE
+    PosixFilePermission/OTHERS_READ
+    PosixFilePermission/OTHERS_WRITE
+    PosixFilePermission/OTHERS_EXECUTE})
+
+(defn- path-of [path]
+  (Paths/get path (make-array String 0)))
+
+(defn- absolute-path [^Path path]
+  (.normalize (.toAbsolutePath path)))
+
+(defn- real-path [^Path path]
+  (try
+    (.toRealPath path (make-array LinkOption 0))
+    (catch Exception _
+      (absolute-path path))))
+
+(defn- path-within?
+  [^Path child ^Path parent]
+  (.startsWith child parent))
+
+(defn- file-under-db-path?
+  [db-path file-path]
+  (let [db-path*   (path-of db-path)
+        file-path* (path-of file-path)]
+    (or (path-within? (absolute-path file-path*) (absolute-path db-path*))
+        (path-within? (real-path file-path*) (real-path db-path*)))))
+
+(defn- insecure-secret-file-perms
+  [^Path path]
+  (try
+    (let [perms     (Files/getPosixFilePermissions path (make-array LinkOption 0))
+          insecure? (some disallowed-secret-file-perms perms)]
+      (when insecure?
+        {:permissions (PosixFilePermissions/toString perms)}))
+    (catch UnsupportedOperationException _
+      nil)))
+
+(defn- validate-secret-file!
+  [db-path file-path label allow-insecure-key-file?]
+  (let [path (path-of file-path)]
     (when-not (Files/exists path (make-array LinkOption 0))
-      (throw (ex-info "Encryption key file does not exist" {:path file-path})))
+      (throw (ex-info (str label " does not exist") {:path file-path})))
+    (when-not allow-insecure-key-file?
+      (when (file-under-db-path? db-path file-path)
+        (throw (ex-info
+                 (str label " must not be stored inside the DB path unless "
+                      ":allow-insecure-key-file? is true")
+                 {:path file-path
+                  :db-path db-path
+                  :reason :inside-db-path})))
+      (when-let [{:keys [permissions]} (insecure-secret-file-perms path)]
+        (throw (ex-info
+                 (str label " must use owner-only permissions unless "
+                      ":allow-insecure-key-file? is true")
+                 {:path file-path
+                  :permissions permissions
+                  :reason :insecure-permissions}))))
+    path))
+
+(defn- read-key-file [db-path file-path allow-insecure-key-file?]
+  (let [path (validate-secret-file! db-path file-path "Encryption key file"
+                                    allow-insecure-key-file?)]
     (decode-key (slurp (.toFile path)))))
 
 (defn- decode-bytes [encoded expected-length label]
@@ -91,10 +154,9 @@
 (defn- strip-trailing-newline [s]
   (str/replace (or s "") #"(?:\r?\n)+\z" ""))
 
-(defn- read-passphrase-file [file-path]
-  (let [path (Paths/get file-path (make-array String 0))]
-    (when-not (Files/exists path (make-array LinkOption 0))
-      (throw (ex-info "Master passphrase file does not exist" {:path file-path})))
+(defn- read-passphrase-file [db-path file-path allow-insecure-key-file?]
+  (let [path (validate-secret-file! db-path file-path "Master passphrase file"
+                                    allow-insecure-key-file?)]
     (strip-trailing-newline (slurp (.toFile path)))))
 
 (defn- generate-salt []
@@ -159,7 +221,11 @@
 
 (defn- resolve-key
   ([db-path] (resolve-key db-path nil))
-  ([db-path {:keys [key-file passphrase passphrase-file passphrase-provider]}]
+  ([db-path {:keys [key-file
+                    passphrase
+                    passphrase-file
+                    passphrase-provider
+                    allow-insecure-key-file?]}]
    (let [env-key              (env-value "XIA_MASTER_KEY")
          env-key-file         (env-value "XIA_MASTER_KEY_FILE")
          env-passphrase       (env-value "XIA_MASTER_PASSPHRASE")
@@ -174,7 +240,7 @@
                                  :new?      (not salt-exists?)})]
     (cond
       (some? key-file)
-      {:key (read-key-file key-file)
+      {:key (read-key-file db-path key-file allow-insecure-key-file?)
        :source :key-file
        :path key-file}
 
@@ -182,7 +248,9 @@
       (passphrase-key db-path passphrase :passphrase)
 
       (some? passphrase-file)
-      (assoc (passphrase-key db-path (read-passphrase-file passphrase-file)
+      (assoc (passphrase-key db-path (read-passphrase-file db-path
+                                                           passphrase-file
+                                                           allow-insecure-key-file?)
                              :passphrase-file)
              :path passphrase-file)
 
@@ -191,7 +259,7 @@
        :source :env}
 
       (seq env-key-file)
-      {:key (read-key-file env-key-file)
+      {:key (read-key-file db-path env-key-file allow-insecure-key-file?)
        :source :env-file
        :path env-key-file}
 
@@ -199,7 +267,9 @@
       (passphrase-key db-path env-passphrase :env-passphrase)
 
       (seq env-passphrase-file)
-      (assoc (passphrase-key db-path (read-passphrase-file env-passphrase-file)
+      (assoc (passphrase-key db-path (read-passphrase-file db-path
+                                                           env-passphrase-file
+                                                           allow-insecure-key-file?)
                              :env-passphrase-file)
              :path env-passphrase-file)
 

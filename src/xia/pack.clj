@@ -79,7 +79,7 @@
       env-key-file*
       {:key-source       :env-file
        :archive-entries  [{:file env-key-file* :entry (support-entry "master.key")}]
-       :restore-requires ["Set XIA_MASTER_KEY_FILE to db/.xia/master.key after extracting the archive."]}
+       :restore-requires ["Move db/.xia/master.key to a secure path outside the extracted DB, set owner-only permissions, then set XIA_MASTER_KEY_FILE to that path."]}
 
       (seq env-passphrase)
       {:key-source       :env-passphrase
@@ -89,17 +89,17 @@
       env-passphrase-file*
       {:key-source       :env-passphrase-file
        :archive-entries  [{:file env-passphrase-file* :entry (support-entry "master.passphrase")}]
-       :restore-requires ["Set XIA_MASTER_PASSPHRASE_FILE to db/.xia/master.passphrase after extracting the archive."]}
+       :restore-requires ["Move db/.xia/master.passphrase to a secure path outside the extracted DB, set owner-only permissions, then set XIA_MASTER_PASSPHRASE_FILE to that path."]}
 
       (.exists ^File local-key-file)
       {:key-source       :local-key-file
        :archive-entries  []
-       :restore-requires ["Open the archive directly with `xia your-archive.xia`, or set XIA_MASTER_KEY_FILE to db/.xia/master.key when opening the extracted DB."]}
+       :restore-requires ["Open the archive directly with `xia your-archive.xia`, or move db/.xia/master.key to a secure path outside the extracted DB and set XIA_MASTER_KEY_FILE to that path."]}
 
       (.exists ^File local-passphrase-file)
       {:key-source       :local-passphrase-file
        :archive-entries  []
-       :restore-requires ["Open the archive directly with `xia your-archive.xia`, or set XIA_MASTER_PASSPHRASE_FILE to db/.xia/master.passphrase when opening the extracted DB."]}
+       :restore-requires ["Open the archive directly with `xia your-archive.xia`, or move db/.xia/master.passphrase to a secure path outside the extracted DB and set XIA_MASTER_PASSPHRASE_FILE to that path."]}
 
       (.exists salt-file)
       {:key-source       :prompt-passphrase
@@ -246,10 +246,12 @@
         passphrase-file (support-file db-path "master.passphrase")]
     (cond
       (.exists ^File key-file)
-      {:key-file (.getAbsolutePath ^File key-file)}
+      {:key-file (.getAbsolutePath ^File key-file)
+       :allow-insecure-key-file? true}
 
       (.exists ^File passphrase-file)
-      {:passphrase-file (.getAbsolutePath ^File passphrase-file)}
+      {:passphrase-file (.getAbsolutePath ^File passphrase-file)
+       :allow-insecure-key-file? true}
 
       :else
       {})))

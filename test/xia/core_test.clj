@@ -4,8 +4,8 @@
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.pack :as pack])
-  (:import [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]
+  (:import [java.nio.file Files LinkOption Paths]
+           [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]))
 
 (defn- temp-dir []
@@ -16,6 +16,19 @@
   (.encodeToString (Base64/getEncoder)
                    (byte-array (repeat 32 (byte byte-value)))))
 
+(defn- path-of
+  [path]
+  (Paths/get path (make-array String 0)))
+
+(defn- maybe-set-owner-only-perms!
+  [path]
+  (try
+    (Files/getPosixFilePermissions (path-of path) (make-array LinkOption 0))
+    (Files/setPosixFilePermissions (path-of path)
+                                   (PosixFilePermissions/fromString "rw-------"))
+    (catch UnsupportedOperationException _)
+    (catch Exception _)))
+
 (deftest main-opens-archive-argument-directly
   (let [dir          (temp-dir)
         db-path      (str dir "/db")
@@ -24,6 +37,7 @@
         key-file-env {"XIA_MASTER_KEY_FILE" key-file}
         started      (atom nil)]
     (spit key-file (encode-key 11))
+    (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-file-env k))}
       #(do
          (db/connect! db-path)
@@ -44,4 +58,5 @@
     (is (= archive (get-in @started [:archive-context :archive-path])))
     (is (.endsWith ^String (:db @started) "/db"))
     (is (.endsWith ^String (:key-file (:crypto-opts @started))
-                   "/db/.xia/master.key"))))
+                   "/db/.xia/master.key"))
+    (is (true? (:allow-insecure-key-file? (:crypto-opts @started))))))

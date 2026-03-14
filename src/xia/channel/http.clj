@@ -18,7 +18,9 @@
             [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.working-memory :as wm])
-  (:import [java.security SecureRandom]
+  (:import [java.io ByteArrayOutputStream InputStream]
+           [java.nio.charset StandardCharsets]
+           [java.security SecureRandom]
            [java.util Base64]))
 
 ;; ---------------------------------------------------------------------------
@@ -33,6 +35,7 @@
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
+(def ^:private max-request-body-bytes (* 1024 1024)) ; 1 MiB
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private ms-per-day (* 24 60 60 1000))
 (defonce ^:private local-session-secret
@@ -63,47 +66,109 @@
 ;; WebSocket handler
 ;; ---------------------------------------------------------------------------
 
+(declare protected-route-response)
+
 (defn- ws-handler [req]
-  (http/as-channel req
-    {:on-open
-     (fn [ch]
-       (let [sid (db/create-session! :websocket)]
-         (swap! ws-sessions assoc ch sid)
-         (wm/ensure-wm! sid)
-         (log/info "WebSocket connected, session:" sid)
-         (http/send! ch (json/write-json-str {:type "connected" :session-id (str sid)}))))
+  (protected-route-response
+    req
+    #(http/as-channel req
+       {:on-open
+        (fn [ch]
+          (let [sid (db/create-session! :websocket)]
+            (swap! ws-sessions assoc ch sid)
+            (wm/ensure-wm! sid)
+            (log/info "WebSocket connected, session:" sid)
+            (http/send! ch (json/write-json-str {:type "connected" :session-id (str sid)}))))
 
-     :on-receive
-     (fn [ch msg]
-       (if-let [sid (get @ws-sessions ch)]
-         (try
-           (let [data     (json/read-json msg)
-                 text     (get data "message" (get data "content" msg))
-                 response (agent/process-message sid text :channel :websocket)]
-             (http/send! ch (json/write-json-str {:type    "message"
-                                                   :role    "assistant"
-                                                   :content response})))
-           (catch Exception e
-             (log/error e "WebSocket message error")
-             (http/send! ch (json/write-json-str {:type  "error"
-                                                   :error (.getMessage e)}))))
-         (http/send! ch (json/write-json-str {:type "error" :error "Session not found"}))))
+        :on-receive
+        (fn [ch msg]
+          (if-let [sid (get @ws-sessions ch)]
+            (try
+              (let [data     (json/read-json msg)
+                    text     (get data "message" (get data "content" msg))
+                    response (agent/process-message sid text :channel :websocket)]
+                (http/send! ch (json/write-json-str {:type    "message"
+                                                     :role    "assistant"
+                                                     :content response})))
+              (catch Exception e
+                (log/error e "WebSocket message error")
+                (http/send! ch (json/write-json-str {:type  "error"
+                                                     :error (.getMessage e)}))))
+            (http/send! ch (json/write-json-str {:type "error" :error "Session not found"}))))
 
-     :on-close
-     (fn [ch _status]
-       (when-let [sid (get @ws-sessions ch)]
-         (wm/snapshot! sid)
-         (wm/clear-wm! sid))
-       (swap! ws-sessions dissoc ch)
-       (log/info "WebSocket disconnected"))}))
+        :on-close
+        (fn [ch _status]
+          (when-let [sid (get @ws-sessions ch)]
+            (wm/snapshot! sid)
+            (wm/clear-wm! sid))
+          (swap! ws-sessions dissoc ch)
+          (log/info "WebSocket disconnected"))})))
 
 ;; ---------------------------------------------------------------------------
 ;; REST endpoints
 ;; ---------------------------------------------------------------------------
 
+(defn- request-body-too-large-ex
+  []
+  (ex-info "request body too large"
+           {:type :http/request-body-too-large
+            :status 413
+            :error "request body too large"
+            :max_bytes max-request-body-bytes}))
+
+(defn- invalid-json-body-ex
+  [cause]
+  (ex-info "invalid JSON request body"
+           {:type :http/invalid-json-body
+            :status 400
+            :error "invalid JSON request body"}
+           cause))
+
+(defn- read-body-text
+  [body]
+  (cond
+    (nil? body)
+    nil
+
+    (string? body)
+    (let [body-bytes (.getBytes ^String body StandardCharsets/UTF_8)]
+      (when (> (alength body-bytes) max-request-body-bytes)
+        (throw (request-body-too-large-ex)))
+      body)
+
+    (instance? (class (byte-array 0)) body)
+    (let [body-bytes ^bytes body]
+      (when (> (alength body-bytes) max-request-body-bytes)
+        (throw (request-body-too-large-ex)))
+      (String. body-bytes StandardCharsets/UTF_8))
+
+    :else
+    (with-open [^InputStream in (io/input-stream body)
+                out (ByteArrayOutputStream.)]
+      (let [buffer (byte-array 8192)]
+        (loop [total 0]
+          (let [read-count (.read in buffer)]
+            (cond
+              (neg? read-count)
+              (.toString out "UTF-8")
+
+              (> (+ total read-count) max-request-body-bytes)
+              (throw (request-body-too-large-ex))
+
+              :else
+              (do
+                (.write out buffer 0 read-count)
+                (recur (+ total read-count))))))))))
+
 (defn- read-body [req]
   (when-let [body (:body req)]
-    (json/read-json (slurp body))))
+    (let [body-text (read-body-text body)]
+      (try
+        (json/read-json body-text)
+        (catch clojure.lang.ExceptionInfo e
+          (throw e))
+        (catch Exception e
+          (throw (invalid-json-body-ex e)))))))
 
 (defn- request-header
   [req header-name]
@@ -187,17 +252,19 @@
       (seq referer) (local-origin? referer)
       :else         true)))
 
-(defn- trusted-browser-request?
-  "Stateful local UI/API routes require both a local browser origin (when
-   present) and the per-process session secret cookie."
-  [req]
-  (and (trusted-local-origin? req)
-       (valid-session-secret? req)))
-
 (defn- json-response [status body]
   {:status  status
    :headers {"Content-Type" "application/json"}
    :body    (json/write-json-str body)})
+
+(defn- exception-response
+  [e]
+  (let [data    (ex-data e)
+        status  (or (:status data) 400)
+        details (not-empty (dissoc data :status :error :type))
+        body    (cond-> {:error (or (:error data) (.getMessage e))}
+                  details (assoc :details details))]
+    (json-response status body)))
 
 (defn- html-response [body]
   {:status  200
@@ -733,8 +800,7 @@
                         :runs     (mapv history-run->body
                                         (schedule/schedule-history sid 20))})))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-list-scratch-pads [session-id]
   (cond
@@ -946,8 +1012,7 @@
         (db/set-default-provider! provider-id))
       (json-response 200 {:provider (provider->admin-body (db/get-provider provider-id))}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-save-memory-retention [req]
   (try
@@ -972,8 +1037,7 @@
                                retained-count))
       (json-response 200 {:memory_retention (memory-retention->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- parse-optional-bounded-double
   [value field-name]
@@ -1026,8 +1090,7 @@
                                (some-> archive-after-bottom-days (* ms-per-day))))
       (json-response 200 {:knowledge_decay (knowledge-decay->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-save-service [req]
   (try
@@ -1084,8 +1147,7 @@
                          :enabled?    enabled?})
       (json-response 200 {:service (service->admin-body (db/get-service service-id))}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-save-oauth-account [req]
   (try
@@ -1140,8 +1202,7 @@
       (json-response 200 {:oauth_account (oauth-account->admin-body
                                            (db/get-oauth-account account-id))}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-delete-oauth-account [account-id]
   (try
@@ -1159,8 +1220,7 @@
           (json-response 200 {:status "deleted"
                               :oauth_account_id (name oauth-id)}))))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-start-oauth-connect [account-id req]
   (try
@@ -1174,8 +1234,7 @@
                           :authorization_url (:authorization-url started)
                           :redirect_uri (:redirect-uri started)}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-refresh-oauth-account [account-id]
   (try
@@ -1183,8 +1242,7 @@
           account  (oauth/refresh-account! oauth-id)]
       (json-response 200 {:oauth_account (oauth-account->admin-body account)}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- oauth-callback-page
   [status title message account-id]
@@ -1283,8 +1341,7 @@
                            :autonomous-approved? autonomous-approved?})
       (json-response 200 {:site (site->admin-body (db/get-site-cred site-id))}))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-delete-site [site-id]
   (try
@@ -1296,8 +1353,7 @@
                               :site_id (name site-key)}))
         (json-response 404 {:error "site credential not found"})))
     (catch clojure.lang.ExceptionInfo e
-      (json-response 400 {:error (.getMessage e)
-                          :details (ex-data e)}))))
+      (exception-response e))))
 
 (defn- handle-skills [_req]
   (json-response 200 {:skills (mapv (fn [s]
@@ -1323,136 +1379,132 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- router [req]
-  (let [uri    (:uri req)
-        method (:request-method req)
-        session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
-        status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
-        approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
-        history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
-        scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
-        scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
-        scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)
-        admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
-        admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
-        admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
-        admin-oauth-refresh-match (re-matches #"/admin/oauth-accounts/([^/]+)/refresh" uri)]
-    (cond
-      (and (= method :get) (= uri "/"))
-      (handle-home req)
+  (try
+    (let [uri    (:uri req)
+          method (:request-method req)
+          session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
+          status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
+          approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
+          history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
+          scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
+          scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
+          scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)
+          admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
+          admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
+          admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
+          admin-oauth-refresh-match (re-matches #"/admin/oauth-accounts/([^/]+)/refresh" uri)]
+      (cond
+        (and (= method :get) (= uri "/"))
+        (handle-home req)
 
-      (and (= method :get) (= uri "/style.css"))
-      (resource-response "style.css" "text/css")
+        (and (= method :get) (= uri "/style.css"))
+        (resource-response "style.css" "text/css")
 
-      (and (= method :get) (= uri "/app.js"))
-      (resource-response "app.js" "text/javascript")
+        (and (= method :get) (= uri "/app.js"))
+        (resource-response "app.js" "text/javascript")
 
-      (and (= method :get) (= uri "/oauth/callback"))
-      (handle-oauth-callback req)
+        (and (= method :get) (= uri "/oauth/callback"))
+        (handle-oauth-callback req)
 
-      ;; WebSocket upgrade
-      (and (= uri "/ws")
-           (http/websocket-handshake-check req)
-           (trusted-browser-request? req))
-      (ws-handler req)
+        ;; WebSocket upgrade
+        (and (= uri "/ws") (http/websocket-handshake-check req))
+        (ws-handler req)
 
-      (and (= uri "/ws") (http/websocket-handshake-check req))
-      (if (trusted-local-origin? req)
-        (unauthorized-response)
-        (forbidden-response))
+        ;; REST
+        (and (= method :post) (= uri "/sessions"))
+        (protected-route-response req handle-create-session)
 
-      ;; REST
-      (and (= method :post) (= uri "/sessions"))
-      (protected-route-response req handle-create-session)
+        (and (= method :post) (= uri "/chat"))
+        (protected-route-response req #(handle-chat req))
 
-      (and (= method :post) (= uri "/chat"))
-      (protected-route-response req #(handle-chat req))
+        (and (= method :get) status-match)
+        (protected-route-response req #(handle-get-status (second status-match)))
 
-      (and (= method :get) status-match)
-      (protected-route-response req #(handle-get-status (second status-match)))
+        (and (= method :get) approval-match)
+        (protected-route-response req #(handle-get-approval (second approval-match)))
 
-      (and (= method :get) approval-match)
-      (protected-route-response req #(handle-get-approval (second approval-match)))
+        (and (= method :post) approval-match)
+        (protected-route-response req #(handle-submit-approval (second approval-match) req))
 
-      (and (= method :post) approval-match)
-      (protected-route-response req #(handle-submit-approval (second approval-match) req))
+        (and (= method :get) session-match)
+        (protected-route-response req #(handle-session-messages (second session-match)))
 
-      (and (= method :get) session-match)
-      (protected-route-response req #(handle-session-messages (second session-match)))
+        (and (= method :get) (= uri "/history/sessions"))
+        (protected-route-response req handle-history-sessions)
 
-      (and (= method :get) (= uri "/history/sessions"))
-      (protected-route-response req handle-history-sessions)
+        (and (= method :get) (= uri "/history/schedules"))
+        (protected-route-response req handle-history-schedules)
 
-      (and (= method :get) (= uri "/history/schedules"))
-      (protected-route-response req handle-history-schedules)
+        (and (= method :get) history-schedule-match)
+        (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
 
-      (and (= method :get) history-schedule-match)
-      (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
+        (and (= method :get) scratch-list-match)
+        (protected-route-response req #(handle-list-scratch-pads (second scratch-list-match)))
 
-      (and (= method :get) scratch-list-match)
-      (protected-route-response req #(handle-list-scratch-pads (second scratch-list-match)))
+        (and (= method :post) scratch-list-match)
+        (protected-route-response req #(handle-create-scratch-pad (second scratch-list-match) req))
 
-      (and (= method :post) scratch-list-match)
-      (protected-route-response req #(handle-create-scratch-pad (second scratch-list-match) req))
+        (and (= method :get) scratch-pad-match)
+        (protected-route-response req #(handle-get-scratch-pad (second scratch-pad-match)
+                                                               (nth scratch-pad-match 2)))
 
-      (and (= method :get) scratch-pad-match)
-      (protected-route-response req #(handle-get-scratch-pad (second scratch-pad-match)
-                                                             (nth scratch-pad-match 2)))
+        (and (= method :put) scratch-pad-match)
+        (protected-route-response req #(handle-save-scratch-pad (second scratch-pad-match)
+                                                                (nth scratch-pad-match 2)
+                                                                req))
 
-      (and (= method :put) scratch-pad-match)
-      (protected-route-response req #(handle-save-scratch-pad (second scratch-pad-match)
-                                                              (nth scratch-pad-match 2)
-                                                              req))
+        (and (= method :delete) scratch-pad-match)
+        (protected-route-response req #(handle-delete-scratch-pad (second scratch-pad-match)
+                                                                  (nth scratch-pad-match 2)))
 
-      (and (= method :delete) scratch-pad-match)
-      (protected-route-response req #(handle-delete-scratch-pad (second scratch-pad-match)
-                                                                (nth scratch-pad-match 2)))
+        (and (= method :post) scratch-edit-match)
+        (protected-route-response req #(handle-edit-scratch-pad (second scratch-edit-match)
+                                                                (nth scratch-edit-match 2)
+                                                                req))
 
-      (and (= method :post) scratch-edit-match)
-      (protected-route-response req #(handle-edit-scratch-pad (second scratch-edit-match)
-                                                              (nth scratch-edit-match 2)
-                                                              req))
+        (and (= method :get) (= uri "/admin/config"))
+        (protected-route-response req #(handle-admin-config req))
 
-      (and (= method :get) (= uri "/admin/config"))
-      (protected-route-response req #(handle-admin-config req))
+        (and (= method :post) (= uri "/admin/providers"))
+        (protected-route-response req #(handle-save-provider req))
 
-      (and (= method :post) (= uri "/admin/providers"))
-      (protected-route-response req #(handle-save-provider req))
+        (and (= method :post) (= uri "/admin/memory-retention"))
+        (protected-route-response req #(handle-save-memory-retention req))
 
-      (and (= method :post) (= uri "/admin/memory-retention"))
-      (protected-route-response req #(handle-save-memory-retention req))
+        (and (= method :post) (= uri "/admin/knowledge-decay"))
+        (protected-route-response req #(handle-save-knowledge-decay req))
 
-      (and (= method :post) (= uri "/admin/knowledge-decay"))
-      (protected-route-response req #(handle-save-knowledge-decay req))
+        (and (= method :post) (= uri "/admin/oauth-accounts"))
+        (protected-route-response req #(handle-save-oauth-account req))
 
-      (and (= method :post) (= uri "/admin/oauth-accounts"))
-      (protected-route-response req #(handle-save-oauth-account req))
+        (and (= method :post) admin-oauth-connect-match)
+        (protected-route-response req #(handle-start-oauth-connect (second admin-oauth-connect-match) req))
 
-      (and (= method :post) admin-oauth-connect-match)
-      (protected-route-response req #(handle-start-oauth-connect (second admin-oauth-connect-match) req))
+        (and (= method :post) admin-oauth-refresh-match)
+        (protected-route-response req #(handle-refresh-oauth-account (second admin-oauth-refresh-match)))
 
-      (and (= method :post) admin-oauth-refresh-match)
-      (protected-route-response req #(handle-refresh-oauth-account (second admin-oauth-refresh-match)))
+        (and (= method :delete) admin-oauth-match)
+        (protected-route-response req #(handle-delete-oauth-account (second admin-oauth-match)))
 
-      (and (= method :delete) admin-oauth-match)
-      (protected-route-response req #(handle-delete-oauth-account (second admin-oauth-match)))
+        (and (= method :post) (= uri "/admin/services"))
+        (protected-route-response req #(handle-save-service req))
 
-      (and (= method :post) (= uri "/admin/services"))
-      (protected-route-response req #(handle-save-service req))
+        (and (= method :post) (= uri "/admin/sites"))
+        (protected-route-response req #(handle-save-site req))
 
-      (and (= method :post) (= uri "/admin/sites"))
-      (protected-route-response req #(handle-save-site req))
+        (and (= method :delete) admin-site-match)
+        (protected-route-response req #(handle-delete-site (second admin-site-match)))
 
-      (and (= method :delete) admin-site-match)
-      (protected-route-response req #(handle-delete-site (second admin-site-match)))
+        (and (= method :get) (= uri "/skills"))
+        (protected-route-response req #(handle-skills req))
 
-      (and (= method :get) (= uri "/skills"))
-      (protected-route-response req #(handle-skills req))
+        (and (= method :get) (= uri "/health"))
+        (handle-health req)
 
-      (and (= method :get) (= uri "/health"))
-      (handle-health req)
-
-      :else
-      (json-response 404 {:error "not found"}))))
+        :else
+        (json-response 404 {:error "not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle

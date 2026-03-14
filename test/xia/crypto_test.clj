@@ -2,8 +2,8 @@
   (:require [clojure.test :refer :all]
             [xia.crypto :as crypto]
             [xia.db :as db])
-  (:import [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]))
+  (:import [java.nio.file Files LinkOption Paths]
+           [java.nio.file.attribute FileAttribute PosixFilePermissions]))
 
 (defn- temp-db-path []
   (str (Files/createTempDirectory "xia-crypto-test"
@@ -18,6 +18,28 @@
   [byte-value]
   (.encodeToString (java.util.Base64/getEncoder)
                    (byte-array (repeat 32 (byte byte-value)))))
+
+(defn- path-of
+  [path]
+  (Paths/get path (make-array String 0)))
+
+(defn- posix-supported?
+  [path]
+  (try
+    (Files/getPosixFilePermissions (path-of path) (make-array LinkOption 0))
+    true
+    (catch UnsupportedOperationException _
+      false)))
+
+(defn- set-posix-perms!
+  [path perms]
+  (Files/setPosixFilePermissions (path-of path)
+                                 (PosixFilePermissions/fromString perms)))
+
+(defn- maybe-set-owner-only-perms!
+  [path]
+  (when (posix-supported? path)
+    (set-posix-perms! path "rw-------")))
 
 (deftest configure-derives-stable-key-from-passphrase-provider
   (let [db-path   (temp-db-path)
@@ -67,8 +89,61 @@
         key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
                           (into-array FileAttribute [])))]
     (spit key-file (encode-key 5))
+    (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
       #(do
          (crypto/configure! db-path {:key-file key-file})
+         (is (= :key-file (:source (crypto/current-key-source))))
+         (is (= key-file (:path (crypto/current-key-source))))))))
+
+(deftest configure-rejects-key-file-inside-db-path-by-default
+  (let [db-path     (temp-db-path)
+        support-dir (str db-path "/.xia")
+        key-file    (str support-dir "/master.key")]
+    (Files/createDirectories (path-of support-dir)
+                             (into-array FileAttribute []))
+    (spit key-file (encode-key 6))
+    (maybe-set-owner-only-perms! key-file)
+    (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
+      #(let [ex (try
+                  (crypto/configure! db-path {:key-file key-file})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+          (is (instance? clojure.lang.ExceptionInfo ex))
+          (is (= :inside-db-path (:reason (ex-data ex))))))))
+
+(deftest configure-rejects-insecure-key-file-permissions
+  (let [db-path  (temp-db-path)
+        key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
+                          (into-array FileAttribute [])))]
+    (spit key-file (encode-key 7))
+    (if (posix-supported? key-file)
+      (do
+        (set-posix-perms! key-file "rw-r-----")
+        (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
+          #(let [ex (try
+                      (crypto/configure! db-path {:key-file key-file})
+                      nil
+                      (catch clojure.lang.ExceptionInfo e
+                        e))]
+              (is (instance? clojure.lang.ExceptionInfo ex))
+              (is (= :insecure-permissions (:reason (ex-data ex))))
+              (is (= "rw-r-----" (:permissions (ex-data ex)))))))
+      (testing "POSIX permissions unavailable"
+        (is true)))))
+
+(deftest configure-allows-explicit-override-for-db-local-key-file
+  (let [db-path     (temp-db-path)
+        support-dir (str db-path "/.xia")
+        key-file    (str support-dir "/master.key")]
+    (Files/createDirectories (path-of support-dir)
+                             (into-array FileAttribute []))
+    (spit key-file (encode-key 8))
+    (maybe-set-owner-only-perms! key-file)
+    (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
+      #(do
+         (crypto/configure! db-path {:key-file key-file
+                                     :allow-insecure-key-file? true})
          (is (= :key-file (:source (crypto/current-key-source))))
          (is (= key-file (:path (crypto/current-key-source))))))))

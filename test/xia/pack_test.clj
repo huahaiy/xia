@@ -3,8 +3,8 @@
             [clojure.test :refer :all]
             [xia.db :as db]
             [xia.pack :as pack])
-  (:import [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]
+  (:import [java.nio.file Files LinkOption Paths]
+           [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]
            [java.util.zip ZipFile]))
 
@@ -26,6 +26,19 @@
 (defn- encode-key [byte-value]
   (.encodeToString (Base64/getEncoder)
                    (byte-array (repeat 32 (byte byte-value)))))
+
+(defn- path-of
+  [path]
+  (Paths/get path (make-array String 0)))
+
+(defn- maybe-set-owner-only-perms!
+  [path]
+  (try
+    (Files/getPosixFilePermissions (path-of path) (make-array LinkOption 0))
+    (Files/setPosixFilePermissions (path-of path)
+                                   (PosixFilePermissions/fromString "rw-------"))
+    (catch UnsupportedOperationException _)
+    (catch Exception _)))
 
 (deftest pack-includes-db-and-salt-for-passphrase-mode
   (let [dir         (temp-dir)
@@ -56,6 +69,7 @@
         key-file     (str dir "/master.key")
         key-file-env {"XIA_MASTER_KEY_FILE" key-file}]
     (spit key-file (encode-key 7))
+    (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-file-env k))}
       #(do
          (db/connect! db-path)
@@ -71,7 +85,7 @@
       (is (contains? entries "db/.xia/master.key"))
       (is (not (contains? entries "db/.xia/master.salt")))
       (is (= :env-file (:key-source manifest)))
-      (is (= ["Set XIA_MASTER_KEY_FILE to db/.xia/master.key after extracting the archive."]
+      (is (= ["Move db/.xia/master.key to a secure path outside the extracted DB, set owner-only permissions, then set XIA_MASTER_KEY_FILE to that path."]
              (:restore-requires manifest))))))
 
 (deftest pack-default-archive-path
@@ -104,6 +118,7 @@
         key-file     (str dir "/master.key")
         key-file-env {"XIA_MASTER_KEY_FILE" key-file}]
     (spit key-file (encode-key 9))
+    (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-file-env k))}
       #(do
          (db/connect! db-path)
@@ -116,7 +131,9 @@
     (let [opened (with-redefs-fn {#'xia.pack/env-value (constantly nil)}
                    #(pack/open-archive! archive))
           key-path (str (:db-path opened) "/.xia/master.key")]
-      (is (= {:key-file key-path} (:crypto-opts opened)))
+      (is (= {:key-file key-path
+              :allow-insecure-key-file? true}
+             (:crypto-opts opened)))
       (db/connect! (:db-path opened) (:crypto-opts opened))
       (try
         (is (= "Archive Restore" (db/get-config :user/name)))

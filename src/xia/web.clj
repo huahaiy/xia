@@ -11,47 +11,42 @@
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [charred.api :as json]
-            [xia.http-client :as http])
+            [xia.http-client :as http]
+            [xia.ssrf :as ssrf])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
            [org.jsoup.select Elements]
-           [java.net InetAddress URI]
+           [org.apache.http Header]
+           [org.apache.http.client.config RequestConfig]
+           [org.apache.http.client.methods RequestBuilder]
+           [org.apache.http.impl.client HttpClientBuilder]
+           [org.apache.http.util EntityUtils]
+           [java.net URI]
+           [java.nio.charset Charset StandardCharsets]
            [java.util.concurrent ConcurrentHashMap]))
 
 (def ^:private user-agent "Xia/0.1 (personal AI assistant)")
 (def ^:private max-body-bytes (* 1 1024 1024)) ; 1 MB
 (def ^:private max-redirects 5)
+(def ^:private connect-timeout-ms 10000)
+(def ^:private request-timeout-ms 120000)
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
 ;; ---------------------------------------------------------------------------
 
-(defn- private-ip?
-  "True if the address is private, loopback, or link-local."
-  [^InetAddress addr]
-  (or (.isLoopbackAddress addr)
-      (.isLinkLocalAddress addr)
-      (.isSiteLocalAddress addr)
-      (.isAnyLocalAddress addr)))
-
 (defn- resolve-host-addresses
   [host]
-  (seq (InetAddress/getAllByName host)))
+  (ssrf/resolve-host-addresses host))
+
+(defn- resolve-url!
+  [url]
+  (ssrf/resolve-public-url! resolve-host-addresses url))
 
 (defn- validate-url!
   "Validate a URL for safety. Throws on disallowed schemes or private IPs."
   [url]
-  (let [uri (URI. url)]
-    (when-not (#{"http" "https"} (.getScheme uri))
-      (throw (ex-info "Only http:// and https:// URLs are allowed"
-                      {:url url :scheme (.getScheme uri)})))
-    (let [host (.getHost uri)]
-      (when (str/blank? host)
-        (throw (ex-info "URL has no host" {:url url})))
-      (let [addrs (resolve-host-addresses host)]
-        (when (some private-ip? addrs)
-          (throw (ex-info "Access to private/internal network addresses is blocked"
-                          {:url url :host host})))))))
+  (ssrf/validate-url! resolve-host-addresses url))
 
 ;; ---------------------------------------------------------------------------
 ;; Rate limiting — simple per-domain token bucket
@@ -85,35 +80,96 @@
 ;; HTTP fetch
 ;; ---------------------------------------------------------------------------
 
+(defn- normalize-headers
+  [headers]
+  (reduce (fn [m ^Header header]
+            (let [header-name  (str/lower-case (.getName header))
+                  header-value (.getValue header)]
+              (update m header-name
+                      (fn [existing]
+                        (if existing
+                          (str existing "," header-value)
+                          header-value)))))
+          {}
+          headers))
+
+(defn- response-charset
+  [headers]
+  (let [content-type (get headers "content-type")]
+    (try
+      (if-let [[_ charset] (some->> content-type
+                                    (re-find #"(?i)(?:^|;)\s*charset=([^;]+)"))]
+        (Charset/forName (str/trim charset))
+        StandardCharsets/UTF_8)
+      (catch Exception _
+        StandardCharsets/UTF_8))))
+
+(defn- decode-body
+  [body-bytes headers]
+  (String. ^bytes body-bytes ^Charset (response-charset headers)))
+
+(defn- add-header!
+  [^RequestBuilder builder header value]
+  (if (sequential? value)
+    (doseq [item value]
+      (.addHeader builder (str header) (str item)))
+    (.addHeader builder (str header) (str value)))
+  builder)
+
+(defn- fetch-url!
+  [url headers resolution]
+  (let [request-config (-> (RequestConfig/custom)
+                           (.setConnectTimeout (int connect-timeout-ms))
+                           (.setConnectionRequestTimeout (int request-timeout-ms))
+                           (.setSocketTimeout (int request-timeout-ms))
+                           .build)
+        request-builder (doto (RequestBuilder/get url)
+                          (.setConfig request-config))
+        _               (doseq [[header value] headers]
+                          (add-header! request-builder header value))
+        dns-resolver    (ssrf/pinned-dns-resolver resolution)]
+    (with-open [client   (-> (HttpClientBuilder/create)
+                             (.disableAutomaticRetries)
+                             (.disableRedirectHandling)
+                             (.setDefaultRequestConfig request-config)
+                             (.setDnsResolver dns-resolver)
+                             .build)
+                response (.execute client (.build request-builder))]
+      (let [headers    (normalize-headers (.getAllHeaders response))
+            body-bytes (if-let [entity (.getEntity response)]
+                         (EntityUtils/toByteArray entity)
+                         (byte-array 0))]
+        {:status  (.getStatusCode (.getStatusLine response))
+         :headers headers
+         :body    (decode-body body-bytes headers)}))))
+
 (defn- fetch-raw
   "Fetch a URL, return {:status :headers :body :final-url}."
   [url]
   (loop [current-url url
          redirects   0]
-    (validate-url! current-url)
-    (check-rate-limit! current-url)
-    (let [resp (http/request {:url             current-url
-                              :method          :get
-                              :headers         {"User-Agent" user-agent
-                                                "Accept"     "text/html,application/xhtml+xml,*/*"}
-                              :connect-timeout 10000
-                              :request-label   "Web fetch"})
-          status (:status resp)
-          location (get-in resp [:headers "location"])]
-      (if (and (#{301 302 303 307 308} status) (seq location))
-        (do
-          (when (>= redirects max-redirects)
-            (throw (ex-info "Too many redirects"
-                            {:url current-url :redirects redirects})))
-          (let [next-url (str (.resolve (URI. current-url) location))]
-            (recur next-url (inc redirects))))
-        (let [body (str (:body resp))]
-          (when (> (count body) max-body-bytes)
-            (throw (ex-info "Response too large" {:url current-url :size (count body)})))
-          {:status    status
-           :headers   (:headers resp)
-           :body      body
-           :final-url current-url})))))
+    (let [resolution (resolve-url! current-url)]
+      (check-rate-limit! current-url)
+      (let [resp (fetch-url! current-url
+                             {"User-Agent" user-agent
+                              "Accept"     "text/html,application/xhtml+xml,*/*"}
+                             resolution)
+            status (:status resp)
+            location (get-in resp [:headers "location"])]
+        (if (and (#{301 302 303 307 308} status) (seq location))
+          (do
+            (when (>= redirects max-redirects)
+              (throw (ex-info "Too many redirects"
+                              {:url current-url :redirects redirects})))
+            (let [next-url (str (.resolve (URI. current-url) location))]
+              (recur next-url (inc redirects))))
+          (let [body (str (:body resp))]
+            (when (> (count body) max-body-bytes)
+              (throw (ex-info "Response too large" {:url current-url :size (count body)})))
+            {:status    status
+             :headers   (:headers resp)
+             :body      body
+             :final-url current-url}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion

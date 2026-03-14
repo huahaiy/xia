@@ -3,7 +3,8 @@
             [xia.browser :as browser]
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.net InetAddress URL]
-           [org.htmlunit WebRequest]))
+           [org.htmlunit MockWebConnection WebClient WebRequest]
+           [org.htmlunit.html HtmlInput]))
 
 (use-fixtures :each
   with-test-db
@@ -11,6 +12,16 @@
     (browser/close-all-sessions!)
     (f)
     (browser/close-all-sessions!)))
+
+(defn- mock-html-page
+  [html]
+  (let [client (WebClient.)
+        mock   (MockWebConnection.)
+        url    (URL. "https://example.com/form")]
+    (.setResponse mock url html)
+    (.setWebConnection client mock)
+    {:client client
+     :page   (.getPage client (.toString url))}))
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -47,13 +58,44 @@
 
 (deftest web-client-validates-every-request
   (let [client (#'browser/make-client)]
-    (with-redefs-fn {#'browser/validate-url!
+    (with-redefs-fn {#'browser/resolve-url!
                      (fn [_]
                        (throw (ex-info "blocked redirect target" {})))}
       #(is (thrown-with-msg?
              clojure.lang.ExceptionInfo #"blocked redirect target"
              (.getResponse (.getWebConnection client)
                            (WebRequest. (URL. "https://example.com"))))))
+    (.close client)))
+
+(deftest web-client-pins-each-request-resolution
+  (let [client (#'browser/make-client)
+        calls  (atom [])]
+    (with-redefs-fn {#'browser/resolve-host-addresses
+                     (fn [host]
+                       (case host
+                         "public.example"
+                         [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))]
+                         "next.example"
+                         [(InetAddress/getByAddress "next.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 21)]))]))
+                     #'browser/send-browser-request!
+                     (fn [_client request resolution]
+                       (swap! calls conj {:url (str (.getUrl ^WebRequest request))
+                                          :host (:host resolution)
+                                          :addresses (mapv #(.getHostAddress ^InetAddress %)
+                                                           (:addresses resolution))})
+                       nil)}
+      #(do
+         (.getResponse (.getWebConnection client)
+                       (WebRequest. (URL. "https://public.example/start")))
+         (.getResponse (.getWebConnection client)
+                       (WebRequest. (URL. "https://next.example/next")))))
+    (is (= [{:url "https://public.example/start"
+             :host "public.example"
+             :addresses ["93.184.34.20"]}
+            {:url "https://next.example/next"
+             :host "next.example"
+             :addresses ["93.184.34.21"]}]
+           @calls))
     (.close client)))
 
 ;; ---------------------------------------------------------------------------
@@ -111,6 +153,22 @@
           clojure.lang.ExceptionInfo #"No element matches"
           (browser/click sid "#nonexistent-button")))
     (browser/close-session sid)))
+
+(deftest find-form-field-element-matches-exact-id-with-css-metacharacters
+  (let [field-id "victim\"], #attacker"
+        {:keys [client page]} (mock-html-page
+                                (str "<html><body><form>"
+                                     "<input id='" field-id "' value='original'/>"
+                                     "<input id='attacker' value='sentinel'/>"
+                                     "</form></body></html>"))
+        form (first (.getForms page))]
+    (try
+      (let [el (#'browser/find-form-field-element form field-id)]
+        (is (some? el))
+        (is (= field-id (.getAttribute ^HtmlInput el "id")))
+        (is (not= "attacker" (.getAttribute ^HtmlInput el "id"))))
+      (finally
+        (.close client)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Read page

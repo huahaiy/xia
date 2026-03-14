@@ -10,7 +10,7 @@ Xia is an **online-first** assistant. Its primary focus is the digital world bey
 Unlike other autonomous AI assistants that might require a dedicated machine (like a Mac Mini) to avoid host interference, Xia is designed to live on your daily work computer. Because its tools are strictly sandboxed and isolated from your local file system, it can run alongside your normal tasks without any risk of side effects or host-system disruption. Any modern computer works.
 
 ### Database-Centric Portability
-Xia keeps its state in its database, but encrypted secrets are protected by external key material. In passphrase mode that is your startup passphrase plus a non-secret salt file stored under `<db-path>/.xia/master.salt`. To fully restore an instance with encrypted data, move the DB together with the matching support files under the DB directory and the passphrase context. `xia pack` packages the DB plus required local support files into a single archive, and `xia backup.xia` opens that archive directly for non-technical users.
+Xia keeps its state in its database, but encrypted secrets are protected by external key material. In passphrase mode that is your startup passphrase plus a non-secret salt file stored under `<db-path>/.xia/master.salt`. File-backed master keys and passphrases must live outside `<db-path>` and, on POSIX systems, should use owner-only permissions such as `0600` or `0400`. `xia pack` can bundle local support files into a portable archive, and `xia backup.xia` opens that archive directly for non-technical users.
 
 Typical portable workflow:
 
@@ -29,6 +29,7 @@ Notes:
 - No manual unzip step is required for `.xia` archives.
 - Xia extracts the archive into a hidden working directory beside the archive and repacks changes back into the same `.xia` file on normal exit.
 - If the archive uses passphrase mode, enter the same master passphrase when opening it.
+- If you manually extract an archive that contains `db/.xia/master.key` or `db/.xia/master.passphrase`, move that file to a secure path outside the extracted DB and lock down its permissions before using `XIA_MASTER_KEY_FILE` or `XIA_MASTER_PASSPHRASE_FILE`.
 - If the archive depends on a raw env-provided key such as `XIA_MASTER_KEY`, that key still must be supplied on the target machine.
 
 Operational defaults:
@@ -147,7 +148,8 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 ### Master Key Handling
 - **Explicit key support:** `XIA_MASTER_KEY` and `XIA_MASTER_KEY_FILE` can provide a raw 32-byte base64 key for unattended deployments.
 - **Passphrase mode:** `XIA_MASTER_PASSPHRASE` and `XIA_MASTER_PASSPHRASE_FILE` derive the master key with PBKDF2. Interactive CLI startup also prompts for a passphrase for new DBs.
-- **Portable archives:** When a packed archive contains `db/.xia/master.key` or `db/.xia/master.passphrase`, `xia backup.xia` uses them automatically. Raw env-only keys remain external by design.
+- **File-backed secret policy:** `XIA_MASTER_KEY_FILE` and `XIA_MASTER_PASSPHRASE_FILE` are rejected if they point inside `<db-path>`, and on POSIX systems they are rejected if group/world permissions are present.
+- **Portable archives:** When a packed archive contains `db/.xia/master.key` or `db/.xia/master.passphrase`, `xia backup.xia` can use them automatically while opening the archive directly. If you extract the DB manually, move those files out of `db/.xia/` before using env-file mode. Raw env-only keys remain external by design.
 
 ### File System Isolation
 Xia is designed to be safe for the host system.
