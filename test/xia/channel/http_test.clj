@@ -221,6 +221,44 @@
                            :request-method :get
                            :headers        (ui-headers)})))))
 
+(deftest websocket-disconnect-records-conversation-before-clearing-wm
+  (let [handlers  (atom nil)
+        sessions  (atom {})
+        sid       (random-uuid)
+        ch        (Object.)
+        lifecycle (atom [])]
+    (with-redefs [xia.channel.http/protected-route-response (fn [_req handler]
+                                                              (handler))
+                  xia.channel.http/ws-sessions sessions
+                  org.httpkit.server/as-channel (fn [_req ws-handlers]
+                                                  (reset! handlers ws-handlers)
+                                                  ::websocket-upgraded)
+                  org.httpkit.server/send! (fn [_ch _msg] nil)
+                  xia.db/create-session! (fn [channel]
+                                           (is (= :websocket channel))
+                                           sid)
+                  xia.working-memory/ensure-wm! (fn [session-id]
+                                                  (swap! lifecycle conj [:ensure session-id]))
+                  xia.working-memory/get-wm (fn [session-id]
+                                              (is (= sid session-id))
+                                              {:topics "release planning"})
+                  xia.working-memory/snapshot! (fn [session-id]
+                                                (swap! lifecycle conj [:snapshot session-id]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.working-memory/clear-wm! (fn [session-id]
+                                                 (swap! lifecycle conj [:clear session-id]))]
+      (is (= ::websocket-upgraded (#'http/ws-handler {:headers (ui-headers)})))
+      ((:on-open @handlers) ch)
+      (is (= sid (get @sessions ch)))
+      ((:on-close @handlers) ch 1000)
+      (is (= [[:ensure sid]
+              [:snapshot sid]
+              [:record sid :websocket "release planning"]
+              [:clear sid]]
+             @lifecycle))
+      (is (nil? (get @sessions ch))))))
+
 (deftest chat-route-validates-required-message
   (let [response (#'http/router {:uri            "/chat"
                                  :request-method :post

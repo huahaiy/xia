@@ -68,6 +68,23 @@
 
 (declare protected-route-response)
 
+(defn- finalize-websocket-session!
+  [ch]
+  (when-let [sid (get @ws-sessions ch)]
+    (try
+      (let [topics (:topics (wm/get-wm sid))]
+        (wm/snapshot! sid)
+        (hippo/record-conversation! sid :websocket :topics topics))
+      (catch Exception e
+        (log/error e "Failed to finalize WebSocket session"))
+      (finally
+        (try
+          (wm/clear-wm! sid)
+          (catch Exception e
+            (log/error e "Failed to clear WebSocket working memory"))))))
+  (swap! ws-sessions dissoc ch)
+  (log/info "WebSocket disconnected"))
+
 (defn- ws-handler [req]
   (protected-route-response
     req
@@ -98,11 +115,7 @@
 
         :on-close
         (fn [ch _status]
-          (when-let [sid (get @ws-sessions ch)]
-            (wm/snapshot! sid)
-            (wm/clear-wm! sid))
-          (swap! ws-sessions dissoc ch)
-          (log/info "WebSocket disconnected"))})))
+          (finalize-websocket-session! ch))})))
 
 ;; ---------------------------------------------------------------------------
 ;; REST endpoints
