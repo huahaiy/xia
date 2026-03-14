@@ -29,10 +29,68 @@
 ;; Token estimation
 ;; ============================================================================
 
+(def ^:private cjk-char-pattern
+  #"(?:\p{IsHan}|\p{IsHiragana}|\p{IsKatakana}|\p{IsHangul})")
+
+(def ^:private codeish-span-pattern
+  #"[A-Za-z0-9_./:-]{12,}")
+
+(def ^:private codeish-separator-pattern
+  #"[_./:-]+")
+
+(def ^:private camel-segment-pattern
+  #"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+")
+
+(defn- ceil-div
+  [n d]
+  (quot (+ n (dec d)) d))
+
+(defn- codeish-span?
+  [span]
+  (boolean
+   (or (re-find #"[_./:-]" span)
+       (re-find #"[a-z][A-Z]" span)
+       (and (re-find #"[A-Za-z]" span)
+            (re-find #"\d" span)))))
+
+(defn- codeish-chunk-tokens
+  [chunk]
+  (let [camel-segments (count (re-seq camel-segment-pattern chunk))
+        length-estimate (ceil-div (count chunk) 8)]
+    (max 1 camel-segments length-estimate)))
+
+(defn- codeish-span-tokens
+  [span]
+  (->> (str/split span codeish-separator-pattern)
+       (remove str/blank?)
+       (map codeish-chunk-tokens)
+       (reduce + 0)))
+
+(defn- codeish-discount
+  [text]
+  (->> (re-seq codeish-span-pattern text)
+       (filter codeish-span?)
+       (reduce (fn [discount span]
+                 (let [baseline (quot (count span) 4)
+                       adjusted (min baseline (codeish-span-tokens span))]
+                   (+ discount (- baseline adjusted))))
+               0)))
+
 (defn estimate-tokens
-  "Rough token estimate: ~4 chars per token."
+  "Heuristic token estimate.
+
+   Uses ~4 chars/token as the prose baseline, counts CJK characters more
+   conservatively, and discounts long code/identifier spans that would
+   otherwise look too expensive."
   [s]
-  (if (str/blank? s) 0 (quot (count s) 4)))
+  (let [text (str s)]
+    (if (str/blank? text)
+      0
+      (let [baseline       (quot (count text) 4)
+            cjk-chars      (count (re-seq cjk-char-pattern text))
+            cjk-adjustment (- cjk-chars (quot cjk-chars 4))
+            code-discount  (codeish-discount text)]
+        (max 1 (- (+ baseline cjk-adjustment) code-discount))))))
 
 ;; ============================================================================
 ;; Budget config

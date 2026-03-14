@@ -1,5 +1,6 @@
 (ns xia.web-test
   (:require [clojure.test :refer :all]
+            [xia.ssrf :as ssrf]
             [xia.web :as web])
   (:import [java.net InetAddress]
            [org.jsoup Jsoup]
@@ -13,40 +14,39 @@
   (testing "blocks localhost"
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"private/internal"
-          (#'web/validate-url! "http://127.0.0.1/secret"))))
+          (ssrf/validate-url! "http://127.0.0.1/secret"))))
   (testing "blocks localhost hostname"
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"private/internal"
-          (#'web/validate-url! "http://localhost/secret")))))
+          (ssrf/validate-url! "http://localhost/secret")))))
 
 (deftest validate-url-blocks-mixed-public-and-private-resolution
-  (with-redefs-fn {#'web/resolve-host-addresses
-                   (fn [_]
-                     [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))
-                      (InetAddress/getByAddress "private.example" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))])}
-    #(is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"private/internal"
-           (#'web/validate-url! "https://mixed.example/path")))))
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo #"private/internal"
+        (ssrf/validate-url! (fn [_]
+                              [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))
+                               (InetAddress/getByAddress "private.example" (byte-array [(byte 127) (byte 0) (byte 0) (byte 1)]))])
+                            "https://mixed.example/path"))))
 
 (deftest validate-url-blocks-bad-schemes
   (testing "blocks file://"
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"Only http"
-          (#'web/validate-url! "file:///etc/passwd"))))
+          (ssrf/validate-url! "file:///etc/passwd"))))
   (testing "blocks ftp://"
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"Only http"
-          (#'web/validate-url! "ftp://example.com/file"))))
+          (ssrf/validate-url! "ftp://example.com/file"))))
   (testing "blocks javascript:"
     (is (thrown-with-msg?
           Exception #"."
-          (#'web/validate-url! "javascript:alert(1)")))))
+          (ssrf/validate-url! "javascript:alert(1)")))))
 
 (deftest validate-url-allows-public-urls
   (testing "allows https"
-    (is (nil? (#'web/validate-url! "https://example.com"))))
+    (is (nil? (ssrf/validate-url! "https://example.com"))))
   (testing "allows http"
-    (is (nil? (#'web/validate-url! "http://example.com")))))
+    (is (nil? (ssrf/validate-url! "http://example.com")))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion

@@ -13,10 +13,33 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest test-estimate-tokens
-  (is (= 0 (ctx/estimate-tokens "")))
-  (is (= 0 (ctx/estimate-tokens nil)))
-  (is (= 3 (ctx/estimate-tokens "hello world!"))) ; 12 chars / 4
-  (is (pos? (ctx/estimate-tokens "some text"))))
+  (testing "blank input"
+    (is (= 0 (ctx/estimate-tokens "")))
+    (is (= 0 (ctx/estimate-tokens nil))))
+
+  (testing "simple prose stays close to the existing estimate"
+    (is (= 3 (ctx/estimate-tokens "hello world!")))
+    (is (pos? (ctx/estimate-tokens "some text"))))
+
+  (testing "CJK text is not treated as 4 chars per token"
+    (let [text "你好世界"
+          naive (quot (count text) 4)]
+      (is (= 4 (ctx/estimate-tokens text)))
+      (is (> (ctx/estimate-tokens text) naive))))
+
+  (testing "long code identifiers are discounted"
+    (let [identifier "veryLongIdentifierNameWithSeveralCamelCaseSegments"
+          naive      (quot (count identifier) 4)
+          estimate   (ctx/estimate-tokens identifier)]
+      (is (pos? estimate))
+      (is (< estimate naive))))
+
+  (testing "path-like code spans are discounted"
+    (let [path     "src/xia/http_client/really_long_identifier_name.cljs"
+          naive    (quot (count path) 4)
+          estimate (ctx/estimate-tokens path)]
+      (is (pos? estimate))
+      (is (< estimate naive)))))
 
 ;; ---------------------------------------------------------------------------
 ;; flatten-props
