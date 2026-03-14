@@ -120,6 +120,45 @@
             :assistant-response "All set."}
            @reviewed))))
 
+(deftest process-message-serializes-concurrent-turns-per-session
+  (let [session-id         (db/create-session! :http)
+        first-llm-started  (promise)
+        release-first-llm  (promise)
+        llm-call-count     (atom 0)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)
+                  xia.llm/chat-simple                (fn [_messages & _opts]
+                                                       (case (swap! llm-call-count inc)
+                                                         1 (do
+                                                             (deliver first-llm-started true)
+                                                             @release-first-llm
+                                                             "reply-1")
+                                                         2 "reply-2"))]
+      (let [first-turn  (future (agent/process-message session-id "first" :channel :http))
+            _           (is (= true (deref first-llm-started 1000 ::timeout)))
+            second-turn (future (agent/process-message session-id "second" :channel :http))]
+        (Thread/sleep 50)
+        (is (= [[:user "first"]]
+               (->> (db/session-messages session-id)
+                    (mapv (fn [{:keys [role content]}]
+                            [role content])))))
+        (deliver release-first-llm true)
+        (is (= "reply-1" @first-turn))
+        (is (= "reply-2" @second-turn))))
+    (is (= [[:user "first"]
+            [:assistant "reply-1"]
+            [:user "second"]
+            [:assistant "reply-2"]]
+           (->> (db/session-messages session-id)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
+
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)
         max-active (atom 0)

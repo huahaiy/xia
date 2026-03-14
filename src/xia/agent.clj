@@ -16,8 +16,25 @@
             [xia.working-memory :as wm]))
 
 (def ^:private max-tool-rounds 10)
+(def ^:private session-turn-lock-count 256)
+(defonce ^:private session-turn-locks
+  (vec (repeatedly session-turn-lock-count #(Object.))))
 
 ;; build-messages is now in xia.context
+
+(defn- session-turn-lock
+  [session-id]
+  (when session-id
+    (nth session-turn-locks
+         (mod (bit-and Integer/MAX_VALUE (hash session-id))
+              session-turn-lock-count))))
+
+(defn- with-session-turn-lock
+  [session-id f]
+  (if-let [lock (session-turn-lock session-id)]
+    (locking lock
+      (f))
+    (f)))
 
 (defn- call-model
   [messages tools provider-id]
@@ -108,89 +125,92 @@
 
    1. Updates working memory (retrieval pipeline)
    2. Builds context: system prompt (identity + WM context + skills) + history
-   3. Calls the LLM with available tools (function-calling)
-   4. If the LLM wants to use tools, executes them and loops
-   5. Returns the final text response"
+  3. Calls the LLM with available tools (function-calling)
+  4. If the LLM wants to use tools, executes them and loops
+  5. Returns the final text response"
   [session-id user-message & {:keys [channel tool-context provider-id]
                               :or   {channel :terminal
                                      tool-context {}}}]
-  (binding [prompt/*interaction-context* {:channel    channel
-                                          :session-id session-id}]
-    (try
-      (db/add-message! session-id :user user-message)
-      (report-status! "Updating working memory"
-                      :phase :working-memory)
-      (wm/update-wm! user-message session-id channel)
-      (let [{assistant-provider    :provider
-             assistant-provider-id :provider-id}
-            (llm/resolve-provider-selection
-              (cond-> {:workload :assistant}
-                provider-id
-                (assoc :provider-id provider-id)))
-            execution-context (merge {:session-id session-id
-                                      :channel    channel
-                                      :user-message user-message}
-                                     tool-context)
-            tools (tool/tool-definitions execution-context)
-            {:keys [messages used-fact-eids]}
-            (context/build-messages-data session-id
-                                         {:provider            assistant-provider
-                                          :provider-id         assistant-provider-id
-                                          :compaction-workload :history-compaction})]
-        (loop [messages messages
-               round    0]
-          (when (>= round max-tool-rounds)
-            (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
-          (report-status! (if (zero? round)
-                            "Calling model"
-                            "Calling model with tool results")
-                          :phase :llm
-                          :round round)
-          (let [response   (call-model messages tools assistant-provider-id)
-                has-tools? (and (map? response) (seq (get response "tool_calls")))]
-            (if has-tools?
-              (let [tool-calls    (get response "tool_calls")
-                    assistant-msg {:role       "assistant"
-                                   :content    (get response "content" "")
-                                   :tool_calls tool-calls}
-                    tool-count    (count tool-calls)
-                    tool-results  (do
-                                    (report-status! (str "Model requested "
-                                                         tool-count
-                                                         " tool"
-                                                         (when (not= 1 tool-count) "s"))
-                                                    :phase :tool-plan
-                                                    :round round
-                                                    :tool-count tool-count)
-                                    (execute-tool-calls tool-calls
-                                                        execution-context))]
-                ;; Store assistant message with tool calls
-                (db/add-message! session-id :assistant
-                                 (get response "content" "")
-                                 :tool-calls tool-calls)
-                ;; Store tool results
-                (doseq [tr tool-results]
-                  (db/add-message! session-id :tool
-                                   nil
-                                   :tool-result (:result tr)
-                                   :tool-id (:tool_call_id tr)))
-                ;; Continue with updated messages
-                (recur (-> messages
-                           (conj assistant-msg)
-                           (into tool-results))
-                       (inc round)))
-              ;; Final text response
-              (let [text (if (string? response) response (get response "content" ""))]
-                (report-status! "Preparing response"
-                                :phase :finalizing)
-                (db/add-message! session-id :assistant text)
-                (schedule-fact-utility-review! used-fact-eids user-message text)
-                (prompt/status! {:state :done
-                                 :phase :complete
-                                 :message "Ready"})
-                text)))))
-      (catch Exception e
-        (prompt/status! {:state :error
-                         :phase :error
-                         :message (str "Request failed: " (.getMessage e))})
-        (throw e)))))
+  (with-session-turn-lock
+    session-id
+    (fn []
+      (binding [prompt/*interaction-context* {:channel    channel
+                                              :session-id session-id}]
+        (try
+          (db/add-message! session-id :user user-message)
+          (report-status! "Updating working memory"
+                          :phase :working-memory)
+          (wm/update-wm! user-message session-id channel)
+          (let [{assistant-provider    :provider
+                 assistant-provider-id :provider-id}
+                (llm/resolve-provider-selection
+                  (cond-> {:workload :assistant}
+                    provider-id
+                    (assoc :provider-id provider-id)))
+                execution-context (merge {:session-id session-id
+                                          :channel    channel
+                                          :user-message user-message}
+                                         tool-context)
+                tools (tool/tool-definitions execution-context)
+                {:keys [messages used-fact-eids]}
+                (context/build-messages-data session-id
+                                             {:provider            assistant-provider
+                                              :provider-id         assistant-provider-id
+                                              :compaction-workload :history-compaction})]
+            (loop [messages messages
+                   round    0]
+              (when (>= round max-tool-rounds)
+                (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
+              (report-status! (if (zero? round)
+                                "Calling model"
+                                "Calling model with tool results")
+                              :phase :llm
+                              :round round)
+              (let [response   (call-model messages tools assistant-provider-id)
+                    has-tools? (and (map? response) (seq (get response "tool_calls")))]
+                (if has-tools?
+                  (let [tool-calls    (get response "tool_calls")
+                        assistant-msg {:role       "assistant"
+                                       :content    (get response "content" "")
+                                       :tool_calls tool-calls}
+                        tool-count    (count tool-calls)
+                        tool-results  (do
+                                        (report-status! (str "Model requested "
+                                                             tool-count
+                                                             " tool"
+                                                             (when (not= 1 tool-count) "s"))
+                                                        :phase :tool-plan
+                                                        :round round
+                                                        :tool-count tool-count)
+                                        (execute-tool-calls tool-calls
+                                                            execution-context))]
+                    ;; Store assistant message with tool calls
+                    (db/add-message! session-id :assistant
+                                     (get response "content" "")
+                                     :tool-calls tool-calls)
+                    ;; Store tool results
+                    (doseq [tr tool-results]
+                      (db/add-message! session-id :tool
+                                       nil
+                                       :tool-result (:result tr)
+                                       :tool-id (:tool_call_id tr)))
+                    ;; Continue with updated messages
+                    (recur (-> messages
+                               (conj assistant-msg)
+                               (into tool-results))
+                           (inc round)))
+                  ;; Final text response
+                  (let [text (if (string? response) response (get response "content" ""))]
+                    (report-status! "Preparing response"
+                                    :phase :finalizing)
+                    (db/add-message! session-id :assistant text)
+                    (schedule-fact-utility-review! used-fact-eids user-message text)
+                    (prompt/status! {:state :done
+                                     :phase :complete
+                                     :message "Ready"})
+                    text)))))
+          (catch Exception e
+            (prompt/status! {:state :error
+                             :phase :error
+                             :message (str "Request failed: " (.getMessage e))})
+            (throw e)))))))

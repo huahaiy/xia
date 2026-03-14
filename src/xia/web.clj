@@ -9,13 +9,10 @@
    All HTTP requests go through this module (not raw hato) so we can
    enforce SSRF protection, rate limiting, and content size limits."
   (:require [clojure.string :as str]
-            [clojure.tools.logging :as log]
-            [charred.api :as json]
             [xia.http-client :as http]
             [xia.ssrf :as ssrf])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
-           [org.jsoup.select Elements]
            [org.apache.http Header]
            [org.apache.http.client.config RequestConfig]
            [org.apache.http.client.methods RequestBuilder]
@@ -42,11 +39,6 @@
 (defn- resolve-url!
   [url]
   (ssrf/resolve-public-url! resolve-host-addresses url))
-
-(defn- validate-url!
-  "Validate a URL for safety. Throws on disallowed schemes or private IPs."
-  [url]
-  (ssrf/validate-url! resolve-host-addresses url))
 
 ;; ---------------------------------------------------------------------------
 ;; Rate limiting — simple per-domain token bucket
@@ -232,7 +224,7 @@
                   (do (when (pos? (.length sb)) (.append sb "\n"))
                       (let [items (.select el "> li")]
                         (dotimes [i (.size items)]
-                          (let [li (.get items i)
+                          (let [li     (.get items i)
                                 prefix (if (= tag "ol")
                                          (str (inc i) ". ")
                                          "- ")]
@@ -286,7 +278,7 @@
                   (do (when (pos? (.length sb)) (.append sb "\n\n"))
                       (let [rows (.select el "tr")]
                         (dotimes [r (.size rows)]
-                          (let [row (.get rows r)
+                          (let [row   (.get rows r)
                                 cells (.select row "td, th")]
                             (when (pos? (.size cells))
                               (.append sb "| ")
@@ -341,10 +333,6 @@
         (str/replace #"\n{3,}" "\n\n")
         (str/replace #" {2,}" " ")
         str/trim)))
-
-(defn- heading-level [^String tag]
-  (when (and tag (= 1 (count tag)) (Character/isDigit (.charAt tag 0)))
-    (- (int (.charAt tag 0)) (int \0))))
 
 (defn- extract-links
   "Extract links from the main content element."

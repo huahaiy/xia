@@ -11,6 +11,7 @@
                                                                   ↓
                                                         recalled into context"
   (:require [datalevin.core :as d]
+            [xia.config :as cfg]
             [xia.db :as db]))
 
 ;; ============================================================================
@@ -54,31 +55,19 @@
    :decay-half-life-ms    :memory/episode-decay-half-life-ms
    :retained-decayed-count :memory/episode-retained-decayed-count})
 
-(defn- configured-positive-long
-  [config-key default-value]
-  (if-let [raw (db/get-config config-key)]
-    (try
-      (let [parsed (Long/parseLong (str raw))]
-        (if (pos? parsed)
-          parsed
-          default-value))
-      (catch Exception _
-        default-value))
-    default-value))
-
 (defn episode-retention-settings
   "Return the effective episode retention settings."
   []
   (assoc default-episode-retention-config
          :full-resolution-ms
-         (configured-positive-long (:full-resolution-ms episode-retention-config-keys)
-                                   (:full-resolution-ms default-episode-retention-config))
+         (cfg/positive-long (:full-resolution-ms episode-retention-config-keys)
+                            (:full-resolution-ms default-episode-retention-config))
          :decay-half-life-ms
-         (configured-positive-long (:decay-half-life-ms episode-retention-config-keys)
-                                   (:decay-half-life-ms default-episode-retention-config))
+         (cfg/positive-long (:decay-half-life-ms episode-retention-config-keys)
+                            (:decay-half-life-ms default-episode-retention-config))
          :retained-decayed-count
-         (configured-positive-long (:retained-decayed-count episode-retention-config-keys)
-                                   (:retained-decayed-count default-episode-retention-config))))
+         (cfg/positive-long (:retained-decayed-count episode-retention-config-keys)
+                            (:retained-decayed-count default-episode-retention-config))))
 
 (defn- normalize-importance
   [importance]
@@ -246,8 +235,10 @@
                    (remove #(contains? keep-eids (:eid %)) group))))
        vec))
 
-(defn- episode-source-cleanup-tx
+(defn- detach-episode-provenance-tx
   [episode-eid]
+  ;; Pruning keeps extracted facts/edges but removes their episode provenance
+  ;; before deleting the old episode entity.
   (let [fact-eids (map first (db/q '[:find ?f
                                      :in $ ?episode
                                      :where [?f :kg.fact/source ?episode]]
@@ -279,7 +270,7 @@
                                                        as-of
                                                        retention-config)]
      (when (seq to-remove)
-       (db/transact! (vec (mapcat #(episode-source-cleanup-tx (:eid %))
+       (db/transact! (vec (mapcat #(detach-episode-provenance-tx (:eid %))
                                   to-remove))))
      (count to-remove))))
 

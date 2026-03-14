@@ -12,6 +12,7 @@
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [charred.api :as json]
+            [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.memory :as memory]))
@@ -247,8 +248,10 @@ Rules:
                  (= episode-eid (:kg.fact/source (db/entity eid)))))
        vec))
 
-(defn- episode-source-cleanup-tx
+(defn- retract-episode-extractions-tx
   [episode-eid]
+  ;; Consolidation retries replace prior fact/edge extractions from the same
+  ;; episode before writing the fresh extraction result.
   (let [fact-eids (map first (db/q '[:find ?f
                                      :in $ ?episode
                                      :where [?f :kg.fact/source ?episode]]
@@ -388,7 +391,7 @@ Rules:
 
       (vec
         (concat
-          (episode-source-cleanup-tx episode-eid)
+          (retract-episode-extractions-tx episode-eid)
           (->> (vals @nodes*)
                (filter :persist?)
                (map (fn [{:keys [id name type properties new?]}]
@@ -520,18 +523,6 @@ Rules:
    :maintenance-step-ms :memory/knowledge-decay-maintenance-step-ms
    :archive-after-bottom-ms :memory/knowledge-decay-archive-after-bottom-ms})
 
-(defn- configured-positive-long
-  [config-key default-value]
-  (if-let [raw (db/get-config config-key)]
-    (try
-      (let [parsed (Long/parseLong (str raw))]
-        (if (pos? parsed)
-          parsed
-          default-value))
-      (catch Exception _
-        default-value))
-    default-value))
-
 (defn- configured-bounded-double
   [config-key default-value]
   (if-let [raw (db/get-config config-key)]
@@ -549,20 +540,20 @@ Rules:
   []
   (assoc default-knowledge-decay-config
          :grace-period-ms
-         (configured-positive-long (:grace-period-ms knowledge-decay-config-keys)
-                                   (:grace-period-ms default-knowledge-decay-config))
+         (cfg/positive-long (:grace-period-ms knowledge-decay-config-keys)
+                            (:grace-period-ms default-knowledge-decay-config))
          :half-life-ms
-         (configured-positive-long (:half-life-ms knowledge-decay-config-keys)
-                                   (:half-life-ms default-knowledge-decay-config))
+         (cfg/positive-long (:half-life-ms knowledge-decay-config-keys)
+                            (:half-life-ms default-knowledge-decay-config))
          :min-confidence
          (configured-bounded-double (:min-confidence knowledge-decay-config-keys)
                                     (:min-confidence default-knowledge-decay-config))
          :maintenance-step-ms
-         (configured-positive-long (:maintenance-step-ms knowledge-decay-config-keys)
-                                   (:maintenance-step-ms default-knowledge-decay-config))
+         (cfg/positive-long (:maintenance-step-ms knowledge-decay-config-keys)
+                            (:maintenance-step-ms default-knowledge-decay-config))
          :archive-after-bottom-ms
-         (configured-positive-long (:archive-after-bottom-ms knowledge-decay-config-keys)
-                                   (:archive-after-bottom-ms default-knowledge-decay-config))))
+         (cfg/positive-long (:archive-after-bottom-ms knowledge-decay-config-keys)
+                            (:archive-after-bottom-ms default-knowledge-decay-config))))
 
 (defn- decay-window-ms
   [^java.util.Date updated-at ^java.util.Date as-of decay-config]
