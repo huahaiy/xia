@@ -1,5 +1,9 @@
 # xia
 
+![Xia logo](xia-logo.png)
+
+> "There is an old Chinese story about the 田螺姑娘, a gentle spirit who appears each day to care for a home before anyone returns. Xia (虾) is a modern echo of that tale—an autonomous AI assistant that quietly tends to the details of your digital life."
+
 Portable personal AI assistant. Single native binary + embedded DB = zero install friction. Everything is in the database: you can take the DB file to any computer, start Xia, and resume your exact experience. Works with any OpenAI-compatible LLM (Qwen, Ollama, OpenAI, Anthropic via proxy).
 
 ## Positioning & Philosophy
@@ -143,7 +147,7 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 ### Credential Protection (`xia.secret`)
 `xia.db` functions exposed to the sandbox are safe wrappers that enforce access control:
 - **Protected attributes:** Attributes like `:llm.provider/api-key`, `:service/auth-key`, `:oauth.account/client-secret`, `:oauth.account/access-token`, and `:oauth.account/refresh-token` are blocked.
-- **Datalog query filtering:** Every query is analyzed before execution; if it references a secret attribute or pattern (password, token, etc.), it is rejected.
+- **Datalog query filtering:** Every query is analyzed before execution; if it references a secret attribute or pattern (password, token, etc.), uses indirect attribute scans, or uses computed `:where` clauses, it is rejected.
 
 ### Master Key Handling
 - **Explicit key support:** `XIA_MASTER_KEY` and `XIA_MASTER_KEY_FILE` can provide a raw 32-byte base64 key for unattended deployments.

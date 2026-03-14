@@ -154,6 +154,34 @@
         (secret/safe-q '[:find (pull ?e [*]) :where
                          [?e :llm.provider/id :test]]))))
 
+(deftest safe-q-blocks-computed-where-clauses
+  (db/transact! [{:service/id        :leak
+                  :service/name      "Leak"
+                  :service/base-url  "https://example.com"
+                  :service/auth-type :bearer
+                  :service/auth-key  "top-secret"
+                  :service/enabled?  true}
+                 {:llm.provider/id       :test
+                  :llm.provider/name     "test"
+                  :llm.provider/base-url "http://localhost"
+                  :llm.provider/api-key  "sk-super-secret"
+                  :llm.provider/model    "test-model"
+                  :llm.provider/default? true}])
+
+  (testing "blocks entity-returning Datalevin function clauses"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?entity :where
+                           [?e :service/id :leak]
+                           [(datalevin.core/entity $ ?e) ?entity]]))))
+
+  (testing "blocks non-secret computed clauses as part of the sandbox policy"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?label :where
+                           [?e :llm.provider/name ?name]
+                           [(str ?name "-suffix") ?label]])))))
+
 (deftest safe-q-blocks-transcript-and-run-history-queries
   (let [sid         (db/create-session! :terminal)
         session-eid (ffirst (db/q '[:find ?e :in $ ?sid

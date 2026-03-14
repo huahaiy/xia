@@ -55,8 +55,24 @@
               io/resource
               slurp))))
 
+(def ^:private read-resource-bytes
+  (memoize
+    (fn [path]
+      (when-let [resource (some-> (str "web/" path) io/resource)]
+        (with-open [in (io/input-stream resource)
+                    out (ByteArrayOutputStream.)]
+          (io/copy in out)
+          (.toByteArray out))))))
+
 (defn- resource-response [path content-type]
   (if-let [content (read-resource path)]
+    {:status  200
+     :headers {"Content-Type" content-type}
+     :body    content}
+    {:status 404 :body "Not Found"}))
+
+(defn- binary-resource-response [path content-type]
+  (if-let [content (read-resource-bytes path)]
     {:status  200
      :headers {"Content-Type" content-type}
      :body    content}
@@ -1465,6 +1481,9 @@
 
         (and (= method :get) (= uri "/app.js"))
         (resource-response "app.js" "text/javascript")
+
+        (and (= method :get) (= uri "/xia-logo.png"))
+        (binary-resource-response "xia-logo.png" "image/png")
 
         (and (= method :get) (= uri "/oauth/callback"))
         (handle-oauth-callback req)

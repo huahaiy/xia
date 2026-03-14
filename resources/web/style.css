@@ -57,6 +57,24 @@ body::before {
 }
 .hero-copy { padding: 26px 28px; }
 .hero-meta { padding: 22px; display: grid; gap: 14px; }
+.hero-brand {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.hero-brand-copy {
+  min-width: 0;
+}
+.hero-logo {
+  width: clamp(72px, 11vw, 108px);
+  height: clamp(72px, 11vw, 108px);
+  border-radius: 24px;
+  object-fit: cover;
+  object-position: center;
+  border: 1px solid rgba(23, 33, 25, 0.12);
+  box-shadow: 0 16px 34px rgba(23, 33, 25, 0.16);
+  background: rgba(255, 255, 255, 0.8);
+}
 .eyebrow {
   margin: 0 0 10px;
   color: var(--accent-dark);
@@ -77,6 +95,15 @@ h1 {
   max-width: 46rem;
   color: var(--muted);
   font-size: 1.02rem;
+  line-height: 1.65;
+}
+.tagline {
+  margin: 18px 0 0;
+  max-width: 44rem;
+  color: var(--accent-dark);
+  font-family: "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: 1.02rem;
+  font-style: italic;
   line-height: 1.65;
 }
 .meta-row { display: grid; gap: 6px; }
@@ -633,4 +660,10 @@ textarea:focus {
   .admin-card-wide { grid-column: auto; }
   .shell { padding: 16px; }
   textarea { min-height: 240px; }
+  .hero-brand { align-items: flex-start; }
+  .hero-logo {
+    width: 72px;
+    height: 72px;
+    border-radius: 20px;
+  }
 }

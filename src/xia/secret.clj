@@ -101,6 +101,11 @@
        (<= 3 (count clause) 4)
        (not (seq? (first clause)))))
 
+(defn- computed-clause?
+  [clause]
+  (and (vector? clause)
+       (seq? (first clause))))
+
 (defn- unsafe-data-pattern?
   [clause]
   (let [attr (nth clause 1)]
@@ -113,8 +118,11 @@
     (data-pattern-clause? clause)
     (unsafe-data-pattern? clause)
 
+    (computed-clause? clause)
+    true
+
     (vector? clause)
-    (unsafe-form? (first clause))
+    (unsafe-form? clause)
 
     (seq? clause)
     (let [op   (first clause)
@@ -128,7 +136,8 @@
 
 (defn- query-references-secret?
   "Check if a Datalog query references secret attrs or uses query forms that
-   can enumerate attributes indirectly."
+   can enumerate attributes indirectly. Computed :where clauses are rejected
+   outright because they can call host functions outside the attribute filter."
   [query]
   (let [sections (if (vector? query)
                    (split-query-sections query)
@@ -141,7 +150,7 @@
 (defn safe-q
   "Restricted Datalog query for the SCI sandbox.
    Rejects queries that reference secret attributes or use indirect attribute
-   access such as pull or attr-position variables."
+   access such as pull, computed clauses, or attr-position variables."
   [query & inputs]
   (when (query-references-secret? query)
     (throw (ex-info "Access denied: query references secret attributes"

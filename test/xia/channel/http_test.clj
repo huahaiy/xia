@@ -74,7 +74,9 @@
     (is (re-find #"Rate Limit \(req/min\)" (:body response)))
     (is (re-find #"<textarea" (:body response)))
     (is (re-find #"src=\"app.js\"" (:body response)))
-    (is (re-find #"href=\"style.css\"" (:body response)))))
+    (is (re-find #"href=\"style.css\"" (:body response)))
+    (is (re-find #"rel=\"icon\" type=\"image/png\" href=\"xia-logo.png\"" (:body response)))
+    (is (re-find #"alt=\"Xia logo\"" (:body response)))))
 
 (deftest serves-static-resources
   (testing "serves style.css"
@@ -86,7 +88,13 @@
     (let [response (#'http/router {:uri "/app.js" :request-method :get})]
       (is (= 200 (:status response)))
       (is (= "text/javascript" (get-in response [:headers "Content-Type"])))
-      (is (re-find #"sessionStorage\.getItem" (:body response))))))
+      (is (re-find #"sessionStorage\.getItem" (:body response)))))
+  (testing "serves xia-logo.png"
+    (let [response (#'http/router {:uri "/xia-logo.png" :request-method :get})]
+      (is (= 200 (:status response)))
+      (is (= "image/png" (get-in response [:headers "Content-Type"])))
+      (is (instance? (Class/forName "[B") (:body response)))
+      (is (pos? (alength ^bytes (:body response)))))))
 
 (deftest create-session-route-returns-session-id
   (let [response (#'http/router {:uri            "/sessions"
