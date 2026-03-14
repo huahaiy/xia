@@ -89,11 +89,12 @@
                                                    :approval-bypass? true}))))
     (is (= {:session-id        session-id
             :channel           :scheduler
+            :user-message      "hello"
             :schedule-id       :nightly
             :autonomous-run?   true
             :approval-bypass?  true}
            (select-keys @context-seen
-                        [:session-id :channel :schedule-id
+                        [:session-id :channel :user-message :schedule-id
                          :autonomous-run? :approval-bypass?])))))
 
 (deftest process-message-schedules-fact-utility-review

@@ -4,6 +4,7 @@
 {:id          :browser-navigate
  :name        "browser-navigate"
  :description "Navigate an existing browser session to a new URL. Use this when you already have a session_id and need to move to another page without starting over."
+ :tags        #{:browser :web :navigation}
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"
                                            "description" "The browser session ID from browser-open or browser-login"}

@@ -4,6 +4,7 @@
 {:id          :web-search
  :name        "web-search"
  :description "Search the web for information. Returns a list of results with titles, URLs, and snippets. Use this when you need to find web pages about a topic."
+ :tags        #{:web :research :search}
  :execution-mode :parallel-safe
  :parameters  {"type"       "object"
                "properties" {"query"       {"type"        "string"

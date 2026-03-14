@@ -4,6 +4,7 @@
 {:id          :browser-wait
  :name        "browser-wait"
  :description "Wait for JavaScript rendering or polling conditions in a browser session. Optionally wait until a CSS selector appears, text shows up, or the URL contains a substring. Returns the current page with matched/timed_out flags."
+ :tags        #{:browser :web :wait :page}
  :parameters  {"type"       "object"
                "properties" {"session_id"   {"type"        "string"
                                              "description" "The browser session ID to wait on"}

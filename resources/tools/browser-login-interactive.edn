@@ -5,6 +5,7 @@
 {:id          :browser-login-interactive
  :name        "browser-login-interactive"
  :description "Log into a website by asking the user to type credentials in the terminal. Password input is masked. Credentials are never stored or visible in the conversation. Use this for one-time logins or when the user hasn't registered site credentials."
+ :tags        #{:browser :web :login :auth}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"url"    {"type"        "string"

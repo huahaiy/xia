@@ -8,6 +8,7 @@
    Contrast with skills: a skill is text the LLM reads and follows;
    a tool is code the LLM triggers and gets results from."
   (:require [clojure.edn :as edn]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.java.io :as io]
             [clojure.tools.logging :as log]
@@ -45,6 +46,10 @@
 
 (def ^:private approval-note
   " Requires user approval before execution.")
+
+(def ^:private ignored-selection-terms
+  #{"a" "an" "and" "any" "for" "from" "get" "how" "i" "in" "into" "is"
+    "it" "me" "my" "of" "on" "or" "the" "to" "up" "use" "using" "with"})
 
 (def ^:private privileged-handler-rules
   [{:match "xia.service/request"
@@ -140,12 +145,13 @@
 (defn import-tool!
   "Import a tool from an EDN definition map. Installs in DB and loads it."
   [tool-def]
-  (let [{:keys [id name description parameters handler approval execution-mode]} tool-def]
+  (let [{:keys [id name description tags parameters handler approval execution-mode]} tool-def]
     (when-not id
       (throw (ex-info "Tool definition must have an :id" {:def tool-def})))
     (db/install-tool! {:id          id
                        :name        (or name (clojure.core/name id))
                        :description (or description "")
+                       :tags        (or tags #{})
                        :parameters  (or parameters {})
                        :handler     (if (string? handler) handler (pr-str handler))
                        :approval    (cond
@@ -294,14 +300,20 @@
             missing (filterv #(nil? (db/get-tool (:id %))) defs)]
         (doseq [tool-def missing]
           (import-tool! tool-def))
-        (doseq [{:keys [id execution-mode]} defs
-                :when execution-mode]
+        (doseq [{:keys [id execution-mode tags]} defs]
           (let [tool (db/get-tool id)]
-            (when (and tool (nil? (:tool/execution-mode tool)))
-              (db/install-tool! {:id             id
-                                 :execution-mode (if (keyword? execution-mode)
-                                                   execution-mode
-                                                   (keyword execution-mode))})
+            (when (and tool
+                       (or (and execution-mode
+                                (nil? (:tool/execution-mode tool)))
+                           (and (seq tags)
+                                (empty? (:tool/tags tool)))))
+              (db/install-tool! (cond-> {:id id}
+                                  execution-mode
+                                  (assoc :execution-mode (if (keyword? execution-mode)
+                                                           execution-mode
+                                                           (keyword execution-mode)))
+                                  (seq tags)
+                                  (assoc :tags tags)))
               (when (contains? @registry id)
                 (load-tool! id)))))
         (+ installed-count (clojure.core/count missing))))
@@ -316,15 +328,66 @@
   "Return all loaded tools formatted as OpenAI tool definitions."
   ([] (tool-definitions nil))
   ([context]
-   (->> @registry
-        vals
-        (filter :handler)
-        (filter #(tool-visible? (:tool %) context))
-        (mapv (fn [{:keys [tool]}]
-                {:type     "function"
-                 :function {:name        (name (:tool/id tool))
-                            :description (tool-description-for-llm tool context)
-                            :parameters  (or (:tool/parameters tool) {})}})))))
+   (letfn [(tokenize [value]
+             (->> (str/split (str/lower-case (str value)) #"[^\p{Alnum}]+")
+                  (remove str/blank?)
+                  (remove ignored-selection-terms)
+                  (filter #(> (count %) 1))
+                  set))
+           (tool-tags [tool]
+             (->> (:tool/tags tool)
+                  (map name)
+                  (map str/lower-case)
+                  set))
+           (tool-name-terms [tool]
+             (tokenize (str (name (:tool/id tool)) " " (:tool/name tool))))
+           (tool-description-terms [tool]
+             (tokenize (:tool/description tool)))
+           (context-terms []
+             (let [wm-context (when-let [session-id (:session-id context)]
+                                (wm/wm->context session-id))]
+               (->> (concat
+                      (tokenize (:user-message context))
+                      (tokenize (:topics wm-context))
+                      (mapcat (comp tokenize :name) (:entities wm-context)))
+                    set)))
+           (tool-match-score [tool terms]
+             (let [tag-matches  (count (set/intersection (tool-tags tool) terms))
+                   name-matches (count (set/intersection (tool-name-terms tool) terms))
+                   desc-matches (count (set/intersection (tool-description-terms tool) terms))]
+               (+ (* 8 tag-matches)
+                  (* 4 name-matches)
+                  desc-matches)))
+           (tool-sort-name [tool]
+             (str/lower-case (or (:tool/name tool)
+                                 (some-> (:tool/id tool) name)
+                                 "")))]
+     (let [visible-tools (->> @registry
+                              vals
+                              (filter :handler)
+                              (map :tool)
+                              (filter #(tool-visible? % context))
+                              vec)
+           terms         (context-terms)
+           selected      (if (seq terms)
+                           (let [scored (->> visible-tools
+                                             (map (fn [tool]
+                                                    {:tool  tool
+                                                     :score (tool-match-score tool terms)}))
+                                             (filter #(pos? (:score %)))
+                                             (sort-by (fn [{:keys [tool score]}]
+                                                        [(- score) (tool-sort-name tool)]))
+                                             (mapv :tool))]
+                             (if (seq scored)
+                               scored
+                               (sort-by tool-sort-name visible-tools)))
+                           (sort-by tool-sort-name visible-tools))]
+       (mapv (fn [tool]
+               {:type     "function"
+                :function {:name        (name (:tool/id tool))
+                           :description (tool-description-for-llm tool context)
+                           :parameters  (or (:tool/parameters tool) {})}})
+             selected)))))
 
 (defn- approval-error
   [tool-id message]

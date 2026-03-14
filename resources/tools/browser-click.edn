@@ -4,6 +4,7 @@
 {:id          :browser-click
  :name        "browser-click"
  :description "Click an element on the current page using a CSS selector. Returns the resulting page content. Use for clicking links, buttons, or any clickable element."
+ :tags        #{:browser :web :navigation :interaction :click}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"

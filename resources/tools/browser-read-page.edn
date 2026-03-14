@@ -4,6 +4,7 @@
 {:id          :browser-read-page
  :name        "browser-read-page"
  :description "Read the current page in a browser session without clicking or navigating. Use after browser-wait or when you want a fresh snapshot of the current page state."
+ :tags        #{:browser :web :read :page}
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"
                                            "description" "The browser session ID to inspect"}}

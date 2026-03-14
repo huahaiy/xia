@@ -147,6 +147,53 @@
     (is (= "Annotated tool Requires user approval before execution."
            (get-in tool-def [:function :description])))))
 
+(deftest tool-definitions-are-scoped-by-context
+  (db/install-tool! {:id          :web-search
+                     :name        "web-search"
+                     :description "Search the web for information"
+                     :tags        #{:web :research :search}
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (db/install-tool! {:id          :schedule-manage
+                     :name        "schedule-manage"
+                     :description "Manage a scheduled task"
+                     :tags        #{:schedule :automation :task}
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :web-search)
+  (tool/load-tool! :schedule-manage)
+  (with-redefs [xia.working-memory/wm->context (fn [_]
+                                                 {:topics   "web research"
+                                                  :entities [{:name "OpenAI"}]})]
+    (let [defs  (tool/tool-definitions {:session-id   (random-uuid)
+                                        :user-message "search the web for OpenAI"})
+          names (set (map #(get-in % [:function :name]) defs))]
+      (is (contains? names "web-search"))
+      (is (not (contains? names "schedule-manage"))))))
+
+(deftest tool-definitions-fall-back-to-all-visible-tools-without-match
+  (db/install-tool! {:id          :web-search
+                     :name        "web-search"
+                     :description "Search the web for information"
+                     :tags        #{:web :research :search}
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (db/install-tool! {:id          :schedule-manage
+                     :name        "schedule-manage"
+                     :description "Manage a scheduled task"
+                     :tags        #{:schedule :automation :task}
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :web-search)
+  (tool/load-tool! :schedule-manage)
+  (with-redefs [xia.working-memory/wm->context (fn [_]
+                                                 {:topics   "completely unrelated"
+                                                  :entities []})]
+    (let [defs  (tool/tool-definitions {:session-id   (random-uuid)
+                                        :user-message "hello there"})
+          names (set (map #(get-in % [:function :name]) defs))]
+      (is (= #{"web-search" "schedule-manage"} names)))))
+
 (deftest autonomous-tool-definitions-hide-unavailable-privileged-tools
   (db/register-service! {:id                   :github
                          :name                 "GitHub"

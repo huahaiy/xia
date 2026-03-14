@@ -4,6 +4,7 @@
 {:id          :browser-close
  :name        "browser-close"
  :description "Close a browser session and free resources. Always close sessions when done."
+ :tags        #{:browser :web :session}
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"
                                            "description" "The browser session ID to close"}}

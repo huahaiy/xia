@@ -128,7 +128,8 @@
                 provider-id
                 (assoc :provider-id provider-id)))
             execution-context (merge {:session-id session-id
-                                      :channel    channel}
+                                      :channel    channel
+                                      :user-message user-message}
                                      tool-context)
             tools (tool/tool-definitions execution-context)
             {:keys [messages used-fact-eids]}

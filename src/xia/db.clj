@@ -191,6 +191,7 @@
    :tool/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :tool/name          {:db/valueType :db.type/string}
    :tool/description   {:db/valueType :db.type/string}
+   :tool/tags          {:db/valueType :db.type/keyword :db/cardinality :db.cardinality/many}
    :tool/parameters    {:db/valueType :db.type/idoc :db/domain "tool-parameters"}
    :tool/handler       {:db/valueType :db.type/string}  ; SCI code → fn
    :tool/approval      {:db/valueType :db.type/keyword} ; :auto :session :always
@@ -958,7 +959,7 @@
 (declare get-tool)
 
 (defn install-tool!
-  [{:keys [id name description parameters handler approval execution-mode enabled? installed-at]}]
+  [{:keys [id name description tags parameters handler approval execution-mode enabled? installed-at]}]
   (let [existing (when id (get-tool id))]
     (transact! [(cond-> {:tool/id           id
                          :tool/name         (or name
@@ -967,6 +968,9 @@
                          :tool/description  (or description
                                                 (:tool/description existing)
                                                 "")
+                         :tool/tags         (or tags
+                                                (:tool/tags existing)
+                                                #{})
                          :tool/parameters   (or parameters
                                                 (:tool/parameters existing)
                                                 {})
