@@ -11,6 +11,23 @@
   (is (thrown? Exception
                (sci-env/eval-string "(System/getenv \"PATH\")"))))
 
+(deftest file-shell-and-source-access-are-blocked-in-sci
+  (doseq [code ["(slurp \"/etc/hosts\")"
+                "(require 'clojure.java.io) (clojure.java.io/reader \"/etc/hosts\")"
+                "(require 'clojure.java.shell) (clojure.java.shell/sh \"echo\" \"hi\")"
+                "(require 'clojure.repl) (clojure.repl/source-fn 'clojure.set/union)"]]
+    (is (thrown? Exception
+                 (sci-env/eval-string code))
+        code)))
+
+(deftest safe-utility-namespaces-remain-available-in-sci
+  (is (= "a,b"
+         (sci-env/eval-string
+           "(require '[clojure.string :as str]) (str/join \",\" [\"a\" \"b\"])")))
+  (is (= #{1 2}
+         (sci-env/eval-string
+           "(require '[clojure.set :as set]) (set/union #{1} #{2})"))))
+
 (deftest schedule-history-is-redacted-in-sci
   (schedule/create-schedule!
     {:id :sandbox-history

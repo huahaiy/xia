@@ -8,8 +8,8 @@
 
    SECURITY: Tool handlers run untrusted code. All DB access goes through
    xia.secret safe wrappers that block access to credentials and secrets.
-   The sandbox also restricts all local file system access, ensuring tool
-   code cannot interact with the host beyond the database directory."
+   The sandbox explicitly denies file I/O, shell execution, and source
+   introspection vars so SCI default namespace changes do not widen access."
   (:require [sci.core :as sci]
             [xia.browser :as browser]
             [xia.cron :as cron]
@@ -101,11 +101,63 @@
    'skill-headings      skill/skill-headings
    'patch-skill-section! skill/patch-skill-section!})
 
+(defn- blocked-sci-fn
+  [sym]
+  (fn [& _]
+    (throw (ex-info (str sym " is not available in Xia's SCI sandbox")
+                    {:symbol sym}))))
+
+(def ^:private sci-core-overrides
+  {'slurp       (blocked-sci-fn 'clojure.core/slurp)
+   'spit        (blocked-sci-fn 'clojure.core/spit)
+   'load-file   (blocked-sci-fn 'clojure.core/load-file)
+   'load-reader (blocked-sci-fn 'clojure.core/load-reader)})
+
+(def ^:private sci-io-overrides
+  {'delete-file   (blocked-sci-fn 'clojure.java.io/delete-file)
+   'file          (blocked-sci-fn 'clojure.java.io/file)
+   'input-stream  (blocked-sci-fn 'clojure.java.io/input-stream)
+   'output-stream (blocked-sci-fn 'clojure.java.io/output-stream)
+   'reader        (blocked-sci-fn 'clojure.java.io/reader)
+   'resource      (blocked-sci-fn 'clojure.java.io/resource)
+   'writer        (blocked-sci-fn 'clojure.java.io/writer)})
+
+(def ^:private sci-shell-overrides
+  {'sh          (blocked-sci-fn 'clojure.java.shell/sh)
+   'with-sh-dir (blocked-sci-fn 'clojure.java.shell/with-sh-dir)
+   'with-sh-env (blocked-sci-fn 'clojure.java.shell/with-sh-env)})
+
+(def ^:private sci-repl-overrides
+  {'source    (blocked-sci-fn 'clojure.repl/source)
+   'source-fn (blocked-sci-fn 'clojure.repl/source-fn)})
+
+(def ^:private denied-sci-symbols
+  '[slurp
+    spit
+    load-file
+    load-reader
+    clojure.java.io/delete-file
+    clojure.java.io/file
+    clojure.java.io/input-stream
+    clojure.java.io/output-stream
+    clojure.java.io/reader
+    clojure.java.io/resource
+    clojure.java.io/writer
+    clojure.java.shell/sh
+    clojure.java.shell/with-sh-dir
+    clojure.java.shell/with-sh-env
+    clojure.repl/source
+    clojure.repl/source-fn])
+
 (defn make-ctx
   "Create a SCI evaluation context with xia APIs available."
   []
   (sci/init
-    {:namespaces {'xia.memory         xia-memory-ns
+    {:namespaces {'clojure.core       sci-core-overrides
+                  'clojure.java.io    sci-io-overrides
+                  'clojure.java.shell sci-shell-overrides
+                  'clojure.repl       sci-repl-overrides
+                  'xia.memory         xia-memory-ns
                   'xia.working-memory xia-wm-ns
                   'xia.skill          xia-skill-ns
                   'xia.schedule       xia-schedule-ns
@@ -115,6 +167,7 @@
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns
                   'xia.db             xia-db-ns}
+     :deny       denied-sci-symbols
      :classes    {'java.util.Date java.util.Date
                   'java.util.UUID java.util.UUID}}))
 

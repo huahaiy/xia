@@ -1,32 +1,32 @@
 {:paths ["src" "resources"]
 
  :deps
- {org.clojure/clojure       {:mvn/version "1.12.0"}
+ {org.clojure/clojure       {:mvn/version "1.12.4"}
   datalevin/datalevin        {:mvn/version "0.10.7"}
-  org.clojure/tools.cli      {:mvn/version "1.1.230"}
+  org.clojure/tools.cli      {:mvn/version "1.4.256"}
 
   ;; HTTP client for LLM API calls
   hato/hato                  {:mvn/version "1.0.0"}
 
   ;; JSON
-  com.cnuernber/charred      {:mvn/version "1.034"}
+  com.cnuernber/charred      {:mvn/version "1.038"}
 
   ;; SCI — Clojure interpreter that works in GraalVM native-image
-  org.babashka/sci            {:mvn/version "0.8.43"}
+  org.babashka/sci            {:mvn/version "0.12.51"}
 
   ;; HTML parsing (GraalVM native-image compatible)
-  org.jsoup/jsoup              {:mvn/version "1.18.3"}
+  org.jsoup/jsoup              {:mvn/version "1.22.1"}
 
   ;; Headless browser — full DOM, JavaScript, cookies, form interaction
   ;; NOTE: needs reflection config for GraalVM native-image
-  org.htmlunit/htmlunit         {:mvn/version "4.7.0"}
+  org.htmlunit/htmlunit         {:mvn/version "4.21.0"}
 
   ;; HTTP/WebSocket server
-  http-kit/http-kit           {:mvn/version "2.8.0"}
+  http-kit/http-kit           {:mvn/version "2.8.1"}
 
   ;; Logging
-  org.clojure/tools.logging  {:mvn/version "1.3.0"}
-  ch.qos.logback/logback-classic {:mvn/version "1.5.6"}}
+  org.clojure/tools.logging  {:mvn/version "1.3.1"}
+  ch.qos.logback/logback-classic {:mvn/version "1.5.32"}}
 
  :aliases
  {:dev
@@ -42,11 +42,11 @@
    :exec-fn   cognitect.test-runner.api/test}
 
   :native
-  {:extra-deps {org.graalvm.nativeimage/svm {:mvn/version "24.1.1"}}
+  {:extra-deps {org.graalvm.nativeimage/svm {:mvn/version "25.0.2"}}
    :main-opts  ["-m" "xia.core"]}
 
   :build
-  {:deps  {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
+  {:deps  {io.github.clojure/tools.build {:mvn/version "0.10.12"}}
    :ns-default build}
 
   :uberjar
