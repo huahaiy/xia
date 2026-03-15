@@ -209,7 +209,12 @@
 
   (testing "substring match"
     (let [results (memory/find-node "Cloj")]
-      (is (= 1 (count results))))))
+      (is (= 1 (count results)))))
+
+  (testing "non-prefix substring match"
+    (let [results (memory/find-node "loju")]
+      (is (= 1 (count results)))
+      (is (= "Clojure" (:name (first results)))))))
 
 (deftest test-get-node
   (let [node-eid (th/seed-node! "TestNode" "concept")]

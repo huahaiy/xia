@@ -10,7 +10,8 @@
    conversation → episodic recording → hippocampus consolidation → knowledge graph
                                                                   ↓
                                                         recalled into context"
-  (:require [datalevin.core :as d]
+  (:require [clojure.string :as str]
+            [datalevin.core :as d]
             [xia.config :as cfg]
             [xia.db :as db]))
 
@@ -300,16 +301,19 @@
 (defn find-node
   "Find a node by name (case-insensitive substring match)."
   [name-pattern]
-  (let [pattern (clojure.string/lower-case name-pattern)]
-    (->> (db/q '[:find ?e ?name ?type
-                 :where
-                 [?e :kg.node/name ?name]
-                 [?e :kg.node/type ?type]])
-         (filter (fn [[_ name _]]
-                   (clojure.string/includes?
-                     (clojure.string/lower-case name) pattern)))
-         (mapv (fn [[eid name type]]
-                 {:eid eid :name name :type type})))))
+  (let [pattern (some-> name-pattern str/lower-case)]
+    (if (str/blank? pattern)
+      []
+      (->> (db/q '[:find ?e ?name ?type
+                   :in $ ?pattern
+                   :where
+                   [?e :kg.node/name ?name]
+                   [(clojure.string/lower-case ?name) ?lower-name]
+                   [(clojure.string/includes? ?lower-name ?pattern)]
+                   [?e :kg.node/type ?type]]
+                 pattern)
+           (mapv (fn [[eid name type]]
+                   {:eid eid :name name :type type}))))))
 
 (defn get-node [node-eid]
   (into {} (db/entity node-eid)))
