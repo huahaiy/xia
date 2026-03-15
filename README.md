@@ -2,7 +2,7 @@
 
 ![Xia logo](xia-logo.png)
 
-> There is an old Chinese story about a Sail Maiden, a gentle spirit who appears
+> There is an old Chinese story about a snail maiden, a gentle spirit who appears
 > each day to care for a home before anyone returns. Xia is a modern echo of
 > that tale: an autonomous AI assistant that quietly tends to the details of your digital life.
 

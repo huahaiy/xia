@@ -171,6 +171,17 @@
       (is (str/includes? result "### Known"))
       (is (< (count (re-seq #"- Entity" result)) 20))))
 
+  (testing "sorts entities by relevance before applying the budget"
+    (let [render-entity #'xia.context/render-entity
+          low    {:name "Low" :type :concept :relevance 0.1
+                  :facts [] :edges {:outgoing [] :incoming []}}
+          high   {:name "Top" :type :concept :relevance 0.9
+                  :facts [] :edges {:outgoing [] :incoming []}}
+          budget (+ 8 (ctx/estimate-tokens (render-entity high)))
+          result (ctx/render-entities [low high] budget)]
+      (is (str/includes? result "- Top"))
+      (is (not (str/includes? result "- Low")))))
+
   (testing "nil entities"
     (is (nil? (ctx/render-entities nil 1000))))
 

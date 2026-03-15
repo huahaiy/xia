@@ -245,7 +245,10 @@
   "Render active entities + facts into compact format, within token budget."
   [entities budget]
   (when (seq entities)
-    (loop [ents entities
+    (loop [ents (sort-by (fn [entity]
+                           (double (or (:relevance entity) 0.0)))
+                         >
+                         entities)
            lines ["### Known"]
            tokens 8
            used-fact-eids []] ; "### Known\n"
