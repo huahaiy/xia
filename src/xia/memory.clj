@@ -103,8 +103,9 @@
 
 (defn unprocessed-episodes
   "Get episodes not yet consolidated by the hippocampus.
-   Uses entity lookup for :processed? check (Datalevin 0.10.x boolean index
-   doesn't reliably reflect updates)."
+   In Datalevin 0.10.x, `[?e :episode/processed? false]` can still match an
+   entity after it has been updated to true, so pending episodes are queried as
+   the absence of `:episode/processed? true` rather than the presence of false."
   []
   (->> (db/q '[:find ?e ?summary ?ctx ?ts ?type ?importance
                :where
@@ -112,9 +113,8 @@
                [?e :episode/timestamp ?ts]
                [?e :episode/type ?type]
                [(get-else $ ?e :episode/context "") ?ctx]
-               [(get-else $ ?e :episode/importance 0.5) ?importance]])
-       (filter (fn [[eid]]
-                 (not (:episode/processed? (db/entity eid)))))
+               [(get-else $ ?e :episode/importance 0.5) ?importance]
+               (not [?e :episode/processed? true])])
        (map (fn [[eid summary ctx ts type importance]]
               {:eid        eid
                :summary    summary
@@ -157,15 +157,14 @@
   []
   (->> (db/q '[:find ?e ?summary ?ctx ?ts ?type ?channel ?session-id ?importance
                :where
-               [?e :episode/summary ?summary]
-               [?e :episode/timestamp ?ts]
-               [?e :episode/type ?type]
-               [(get-else $ ?e :episode/context "") ?ctx]
-               [(get-else $ ?e :episode/channel "") ?channel]
-               [(get-else $ ?e :episode/session-id "") ?session-id]
-               [(get-else $ ?e :episode/importance 0.5) ?importance]])
-       (filter (fn [[eid]]
-                 (:episode/processed? (db/entity eid))))
+                [?e :episode/summary ?summary]
+                [?e :episode/timestamp ?ts]
+                [?e :episode/type ?type]
+                [(get-else $ ?e :episode/context "") ?ctx]
+                [(get-else $ ?e :episode/channel "") ?channel]
+                [(get-else $ ?e :episode/session-id "") ?session-id]
+                [(get-else $ ?e :episode/importance 0.5) ?importance]
+               [?e :episode/processed? true]])
        (mapv (fn [[eid summary ctx ts type channel session-id importance]]
                {:eid        eid
                 :summary    summary

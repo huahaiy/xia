@@ -34,7 +34,11 @@
       (let [entity (into {} (db/entity eid))]
         (is (true? (:episode/processed? entity))
             "Entity should be marked as processed")))
-    (let [remaining (memory/unprocessed-episodes)]
+    (let [remaining (with-redefs [xia.db/entity
+                                  (fn [_]
+                                    (throw (ex-info "unprocessed-episodes should not call db/entity"
+                                                    {})))]
+                      (memory/unprocessed-episodes))]
       (is (= 1 (count remaining))))))
 
 (deftest test-recent-episodes-ordering
