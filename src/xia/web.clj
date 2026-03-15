@@ -18,7 +18,7 @@
            [org.apache.http.client.config RequestConfig]
            [org.apache.http.client.methods RequestBuilder]
            [org.apache.http.impl.client HttpClientBuilder]
-           [org.apache.http.util EntityUtils]
+           [java.io ByteArrayOutputStream InputStream]
            [java.net URI]
            [java.nio.charset Charset StandardCharsets]
            [java.util.concurrent ConcurrentHashMap]))
@@ -124,6 +124,32 @@
   [body-bytes headers]
   (String. ^bytes body-bytes ^Charset (response-charset headers)))
 
+(defn- read-entity-bytes!
+  [entity url]
+  (if-not entity
+    (byte-array 0)
+    (let [declared-size (.getContentLength entity)]
+      (when (> declared-size max-body-bytes)
+        (throw (ex-info "Response too large"
+                        {:url   url
+                         :size  declared-size
+                         :limit max-body-bytes})))
+      (with-open [^InputStream in (.getContent entity)
+                  out            (ByteArrayOutputStream.)]
+        (let [buffer (byte-array 8192)]
+          (loop [total 0]
+            (let [read-count (.read in buffer)]
+              (if (neg? read-count)
+                (.toByteArray out)
+                (let [new-total (+ total read-count)]
+                  (when (> new-total max-body-bytes)
+                    (throw (ex-info "Response too large"
+                                    {:url   url
+                                     :size  new-total
+                                     :limit max-body-bytes})))
+                  (.write out buffer 0 read-count)
+                  (recur new-total))))))))))
+
 (defn- add-header!
   [^RequestBuilder builder header value]
   (if (sequential? value)
@@ -153,7 +179,7 @@
                 response (.execute client (.build request-builder))]
       (let [headers    (normalize-headers (.getAllHeaders response))
             body-bytes (if-let [entity (.getEntity response)]
-                         (EntityUtils/toByteArray entity)
+                         (read-entity-bytes! entity url)
                          (byte-array 0))]
         {:status  (.getStatusCode (.getStatusLine response))
          :headers headers
@@ -164,31 +190,28 @@
   ([url]
    (fetch-raw url {}))
   ([url extra-headers]
-  (loop [current-url url
-         redirects   0]
-    (let [resolution (resolve-url! current-url)]
-      (check-rate-limit! current-url)
-      (let [resp (fetch-url! current-url
-                             (merge {"User-Agent" user-agent
-                                     "Accept"     "text/html,application/xhtml+xml,*/*"}
-                                    extra-headers)
-                             resolution)
-            status (:status resp)
-            location (get-in resp [:headers "location"])]
-        (if (and (#{301 302 303 307 308} status) (seq location))
-          (do
-            (when (>= redirects max-redirects)
-              (throw (ex-info "Too many redirects"
-                              {:url current-url :redirects redirects})))
-            (let [next-url (str (.resolve (URI. current-url) location))]
-              (recur next-url (inc redirects))))
-          (let [body (str (:body resp))]
-            (when (> (count body) max-body-bytes)
-              (throw (ex-info "Response too large" {:url current-url :size (count body)})))
-            {:status    status
-             :headers   (:headers resp)
-             :body      body
-             :final-url current-url})))))))
+   (loop [current-url url
+          redirects   0]
+     (let [resolution (resolve-url! current-url)]
+       (check-rate-limit! current-url)
+       (let [resp (fetch-url! current-url
+                              (merge {"User-Agent" user-agent
+                                      "Accept"     "text/html,application/xhtml+xml,*/*"}
+                                     extra-headers)
+                              resolution)
+             status (:status resp)
+             location (get-in resp [:headers "location"])]
+         (if (and (#{301 302 303 307 308} status) (seq location))
+           (do
+             (when (>= redirects max-redirects)
+               (throw (ex-info "Too many redirects"
+                               {:url current-url :redirects redirects})))
+             (let [next-url (str (.resolve (URI. current-url) location))]
+               (recur next-url (inc redirects))))
+           {:status    status
+            :headers   (:headers resp)
+            :body      (str (:body resp))
+            :final-url current-url}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion

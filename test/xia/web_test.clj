@@ -5,7 +5,9 @@
             [xia.ssrf :as ssrf]
             [xia.web :as web])
   (:import [java.net InetAddress]
+           [java.nio.charset StandardCharsets]
            [java.util.concurrent ConcurrentHashMap]
+           [org.apache.http.entity ByteArrayEntity]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element]))
 
@@ -66,6 +68,24 @@
       (is (= {:timestamps (vec (repeat (var-get #'web/rate-limit-max) hit-ts))
               :cleaned    now}
              @state)))))
+
+(deftest read-entity-bytes-enforces-byte-limit-before-decoding
+  (let [char-count (inc (quot (var-get #'web/max-body-bytes) 3))
+        text       (apply str (repeat char-count "界"))
+        payload    (.getBytes ^String text StandardCharsets/UTF_8)
+        entity     (ByteArrayEntity. payload)
+        ex         (try
+                     (#'web/read-entity-bytes! entity "https://example.com/cjk")
+                     nil
+                     (catch clojure.lang.ExceptionInfo e
+                       e))]
+    (is (some? ex))
+    (is (< char-count (var-get #'web/max-body-bytes)))
+    (is (> (alength payload) (var-get #'web/max-body-bytes)))
+    (is (re-find #"Response too large" (.getMessage ex)))
+    (is (= {:url   "https://example.com/cjk"
+            :limit (var-get #'web/max-body-bytes)}
+           (select-keys (ex-data ex) [:url :limit])))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion
