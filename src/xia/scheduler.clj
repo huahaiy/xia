@@ -65,6 +65,20 @@
            :actions     @audit-log
            :error       (.getMessage e)})))))
 
+(defn- finalize-prompt-schedule-session!
+  [session-id]
+  (try
+    (let [topics (:topics (wm/get-wm session-id))]
+      (wm/snapshot! session-id)
+      (hippo/record-conversation! session-id :scheduler :topics topics))
+    (catch Exception e
+      (log/error e "Failed to finalize scheduler session" session-id))
+    (finally
+      (try
+        (wm/clear-wm! session-id)
+        (catch Exception e
+          (log/error e "Failed to clear scheduler working memory" session-id))))))
+
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
   [{:keys [id prompt trusted?]}]
@@ -92,8 +106,7 @@
            :actions     @audit-log
            :error       (.getMessage e)}))
       (finally
-        (wm/snapshot! session-id)
-        (wm/clear-wm! session-id)))))
+        (finalize-prompt-schedule-session! session-id)))))
 
 (defn- execute-schedule!
   "Execute a single schedule, preventing concurrent runs of the same schedule."
