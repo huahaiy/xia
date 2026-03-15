@@ -125,6 +125,18 @@
                            [?s :session/channel ?channel]]
                          sid))))))
 
+(deftest create-session-route-schedules-rest-session-finalizer
+  (let [scheduled (atom nil)]
+    (with-redefs [xia.channel.http/schedule-rest-session-finalizer! (fn [sid]
+                                                                      (reset! scheduled sid))]
+      (let [response (#'http/router {:uri            "/sessions"
+                                     :request-method :post
+                                     :headers        (ui-headers)})
+            body     (response-json response)
+            sid      (UUID/fromString (get body "session_id"))]
+        (is (= 200 (:status response)))
+        (is (= sid @scheduled))))))
+
 (deftest chat-route-creates-http-session
   (with-redefs [xia.agent/process-message (fn [_session-id user-message & _]
                                             (str "echo: " user-message))]
@@ -145,6 +157,21 @@
                              [?s :session/channel ?channel]]
                            sid)))))))
 
+(deftest chat-route-schedules-rest-session-finalizer
+  (let [scheduled (atom nil)]
+    (with-redefs [xia.agent/process-message (fn [_session-id user-message & _]
+                                              (str "echo: " user-message))
+                  xia.channel.http/schedule-rest-session-finalizer! (fn [sid]
+                                                                      (reset! scheduled sid))]
+      (let [response (#'http/router {:uri            "/chat"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "hello"})})
+            body     (response-json response)
+            sid      (UUID/fromString (get body "session_id"))]
+        (is (= 200 (:status response)))
+        (is (= sid @scheduled))))))
+
 (deftest chat-route-reuses-provided-session-id
   (let [seen-session (atom nil)
         sid          (db/create-session! :http)]
@@ -160,6 +187,18 @@
         (is (= 200 (:status response)))
         (is (= (str sid) (get body "session_id")))
         (is (= sid @seen-session))))))
+
+(deftest chat-route-rejects-closed-session
+  (let [sid (db/create-session! :http)]
+    (#'http/set-session-active! sid false)
+    (let [response (#'http/router {:uri            "/chat"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"message" "hello"
+                                                                  "session_id" (str sid)})})
+          body     (response-json response)]
+      (is (= 409 (:status response)))
+      (is (= "session closed" (get body "error"))))))
 
 (deftest chat-route-blocks-non-local-origins
   (let [response (#'http/router {:uri            "/chat"
@@ -340,6 +379,39 @@
               [:clear sid]]
              @lifecycle))
       (is (nil? (get @sessions ch))))))
+
+(deftest close-session-route-finalizes-rest-session
+  (let [sid       (db/create-session! :http)
+        lifecycle (atom [])]
+    (with-redefs [xia.channel.http/cancel-rest-session-finalizer! (fn [session-id]
+                                                                    (swap! lifecycle conj [:cancel session-id]))
+                  xia.working-memory/get-wm (fn [session-id]
+                                              (is (= sid session-id))
+                                              {:topics "release planning"})
+                  xia.working-memory/snapshot! (fn [session-id]
+                                                (swap! lifecycle conj [:snapshot session-id]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.working-memory/clear-wm! (fn [session-id]
+                                                 (swap! lifecycle conj [:clear session-id]))]
+      (let [response (#'http/router {:uri            (str "/sessions/" sid)
+                                     :request-method :delete
+                                     :headers        (ui-headers)})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= "closed" (get body "status")))
+        (is (= false (get body "already_closed")))
+        (is (= [[:snapshot sid]
+                [:record sid :http "release planning"]
+                [:clear sid]
+                [:cancel (str sid)]]
+               @lifecycle))
+        (is (= false
+               (ffirst (db/q '[:find ?active :in $ ?sid
+                               :where
+                               [?s :session/id ?sid]
+                               [(get-else $ ?s :session/active? false) ?active]]
+                             sid))))))))
 
 (deftest chat-route-validates-required-message
   (let [response (#'http/router {:uri            "/chat"

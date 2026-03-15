@@ -19,9 +19,10 @@
             [xia.prompt :as prompt]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
-           [java.nio.charset StandardCharsets]
-           [java.security SecureRandom]
-           [java.util Base64]))
+    [java.nio.charset StandardCharsets]
+    [java.security SecureRandom]
+    [java.util Base64]
+    [java.util.concurrent Executors ScheduledExecutorService ScheduledFuture TimeUnit]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -36,6 +37,8 @@
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
 (def ^:private max-request-body-bytes (* 1024 1024)) ; 1 MiB
+(def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
+(def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private ms-per-day (* 24 60 60 1000))
 (defonce ^:private local-session-secret
@@ -43,6 +46,10 @@
     (let [bytes (byte-array 32)
           _     (.nextBytes (SecureRandom.) bytes)]
       (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes))))
+(defonce ^:private rest-session-finalizer-executor (atom nil))
+(defonce ^:private rest-session-finalizers (atom {})) ; session-id string → ScheduledFuture
+(defonce ^:private session-finalize-locks
+  (vec (repeatedly session-finalize-lock-count #(Object.))))
 
 ;; ---------------------------------------------------------------------------
 ;; Local web UI
@@ -412,6 +419,95 @@
                       [?e :session/id ?sid]]
                     (java.util.UUID/fromString sid))))))
 
+(defn- session-id-str
+  [session-id]
+  (cond
+    (instance? java.util.UUID session-id) (str session-id)
+    :else                                 (parse-session-id session-id)))
+
+(defn- session-uuid
+  [session-id]
+  (some-> (session-id-str session-id) java.util.UUID/fromString))
+
+(defn- session-eid
+  [session-id]
+  (when-let [sid (session-uuid session-id)]
+    (ffirst (db/q '[:find ?e :in $ ?sid
+                    :where
+                    [?e :session/id ?sid]]
+                  sid))))
+
+(defn- session-active?
+  [session-id]
+  (when-let [eid (session-eid session-id)]
+    (boolean
+      (ffirst (db/q '[:find ?active :in $ ?e
+                      :where
+                      [(get-else $ ?e :session/active? false) ?active]]
+                    eid)))))
+
+(defn- set-session-active!
+  [session-id active?]
+  (when-let [eid (session-eid session-id)]
+    (db/transact! [[:db/add eid :session/active? active?]])
+    true))
+
+(defn- session-busy?
+  [session-id]
+  (contains? @session-statuses (str session-id)))
+
+(defn- session-finalize-lock
+  [session-id]
+  (when-let [sid (session-id-str session-id)]
+    (nth session-finalize-locks
+         (mod (bit-and Integer/MAX_VALUE (hash sid))
+              session-finalize-lock-count))))
+
+(defn- with-session-finalize-lock
+  [session-id f]
+  (if-let [lock (session-finalize-lock session-id)]
+    (locking lock
+      (f))
+    (f)))
+
+(defn- rest-session-idle-timeout-ms
+  []
+  default-rest-session-idle-timeout-ms)
+
+(declare finalize-rest-session!)
+
+(defn- cancel-rest-session-finalizer!
+  [session-id]
+  (when-let [sid (session-id-str session-id)]
+    (when-let [^ScheduledFuture future (get @rest-session-finalizers sid)]
+      (.cancel future false))
+    (swap! rest-session-finalizers dissoc sid)))
+
+(defn- clear-rest-session-finalizers!
+  []
+  (doseq [[_ ^ScheduledFuture future] @rest-session-finalizers]
+    (.cancel future false))
+  (reset! rest-session-finalizers {}))
+
+(defn- schedule-rest-session-finalizer!
+  [session-id]
+  (when-let [sid (session-id-str session-id)]
+    (cancel-rest-session-finalizer! sid)
+    (when-let [^ScheduledExecutorService exec @rest-session-finalizer-executor]
+      (let [delay-ms (rest-session-idle-timeout-ms)
+            task     ^Runnable
+            (fn []
+              (swap! rest-session-finalizers dissoc sid)
+              (finalize-rest-session! sid :idle-timeout))]
+        (swap! rest-session-finalizers assoc
+               sid
+               (.schedule exec task delay-ms TimeUnit/MILLISECONDS))))))
+
+(defn- touch-rest-session!
+  [session-id]
+  (when (session-active? session-id)
+    (schedule-rest-session-finalizer! session-id)))
+
 (defn- instant->str [value]
   (some-> value .toInstant str))
 
@@ -480,6 +576,13 @@
   (when session-id
     (swap! session-statuses dissoc (str session-id))))
 
+(defn- clear-rest-session-state!
+  [session-id]
+  (let [sid (str session-id)]
+    (clear-session-status! sid)
+    (swap! pending-approvals dissoc sid)
+    (cancel-rest-session-finalizer! sid)))
+
 (defn- terminal-status-state?
   [state]
   (contains? #{:done :error} state))
@@ -490,6 +593,38 @@
     (if (terminal-status-state? state)
       (clear-session-status! sid)
       (swap! session-statuses assoc sid (assoc status :updated-at (java.util.Date.))))))
+
+(defn- finalize-rest-session!
+  ([session-id]
+   (finalize-rest-session! session-id :explicit))
+  ([session-id reason]
+   (when-let [sid (session-uuid session-id)]
+     (with-session-finalize-lock
+       sid
+       (fn []
+         (let [sid-str     (str sid)
+               was-active? (session-active? sid)]
+           (try
+             (when was-active?
+               (let [topics (:topics (wm/get-wm sid))]
+                 (wm/snapshot! sid)
+                 (hippo/record-conversation! sid :http :topics topics)))
+             (catch Exception e
+               (log/error e "Failed to finalize REST session" sid-str "reason" (name reason)))
+             (finally
+               (try
+                 (wm/clear-wm! sid)
+                 (catch Exception e
+                   (log/error e "Failed to clear REST working memory" sid-str)))
+               (clear-rest-session-state! sid)
+               (when was-active?
+                 (try
+                   (set-session-active! sid false)
+                   (catch Exception e
+                     (log/error e "Failed to mark REST session inactive" sid-str))))))
+           (when was-active?
+             (log/info "Finalized REST session" sid-str "reason" (name reason)))
+           was-active?))))))
 
 (defn- scratch-pad->body
   [pad]
@@ -743,6 +878,7 @@
 (defn- handle-create-session []
   (let [sid (db/create-session! :http)]
     (wm/ensure-wm! sid)
+    (touch-rest-session! sid)
     (json-response 200 {:session_id (str sid)})))
 
 (defn- internal-server-error-response
@@ -761,21 +897,28 @@
       (and session-id (not (session-exists? session-id)))
       {:response (json-response 404 {:error "unknown session id"})}
 
+      (and session-id (not (session-active? session-id)))
+      {:response (json-response 409 {:error "session closed"})}
+
       :else
       (let [sid (if session-id
                   (java.util.UUID/fromString session-id)
                   (db/create-session! :http))]
         (wm/ensure-wm! sid)
+        (cancel-rest-session-finalizer! sid)
         (clear-session-status! sid)
         {:session-id sid
          :message    message}))))
 
 (defn- process-chat!
   [{:keys [session-id message]}]
-  (let [response (agent/process-message session-id message :channel :http)]
-    (json-response 200 {:session_id (str session-id)
-                        :role       "assistant"
-                        :content    response})))
+  (try
+    (let [response (agent/process-message session-id message :channel :http)]
+      (json-response 200 {:session_id (str session-id)
+                          :role       "assistant"
+                          :content    response}))
+    (finally
+      (touch-rest-session! session-id))))
 
 (defn- handle-chat-sync
   [chat]
@@ -818,16 +961,20 @@
     (json-response 404 {:error "session not found"})
 
     :else
-    (json-response 200 {:session_id session-id
-                        :status     (status->body (get @session-statuses session-id))})))
+    (do
+      (touch-rest-session! session-id)
+      (json-response 200 {:session_id session-id
+                          :status     (status->body (get @session-statuses session-id))}))))
 
 (defn- handle-get-approval [session-id]
   (if-not (parse-session-id session-id)
     (json-response 400 {:error "invalid session id"})
-    (if-let [approval (get @pending-approvals session-id)]
-      (json-response 200 {:pending true
-                          :approval (approval->body approval)})
-      (json-response 200 {:pending false}))))
+    (do
+      (touch-rest-session! session-id)
+      (if-let [approval (get @pending-approvals session-id)]
+        (json-response 200 {:pending true
+                            :approval (approval->body approval)})
+        (json-response 200 {:pending false})))))
 
 (defn- handle-submit-approval [session-id req]
   (if-not (parse-session-id session-id)
@@ -854,6 +1001,7 @@
         (do
           (deliver (:decision current) decision*)
           (clear-pending-approval! session-id approval-id)
+          (touch-rest-session! session-id)
           (json-response 200 {:status "recorded"}))))))
 
 (defn- handle-session-messages [session-id]
@@ -865,10 +1013,28 @@
                                 {:role       (name role)
                                  :content    content
                                  :created_at (some-> created-at .toInstant str)})))]
+      (touch-rest-session! session-id)
       (json-response 200 {:session_id session-id
                           :messages   messages}))
     (catch IllegalArgumentException _
       (json-response 400 {:error "invalid session id"}))))
+
+(defn- handle-close-session [session-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    (session-busy? session-id)
+    (json-response 409 {:error "session is still processing a request"})
+
+    :else
+    (let [closed? (finalize-rest-session! session-id :explicit)]
+      (json-response 200 {:session_id      (parse-session-id session-id)
+                          :status          (if closed? "closed" "already_closed")
+                          :already_closed  (not closed?)}))))
 
 (defn- handle-history-sessions []
   (json-response 200
@@ -909,11 +1075,13 @@
     (json-response 404 {:error "session not found"})
 
     :else
-    (json-response 200
-                   {:session_id session-id
-                    :pads       (mapv scratch-metadata->body
-                                      (scratch/list-pads {:scope :session
-                                                          :session-id session-id}))})))
+    (do
+      (touch-rest-session! session-id)
+      (json-response 200
+                     {:session_id session-id
+                      :pads       (mapv scratch-metadata->body
+                                        (scratch/list-pads {:scope :session
+                                                            :session-id session-id}))}))))
 
 (defn- handle-create-scratch-pad [session-id req]
   (cond
@@ -930,6 +1098,7 @@
                                      :title      (get data "title")
                                      :content    (get data "content")
                                      :mime       (get data "mime")})]
+      (touch-rest-session! session-id)
       (json-response 201 {:session_id session-id
                           :pad        (scratch-pad->body pad)}))))
 
@@ -943,8 +1112,10 @@
 
     :else
     (if-let [pad (session-scratch-pad session-id pad-id)]
-      (json-response 200 {:session_id session-id
-                          :pad        (scratch-pad->body pad)})
+      (do
+        (touch-rest-session! session-id)
+        (json-response 200 {:session_id session-id
+                            :pad        (scratch-pad->body pad)}))
       (json-response 404 {:error "scratch pad not found"}))))
 
 (defn- handle-save-scratch-pad [session-id pad-id req]
@@ -967,6 +1138,7 @@
                     (contains? data "expected_version") (assoc :expected-version
                                                                (get data "expected_version")))]
       (try
+        (touch-rest-session! session-id)
         (json-response 200
                        {:session_id session-id
                         :pad        (scratch-pad->body (scratch/save-pad! pad-id updates))})
@@ -1011,6 +1183,7 @@
                       (contains? operation "expected_version") (assoc :expected-version
                                                                      (get operation "expected_version")))]
       (try
+        (touch-rest-session! session-id)
         (json-response 200
                        {:session_id session-id
                         :pad        (scratch-pad->body (scratch/edit-pad! pad-id edit))})
@@ -1039,6 +1212,7 @@
     :else
     (do
       (scratch/delete-pad! pad-id)
+      (touch-rest-session! session-id)
       (json-response 200 {:status "deleted"
                           :session_id session-id
                           :pad_id pad-id}))))
@@ -1480,6 +1654,7 @@
   (try
     (let [uri    (:uri req)
           method (:request-method req)
+          session-close-match (re-matches #"/sessions/([0-9a-fA-F-]+)" uri)
           session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
           status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
           approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
@@ -1511,6 +1686,9 @@
 
         (and (= method :post) (= uri "/chat"))
         (protected-route-response req #(handle-chat req))
+
+        (and (= method :delete) session-close-match)
+        (protected-route-response req #(handle-close-session (second session-close-match)))
 
         (and (= method :get) status-match)
         (protected-route-response req #(handle-get-status (second status-match)))
@@ -1617,14 +1795,28 @@
    (prompt/register-approval! :websocket http-approval-handler)
    (prompt/register-status! :http http-status-handler)
    (prompt/register-status! :websocket http-status-handler)
-   (let [s (http/run-server router {:ip bind-host :port port})]
+   (let [^ScheduledExecutorService finalizer-exec
+         (Executors/newSingleThreadScheduledExecutor)
+         s (http/run-server router {:ip bind-host :port port})]
+     (reset! rest-session-finalizer-executor finalizer-exec)
      (reset! server-atom s)
      (log/info "HTTP/WebSocket server started on" bind-host ":" port)
      s)))
 
 (defn stop! []
   (when-let [s @server-atom]
+    (doseq [{:keys [id channel active?]} (db/list-sessions)
+            :when (and (= :http channel) active?)]
+      (finalize-rest-session! id :server-stop))
     (s) ; http-kit stop fn
+    (when-let [^ScheduledExecutorService exec @rest-session-finalizer-executor]
+      (clear-rest-session-finalizers!)
+      (.shutdown exec)
+      (try
+        (.awaitTermination exec 5 TimeUnit/SECONDS)
+        (catch InterruptedException _
+          (.shutdownNow exec)))
+      (reset! rest-session-finalizer-executor nil))
     (prompt/register-approval! :http nil)
     (prompt/register-approval! :websocket nil)
     (prompt/register-status! :http nil)
