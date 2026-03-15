@@ -136,6 +136,29 @@
             props    (memory/node-properties node-eid)]
         (is (= {:company "Acme" :title "CTO"} (:work props)))))
 
+    (testing "deep-merges nested properties on later extractions"
+      (#'xia.hippocampus/merge-extraction!
+        {"entities" [{"name"       "Dana"
+                      "type"       "person"
+                      "facts"      []
+                      "properties" {"work" {"company" "Acme"
+                                            "title"   "Engineer"}}}]
+         "relations" []}
+        ep-eid)
+      (#'xia.hippocampus/merge-extraction!
+        {"entities" [{"name"       "Dana"
+                      "type"       "person"
+                      "facts"      []
+                      "properties" {"work" {"salary" 100000}}}]
+         "relations" []}
+        ep-eid)
+      (let [node-eid (:eid (first (memory/find-node "Dana")))
+            props    (memory/node-properties node-eid)]
+        (is (= {:company "Acme"
+                :title   "Engineer"
+                :salary  100000}
+               (:work props)))))
+
     (testing "creates edges between entities"
       (#'xia.hippocampus/merge-extraction!
         {"entities"  [{"name" "Carol" "type" "person"}

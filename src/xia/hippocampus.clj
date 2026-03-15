@@ -263,10 +263,19 @@ Rules:
     (mapv (fn [eid] [:db/retractEntity eid])
           (concat fact-eids edge-eids))))
 
+(defn- deep-merge-props
+  [left right]
+  (merge-with (fn [a b]
+                (if (and (map? a) (map? b))
+                  (deep-merge-props a b)
+                  b))
+              left
+              right))
+
 (defn- merge-node-properties
   [existing-props new-props]
   (if (seq new-props)
-    (merge (or existing-props {}) new-props)
+    (deep-merge-props (or existing-props {}) new-props)
     existing-props))
 
 (defn- ensure-node-state!
