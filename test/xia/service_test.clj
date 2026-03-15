@@ -214,6 +214,21 @@
             (service/request :limited :get "/three")))
       (is (= 2 @request-count)))))
 
+(deftest check-rate-limit-overflow-does-not-mutate-state
+  (let [now   60000
+        state (atom {:timestamps [59001 59002]
+                     :cleaned    now})
+        limits (doto (ConcurrentHashMap.)
+                 (.put :limited state))]
+    (with-redefs [xia.service/service-rate-limits limits
+                  xia.service/current-time-ms     (constantly now)]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"Rate limit exceeded for service limited"
+            (#'service/check-rate-limit! :limited {:rate-limit-per-minute 2})))
+      (is (= {:timestamps [59001 59002]
+              :cleaned    now}
+             @state)))))
+
 (deftest request-query-param-auth-overrides-tool-param-by-normalized-name
   (db/register-service! {:id          :query-auth-svc
                          :base-url    "https://api.example.com"

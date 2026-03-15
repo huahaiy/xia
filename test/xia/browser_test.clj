@@ -225,6 +225,45 @@
     (is (= "Example Domain" (:title page)))
     (browser/close-session sid)))
 
+(deftest concurrent-get-session-restores-once-per-session-id
+  (let [sid "restore-race"
+        url "https://example.com/restored"
+        snapshot {"session_id" sid
+                  "current_url" url
+                  "created_at_ms" (System/currentTimeMillis)
+                  "updated_at_ms" (System/currentTimeMillis)
+                  "last_access_ms" (System/currentTimeMillis)
+                  "js_enabled" true
+                  "cookies" []}
+        make-client-calls (atom 0)
+        first-restore-started (promise)
+        allow-restore (promise)]
+    ((var-get #'browser/write-session-snapshot!) sid snapshot)
+    (with-redefs [browser/make-client
+                  (fn []
+                    (swap! make-client-calls inc)
+                    (deliver first-restore-started true)
+                    @allow-restore
+                    (let [client (WebClient.)
+                          mock (MockWebConnection.)]
+                      (.setResponse mock (URL. url)
+                                    "<html><head><title>Restored</title></head><body>restored</body></html>")
+                      (.setWebConnection client mock)
+                      client))
+                  browser/wait-for-js! (fn [client _] client)
+                  browser/persist-session! (fn [_] nil)]
+      (let [f1 (future ((var-get #'browser/get-session) sid))
+            _ @first-restore-started
+            f2 (future ((var-get #'browser/get-session) sid))]
+        (Thread/sleep 100)
+        (is (= 1 @make-client-calls))
+        (deliver allow-restore true)
+        (let [sess1 @f1
+              sess2 @f2]
+          (is (= 1 @make-client-calls))
+          (is (identical? (:client sess1) (:client sess2)))
+          (browser/close-session sid))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Session limit
 ;; ---------------------------------------------------------------------------

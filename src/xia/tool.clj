@@ -520,7 +520,7 @@
                                   :tool-id  tool-id
                                   :tool-name (or (:tool/name tool) (name tool-id))})
                  (try
-                   (let [result (handler arguments)]
+                   (let [result (sci-env/call-fn handler arguments)]
                      (audit-entry! context tool-id tool arguments
                                    {:status          "success"
                                     :approval-policy (name policy)

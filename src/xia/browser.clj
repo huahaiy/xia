@@ -38,8 +38,11 @@
 (def ^:private resumable-session-ttl-ms (* 7 24 60 60 1000)) ; 7 days
 (def ^:private browser-session-dbi "xia/browser-sessions")
 (def ^:private action-settle-ms 1200)
+(def ^:private session-restore-lock-count 256)
 
 (defonce ^:private sessions (ConcurrentHashMap.))
+(defonce ^:private session-restore-locks
+  (vec (repeatedly session-restore-lock-count #(Object.))))
 
 (declare resolve-url!)
 (declare send-browser-request!)
@@ -49,6 +52,20 @@
 
 (defn- now-ms []
   (System/currentTimeMillis))
+
+(defn- session-restore-lock
+  [session-id]
+  (when session-id
+    (nth session-restore-locks
+         (mod (bit-and Integer/MAX_VALUE (hash session-id))
+              session-restore-lock-count))))
+
+(defn- with-session-restore-lock
+  [session-id f]
+  (if-let [lock (session-restore-lock session-id)]
+    (locking lock
+      (f))
+    (f)))
 
 (defn- lmdb []
   (try
@@ -167,10 +184,23 @@
   (when-let [sess (.get sessions session-id)]
     (write-session-snapshot! session-id (live-session->snapshot session-id @sess))))
 
+(defn- close-session-value!
+  [sess]
+  (when sess
+    (try (.close ^WebClient (:client @sess)) (catch Exception _))
+    true))
+
 (defn- close-live-session!
   [session-id]
   (when-let [sess (.remove sessions session-id)]
-    (try (.close ^WebClient (:client @sess)) (catch Exception _))
+    (close-session-value! sess)
+    true))
+
+(defn- discard-live-session!
+  [session-id sess]
+  (when sess
+    (.remove sessions session-id sess)
+    (close-session-value! sess)
     true))
 
 (defn- install-url-guard!
@@ -255,7 +285,7 @@
               (persist-session! sid)
               @sess
               (catch Exception e
-                (close-live-session! sid)
+                (discard-live-session! sid sess)
                 (throw (ex-info "Failed to restore browser session"
                                 {:session-id session-id
                                  :url (get snapshot "current_url")}
@@ -276,21 +306,43 @@
   "Get a live session or restore it from the persisted snapshot."
   [session-id]
   (let [sess (or (.get sessions session-id)
-                 (do
-                   (restore-session! session-id)
-                   (.get sessions session-id)))]
+                 (with-session-restore-lock
+                   session-id
+                   (fn []
+                     (or (.get sessions session-id)
+                         (do
+                           (restore-session! session-id)
+                           (.get sessions session-id))))))]
     (when-not sess
       (throw (ex-info (str "No browser session: " session-id
                            ". Call browser-open first.")
                       {:session-id session-id})))
-    (when (session-expired? @sess)
-      (persist-session! session-id)
-      (close-live-session! session-id)
-      (if-let [restored (restore-session! session-id)]
-        restored
-        (throw (ex-info "Browser session expired" {:session-id session-id}))))
-    (swap! sess assoc :last-access (now-ms))
-    @sess))
+    (let [sess (if (session-expired? @sess)
+                 (with-session-restore-lock
+                   session-id
+                   (fn []
+                     (let [current (.get sessions session-id)]
+                       (cond
+                         (and current (not (session-expired? @current)))
+                         current
+
+                         current
+                         (do
+                           (persist-session! session-id)
+                           (close-live-session! session-id)
+                           (if-let [restored (restore-session! session-id)]
+                             restored
+                             (throw (ex-info "Browser session expired"
+                                             {:session-id session-id}))))
+
+                         :else
+                         (if-let [restored (restore-session! session-id)]
+                           restored
+                           (throw (ex-info "Browser session expired"
+                                           {:session-id session-id})))))))
+                 sess)]
+      (swap! sess assoc :last-access (now-ms))
+      @sess)))
 
 ;; ---------------------------------------------------------------------------
 ;; Page → readable content

@@ -17,6 +17,17 @@
   (is (= {"status" "ok"}
          (tool/execute-tool :safe-tool {} {:channel :scheduler}))))
 
+(deftest tool-handler-times-out
+  (db/set-config! :tool/sci-handler-timeout-ms 100)
+  (db/install-tool! {:id          :hung-tool
+                     :name        "hung-tool"
+                     :description "Hung tool"
+                     :approval    :auto
+                     :handler     "(fn [_] (deref (promise)))"})
+  (tool/load-tool! :hung-tool)
+  (is (= {:error "Tool execution failed: SCI handler timed out after 100 ms"}
+         (tool/execute-tool :hung-tool {} {:channel :scheduler}))))
+
 (deftest privileged-tool-blocks-without-approval-handler
   (db/install-tool! {:id          :privileged-tool
                      :name        "privileged-tool"

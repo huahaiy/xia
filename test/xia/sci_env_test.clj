@@ -12,6 +12,33 @@
   (is (thrown? Exception
                (sci-env/eval-string "(System/getenv \"PATH\")"))))
 
+(deftest sci-eval-times-out
+  (xia.db/set-config! :tool/sci-eval-timeout-ms 100)
+  (let [ex (try
+             (sci-env/eval-string "(deref (promise))")
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (re-find #"SCI eval timed out" (.getMessage ex)))
+    (is (= {:stage :eval
+            :timeout-ms 100}
+           (select-keys (ex-data ex) [:stage :timeout-ms])))))
+
+(deftest sci-handler-call-times-out
+  (xia.db/set-config! :tool/sci-handler-timeout-ms 100)
+  (let [handler (sci-env/eval-string "(fn [_] (deref (promise)))")
+        ex      (try
+                  (sci-env/call-fn handler {})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+    (is (some? ex))
+    (is (re-find #"SCI handler timed out" (.getMessage ex)))
+    (is (= {:stage :handler
+            :timeout-ms 100}
+           (select-keys (ex-data ex) [:stage :timeout-ms])))))
+
 (deftest file-shell-and-source-access-are-blocked-in-sci
   (doseq [code ["(slurp \"/etc/hosts\")"
                 "(require 'clojure.java.io) (clojure.java.io/reader \"/etc/hosts\")"

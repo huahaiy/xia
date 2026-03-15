@@ -13,6 +13,7 @@
    namespace changes do not widen access."
   (:require [sci.core :as sci]
             [xia.browser :as browser]
+            [xia.config :as cfg]
             [xia.cron :as cron]
             [xia.memory :as memory]
             [xia.scratch :as scratch]
@@ -22,6 +23,9 @@
             [xia.skill :as skill]
             [xia.web :as web]
             [xia.working-memory :as wm]))
+
+(def ^:private default-sci-eval-timeout-ms 10000)
+(def ^:private default-sci-handler-timeout-ms 120000)
 
 (defn- blocked-sci-fn
   [sym]
@@ -180,7 +184,39 @@
 
 (defonce ^:private default-ctx (delay (make-ctx)))
 
+(defn- sci-eval-timeout-ms
+  []
+  (cfg/positive-long :tool/sci-eval-timeout-ms
+                     default-sci-eval-timeout-ms))
+
+(defn- sci-handler-timeout-ms
+  []
+  (cfg/positive-long :tool/sci-handler-timeout-ms
+                     default-sci-handler-timeout-ms))
+
+(defn- call-with-timeout
+  [timeout-ms stage f]
+  (let [worker   (future (f))
+        timeout  (Object.)
+        result   (deref worker timeout-ms timeout)]
+    (if (identical? timeout result)
+      (do
+        (future-cancel worker)
+        (throw (ex-info (str "SCI " (name stage) " timed out after " timeout-ms " ms")
+                        {:stage stage
+                         :timeout-ms timeout-ms})))
+      result)))
+
 (defn eval-string
   "Evaluate a string of Clojure code in the SCI sandbox."
   [code-str]
-  (sci/eval-string* @default-ctx code-str))
+  (call-with-timeout (sci-eval-timeout-ms)
+                     :eval
+                     #(sci/eval-string* @default-ctx code-str)))
+
+(defn call-fn
+  "Invoke a compiled SCI function with a bounded execution time."
+  [f & args]
+  (call-with-timeout (sci-handler-timeout-ms)
+                     :handler
+                     #(apply f args)))

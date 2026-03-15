@@ -5,6 +5,7 @@
             [xia.ssrf :as ssrf]
             [xia.web :as web])
   (:import [java.net InetAddress]
+           [java.util.concurrent ConcurrentHashMap]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element]))
 
@@ -49,6 +50,22 @@
     (is (nil? (ssrf/validate-url! "https://example.com"))))
   (testing "allows http"
     (is (nil? (ssrf/validate-url! "http://example.com")))))
+
+(deftest rate-limit-overflow-does-not-mutate-state
+  (let [host  "example.com"
+        now   (System/currentTimeMillis)
+        hit-ts (- now 1000)
+        state (atom {:timestamps (vec (repeat (var-get #'web/rate-limit-max) hit-ts))
+                     :cleaned    now})
+        limits (doto (ConcurrentHashMap.)
+                 (.put host state))]
+    (with-redefs [xia.web/rate-limits limits]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"Rate limit exceeded for example.com"
+            (#'web/check-rate-limit! "https://example.com/path")))
+      (is (= {:timestamps (vec (repeat (var-get #'web/rate-limit-max) hit-ts))
+              :cleaned    now}
+             @state)))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML → readable text conversion

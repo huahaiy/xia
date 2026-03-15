@@ -133,6 +133,19 @@
 (defn- current-time-ms []
   (System/currentTimeMillis))
 
+(defn- consume-rate-limit-slot!
+  [state now limit error-fn]
+  (loop []
+    (let [{:keys [timestamps] :as current} @state
+          cutoff (- now rate-limit-window-ms)
+          recent (filterv #(> % cutoff) timestamps)]
+      (when (>= (count recent) limit)
+        (throw (error-fn)))
+      (let [updated {:timestamps (conj recent now)
+                     :cleaned    now}]
+        (when-not (compare-and-set! state current updated)
+          (recur))))))
+
 (defn- check-rate-limit!
   [service-id service]
   (let [limit (effective-rate-limit-per-minute service)
@@ -140,17 +153,15 @@
         state (.computeIfAbsent service-rate-limits service-id
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
-    (swap! state
-      (fn [{:keys [timestamps]}]
-        (let [cutoff (- now rate-limit-window-ms)
-              recent (filterv #(> % cutoff) timestamps)]
-          (when (>= (count recent) limit)
-            (throw (ex-info (str "Rate limit exceeded for service " (name service-id)
-                                 " (max " limit " requests/minute)")
-                            {:service-id service-id
-                             :limit      limit})))
-          {:timestamps (conj recent now)
-           :cleaned    now})))))
+    (consume-rate-limit-slot!
+      state
+      now
+      limit
+      (fn []
+        (ex-info (str "Rate limit exceeded for service " (name service-id)
+                      " (max " limit " requests/minute)")
+                 {:service-id service-id
+                  :limit      limit})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Service resolution
