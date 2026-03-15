@@ -304,7 +304,43 @@
                                           (reset! opts-seen opts)
                                           "Recap of earlier conversation.")]
         (ctx/compact-history msgs 100 {:workload :history-compaction})
-        (is (= [:workload :history-compaction] @opts-seen))))))
+        (is (= [:workload :history-compaction] @opts-seen)))))
+
+  (testing "includes tool usage and results in the compaction transcript"
+    (let [tool-calls [{"id" "call_1"
+                       "function" {"name" "web-search"
+                                   "arguments" "{\"q\":\"weather in sf\"}"}}]
+          msgs       [{:role "user"
+                       :content (str "Please check the weather. " (apply str (repeat 120 "x")))}
+                      {:role "assistant"
+                       :content "I will search for the latest forecast."
+                       :tool_calls tool-calls}
+                      {:role "tool"
+                       :tool_call_id "call_1"
+                       :content "{\"success?\":true,\"results\":[{\"title\":\"Forecast\"}]}"}
+                      {:role "assistant"
+                       :content "The forecast says it will rain later today."}
+                      {:role "user"
+                       :content (str "Thanks. " (apply str (repeat 120 "y")))}
+                      {:role "assistant"
+                       :content (str "You're welcome. " (apply str (repeat 120 "z")))}
+                      {:role "user"
+                       :content (str "Anything else? " (apply str (repeat 120 "q")))}
+                      {:role "assistant"
+                       :content (str "No. " (apply str (repeat 120 "w")))}]
+          llm-input  (atom nil)]
+      (with-redefs [xia.llm/chat-simple (fn [messages & _]
+                                          (reset! llm-input messages)
+                                          "Recap of earlier conversation.")]
+        (ctx/compact-history msgs 100)
+        (is (str/includes? (get-in @llm-input [0 :content])
+                           "important tool usage"))
+        (is (str/includes? (get-in @llm-input [1 :content])
+                           "assistant requested tool[call_1]: web-search"))
+        (is (str/includes? (get-in @llm-input [1 :content])
+                           "args={\"q\":\"weather in sf\"}"))
+        (is (str/includes? (get-in @llm-input [1 :content])
+                           "tool result[call_1]: {\"success?\":true,\"results\":[{\"title\":\"Forecast\"}]}"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; build-messages

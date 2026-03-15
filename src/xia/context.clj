@@ -186,6 +186,66 @@
     (some? tool-result)   (json/write-json-str tool-result)
     :else                 content))
 
+(defn- history-role-name
+  [role]
+  (cond
+    (keyword? role) (name role)
+    (symbol? role)  (name role)
+    (string? role)  role
+    (some? role)    (str role)
+    :else           "unknown"))
+
+(defn- history-summary-fragment
+  [value]
+  (when (some? value)
+    (let [text (try
+                 (if (string? value)
+                   value
+                   (json/write-json-str value))
+                 (catch Exception _
+                   (str value)))
+          compact (some-> text str str/trim (str/replace #"\s+" " "))]
+      (when (seq compact)
+        compact))))
+
+(defn- render-tool-call-summary
+  [call]
+  (let [call-id  (history-summary-fragment (or (:id call) (get call "id")))
+        function (or (:function call) (get call "function"))
+        fn-name  (or (history-summary-fragment (or (:name function) (get function "name")))
+                     "unknown-tool")
+        args     (history-summary-fragment (or (:arguments function)
+                                               (get function "arguments")))]
+    (str "assistant requested tool"
+         (when call-id
+           (str "[" call-id "]"))
+         ": "
+         fn-name
+         (when args
+           (str " args=" args)))))
+
+(defn- history-message->summary-lines
+  [{:keys [content] :as message}]
+  (let [role         (history-role-name (:role message))
+        content-text (history-summary-fragment content)
+        tool-calls   (or (:tool_calls message)
+                         (get message "tool_calls"))
+        tool-call-id (history-summary-fragment (or (:tool_call_id message)
+                                                   (get message "tool_call_id")))]
+    (cond-> []
+      (= role "tool")
+      (conj (str "tool result"
+                 (when tool-call-id
+                   (str "[" tool-call-id "]"))
+                 ": "
+                 (or content-text "[no content]")))
+
+      (and (not= role "tool") content-text)
+      (conj (str role ": " content-text))
+
+      (seq tool-calls)
+      (into (map render-tool-call-summary tool-calls)))))
+
 ;; ============================================================================
 ;; Renderers
 ;; ============================================================================
@@ -397,12 +457,14 @@
              old-msgs    (subvec (vec messages) 0 (- msg-count keep-count))
              recent-msgs (subvec (vec messages) (- msg-count keep-count))
              old-text    (->> old-msgs
-                              (map (fn [{:keys [role content]}]
-                                     (str (name role) ": " content)))
+                              (mapcat history-message->summary-lines)
                               (str/join "\n"))]
          (try
            (let [summary-messages [{:role "system"
-                                    :content "Summarize this conversation excerpt in 2-4 sentences. Capture key topics, decisions, and any personal information shared. Be factual."}
+                                    :content (str "Summarize this conversation excerpt in 2-4 sentences. "
+                                                  "Capture key topics, decisions, any personal information shared, "
+                                                  "and important tool usage, including which tools were called and "
+                                                  "the important results or errors they returned. Be factual.")}
                                    {:role "user" :content old-text}]
                  recap            (cond
                                     provider-id
