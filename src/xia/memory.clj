@@ -127,6 +127,12 @@
 (defn mark-episode-processed! [eid]
   (db/transact! [[:db/add eid :episode/processed? true]]))
 
+(defn mark-episode-consolidation-failed!
+  [eid error-message]
+  (db/transact! [[:db/add eid :episode/processed? true]
+                 [:db/add eid :episode/consolidation-error (str error-message)]
+                 [:db/add eid :episode/consolidation-failed-at (java.util.Date.)]]))
+
 (defn recent-episodes
   "Get the N most recent episodes."
   [n]

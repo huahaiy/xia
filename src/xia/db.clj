@@ -41,7 +41,9 @@
    :episode/session-id   {:db/valueType :db.type/string}  ; link back to session
    :episode/timestamp    {:db/valueType :db.type/instant}
    :episode/importance   {:db/valueType :db.type/float}
-   :episode/processed?   {:db/valueType :db.type/boolean}  ; consolidated by hippocampus?
+   :episode/processed?   {:db/valueType :db.type/boolean}  ; consolidation reached a terminal state
+   :episode/consolidation-error {:db/valueType :db.type/string}
+   :episode/consolidation-failed-at {:db/valueType :db.type/instant}
 
    ;; --- Knowledge Graph: Nodes ---
    :kg.node/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}

@@ -444,21 +444,31 @@ Rules:
   [{:keys [eid summary importance] :as episode}]
   (log/info "Consolidating episode:" summary)
   (let [extraction (extract-knowledge episode)]
-    (when-not extraction
-      (throw (ex-info "knowledge extraction returned invalid JSON"
-                      {:episode-eid eid
-                       :summary     summary})))
-    (db/transact! (build-merge-tx extraction
-                                  eid
-                                  :mark-processed? true
-                                  :importance (or importance
-                                                  default-episode-importance)))
-    (memory/prune-processed-episodes!)
-    (log/info "Consolidated episode, extracted"
-              (count (get extraction "entities" []))
-              "entities and"
-              (count (get extraction "relations" []))
-              "relations")))
+    (if-not extraction
+      (let [error-message "knowledge extraction returned invalid JSON"]
+        (memory/mark-episode-consolidation-failed! eid error-message)
+        (log/warn "Skipping episode after invalid extraction:" summary)
+        {:status      :invalid-extraction
+         :episode-eid eid
+         :summary     summary
+         :error       error-message})
+      (do
+        (db/transact! (build-merge-tx extraction
+                                      eid
+                                      :mark-processed? true
+                                      :importance (or importance
+                                                      default-episode-importance)))
+        (memory/prune-processed-episodes!)
+        (log/info "Consolidated episode, extracted"
+                  (count (get extraction "entities" []))
+                  "entities and"
+                  (count (get extraction "relations" []))
+                  "relations")
+        {:status      :ok
+         :episode-eid eid
+         :summary     summary
+         :entities    (count (get extraction "entities" []))
+         :relations   (count (get extraction "relations" []))}))))
 
 (defn consolidate-pending!
   "Process all unprocessed episodes."

@@ -265,17 +265,24 @@
     (is (false? (:episode/processed? (db/entity ep-eid))))
     (is (empty? (memory/find-node "RollbackNode")))))
 
-(deftest test-consolidate-episode-leaves-invalid-extractions-pending
+(deftest test-consolidate-episode-quarantines-invalid-extractions
   (let [ep-eid (th/seed-episode! "Bad extraction")]
     (with-redefs [xia.hippocampus/extract-knowledge
                   (fn [_episode] nil)]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
-            #"knowledge extraction returned invalid JSON"
-            (hippo/consolidate-episode!
-              {:eid     ep-eid
-               :summary "Bad extraction"
-               :type    :conversation}))))
-    (is (false? (:episode/processed? (db/entity ep-eid))))
+      (is (= {:status      :invalid-extraction
+              :episode-eid ep-eid
+              :summary     "Bad extraction"
+              :error       "knowledge extraction returned invalid JSON"}
+             (hippo/consolidate-episode!
+               {:eid     ep-eid
+                :summary "Bad extraction"
+                :type    :conversation}))))
+    (let [episode (db/entity ep-eid)]
+      (is (true? (:episode/processed? episode)))
+      (is (= "knowledge extraction returned invalid JSON"
+             (:episode/consolidation-error episode)))
+      (is (some? (:episode/consolidation-failed-at episode))))
+    (is (empty? (memory/unprocessed-episodes)))
     (is (empty? (memory/find-node "Bad extraction")))))
 
 ;; ---------------------------------------------------------------------------
@@ -322,6 +329,30 @@
     (is (< (Math/abs (- 0.2
                         (double (:episode/importance (db/entity ep-2)))))
            1.0e-6))))
+
+(deftest test-consolidate-pending-quarantines-invalid-episodes-and-processes-rest
+  (let [bad-eid  (th/seed-episode! "Bad extraction")
+        good-eid (th/seed-episode! "Good extraction")]
+    (with-redefs [xia.hippocampus/rate-episode-importance
+                  (fn [episodes]
+                    (into {}
+                          (map (fn [{:keys [eid]}] [eid 0.5]))
+                          episodes))
+                  xia.hippocampus/extract-knowledge
+                  (fn [{:keys [summary]}]
+                    (if (= "Bad extraction" summary)
+                      nil
+                      {"entities" [] "relations" []}))
+                  xia.memory/prune-processed-episodes!
+                  (fn [] 0)]
+      (hippo/consolidate-pending!))
+    (let [bad  (db/entity bad-eid)
+          good (db/entity good-eid)]
+      (is (true? (:episode/processed? bad)))
+      (is (= "knowledge extraction returned invalid JSON"
+             (:episode/consolidation-error bad)))
+      (is (true? (:episode/processed? good))))
+    (is (empty? (memory/unprocessed-episodes)))))
 
 ;; ---------------------------------------------------------------------------
 ;; maintain-knowledge! — confidence decay
