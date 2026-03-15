@@ -52,6 +52,10 @@
     (testing "no match"
       (is (false? (fs? "likes Python" "prefers Rust"))))
 
+    (testing "high-overlap corrections do not dedup"
+      (is (false? (fs? "She prefers Python for data science work"
+                       "She prefers Ruby for data science work"))))
+
     (testing "whitespace trimming"
       (is (true? (fs? "  likes Clojure  " "likes Clojure"))))))
 
@@ -78,6 +82,22 @@
       (#'xia.hippocampus/dedup-fact! node-eid "lives in Seattle" ep-eid)
       (let [facts (memory/node-facts node-eid)]
         (is (= 2 (count facts)))))))
+
+(deftest test-dedup-fact-keeps-high-overlap-corrections
+  (let [node-eid (th/seed-node! "Avery" "person")
+        ep-eid   (th/seed-episode! "correction episode")]
+    (#'xia.hippocampus/dedup-fact! node-eid
+                                   "She prefers Python for data science work"
+                                   ep-eid)
+    (#'xia.hippocampus/dedup-fact! node-eid
+                                   "She prefers Ruby for data science work"
+                                   ep-eid)
+    (let [facts (memory/node-facts node-eid)
+          contents (set (map :content facts))]
+      (is (= 2 (count facts)))
+      (is (= #{"She prefers Python for data science work"
+               "She prefers Ruby for data science work"}
+             contents)))))
 
 ;; ---------------------------------------------------------------------------
 ;; find-or-create-node!

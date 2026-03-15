@@ -205,21 +205,20 @@ Rules:
            set))))
 
 (defn- fact-similar?
-  "Check if two fact strings are substantially similar (for dedup)."
+  "Check if two fact strings are conservatively similar enough to dedup.
+
+   Prefer false negatives over false positives here: duplicate facts are less
+   damaging than silently collapsing a correction into an older fact."
   [existing-content new-content]
   (let [a  (canonical-fact existing-content)
         b  (canonical-fact new-content)
         ta (fact-tokens existing-content)
-        tb (fact-tokens new-content)
-        overlap (when (and (seq ta) (seq tb))
-                  (/ (count (set/intersection ta tb))
-                     (double (max (count ta) (count tb)))))]
+        tb (fact-tokens new-content)]
     (or (= a b)
         (str/includes? a b)
         (str/includes? b a)
         (and (seq ta) (seq tb) (set/subset? ta tb))
-        (and (seq ta) (seq tb) (set/subset? tb ta))
-        (and overlap (>= overlap 0.8)))))
+        (and (seq ta) (seq tb) (set/subset? tb ta)))))
 
 (defn- dedup-fact!
   "Add a fact with deduplication. If a similar fact exists on the node,
