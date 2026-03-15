@@ -395,7 +395,8 @@
      :include-links — include link URLs in output (default true)
 
    Returns:
-     {:url        \"https://...\"
+     {:success?   true
+      :url        \"https://...\"
       :title      \"Page Title\"
       :content    \"Readable markdown-like text\"
       :links      [{:text \"Link\" :url \"https://...\"}]
@@ -420,21 +421,24 @@
                 raw    (element->markdown main include-links)
                 content (truncate-to-tokens raw max-tokens)
                 links  (when include-links (extract-links main))]
-            {:url        (or final-url url)
+            {:success?   true
+             :url        (or final-url url)
              :title      title
              :content    content
              :links      (or links [])
              :truncated? (not= raw content)})
           ;; Non-HTML — return raw text truncated
           (let [content (truncate-to-tokens (or body "") max-tokens)]
-            {:url        (or final-url url)
+            {:success?   true
+             :url        (or final-url url)
              :title      nil
              :content    content
              :links      []
              :truncated? (not= body content)}))))
     (catch Exception e
-      {:url   url
-       :error (.getMessage e)})))
+      {:success? false
+       :url      url
+       :error    (.getMessage e)})))
 
 (defn- extract-ddg-url
   "Extract the actual target URL from a DuckDuckGo redirect href.
@@ -635,9 +639,15 @@
      :backend     — one of :duckduckgo-html or :searxng-json
 
    Returns:
-     {:query   \"search terms\"
-      :backend \"duckduckgo-html\"
-      :results [{:title \"...\" :url \"...\" :snippet \"...\"}]}"
+     {:success? true
+      :query    \"search terms\"
+      :backend  \"duckduckgo-html\"
+      :results  [{:title \"...\" :url \"...\" :snippet \"...\"}]}
+
+     On failure:
+     {:success? false
+      :query    \"search terms\"
+      :error    \"...\"}"
   [query & {:keys [max-results backend]
             :or   {max-results 5}}]
   (try
@@ -652,7 +662,8 @@
                       (catch Exception e
                         {:exception e}))]
         (if-let [results (:results attempt)]
-          {:query     query
+          {:success?  true
+           :query     query
            :backend   (name backend-id)
            :results   results
            :fallbacks (when (seq failures) failures)}
@@ -668,8 +679,11 @@
                                :failures (conj failures failure)}
                               e)))))))
     (catch Exception e
-      {:query query
-       :error (.getMessage e)})))
+      (cond-> {:success? false
+               :query    query
+               :error    (.getMessage e)}
+        (:backend (ex-data e)) (assoc :backend (:backend (ex-data e)))
+        (:failures (ex-data e)) (assoc :failures (:failures (ex-data e)))))))
 
 (defn extract-data
   "Fetch a page and extract structured data using CSS selectors.
@@ -685,10 +699,11 @@
         \"prices\"   \".price\"})
 
    Returns:
-     {:url  \"https://...\"
-      :data {\"headings\" [\"Title\" \"Subtitle\"]
-             \"links\"    [{:text \"...\" :href \"...\"}]
-             \"prices\"   [\"$19.99\"]}}"
+     {:success? true
+      :url      \"https://...\"
+      :data     {\"headings\" [\"Title\" \"Subtitle\"]
+                 \"links\"    [{:text \"...\" :href \"...\"}]
+                 \"prices\"   [\"$19.99\"]}}"
   [url selectors]
   (try
     (let [{:keys [status body final-url]} (fetch-raw url)]
@@ -706,8 +721,10 @@
                                els))))
                    {}
                    selectors)]
-        {:url  (or final-url url)
-         :data data}))
+        {:success? true
+         :url      (or final-url url)
+         :data     data}))
     (catch Exception e
-      {:url   url
-       :error (.getMessage e)})))
+      {:success? false
+       :url      url
+       :error    (.getMessage e)})))

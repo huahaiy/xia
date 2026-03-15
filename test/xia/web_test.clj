@@ -217,6 +217,7 @@
                               </body></html>"
                        :final-url url}))}
     #(let [result (web/search-web "clojure" :backend :duckduckgo-html)]
+       (is (true? (:success? result)))
        (is (= "duckduckgo-html" (:backend result)))
        (is (= [{:title "Clojure"
                 :url "https://clojure.org/"
@@ -238,7 +239,12 @@
                        :body "<html><body><div class='unexpected'>markup changed</div></body></html>"
                        :final-url url}))}
     #(let [result (web/search-web "clojure" :backend :duckduckgo-html)]
+       (is (false? (:success? result)))
        (is (nil? (:results result)))
+       (is (= "duckduckgo-html" (:backend result)))
+       (is (= [{:backend "duckduckgo-html"
+                :error "DuckDuckGo HTML markup changed; search results could not be parsed"}]
+              (:failures result)))
        (is (re-find #"markup changed" (:error result))))))
 
 (deftest search-web-ddg-allows-empty-no-results-pages
@@ -255,6 +261,7 @@
                        :body "<html><body><div>No results found for test query</div></body></html>"
                        :final-url url}))}
     #(let [result (web/search-web "test query" :backend :duckduckgo-html)]
+       (is (true? (:success? result)))
        (is (= [] (:results result)))
        (is (= "duckduckgo-html" (:backend result)))
        (is (nil? (:error result))))))
@@ -288,6 +295,7 @@
                        ([url _headers]
                         (response-for-url url)))}
       #(let [result (web/search-web "clojure")]
+         (is (true? (:success? result)))
          (is (= ["https://html.duckduckgo.com/html/?q=clojure"
                  "https://search.example/search?q=clojure&format=json"]
                 @calls))
@@ -304,8 +312,22 @@
 ;; Integration: fetch-page (live HTTP)
 ;; ---------------------------------------------------------------------------
 
+(deftest fetch-page-sets-success-flag-on-success
+  (with-redefs-fn {#'web/fetch-raw
+                   (fn [_url]
+                     {:status 200
+                      :headers {"content-type" "text/html"}
+                      :body "<html><head><title>Example</title></head><body><main><p>Hello</p></main></body></html>"
+                      :final-url "https://example.com"})}
+    #(let [result (web/fetch-page "https://example.com")]
+       (is (true? (:success? result)))
+       (is (= "Example" (:title result)))
+       (is (re-find #"Hello" (:content result)))
+       (is (nil? (:error result))))))
+
 (deftest ^:integration fetch-page-example-com
   (let [result (web/fetch-page "https://example.com")]
+    (is (true? (:success? result)))
     (is (nil? (:error result)))
     (is (string? (:title result)))
     (is (string? (:content result)))
@@ -313,10 +335,12 @@
 
 (deftest fetch-page-returns-error-for-bad-url
   (let [result (web/fetch-page "http://localhost:1/nope")]
+    (is (false? (:success? result)))
     (is (some? (:error result)))))
 
 (deftest fetch-page-blocks-file-scheme
   (let [result (web/fetch-page "file:///etc/passwd")]
+    (is (false? (:success? result)))
     (is (some? (:error result)))
     (is (re-find #"Only http" (:error result)))))
 
@@ -381,6 +405,7 @@
   (let [result (web/extract-data "https://example.com"
                  {"headings" "h1"
                   "links"    "a[href]"})]
+    (is (true? (:success? result)))
     (is (nil? (:error result)))
     (is (map? (:data result)))
     (is (vector? (get-in result [:data "headings"])))))
