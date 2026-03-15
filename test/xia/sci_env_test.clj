@@ -1,6 +1,7 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer :all]
             [xia.db]
+            [xia.memory :as memory]
             [xia.schedule :as schedule]
             [xia.sci-env :as sci-env]
             [xia.test-helpers :refer [with-test-db]]))
@@ -27,6 +28,23 @@
   (is (= #{1 2}
          (sci-env/eval-string
            "(require '[clojure.set :as set]) (set/union #{1} #{2})"))))
+
+(deftest memory-access-is-read-only-in-sci
+  (memory/record-episode! {:summary "trusted episode"})
+  (is (= 1
+         (sci-env/eval-string "(count (xia.memory/recent-episodes 10))")))
+  (doseq [code ["(xia.memory/record-episode! {:summary \"forged episode\"})"
+                "(xia.memory/add-node! {:name \"Injected\" :type :concept})"
+                "(xia.memory/add-edge! {:from-eid nil :to-eid nil :type :related-to})"
+                "(xia.memory/add-fact! {:node-eid nil :content \"forged fact\"})"
+                "(xia.memory/set-node-property! nil [:role] \"hijacked\")"
+                "(xia.memory/remove-node-property! nil [:role])"]]
+    (is (thrown-with-msg?
+          Exception
+          #"not available in Xia's SCI sandbox"
+          (sci-env/eval-string code))
+        code))
+  (is (= 1 (count (memory/recent-episodes 10)))))
 
 (deftest schedule-history-is-redacted-in-sci
   (schedule/create-schedule!

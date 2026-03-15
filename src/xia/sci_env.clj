@@ -8,8 +8,9 @@
 
    SECURITY: Tool handlers run untrusted code. All DB access goes through
    xia.secret safe wrappers that block access to credentials and secrets.
-   The sandbox explicitly denies file I/O, shell execution, and source
-   introspection vars so SCI default namespace changes do not widen access."
+   The sandbox explicitly denies file I/O, shell execution, source
+   introspection vars, and direct long-term memory mutation so SCI default
+   namespace changes do not widen access."
   (:require [sci.core :as sci]
             [xia.browser :as browser]
             [xia.cron :as cron]
@@ -22,12 +23,14 @@
             [xia.web :as web]
             [xia.working-memory :as wm]))
 
-(def ^:private xia-memory-ns
-  {'record-episode!          memory/record-episode!
-   'add-node!                memory/add-node!
-   'find-node                memory/find-node
-   'add-edge!                memory/add-edge!
-   'add-fact!                memory/add-fact!
+(defn- blocked-sci-fn
+  [sym]
+  (fn [& _]
+    (throw (ex-info (str sym " is not available in Xia's SCI sandbox")
+                    {:symbol sym}))))
+
+(def ^:private xia-memory-read-ns
+  {'find-node                memory/find-node
    'node-facts               memory/node-facts
    'node-edges               memory/node-edges
    'recent-episodes          memory/recent-episodes
@@ -36,9 +39,19 @@
    'search-episodes          memory/search-episodes
    'recall-knowledge         memory/recall-knowledge
    'node-properties          memory/node-properties
-   'set-node-property!       memory/set-node-property!
-   'remove-node-property!    memory/remove-node-property!
    'query-nodes-by-property  memory/query-nodes-by-property})
+
+(def ^:private xia-memory-write-blocked-ns
+  {'record-episode!          (blocked-sci-fn 'xia.memory/record-episode!)
+   'add-node!                (blocked-sci-fn 'xia.memory/add-node!)
+   'add-edge!                (blocked-sci-fn 'xia.memory/add-edge!)
+   'add-fact!                (blocked-sci-fn 'xia.memory/add-fact!)
+   'set-node-property!       (blocked-sci-fn 'xia.memory/set-node-property!)
+   'remove-node-property!    (blocked-sci-fn 'xia.memory/remove-node-property!)})
+
+(def ^:private xia-memory-ns
+  (merge xia-memory-read-ns
+         xia-memory-write-blocked-ns))
 
 (def ^:private xia-wm-ns
   {'get-wm      wm/get-wm
@@ -100,12 +113,6 @@
    'skill-section       skill/skill-section
    'skill-headings      skill/skill-headings
    'patch-skill-section! skill/patch-skill-section!})
-
-(defn- blocked-sci-fn
-  [sym]
-  (fn [& _]
-    (throw (ex-info (str sym " is not available in Xia's SCI sandbox")
-                    {:symbol sym}))))
 
 (def ^:private sci-core-overrides
   {'slurp       (blocked-sci-fn 'clojure.core/slurp)
