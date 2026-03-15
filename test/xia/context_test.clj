@@ -21,10 +21,10 @@
     (is (= 3 (ctx/estimate-tokens "hello world!")))
     (is (pos? (ctx/estimate-tokens "some text"))))
 
-  (testing "CJK text is not treated as 4 chars per token"
+  (testing "CJK text is priced more conservatively without assuming 1 char per token"
     (let [text "你好世界"
           naive (quot (count text) 4)]
-      (is (= 4 (ctx/estimate-tokens text)))
+      (is (= 2 (ctx/estimate-tokens text)))
       (is (> (ctx/estimate-tokens text) naive))))
 
   (testing "long code identifiers are discounted"

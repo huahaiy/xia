@@ -88,7 +88,8 @@
       0
       (let [baseline       (quot (count text) 4)
             cjk-chars      (count (re-seq cjk-char-pattern text))
-            cjk-adjustment (- cjk-chars (quot cjk-chars 4))
+            cjk-adjustment (- (ceil-div cjk-chars 2)
+                              (quot cjk-chars 4))
             code-discount  (codeish-discount text)]
         (max 1 (- (+ baseline cjk-adjustment) code-discount))))))
 
