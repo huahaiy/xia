@@ -18,6 +18,8 @@
 
 (def ^:private max-tool-rounds 10)
 (def ^:private default-max-tool-calls-per-round 12)
+(def ^:private default-max-user-message-chars 32768)
+(def ^:private default-max-user-message-tokens 8000)
 (def ^:private session-turn-lock-count 256)
 (defonce ^:private session-turn-locks
   (vec (repeatedly session-turn-lock-count #(Object.))))
@@ -37,6 +39,48 @@
     (locking lock
       (f))
     (f)))
+
+(defn- max-user-message-chars
+  []
+  (cfg/positive-long :agent/max-user-message-chars
+                     default-max-user-message-chars))
+
+(defn- max-user-message-tokens
+  []
+  (cfg/positive-long :agent/max-user-message-tokens
+                     default-max-user-message-tokens))
+
+(defn- validate-user-message!
+  [user-message]
+  (let [message        (or user-message "")
+        char-count     (count message)
+        token-estimate (context/estimate-tokens message)
+        max-chars      (max-user-message-chars)
+        max-tokens     (max-user-message-tokens)]
+    (cond
+      (> char-count max-chars)
+      (throw (ex-info (str "User message too large: "
+                           char-count
+                           " chars (max "
+                           max-chars
+                           ")")
+                      {:type        :user-message-too-large
+                       :status      413
+                       :error       "user message too large"
+                       :char-count  char-count
+                       :max-chars   max-chars}))
+
+      (> token-estimate max-tokens)
+      (throw (ex-info (str "User message too large: ~"
+                           token-estimate
+                           " tokens (max "
+                           max-tokens
+                           ")")
+                      {:type           :user-message-too-large
+                       :status         413
+                       :error          "user message too large"
+                       :token-estimate token-estimate
+                       :max-tokens     max-tokens})))))
 
 (defn- call-model
   [messages tools provider-id]
@@ -190,6 +234,7 @@
       (binding [prompt/*interaction-context* {:channel    channel
                                               :session-id session-id}]
         (try
+          (validate-user-message! user-message)
           (db/add-message! session-id :user user-message)
           (report-status! "Updating working memory"
                           :phase :working-memory)

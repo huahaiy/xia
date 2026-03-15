@@ -120,6 +120,82 @@
             :assistant-response "All set."}
            @reviewed))))
 
+(deftest process-message-rejects-oversized-user-message-by-char-count
+  (let [session-id  (db/create-session! :terminal)
+        wm-calls    (atom 0)
+        llm-calls   (atom 0)]
+    (db/set-config! :agent/max-user-message-chars 5)
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _]
+                                                       (swap! wm-calls inc))
+                  xia.tool/tool-definitions          (constantly [])
+                  xia.llm/resolve-provider-selection (fn [& _]
+                                                       (swap! llm-calls inc)
+                                                       {:provider {:llm.provider/id :default}
+                                                        :provider-id :default})
+                  xia.context/build-messages-data    (fn [& _]
+                                                       (swap! llm-calls inc)
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-simple                (fn [& _]
+                                                       (swap! llm-calls inc)
+                                                       "unreachable")]
+      (let [err (try
+                  (agent/process-message session-id "123456" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"User message too large: 6 chars \(max 5\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:type       :user-message-too-large
+                :status     413
+                :error      "user message too large"
+                :char-count 6
+                :max-chars  5}
+               (select-keys (ex-data err)
+                            [:type :status :error :char-count :max-chars])))))
+    (is (zero? @wm-calls))
+    (is (zero? @llm-calls))
+    (is (empty? (db/session-messages session-id)))))
+
+(deftest process-message-rejects-oversized-user-message-by-token-estimate
+  (let [session-id (db/create-session! :terminal)
+        text       "hello world!"
+        wm-calls   (atom 0)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/max-user-message-chars 1000)
+    (db/set-config! :agent/max-user-message-tokens 2)
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _]
+                                                       (swap! wm-calls inc))
+                  xia.tool/tool-definitions          (constantly [])
+                  xia.llm/resolve-provider-selection (fn [& _]
+                                                       (swap! llm-calls inc)
+                                                       {:provider {:llm.provider/id :default}
+                                                        :provider-id :default})
+                  xia.context/build-messages-data    (fn [& _]
+                                                       (swap! llm-calls inc)
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-simple                (fn [& _]
+                                                       (swap! llm-calls inc)
+                                                       "unreachable")]
+      (let [err (try
+                  (agent/process-message session-id text :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"User message too large: ~3 tokens \(max 2\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:type           :user-message-too-large
+                :status         413
+                :error          "user message too large"
+                :token-estimate 3
+                :max-tokens     2}
+               (select-keys (ex-data err)
+                            [:type :status :error :token-estimate :max-tokens])))))
+    (is (zero? @wm-calls))
+    (is (zero? @llm-calls))
+    (is (empty? (db/session-messages session-id)))))
+
 (deftest process-message-serializes-concurrent-turns-per-session
   (let [session-id         (db/create-session! :http)
         first-llm-started  (promise)
