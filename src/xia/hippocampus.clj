@@ -521,7 +521,11 @@ Rules:
            :session-id   session-id
            :participants (db/get-config :user/name)})
         ;; Consolidate in the background
-        (future (consolidate-pending!))))))
+        (future
+          (try
+            (consolidate-pending!)
+            (catch Exception e
+              (log/error e "Background consolidation failed for session" session-id))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Knowledge maintenance

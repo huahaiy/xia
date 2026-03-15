@@ -8,14 +8,16 @@
    Tools  = executable functions the LLM can call via function-calling."
   (:require [clojure.tools.logging :as log]
             [charred.api :as json]
+            [xia.config :as cfg]
+            [xia.context :as context]
             [xia.db :as db]
             [xia.llm :as llm]
-            [xia.tool :as tool]
-            [xia.context :as context]
             [xia.prompt :as prompt]
+            [xia.tool :as tool]
             [xia.working-memory :as wm]))
 
 (def ^:private max-tool-rounds 10)
+(def ^:private default-max-tool-calls-per-round 12)
 (def ^:private session-turn-lock-count 256)
 (defonce ^:private session-turn-locks
   (vec (repeatedly session-turn-lock-count #(Object.))))
@@ -154,11 +156,22 @@
 (defn- execute-tool-calls
   "Execute tool calls from the LLM response, return tool result messages."
   [tool-calls context]
-  (->> tool-calls
-       (mapv prepare-tool-call)
-       tool-call-batches
-       (mapcat #(execute-tool-batch % context))
-       vec))
+  (let [tool-count               (count tool-calls)
+        max-tool-calls-per-round (cfg/positive-long :agent/max-tool-calls-per-round
+                                                    default-max-tool-calls-per-round)]
+    (when (> tool-count max-tool-calls-per-round)
+      (throw (ex-info (str "Too many tool calls in one round: "
+                           tool-count
+                           " (max "
+                           max-tool-calls-per-round
+                           ")")
+                      {:tool-count               tool-count
+                       :max-tool-calls-per-round max-tool-calls-per-round})))
+    (->> tool-calls
+         (mapv prepare-tool-call)
+         tool-call-batches
+         (mapcat #(execute-tool-batch % context))
+         vec)))
 
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.

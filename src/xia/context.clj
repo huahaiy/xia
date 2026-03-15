@@ -401,18 +401,18 @@
                                      (str (name role) ": " content)))
                               (str/join "\n"))]
          (try
-           (let [messages [{:role "system"
-                            :content "Summarize this conversation excerpt in 2-4 sentences. Capture key topics, decisions, and any personal information shared. Be factual."}
-                           {:role "user" :content old-text}]
-                 recap    (cond
-                            provider-id
-                            (llm/chat-simple messages :provider-id provider-id)
+           (let [summary-messages [{:role "system"
+                                    :content "Summarize this conversation excerpt in 2-4 sentences. Capture key topics, decisions, and any personal information shared. Be factual."}
+                                   {:role "user" :content old-text}]
+                 recap            (cond
+                                    provider-id
+                                    (llm/chat-simple summary-messages :provider-id provider-id)
 
-                            workload
-                            (llm/chat-simple messages :workload workload)
+                                    workload
+                                    (llm/chat-simple summary-messages :workload workload)
 
-                            :else
-                            (llm/chat-simple messages))]
+                                    :else
+                                    (llm/chat-simple summary-messages))]
              (into [{:role "system"
                      :content (str "[Conversation recap: " (str/trim recap) "]")}]
                    recent-msgs))

@@ -260,3 +260,50 @@
           (is (instance? clojure.lang.ExceptionInfo err))
           (is (re-find #"Parallel tool execution failed: web-fetch"
                        (.getMessage ^Exception err))))))))
+
+(deftest execute-tool-calls-rejects-oversized-rounds-before-execution
+  (let [executed   (atom 0)
+        tool-calls (vec (for [i (range 13)]
+                          {"id"       (str "call-" i)
+                           "function" {"name"      "web-search"
+                                       "arguments" "{}"}}))]
+    (with-redefs [tool/parallel-safe? (constantly true)
+                  tool/execute-tool   (fn [& _]
+                                        (swap! executed inc)
+                                        {:ok true})]
+      (let [err (try
+                  (#'agent/execute-tool-calls tool-calls {:channel :terminal})
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Too many tool calls in one round: 13 \(max 12\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:tool-count 13
+                :max-tool-calls-per-round 12}
+               (select-keys (ex-data err)
+                            [:tool-count :max-tool-calls-per-round])))
+        (is (zero? @executed))))))
+
+(deftest execute-tool-calls-honors-configured-round-cap
+  (let [executed   (atom 0)
+        tool-calls (vec (for [i (range 5)]
+                          {"id"       (str "call-" i)
+                           "function" {"name"      "web-search"
+                                       "arguments" "{}"}}))]
+    (db/set-config! :agent/max-tool-calls-per-round 4)
+    (with-redefs [tool/parallel-safe? (constantly true)
+                  tool/execute-tool   (fn [& _]
+                                        (swap! executed inc)
+                                        {:ok true})]
+      (let [err (try
+                  (#'agent/execute-tool-calls tool-calls {:channel :terminal})
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Too many tool calls in one round: 5 \(max 4\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:tool-count 5
+                :max-tool-calls-per-round 4}
+               (select-keys (ex-data err)
+                            [:tool-count :max-tool-calls-per-round])))
+        (is (zero? @executed))))))
