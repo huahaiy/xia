@@ -108,9 +108,12 @@
 
 (deftest browser-runtime-functions-are-exposed-through-sci
   (let [status (sci-env/eval-string "(xia.browser/runtime-status)")
-        bootstrap (sci-env/eval-string "(xia.browser/bootstrap-runtime! :backend :playwright)")]
-    (is (= :htmlunit (:selected-auto-backend status)))
+        bootstrap (sci-env/eval-string "(xia.browser/bootstrap-runtime! :backend :playwright)")
+        deps (sci-env/eval-string "(xia.browser/install-browser-deps! :backend :htmlunit)")]
+    (is (= :playwright (:selected-auto-backend status)))
     (is (= #{:htmlunit :playwright}
            (set (map :backend (:backends status)))))
     (is (= :playwright (:backend bootstrap)))
-    (is (= :running (:status bootstrap)))))
+    (is (= :running (:status bootstrap)))
+    (is (= :htmlunit (:backend deps)))
+    (is (= :unsupported-backend (:status deps)))))

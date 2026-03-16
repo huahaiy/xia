@@ -100,7 +100,7 @@ Every interaction is recorded as an episode. A background consolidation process 
 
 Xia can interact with the live web through secure, sandboxed tools.
 
-- **Headless browser backends:** Playwright for modern sites when runtime support is available, with HtmlUnit as a lightweight fallback.
+- **Headless browser backends:** Playwright for modern sites, with first-use browser install support and an explicit Linux system-deps setup path, plus HtmlUnit as a lightweight fallback.
 - **Resumable browser sessions:** backend-specific browser state and current URL persist in Xia's DB.
 - **Stealth authenticated login:** stored credentials are injected by a proxy, not exposed to the LLM.
 - **Interactive login:** for MFA or complex flows, Xia can prompt the user directly and avoid storage.

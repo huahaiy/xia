@@ -775,6 +775,13 @@
   [_opts]
   (assoc (htmlunit-runtime-status) :bootstrapped? true))
 
+(defn- htmlunit-install-browser-deps!
+  [_opts]
+  {:backend htmlunit-backend-id
+   :supported? false
+   :status :unsupported-backend
+   :message "HtmlUnit does not require Playwright system dependencies."})
+
 (defonce ^:private registered-backends (atom {}))
 
 (defn- register-backend!
@@ -807,7 +814,7 @@
   []
   (or (first (filter (fn [backend-id]
                        (when-let [backend (get @registered-backends backend-id)]
-                         (true? (:ready? (browser.backend/runtime-status* backend)))))
+                         (true? (:available? (browser.backend/runtime-status* backend)))))
                      [:playwright htmlunit-backend-id]))
       htmlunit-backend-id))
 
@@ -832,6 +839,7 @@
     {:id htmlunit-backend-id
      :runtime-status htmlunit-runtime-status
      :bootstrap-runtime htmlunit-bootstrap-runtime!
+     :install-browser-deps htmlunit-install-browser-deps!
      :open-session (fn [url opts]
                      (htmlunit-open-session url
                                             :js (if (contains? opts :js)
@@ -996,6 +1004,17 @@
                      (sort-by :backend)
                      vec)}
       (browser.backend/bootstrap-runtime!* (backend-by-id backend-id) {}))))
+
+(defn install-browser-deps!
+  "Preview or install browser system dependencies for a backend.
+
+   This currently matters only for the Playwright backend on Linux.
+   Defaults to :playwright and uses a dry-run preview unless :dry-run false."
+  [& {:keys [backend dry-run]
+      :or {backend :playwright
+           dry-run true}}]
+  (browser.backend/install-browser-deps!* (backend-by-id (normalize-backend-id backend))
+                                          {:dry-run dry-run}))
 
 ;; ---------------------------------------------------------------------------
 ;; Login helpers — credential injection without LLM exposure

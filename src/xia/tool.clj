@@ -31,6 +31,7 @@
    "tools/web-extract.edn"
    "tools/browser-runtime-status.edn"
    "tools/browser-bootstrap-runtime.edn"
+   "tools/browser-install-deps.edn"
    "tools/browser-open.edn"
    "tools/browser-navigate.edn"
    "tools/browser-read-page.edn"

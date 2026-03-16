@@ -322,6 +322,7 @@
     (is (= :web-search (:tool/id (db/get-tool :web-search))))
     (is (= :browser-runtime-status (:tool/id (db/get-tool :browser-runtime-status))))
     (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
+    (is (= :browser-install-deps (:tool/id (db/get-tool :browser-install-deps))))
     (is (= :browser-open (:tool/id (db/get-tool :browser-open))))
     (is (= :browser-navigate (:tool/id (db/get-tool :browser-navigate))))
     (is (= :browser-read-page (:tool/id (db/get-tool :browser-read-page))))
@@ -343,6 +344,7 @@
   (tool/ensure-bundled-tools!)
   (tool/load-tool! :browser-runtime-status)
   (tool/load-tool! :browser-bootstrap-runtime)
+  (tool/load-tool! :browser-install-deps)
   (let [status (tool/execute-tool :browser-runtime-status {} {:channel :scheduler})
         session-id (random-uuid)]
     (is (= #{:htmlunit :playwright}
@@ -354,6 +356,11 @@
                                           :session-id session-id})]
         (is (= :playwright (:backend bootstrap)))
         (is (= :running (:status bootstrap))))
+      (let [deps (tool/execute-tool :browser-install-deps {}
+                                    {:channel :terminal
+                                     :session-id session-id})]
+        (is (= :playwright (:backend deps)))
+        (is (contains? #{:unsupported-platform :dry-run} (:status deps))))
       (finally
         (prompt/register-approval! :terminal nil)
         (tool/clear-session-approvals! session-id)

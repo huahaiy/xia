@@ -1,16 +1,20 @@
 (ns xia.browser.playwright
   "Playwright browser backend."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.browser.backend :as backend]
             [xia.config :as cfg])
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
-            Browser$NewContextOptions BrowserType$LaunchOptions]
+            Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
+           [com.microsoft.playwright.impl.driver Driver]
+           [java.nio.file Files LinkOption Paths]
            [java.util.concurrent ConcurrentHashMap]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Element]))
 
 (def ^:private backend-id :playwright)
+(def ^:private browser-name "chromium")
 (def ^:private max-content-chars 8000)
 (def ^:private live-session-ttl-ms (* 60 60 1000))
 (def ^:private action-settle-ms 1200)
@@ -18,7 +22,9 @@
 
 (defonce ^:private runtime (atom {:playwright nil
                                   :browser nil
-                                  :bootstrapped? false}))
+                                  :bootstrapped? false
+                                  :browser-installed? false
+                                  :browser-executable nil}))
 (defonce ^:private runtime-lock (Object.))
 (defonce ^:private sessions (ConcurrentHashMap.))
 (defonce ^:private session-restore-locks
@@ -35,6 +41,29 @@
 
 (defn- timeout-ms []
   (cfg/positive-long :browser/playwright-timeout-ms 15000))
+
+(defn- auto-install? []
+  (cfg/boolean-option :browser/playwright-auto-install? true))
+
+(defn- browsers-path []
+  (cfg/string-option :browser/playwright-browsers-path nil))
+
+(defn- playwright-env
+  []
+  (cond-> {}
+    (seq (browsers-path))
+    (assoc "PLAYWRIGHT_BROWSERS_PATH" (browsers-path))))
+
+(defn- linux-platform?
+  []
+  (some-> (System/getProperty "os.name")
+          str/lower-case
+          (str/includes? "linux")))
+
+(defn- platform-summary
+  []
+  {:os-name (System/getProperty "os.name")
+   :arch (System/getProperty "os.arch")})
 
 (defn- session-restore-lock
   [session-id]
@@ -57,6 +86,157 @@
     (catch Exception _
       false)))
 
+(defn- create-playwright
+  []
+  (let [env (playwright-env)]
+    (if (seq env)
+      (Playwright/create (doto (Playwright$CreateOptions.)
+                           (.setEnv env)))
+      (Playwright/create))))
+
+(defn- path-exists?
+  [path]
+  (and (string? path)
+       (not (str/blank? path))
+       (Files/exists (Paths/get path (make-array String 0))
+                     (make-array LinkOption 0))))
+
+(defn- browser-installation-info
+  ([]
+   (try
+     (with-open [playwright (create-playwright)]
+       (browser-installation-info playwright))
+     (catch Exception e
+       {:browser browser-name
+        :available? false
+        :installed? false
+        :auto-install? (auto-install?)
+        :message (or (.getMessage e)
+                     "Playwright runtime is unavailable.")
+        :error (.getMessage e)})))
+  ([^Playwright playwright]
+   (let [executable (.executablePath (.chromium playwright))
+         installed? (path-exists? executable)]
+     {:browser browser-name
+      :available? true
+      :installed? installed?
+      :auto-install? (auto-install?)
+      :executable executable
+      :message (if installed?
+                 "Playwright browser binaries are installed."
+                 "Playwright browser binaries are missing.")})))
+
+(defn- read-process-output
+  [^Process process]
+  (with-open [reader (io/reader (.getInputStream process) :encoding "UTF-8")]
+    (slurp reader)))
+
+(defn- run-playwright-cli!
+  ([args]
+   (run-playwright-cli! args {}))
+  ([args {:keys [inherit-io?] :or {inherit-io? false}}]
+  (let [driver (Driver/ensureDriverInstalled (playwright-env) Boolean/FALSE)
+        pb (.createProcessBuilder driver)]
+    (.addAll (.command pb) args)
+    (if inherit-io?
+      (.inheritIO pb)
+      (.redirectErrorStream pb true))
+    (let [process (.start pb)
+          output  (when-not inherit-io?
+                    (read-process-output process))
+          exit    (.waitFor process)]
+      {:args (vec args)
+       :exit exit
+       :output output
+       :interactive? (boolean inherit-io?)}))))
+
+(defn- install-browser!
+  []
+  (let [{:keys [exit] :as result} (run-playwright-cli! ["install" browser-name])]
+    (when-not (zero? exit)
+      (throw (ex-info "Playwright browser installation failed."
+                      (assoc result
+                             :backend backend-id
+                             :browser browser-name
+                             :status :install-failed))))
+    result))
+
+(defn- install-browser-deps!
+  [{:keys [dry-run]
+    :or {dry-run true}}]
+  (let [platform (platform-summary)]
+    (if-not (linux-platform?)
+      {:backend backend-id
+       :browser browser-name
+       :supported? false
+       :dry-run (boolean dry-run)
+       :status :unsupported-platform
+       :message "Playwright system dependency installation is only supported on Linux."
+       :platform platform}
+      (let [interactive? (and (not dry-run)
+                              (some? (System/console)))
+            args (cond-> ["install-deps" browser-name]
+                   dry-run (conj "--dry-run"))
+            {:keys [exit] :as result} (run-playwright-cli! args {:inherit-io? interactive?})]
+        (when-not (zero? exit)
+          (throw (ex-info "Playwright system dependency installation failed."
+                          (merge result
+                                 {:backend backend-id
+                                  :browser browser-name
+                                  :supported? true
+                                  :dry-run (boolean dry-run)
+                                  :status :install-deps-failed
+                                  :platform platform}))))
+        (merge result
+               {:backend backend-id
+                :browser browser-name
+                :supported? true
+                :dry-run (boolean dry-run)
+                :status (if dry-run :dry-run :installed)
+                :message (if dry-run
+                           "Previewed Playwright system dependency installation commands."
+                           "Installed Playwright system dependencies.")
+                :platform platform})))))
+
+(defn- ensure-browser-installed!
+  [^Playwright playwright]
+  (let [{:keys [installed? executable] :as info} (browser-installation-info playwright)]
+    (cond
+      installed?
+      info
+
+      (not (auto-install?))
+      (throw (ex-info "Playwright browser binaries are missing and auto-install is disabled."
+                      (assoc info
+                             :backend backend-id
+                             :status :missing-browser)))
+
+      :else
+      (do
+        (log/info "Installing Playwright browser binaries for first use"
+                  {:backend backend-id
+                   :browser browser-name
+                   :path executable})
+        (let [{:keys [output]} (install-browser!)
+              rechecked (browser-installation-info playwright)]
+          (if (:installed? rechecked)
+            (assoc rechecked
+                   :installed-by-xia? true
+                   :install-output output)
+            (throw (ex-info "Playwright browser installation completed but the browser executable is still missing."
+                            (merge rechecked
+                                   {:backend backend-id
+                                    :browser browser-name
+                                    :status :missing-browser-after-install
+                                    :install-output output})))))))))
+
+(defn- launch-browser
+  [^Playwright playwright]
+  (.launch (.chromium playwright)
+           (doto (BrowserType$LaunchOptions.)
+             (.setHeadless (headless?))
+             (.setTimeout (double (timeout-ms))))))
+
 (defn- stop-runtime!
   []
   (locking runtime-lock
@@ -71,11 +251,15 @@
         (catch Exception _))
       (reset! runtime {:playwright nil
                        :browser nil
-                       :bootstrapped? false}))))
+                       :bootstrapped? false
+                       :browser-installed? false
+                       :browser-executable nil}))))
 
 (defn runtime-status
   []
-  (let [{:keys [bootstrapped?]} @runtime
+  (let [{:keys [bootstrapped?
+                browser-installed?
+                browser-executable]} @runtime
         running? (runtime-running? @runtime)]
     (cond
       (not (enabled?))
@@ -84,6 +268,9 @@
        :ready? false
        :running? false
        :bootstrapped? false
+       :browser browser-name
+       :browser-installed? false
+       :browser-executable nil
        :status :disabled
        :message "Playwright backend is disabled by config."}
 
@@ -93,6 +280,9 @@
        :ready? true
        :running? true
        :bootstrapped? true
+       :browser browser-name
+       :browser-installed? (boolean browser-installed?)
+       :browser-executable browser-executable
        :status :running
        :message "Playwright backend is running."}
 
@@ -102,17 +292,53 @@
        :ready? true
        :running? false
        :bootstrapped? true
+       :browser browser-name
+       :browser-installed? (boolean browser-installed?)
+       :browser-executable browser-executable
        :status :ready
        :message "Playwright backend is bootstrapped."}
 
       :else
-      {:backend backend-id
-       :available? true
-       :ready? false
-       :running? false
-       :bootstrapped? false
-       :status :available
-       :message "Playwright backend is available but not bootstrapped."})))
+      (let [{:keys [available? installed? executable message] :as info}
+            (browser-installation-info)]
+        (cond
+          (not available?)
+          {:backend backend-id
+           :available? false
+           :ready? false
+           :running? false
+           :bootstrapped? false
+           :browser browser-name
+           :browser-installed? false
+           :browser-executable nil
+           :status :unavailable
+           :message message
+           :error (:error info)}
+
+          installed?
+          {:backend backend-id
+           :available? true
+           :ready? false
+           :running? false
+           :bootstrapped? false
+           :browser browser-name
+           :browser-installed? true
+           :browser-executable executable
+           :status :available
+           :message "Playwright backend is available and browser binaries are installed."}
+
+          :else
+          {:backend backend-id
+           :available? true
+           :ready? false
+           :running? false
+           :bootstrapped? false
+           :browser browser-name
+           :browser-installed? false
+           :browser-executable executable
+           :status :missing-browser
+           :auto-install? (auto-install?)
+           :message "Playwright browser binaries are missing. Xia can install them on first use."})))))
 
 (defn- not-ready-ex
   []
@@ -129,15 +355,15 @@
   (locking runtime-lock
     (if (runtime-running? @runtime)
       @runtime
-      (let [playwright (Playwright/create)]
+      (let [playwright (create-playwright)]
         (try
-          (let [browser (.launch (.chromium playwright)
-                                 (doto (BrowserType$LaunchOptions.)
-                                   (.setHeadless (headless?))
-                                   (.setTimeout (double (timeout-ms)))))
+          (let [{:keys [installed? executable]} (ensure-browser-installed! playwright)
+                browser (launch-browser playwright)
                 state {:playwright playwright
                        :browser browser
-                       :bootstrapped? true}]
+                       :bootstrapped? true
+                       :browser-installed? (boolean installed?)
+                       :browser-executable executable}]
             (reset! runtime state)
             state)
           (catch Exception e
@@ -528,6 +754,8 @@
       (do
         (ensure-runtime!)
         (runtime-status))))
+  (install-browser-deps!* [_ opts]
+    (install-browser-deps! opts))
   (open-session* [_ url {:keys [js]}]
     (let [session-id (str (random-uuid))
           _sess (create-session! ops session-id url (if (nil? js) true js) nil nil)

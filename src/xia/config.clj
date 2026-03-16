@@ -33,3 +33,12 @@
         (#{"false" "0" "no" "off"} normalized) false
         :else default-value))
     default-value))
+
+(defn string-option
+  [config-key default-value]
+  (if-let [raw (db/get-config config-key)]
+    (let [parsed (some-> raw str str/trim)]
+      (if (seq parsed)
+        parsed
+        default-value))
+    default-value))

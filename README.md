@@ -88,7 +88,10 @@ intentionally want to expose it beyond the local machine.
   prior conversations.
 - Let Xia research websites, follow links, fill forms, and return structured
   results through a real Playwright browser when available, with HtmlUnit
-  fallback for lighter environments.
+  fallback for lighter environments. On first use, Xia can detect missing
+  Playwright browser binaries and install them automatically. On Linux, Xia
+  can also preview or run Playwright's system dependency setup as a separate
+  explicit step.
 - Connect services such as GitHub or Google through static credentials or OAuth,
   then let Xia use them without exposing secrets to tools.
 - Schedule recurring work like checks, summaries, monitoring, and maintenance.

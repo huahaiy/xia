@@ -8,6 +8,8 @@
     "Return a status map describing whether the backend is ready.")
   (bootstrap-runtime!* [this opts]
     "Prepare the backend runtime and return an updated status map.")
+  (install-browser-deps!* [this opts]
+    "Install or preview browser system dependencies for this backend.")
   (open-session* [this url opts]
     "Open a new browser session.")
   (navigate* [this session-id url]

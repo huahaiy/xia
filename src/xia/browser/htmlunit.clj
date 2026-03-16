@@ -10,6 +10,8 @@
     ((:runtime-status ops)))
   (bootstrap-runtime!* [_ opts]
     ((:bootstrap-runtime ops) opts))
+  (install-browser-deps!* [_ opts]
+    ((:install-browser-deps ops) opts))
   (open-session* [_ url opts]
     ((:open-session ops) url opts))
   (navigate* [_ session-id url]

@@ -1,0 +1,16 @@
+;; Preview or install Playwright system dependencies.
+;; Import with: /import-tool resources/tools/browser-install-deps.edn
+
+{:id          :browser-install-deps
+ :name        "browser-install-deps"
+ :description "Preview or install Linux system packages required by Playwright Chromium. Defaults to a dry-run preview. Use dry_run=false from a terminal session to execute package installation on Linux."
+ :tags        #{:browser :web :runtime :setup :linux}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"dry_run" {"type" "boolean"
+                                         "description" "Preview install commands only when true (default true). Set false to execute Linux package installation."}}}
+ :handler     "(fn [args]
+                 (xia.browser/install-browser-deps!
+                   :dry-run (if (contains? args \"dry_run\")
+                               (boolean (get args \"dry_run\"))
+                               true)))"}

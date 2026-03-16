@@ -96,6 +96,7 @@
    'list-sessions     browser/list-sessions
    'runtime-status    browser/browser-runtime-status
    'bootstrap-runtime! browser/bootstrap-browser-runtime!
+   'install-browser-deps! browser/install-browser-deps!
    'login             browser/login
    'login-interactive browser/login-interactive
    'list-sites        browser/list-sites})

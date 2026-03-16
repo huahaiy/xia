@@ -16,7 +16,7 @@ mkdir -p "$ROOT_DIR/target/native-tmp/.tmp" "$ROOT_DIR/target/native-image"
 
 cd "$ROOT_DIR"
 
-clojure -T:build uber
+clojure -T:build native-uber
 
 env TMPDIR="$ROOT_DIR/target/native-tmp/.tmp" \
   native-image \
