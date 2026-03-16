@@ -16,7 +16,7 @@
      :query-param    — appends <auth-header>=<auth-key> to query string
      :oauth-account  — Authorization header from a stored OAuth account"
   (:require [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [charred.api :as json]
             [xia.autonomous :as autonomous]
             [xia.db :as db]

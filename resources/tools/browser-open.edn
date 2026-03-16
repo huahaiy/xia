@@ -12,9 +12,13 @@
                "properties" {"url" {"type"        "string"
                                     "description" "The URL to open"}
                              "js"  {"type"        "boolean"
-                                    "description" "Enable JavaScript (default true)"}}
+                                    "description" "Enable JavaScript (default true)"}
+                             "backend" {"type" "string"
+                                        "description" "Optional browser backend override: auto, htmlunit, or playwright when available."}}
                "required"   ["url"]}
  :handler     "(fn [args]
-                 (let [js (get args \"js\")]
+                 (let [js (get args \"js\")
+                       backend (get args \"backend\")]
                    (xia.browser/open-session (get args \"url\")
-                                             :js (if (nil? js) true js))))"}
+                                             :js (if (nil? js) true js)
+                                             :backend backend)))"}

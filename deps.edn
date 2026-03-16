@@ -2,7 +2,7 @@
 
  :deps
  {org.clojure/clojure       {:mvn/version "1.12.4"}
-  datalevin/datalevin        {:mvn/version "0.10.7"}
+  org.datalevin/datalevin-embedded {:mvn/version "0.10.8"}
   org.clojure/tools.cli      {:mvn/version "1.4.256"}
 
   ;; HTTP client for LLM API calls
@@ -21,12 +21,14 @@
   ;; NOTE: needs reflection config for GraalVM native-image
   org.htmlunit/htmlunit         {:mvn/version "4.21.0"}
 
+  ;; Real browser backend for modern web apps
+  com.microsoft.playwright/playwright {:mvn/version "1.52.0"}
+
   ;; HTTP/WebSocket server
   http-kit/http-kit           {:mvn/version "2.8.1"}
 
   ;; Logging
-  org.clojure/tools.logging  {:mvn/version "1.3.1"}
-  ch.qos.logback/logback-classic {:mvn/version "1.5.32"}}
+  com.taoensso/timbre        {:mvn/version "6.5.0"}}
 
  :aliases
  {:dev

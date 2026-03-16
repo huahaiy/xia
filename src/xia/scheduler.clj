@@ -10,7 +10,7 @@
                (LLM decides what tools to use)
 
    Lifecycle: start! → (tick every 60s) → stop!"
-  (:require [clojure.tools.logging :as log]
+  (:require [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.agent :as agent]
             [xia.hippocampus :as hippo]

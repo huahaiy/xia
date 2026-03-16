@@ -1,19 +1,24 @@
 (ns xia.browser
   "Headless browser for interactive web browsing.
 
-   Provides stateful browser sessions backed by HtmlUnit. Tools can open
-   a session, navigate pages, click elements, fill forms, and submit —
-   all within the SCI sandbox. Each action returns the resulting page
-   content so the LLM minimizes round-trips.
+   Provides stateful browser sessions behind a pluggable backend seam.
+   Today Xia registers HtmlUnit as the default backend. Tools can open a
+   session, navigate pages, click elements, fill forms, and submit — all
+   within the SCI sandbox. Each action returns the resulting page content
+   so the LLM minimizes round-trips.
 
    Live sessions auto-close after an idle timeout, but their cookies and
    current URL are snapshotted into Xia's DB so multi-step browser tasks
    can resume later."
   (:require [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [charred.api :as json]
             [datalevin.core :as d]
+            [xia.browser.backend :as browser.backend]
+            [xia.browser.htmlunit :as htmlunit]
+            [xia.browser.playwright :as playwright]
             [xia.autonomous :as autonomous]
+            [xia.config :as cfg]
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -39,6 +44,8 @@
 (def ^:private browser-session-dbi "xia/browser-sessions")
 (def ^:private action-settle-ms 1200)
 (def ^:private session-restore-lock-count 256)
+(def ^:private htmlunit-backend-id :htmlunit)
+(def ^:private auto-backend-id :auto)
 
 (defonce ^:private sessions (ConcurrentHashMap.))
 (defonce ^:private session-restore-locks
@@ -158,10 +165,11 @@
     []))
 
 (defn- live-session->snapshot
-  [session-id {:keys [client created-at-ms last-access js-enabled]}]
+  [session-id {:keys [backend client created-at-ms last-access js-enabled]}]
   (let [page (current-page client)
         cookies (.getCookies (.getCookieManager ^WebClient client))]
     {"session_id" session-id
+     "backend" (name (or backend htmlunit-backend-id))
      "current_url" (some-> page .getUrl str)
      "created_at_ms" (long (or created-at-ms (now-ms)))
      "updated_at_ms" (long (now-ms))
@@ -183,6 +191,12 @@
   [session-id]
   (when-let [sess (.get sessions session-id)]
     (write-session-snapshot! session-id (live-session->snapshot session-id @sess))))
+
+(defn- snapshot-backend-id
+  [snapshot]
+  (some-> (or (get snapshot "backend")
+              (name htmlunit-backend-id))
+          keyword))
 
 (defn- close-session-value!
   [sess]
@@ -256,6 +270,10 @@
 
       :else
       (do
+        (when-not (= htmlunit-backend-id (snapshot-backend-id snapshot))
+          (throw (ex-info "Unsupported browser backend in snapshot"
+                          {:session-id session-id
+                           :backend (get snapshot "backend")})))
         (evict-expired!)
         (when (>= (.size sessions) max-sessions)
           (throw (ex-info (str "Too many browser sessions (max " max-sessions
@@ -274,6 +292,7 @@
               (catch Exception e
                 (log/debug e "Skipping invalid restored cookie" session-id))))
           (let [sess (atom {:client client
+                            :backend htmlunit-backend-id
                             :last-access (now-ms)
                             :created-at-ms (long (or (get snapshot "created_at_ms")
                                                      (now-ms)))
@@ -404,7 +423,8 @@
 
 (defn- page-result
   [session-id result]
-  (assoc result :session-id session-id))
+  (assoc result :session-id session-id
+                :backend htmlunit-backend-id))
 
 (defn- selector-match?
   [^HtmlPage page selector]
@@ -459,10 +479,10 @@
         (.close connection)))))
 
 ;; ---------------------------------------------------------------------------
-;; Public API — exposed to SCI sandbox
+;; HtmlUnit backend implementation
 ;; ---------------------------------------------------------------------------
 
-(defn open-session
+(defn- htmlunit-open-session
   "Open a new browser session and navigate to a URL.
 
    Returns the page content along with a session-id for subsequent calls.
@@ -481,6 +501,7 @@
     (when-not js
       (-> client .getOptions (.setJavaScriptEnabled false)))
     (.put sessions sid (atom {:client client
+                              :backend htmlunit-backend-id
                               :last-access (now-ms)
                               :created-at-ms (now-ms)
                               :js-enabled js}))
@@ -500,7 +521,7 @@
         (delete-session-snapshot! sid)
         (throw e)))))
 
-(defn navigate
+(defn- htmlunit-navigate
   "Navigate to a new URL in an existing session.
    Returns the page content."
   [session-id url]
@@ -513,7 +534,7 @@
       (page-result session-id (page->map page))
       (page-result session-id {:url url :content (str page) :forms [] :links []}))))
 
-(defn click
+(defn- htmlunit-click
   "Click an element matching a CSS selector.
    Returns the resulting page content."
   [session-id selector]
@@ -555,7 +576,7 @@
               el))
           (.getFormElements form))))
 
-(defn fill-form
+(defn- htmlunit-fill-form
   "Fill form fields and optionally submit.
 
    Arguments:
@@ -625,7 +646,7 @@
           (persist-session! session-id)
           (page-result session-id (page->map page)))))))
 
-(defn read-page
+(defn- htmlunit-read-page
   "Read the current page content in a session.
    Useful after waiting for JS to render."
   [session-id]
@@ -635,7 +656,7 @@
       (page-result session-id (page->map page))
       (page-result session-id {:content "No page loaded." :forms [] :links []}))))
 
-(defn wait-for-page
+(defn- htmlunit-wait-for-page
   "Wait for JS/rendering in a browser session, optionally until a selector,
    text snippet, or URL substring appears. Returns the current page along with
    :matched and :timed_out flags."
@@ -688,14 +709,14 @@
                           :timed_out true})
             (recur)))))))
 
-(defn close-session
+(defn- htmlunit-close-session
   "Close a browser session and free resources."
   [session-id]
   (close-live-session! session-id)
   (delete-session-snapshot! session-id)
   {:status "closed" :session-id session-id})
 
-(defn close-all-sessions!
+(defn- htmlunit-close-all-sessions!
   "Close all browser sessions and remove any saved resume snapshots.
    Useful for test cleanup."
   []
@@ -705,7 +726,7 @@
   (doseq [[session-id _snapshot] (all-session-snapshots)]
     (delete-session-snapshot! session-id)))
 
-(defn list-sessions
+(defn- htmlunit-list-sessions
   "List browser sessions, including resumable sessions restored from snapshots."
   []
   (evict-expired!)
@@ -713,6 +734,7 @@
                            (keep (fn [[session-id snapshot]]
                                    (when-not (snapshot-expired? snapshot)
                                      [session-id {:session-id session-id
+                                                  :backend (snapshot-backend-id snapshot)
                                                   :url (get snapshot "current_url")
                                                   :age-seconds (quot (- (now-ms)
                                                                         (long (or (get snapshot "last_access_ms")
@@ -727,6 +749,7 @@
                    (let [s @sess]
                      (assoc acc id
                             {:session-id id
+                             :backend (or (:backend s) htmlunit-backend-id)
                              :url (try (some-> (:client s) current-page
                                                (.getUrl) str)
                                        (catch Exception _ nil))
@@ -740,50 +763,243 @@
          (sort-by :session-id)
          vec)))
 
+(defn- htmlunit-runtime-status
+  []
+  {:backend htmlunit-backend-id
+   :available? true
+   :ready? true
+   :status :ready
+   :message "HtmlUnit backend is ready."})
+
+(defn- htmlunit-bootstrap-runtime!
+  [_opts]
+  (assoc (htmlunit-runtime-status) :bootstrapped? true))
+
+(defonce ^:private registered-backends (atom {}))
+
+(defn- register-backend!
+  [backend]
+  (swap! registered-backends assoc (browser.backend/backend-id backend) backend)
+  backend)
+
+(defn- backend-by-id
+  [backend-id]
+  (or (get @registered-backends backend-id)
+      (throw (ex-info (str "Unsupported browser backend: " backend-id)
+                      {:backend backend-id}))))
+
+(defn- normalize-backend-id
+  [backend]
+  (cond
+    (nil? backend) auto-backend-id
+    (keyword? backend) backend
+    (string? backend) (keyword backend)
+    :else (throw (ex-info "Browser backend must be a keyword or string"
+                          {:backend backend}))))
+
+(defn- configured-default-backend-id
+  []
+  (cfg/keyword-option :browser/backend-default
+                      auto-backend-id
+                      #{auto-backend-id htmlunit-backend-id :playwright}))
+
+(defn- auto-backend-id*
+  []
+  (or (first (filter (fn [backend-id]
+                       (when-let [backend (get @registered-backends backend-id)]
+                         (true? (:ready? (browser.backend/runtime-status* backend)))))
+                     [:playwright htmlunit-backend-id]))
+      htmlunit-backend-id))
+
+(defn- resolve-open-backend-id
+  [requested-backend]
+  (let [backend-id (if (nil? requested-backend)
+                     (configured-default-backend-id)
+                     (normalize-backend-id requested-backend))]
+    (if (= auto-backend-id backend-id)
+      (auto-backend-id*)
+      backend-id)))
+
+(defn- session-backend-id
+  [session-id]
+  (or (some-> (.get sessions session-id) deref :backend)
+      (some-> (read-session-snapshot session-id) snapshot-backend-id)
+      htmlunit-backend-id))
+
+(def ^:private htmlunit-backend
+  (register-backend!
+   (htmlunit/create-backend
+    {:id htmlunit-backend-id
+     :runtime-status htmlunit-runtime-status
+     :bootstrap-runtime htmlunit-bootstrap-runtime!
+     :open-session (fn [url opts]
+                     (htmlunit-open-session url
+                                            :js (if (contains? opts :js)
+                                                  (:js opts)
+                                                  true)))
+     :navigate htmlunit-navigate
+     :click htmlunit-click
+     :fill-form (fn [session-id fields opts]
+                  (htmlunit-fill-form session-id
+                                      fields
+                                      :form-selector (:form-selector opts)
+                                      :submit (:submit opts)))
+     :read-page htmlunit-read-page
+     :wait-for-page (fn [session-id opts]
+                      (htmlunit-wait-for-page session-id
+                                              :timeout-ms (or (:timeout-ms opts) 10000)
+                                              :interval-ms (or (:interval-ms opts) 500)
+                                              :selector (:selector opts)
+                                              :text (:text opts)
+                                              :url-contains (:url-contains opts)))
+     :close-session htmlunit-close-session
+     :close-all-sessions htmlunit-close-all-sessions!
+     :list-sessions htmlunit-list-sessions})))
+
+(def ^:private playwright-backend
+  (register-backend!
+   (playwright/create-backend
+    {:max-sessions max-sessions
+     :now-ms now-ms
+     :read-snapshot read-session-snapshot
+     :write-snapshot! write-session-snapshot!
+     :delete-snapshot! delete-session-snapshot!
+     :all-snapshots all-session-snapshots
+     :snapshot-expired? snapshot-expired?
+     :validate-url! validate-url!
+     :resolve-url! resolve-url!})))
+
+;; ---------------------------------------------------------------------------
+;; Public API — exposed to SCI sandbox
+;; ---------------------------------------------------------------------------
+
+(defn open-session
+  "Open a new browser session and navigate to a URL.
+
+   Returns the page content along with a session-id for subsequent calls.
+
+   Options:
+     :js — enable JavaScript (default true)
+     :backend — browser backend keyword/string (default :auto)"
+  [url & {:keys [js backend] :or {js true}}]
+  (let [requested-backend (normalize-backend-id backend)
+        selected-backend (resolve-open-backend-id backend)
+        open-with (fn [backend-id]
+                    (browser.backend/open-session* (backend-by-id backend-id)
+                                                   url
+                                                   {:js js}))]
+    (if (and (= auto-backend-id requested-backend)
+             (not= htmlunit-backend-id selected-backend))
+      (try
+        (open-with selected-backend)
+        (catch Exception e
+          (log/warn e "Browser backend failed during auto-open, falling back to HtmlUnit"
+                    {:requested selected-backend
+                     :fallback htmlunit-backend-id
+                     :url url})
+          (open-with htmlunit-backend-id)))
+      (open-with selected-backend))))
+
+(defn navigate
+  "Navigate to a new URL in an existing session.
+   Returns the page content."
+  [session-id url]
+  (browser.backend/navigate* (backend-by-id (session-backend-id session-id))
+                             session-id
+                             url))
+
+(defn click
+  "Click an element matching a CSS selector.
+   Returns the resulting page content."
+  [session-id selector]
+  (browser.backend/click* (backend-by-id (session-backend-id session-id))
+                          session-id
+                          selector))
+
+(defn fill-form
+  "Fill form fields and optionally submit.
+
+   Arguments:
+     session-id — browser session
+     fields     — map of field name/id to value
+     opts:
+       :form-selector — CSS selector for the form (default: first form)
+       :submit        — true to submit after filling (default false)
+
+   Returns the page content (after submit if :submit true)."
+  [session-id fields & {:keys [form-selector submit]
+                        :or {submit false}}]
+  (browser.backend/fill-form* (backend-by-id (session-backend-id session-id))
+                              session-id
+                              fields
+                              {:form-selector form-selector
+                               :submit submit}))
+
+(defn read-page
+  "Read the current page content in a session.
+   Useful after waiting for JS to render."
+  [session-id]
+  (browser.backend/read-page* (backend-by-id (session-backend-id session-id))
+                              session-id))
+
+(defn wait-for-page
+  "Wait for JS/rendering in a browser session, optionally until a selector,
+   text snippet, or URL substring appears. Returns the current page along with
+   :matched and :timed_out flags."
+  [session-id & {:keys [timeout-ms interval-ms selector text url-contains]
+                 :or {timeout-ms 10000
+                      interval-ms 500}}]
+  (browser.backend/wait-for-page* (backend-by-id (session-backend-id session-id))
+                                  session-id
+                                  {:timeout-ms timeout-ms
+                                   :interval-ms interval-ms
+                                   :selector selector
+                                   :text text
+                                   :url-contains url-contains}))
+
+(defn close-session
+  "Close a browser session and free resources."
+  [session-id]
+  (browser.backend/close-session* (backend-by-id (session-backend-id session-id))
+                                  session-id))
+
+(defn close-all-sessions!
+  "Close all browser sessions and remove any saved resume snapshots.
+   Useful for test cleanup."
+  []
+  (doseq [backend (vals @registered-backends)]
+    (browser.backend/close-all-sessions!* backend)))
+
+(defn list-sessions
+  "List browser sessions, including resumable sessions restored from snapshots."
+  []
+  (vec (mapcat browser.backend/list-sessions* (vals @registered-backends))))
+
+(defn browser-runtime-status
+  "Return browser backend readiness information."
+  []
+  {:configured-default-backend (configured-default-backend-id)
+   :selected-auto-backend (auto-backend-id*)
+   :backends (->> (vals @registered-backends)
+                  (map browser.backend/runtime-status*)
+                  (sort-by :backend)
+                  vec)})
+
+(defn bootstrap-browser-runtime!
+  "Prepare one backend runtime, or all backends when backend is :auto."
+  [& {:keys [backend] :or {backend auto-backend-id}}]
+  (let [backend-id (normalize-backend-id backend)]
+    (if (= auto-backend-id backend-id)
+      {:requested-backend auto-backend-id
+       :results (->> (vals @registered-backends)
+                     (map #(browser.backend/bootstrap-runtime!* % {}))
+                     (sort-by :backend)
+                     vec)}
+      (browser.backend/bootstrap-runtime!* (backend-by-id backend-id) {}))))
+
 ;; ---------------------------------------------------------------------------
 ;; Login helpers — credential injection without LLM exposure
 ;; ---------------------------------------------------------------------------
-
-(defn- do-login
-  "Internal: fill login form and submit. Used by both login and login-interactive."
-  [session-id ^HtmlPage page username-field password-field
-   username password form-selector extra-fields]
-  (let [form (if form-selector
-               (.querySelector page ^String form-selector)
-               (first (.getForms page)))]
-    (when-not form
-      (throw (ex-info "No login form found on page"
-                      {:url (.toString (.getUrl page))
-                       :form-selector form-selector})))
-    ;; Fill username
-    (when-let [el (try (.getInputByName ^HtmlForm form ^String username-field)
-                       (catch Exception _ nil))]
-      (.setValue ^HtmlInput el ^String username))
-    ;; Fill password
-    (when-let [el (try (.getInputByName ^HtmlForm form ^String password-field)
-                       (catch Exception _ nil))]
-      (.setValue ^HtmlInput el ^String password))
-    ;; Fill extra fields
-    (doseq [[field-name value] extra-fields]
-      (when-let [el (try (.getInputByName ^HtmlForm form ^String field-name)
-                         (catch Exception _ nil))]
-        (.setValue ^HtmlInput el ^String (str value))))
-    ;; Submit
-    (let [submit-btn (or (first (.getInputsByType ^HtmlForm form "submit"))
-                         (.querySelector ^HtmlForm form
-                                         "button[type=submit], button:not([type])"))
-          {:keys [client]} (get-session session-id)
-          result (if submit-btn
-                   (.click ^HtmlElement submit-btn)
-                       ;; Fallback: navigate back to trigger form post
-                   (current-page client))]
-      (wait-for-js! client action-settle-ms)
-      (persist-session! session-id)
-      (if (instance? HtmlPage result)
-        (page-result session-id (page->map result))
-        (if-let [p (current-page client)]
-          (page-result session-id (page->map p))
-          (page-result session-id {:content "Login form submitted." :forms [] :links []}))))))
 
 (defn login
   "Log into a site using stored credentials.
@@ -792,12 +1008,12 @@
    username or password. Credentials are loaded from the DB (system-level
    access, bypassing SCI secret filters).
 
-   Arguments:
+  Arguments:
      site-id — keyword id of a registered site credential
 
   Returns:
      The logged-in page content with session-id for further browsing."
-  [site-id]
+  [site-id & {:keys [backend]}]
   (let [cred (db/get-site-cred site-id)]
     (when-not cred
       (throw (ex-info (str "No site credentials registered for: " (name site-id)
@@ -832,17 +1048,16 @@
           extra-fields (when-let [ef (:site-cred/extra-fields cred)]
                          (try (json/read-json ef) (catch Exception _ {})))
           ;; Open a session and navigate to login page
-          result (open-session login-url)
+          result (open-session login-url :backend backend)
           session-id (:session-id result)
-          {:keys [client]} (get-session session-id)
-          page (current-page client)]
-      (when-not page
-        (throw (ex-info "Failed to load login page" {:url login-url})))
+          field-values (cond-> {username-field username
+                                password-field password}
+                         (map? extra-fields) (merge extra-fields))]
       (try
-        (let [login-result (do-login session-id page
-                                     username-field password-field
-                                     username password
-                                     form-selector extra-fields)]
+        (let [login-result (fill-form session-id
+                                      field-values
+                                      :form-selector form-selector
+                                      :submit true)]
           (autonomous/audit! {:type       "site-login"
                               :site-id    (name site-id)
                               :session-id session-id
@@ -870,7 +1085,7 @@
 
   Returns:
      The logged-in page content with session-id."
-  [url fields]
+  [url fields & {:keys [backend]}]
   (when (autonomous/autonomous-run?)
     (autonomous/audit! {:type   "site-login-interactive"
                         :url    url
@@ -891,45 +1106,12 @@
                       {}
                       fields)
         ;; Open browser and navigate
-        result (open-session url)
+        result (open-session url :backend backend)
         session-id (:session-id result)
-        {:keys [client]} (get-session session-id)
-        page (current-page client)]
-    (when-not page
-      (throw (ex-info "Failed to load login page" {:url url})))
-    ;; Find the form and fill it
-    (let [form (first (.getForms page))]
-      (when-not form
-        (throw (ex-info "No form found on login page" {:url url})))
-      ;; Fill all fields
-      (doseq [[field-name value] field-values]
-        (let [el (or (try (.getInputByName ^HtmlForm form ^String field-name)
-                          (catch Exception _ nil))
-                     (try (first (.getTextAreasByName ^HtmlForm form ^String field-name))
-                          (catch Exception _ nil)))]
-          (when el
-            (cond
-              (instance? HtmlInput el) (.setValue ^HtmlInput el ^String (str value))
-              (instance? HtmlTextArea el) (.setText ^HtmlTextArea el ^String (str value))
-              :else (.setAttribute ^DomElement el "value" (str value))))))
-      ;; Submit
-      (let [submit-btn (or (first (.getInputsByType ^HtmlForm form "submit"))
-                           (.querySelector ^HtmlForm form
-                                           "button[type=submit], button:not([type])"))
-            result (if submit-btn
-                     (.click ^HtmlElement submit-btn)
-                     (current-page client))]
-        (wait-for-js! client action-settle-ms)
-        (persist-session! session-id)
-        (println "  login submitted.")
-        (println)
-        (let [page-result (if (instance? HtmlPage result)
-                            (page-result session-id (page->map result))
-                            (if-let [p (current-page client)]
-                              (page-result session-id (page->map p))
-                              (page-result session-id
-                                           {:content "Login submitted." :forms [] :links []})))]
-          page-result)))))
+        page-result (fill-form session-id field-values :submit true)]
+    (println "  login submitted.")
+    (println)
+    page-result))
 
 (defn list-sites
   "List registered site credentials. Returns names and URLs — never credentials."

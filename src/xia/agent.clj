@@ -6,7 +6,7 @@
 
    Skills = markdown instructions injected into the system prompt.
    Tools  = executable functions the LLM can call via function-calling."
-  (:require [clojure.tools.logging :as log]
+  (:require [taoensso.timbre :as log]
             [charred.api :as json]
             [xia.config :as cfg]
             [xia.context :as context]

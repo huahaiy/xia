@@ -3,7 +3,7 @@
    chat completions API shape, so one client handles OpenAI, Anthropic
    (via proxy), Qwen, local Ollama, etc."
   (:require [charred.api :as json]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.http-client :as http]))
 

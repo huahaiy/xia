@@ -1,6 +1,8 @@
 (ns xia.agent-test
   (:require [clojure.test :refer :all]
             [charred.api :as json]
+            [clojure.string :as str]
+            [taoensso.timbre :as log]
             [xia.agent :as agent]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -283,11 +285,15 @@
         tool-call {"id"       "call-1"
                    "function" {"name"      "web-search"
                                "arguments" "{not-json"}}]
-    (with-redefs [clojure.tools.logging/log*
-                  (fn [_logger level throwable message]
-                    (reset! logged {:level level
-                                    :throwable throwable
-                                    :message message}))]
+    (with-redefs [log/-log!
+                  (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
+                    (let [vargs     @vargs_
+                          throwable (when (instance? Throwable (first vargs))
+                                      (first vargs))
+                          msg-args   (if throwable (rest vargs) vargs)]
+                      (reset! logged {:level level
+                                      :throwable throwable
+                                      :message (str/join " " msg-args)})))]
       (let [prepared (#'agent/prepare-tool-call tool-call)]
         (is (= {} (:args prepared)))
         (is (= :web-search (:tool-id prepared)))

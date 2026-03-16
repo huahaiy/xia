@@ -18,8 +18,11 @@
                                                                        "description" "What to show the user (e.g. \"Email address\")"}
                                                               "mask?" {"type" "boolean"
                                                                        "description" "Hide input (true for passwords)"}}}
-                                       "description" "Fields to prompt for. Include name, label, and mask? for each."}}
+                                       "description" "Fields to prompt for. Include name, label, and mask? for each."}
+                             "backend" {"type" "string"
+                                        "description" "Optional browser backend override: auto, htmlunit, or playwright when available."}}
                "required"   ["url" "fields"]}
  :handler     "(fn [args]
                  (xia.browser/login-interactive (get args \"url\")
-                                                (get args \"fields\")))"}
+                                                (get args \"fields\")
+                                                :backend (get args \"backend\")))"}

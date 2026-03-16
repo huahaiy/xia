@@ -105,3 +105,12 @@
                       "   (xia.scratch/get-pad (:id pad)))"))]
     (is (= "Draft" (:title result)))
     (is (= "alpha beta" (:content result)))))
+
+(deftest browser-runtime-functions-are-exposed-through-sci
+  (let [status (sci-env/eval-string "(xia.browser/runtime-status)")
+        bootstrap (sci-env/eval-string "(xia.browser/bootstrap-runtime! :backend :playwright)")]
+    (is (= :htmlunit (:selected-auto-backend status)))
+    (is (= #{:htmlunit :playwright}
+           (set (map :backend (:backends status)))))
+    (is (= :playwright (:backend bootstrap)))
+    (is (= :running (:status bootstrap)))))

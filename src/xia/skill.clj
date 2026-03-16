@@ -25,7 +25,7 @@
    - A skill registry (future)"
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [datalevin.core :as d]
             [xia.db :as db]))
 

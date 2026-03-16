@@ -1,0 +1,12 @@
+;; Inspect browser backend runtime readiness.
+;; Import with: /import-tool resources/tools/browser-runtime-status.edn
+
+{:id             :browser-runtime-status
+ :name           "browser-runtime-status"
+ :description    "Inspect browser backend readiness and the current default selection. Use this before browser automation when you need to know whether Playwright is ready or Xia will fall back to HtmlUnit."
+ :tags           #{:browser :web :runtime :status}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {}}
+ :handler        "(fn [_]
+                    (xia.browser/runtime-status))"}

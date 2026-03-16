@@ -74,6 +74,19 @@
                                       {:passphrase-provider (constantly "beta")}))]
       (is (not (bytes= key-1 key-2))))))
 
+(deftest env-passphrase-does-not-call-passphrase-provider
+  (let [db-path   (temp-db-path)
+        calls     (atom 0)
+        key-env   {"XIA_MASTER_PASSPHRASE" "env-passphrase"}
+        provider  (fn [_]
+                    (swap! calls inc)
+                    "provider-passphrase")]
+    (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-env k))}
+      #(do
+         (crypto/configure! db-path {:passphrase-provider provider})
+         (is (= :env-passphrase (:source (crypto/current-key-source))))
+         (is (zero? @calls))))))
+
 (deftest db-connect-accepts-crypto-options
   (let [db-path (temp-db-path)]
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}

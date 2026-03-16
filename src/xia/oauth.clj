@@ -2,7 +2,7 @@
   "OAuth 2 authorization-code + PKCE support for registered service accounts."
   (:require [charred.api :as json]
             [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.http-client :as http])
   (:import [java.net URI URLDecoder URLEncoder]

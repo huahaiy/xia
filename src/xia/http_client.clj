@@ -1,7 +1,7 @@
 (ns xia.http-client
   "Shared outbound HTTP helper with bounded request timeouts and retries."
   (:require [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [hato.client :as hc])
   (:import [java.net URI URLEncoder]
            [java.net.http HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]

@@ -1,7 +1,7 @@
 (ns xia.channel.terminal
   "Terminal channel — interactive REPL for talking to xia."
   (:require [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.agent :as agent]
             [xia.skill :as skill]

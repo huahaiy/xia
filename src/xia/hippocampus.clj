@@ -10,7 +10,7 @@
    Runs after conversations end, or periodically as a background process."
   (:require [clojure.set :as set]
             [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [charred.api :as json]
             [xia.config :as cfg]
             [xia.db :as db]

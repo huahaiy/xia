@@ -12,7 +12,7 @@
            [java.nio.file.attribute PosixFilePermission PosixFilePermissions]
            [java.security.spec KeySpec]
            [java.security SecureRandom]
-           [java.util Arrays Base64]
+           [java.util Arrays Base64 Base64$Decoder Base64$Encoder]
            [javax.crypto SecretKeyFactory Cipher]
            [javax.crypto.spec GCMParameterSpec PBEKeySpec SecretKeySpec]))
 
@@ -28,17 +28,17 @@
 (defn- utf8-bytes [s]
   (.getBytes ^String s StandardCharsets/UTF_8))
 
-(defn- decoder []
+(defn- ^Base64$Decoder decoder []
   (Base64/getDecoder))
 
-(defn- encoder []
+(defn- ^Base64$Encoder encoder []
   (Base64/getEncoder))
 
 (defn- decode-key [encoded]
   (let [trimmed (str/trim (or encoded ""))]
     (when (str/blank? trimmed)
       (throw (ex-info "Encryption key is blank" {})))
-    (let [key (.decode (decoder) trimmed)]
+    (let [^bytes key (.decode ^Base64$Decoder (decoder) ^String trimmed)]
       (when-not (= key-bytes (alength key))
         (throw (ex-info "Encryption key must decode to 32 bytes" {})))
       key)))
@@ -76,7 +76,7 @@
     PosixFilePermission/OTHERS_WRITE
     PosixFilePermission/OTHERS_EXECUTE})
 
-(defn- path-of [path]
+(defn- ^Path path-of [path]
   (Paths/get path (make-array String 0)))
 
 (defn- absolute-path [^Path path]
@@ -132,35 +132,35 @@
     path))
 
 (defn- read-key-file [db-path file-path allow-insecure-key-file?]
-  (let [path (validate-secret-file! db-path file-path "Encryption key file"
-                                    allow-insecure-key-file?)]
-    (decode-key (slurp (.toFile path)))))
+  (let [^Path path (validate-secret-file! db-path file-path "Encryption key file"
+                                          allow-insecure-key-file?)]
+    (decode-key (slurp (str path)))))
 
 (defn- decode-bytes [encoded expected-length label]
   (let [trimmed (str/trim (or encoded ""))]
     (when (str/blank? trimmed)
       (throw (ex-info (str label " is blank") {})))
-    (let [bytes (.decode (decoder) trimmed)]
+    (let [^bytes bytes (.decode ^Base64$Decoder (decoder) ^String trimmed)]
       (when-not (= expected-length (alength bytes))
         (throw (ex-info (str label " must decode to " expected-length " bytes") {})))
       bytes)))
 
 (defn- read-salt-file [file-path]
-  (let [path (Paths/get file-path (make-array String 0))]
+  (let [^Path path (Paths/get file-path (make-array String 0))]
     (when-not (Files/exists path (make-array LinkOption 0))
       (throw (ex-info "Encryption salt file does not exist" {:path file-path})))
-    (decode-bytes (slurp (.toFile path)) salt-bytes "Encryption salt")))
+    (decode-bytes (slurp (str path)) salt-bytes "Encryption salt")))
 
 (defn- strip-trailing-newline [s]
   (str/replace (or s "") #"(?:\r?\n)+\z" ""))
 
 (defn- read-passphrase-file [db-path file-path allow-insecure-key-file?]
-  (let [path (validate-secret-file! db-path file-path "Master passphrase file"
-                                    allow-insecure-key-file?)]
-    (strip-trailing-newline (slurp (.toFile path)))))
+  (let [^Path path (validate-secret-file! db-path file-path "Master passphrase file"
+                                          allow-insecure-key-file?)]
+    (strip-trailing-newline (slurp (str path)))))
 
 (defn- generate-salt []
-  (let [bytes (byte-array salt-bytes)]
+  (let [^bytes bytes (byte-array salt-bytes)]
     (.nextBytes (SecureRandom.) bytes)
     bytes))
 
@@ -175,7 +175,7 @@
       (set-owner-only-perms! target-path))))
 
 (defn- ensure-salt-file! [db-path file-path]
-  (let [path (Paths/get file-path (make-array String 0))]
+  (let [^Path path (Paths/get file-path (make-array String 0))]
     (when-not (Files/exists path (make-array LinkOption 0))
       (migrate-legacy-salt! db-path file-path))
     (ensure-parent-dir! path)
@@ -183,9 +183,9 @@
       (do
         (set-owner-only-perms! path)
         (read-salt-file file-path))
-      (let [salt    (generate-salt)
-            encoded (.encodeToString (encoder) salt)]
-        (spit (.toFile path) encoded)
+      (let [^bytes salt (generate-salt)
+            encoded     (.encodeToString ^Base64$Encoder (encoder) salt)]
+        (spit (str path) encoded)
         (set-owner-only-perms! path)
         salt))))
 
@@ -233,11 +233,9 @@
          salt-path            (default-salt-path db-path)
          salt-exists?         (or (.exists (.toFile (Paths/get salt-path (make-array String 0))))
                                   (.exists (.toFile (Paths/get (legacy-salt-path db-path) (make-array String 0)))))
-         provider-passphrase  (provider-passphrase
-                                passphrase-provider
-                                {:db-path   db-path
-                                 :salt-path salt-path
-                                 :new?      (not salt-exists?)})]
+         provider-ctx         {:db-path   db-path
+                               :salt-path salt-path
+                               :new?      (not salt-exists?)}]
     (cond
       (some? key-file)
       {:key (read-key-file db-path key-file allow-insecure-key-file?)
@@ -273,20 +271,19 @@
                              :env-passphrase-file)
              :path env-passphrase-file)
 
-      (seq provider-passphrase)
-      (passphrase-key db-path provider-passphrase :prompt-passphrase)
-
       :else
-      (throw (ex-info "No master key or passphrase available"
-                      {:supported-sources [:key-file
-                                           :passphrase
-                                           :passphrase-file
-                                           :XIA_MASTER_KEY
-                                           :XIA_MASTER_KEY_FILE
-                                           :XIA_MASTER_PASSPHRASE
-                                           :XIA_MASTER_PASSPHRASE_FILE
-                                           :passphrase-provider]
-                       :db-path db-path}))))))
+      (if-let [provider-passphrase (provider-passphrase passphrase-provider provider-ctx)]
+        (passphrase-key db-path provider-passphrase :prompt-passphrase)
+        (throw (ex-info "No master key or passphrase available"
+                        {:supported-sources [:key-file
+                                             :passphrase
+                                             :passphrase-file
+                                             :XIA_MASTER_KEY
+                                             :XIA_MASTER_KEY_FILE
+                                             :XIA_MASTER_PASSPHRASE
+                                             :XIA_MASTER_PASSPHRASE_FILE
+                                             :passphrase-provider]
+                         :db-path db-path})))))))
 
 (defn configure!
   "Load or create the encryption key for the given DB path."
@@ -316,19 +313,20 @@
     (str/blank? value) value
     (encrypted? value) value
     :else
-    (let [iv      (byte-array iv-bytes)
-          _       (.nextBytes (SecureRandom.) iv)
-          cipher  (Cipher/getInstance "AES/GCM/NoPadding")
-          key     (SecretKeySpec. (configured-key) "AES")
-          params  (GCMParameterSpec. 128 iv)
-          aad     (utf8-bytes (str aad))
-          plain   (utf8-bytes value)]
+    (let [^bytes iv                     (byte-array iv-bytes)
+          _                             (.nextBytes (SecureRandom.) iv)
+          ^Cipher cipher                (Cipher/getInstance "AES/GCM/NoPadding")
+          key                           (SecretKeySpec. (configured-key) "AES")
+          params                        (GCMParameterSpec. 128 iv)
+          ^bytes aad-bytes              (utf8-bytes (str aad))
+          ^bytes plain                  (utf8-bytes value)
+          ^Base64$Encoder base64-encoder (encoder)]
       (.init cipher Cipher/ENCRYPT_MODE key params)
-      (.updateAAD cipher aad)
+      (.updateAAD cipher aad-bytes)
       (str envelope-prefix
-           (.encodeToString (encoder) iv)
+           (.encodeToString base64-encoder iv)
            ":"
-           (.encodeToString (encoder) (.doFinal cipher plain))))))
+           (.encodeToString base64-encoder (.doFinal cipher plain))))))
 
 (defn decrypt
   "Decrypt a value if it is an encrypted envelope, otherwise return it unchanged."
@@ -342,11 +340,12 @@
           [iv-b64 data-b64] (str/split payload #":" 2)]
       (when (or (str/blank? iv-b64) (str/blank? data-b64))
         (throw (ex-info "Malformed encrypted value" {:value value})))
-      (let [cipher (Cipher/getInstance "AES/GCM/NoPadding")
-            key    (SecretKeySpec. (configured-key) "AES")
-            iv     (.decode (decoder) iv-b64)
-            data   (.decode (decoder) data-b64)
-            params (GCMParameterSpec. 128 iv)]
+      (let [^Cipher cipher       (Cipher/getInstance "AES/GCM/NoPadding")
+            key                  (SecretKeySpec. (configured-key) "AES")
+            ^bytes iv            (.decode ^Base64$Decoder (decoder) ^String iv-b64)
+            ^bytes data          (.decode ^Base64$Decoder (decoder) ^String data-b64)
+            params               (GCMParameterSpec. 128 iv)
+            ^bytes aad-bytes     (utf8-bytes (str aad))]
         (.init cipher Cipher/DECRYPT_MODE key params)
-        (.updateAAD cipher (utf8-bytes (str aad)))
+        (.updateAAD cipher aad-bytes)
         (String. (.doFinal cipher data) StandardCharsets/UTF_8)))))

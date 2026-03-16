@@ -1,0 +1,21 @@
+{
+  "resources": {
+    "includes": [
+      {
+        "pattern": "\\Qoauth_providers.edn\\E"
+      },
+      {
+        "pattern": "\\Qexample-tool.edn\\E"
+      },
+      {
+        "pattern": "\\Qexample-skill.md\\E"
+      },
+      {
+        "pattern": "\\Qtools/\\E.*"
+      },
+      {
+        "pattern": "\\Qweb/\\E.*"
+      }
+    ]
+  }
+}

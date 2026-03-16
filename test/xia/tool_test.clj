@@ -1,5 +1,6 @@
 (ns xia.tool-test
   (:require [clojure.test :refer :all]
+            [xia.browser :as browser]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.test-helpers :refer [with-test-db]]
@@ -16,17 +17,6 @@
   (tool/load-tool! :safe-tool)
   (is (= {"status" "ok"}
          (tool/execute-tool :safe-tool {} {:channel :scheduler}))))
-
-(deftest tool-handler-times-out
-  (db/set-config! :tool/sci-handler-timeout-ms 100)
-  (db/install-tool! {:id          :hung-tool
-                     :name        "hung-tool"
-                     :description "Hung tool"
-                     :approval    :auto
-                     :handler     "(fn [_] (deref (promise)))"})
-  (tool/load-tool! :hung-tool)
-  (is (= {:error "Tool execution failed: SCI handler timed out after 100 ms"}
-         (tool/execute-tool :hung-tool {} {:channel :scheduler}))))
 
 (deftest privileged-tool-blocks-without-approval-handler
   (db/install-tool! {:id          :privileged-tool
@@ -330,6 +320,8 @@
   (let [count (tool/ensure-bundled-tools!)]
     (is (pos? count))
     (is (= :web-search (:tool/id (db/get-tool :web-search))))
+    (is (= :browser-runtime-status (:tool/id (db/get-tool :browser-runtime-status))))
+    (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
     (is (= :browser-open (:tool/id (db/get-tool :browser-open))))
     (is (= :browser-navigate (:tool/id (db/get-tool :browser-navigate))))
     (is (= :browser-read-page (:tool/id (db/get-tool :browser-read-page))))
@@ -337,5 +329,45 @@
     (is (= :browser-list-sessions (:tool/id (db/get-tool :browser-list-sessions))))
     (is (= :browser-list-sites (:tool/id (db/get-tool :browser-list-sites))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :web-search))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-runtime-status))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-list-sessions))))
-    (is (nil? (:tool/execution-mode (db/get-tool :browser-open))))))
+    (is (nil? (:tool/execution-mode (db/get-tool :browser-open))))
+    (is (contains? (get-in (db/get-tool :browser-open) [:tool/parameters "properties"])
+                   "backend"))
+    (is (contains? (get-in (db/get-tool :browser-login) [:tool/parameters "properties"])
+                   "backend"))
+    (is (contains? (get-in (db/get-tool :browser-login-interactive) [:tool/parameters "properties"])
+                   "backend"))))
+
+(deftest browser-runtime-tools-execute-through-sci
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :browser-runtime-status)
+  (tool/load-tool! :browser-bootstrap-runtime)
+  (let [status (tool/execute-tool :browser-runtime-status {} {:channel :scheduler})
+        session-id (random-uuid)]
+    (is (= #{:htmlunit :playwright}
+           (set (map :backend (:backends status)))))
+    (prompt/register-approval! :terminal (fn [_] true))
+    (try
+      (let [bootstrap (tool/execute-tool :browser-bootstrap-runtime {"backend" "playwright"}
+                                         {:channel :terminal
+                                          :session-id session-id})]
+        (is (= :playwright (:backend bootstrap)))
+        (is (= :running (:status bootstrap))))
+      (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)
+        (browser/close-all-sessions!)))))
+
+(deftest browser-open-tool-accepts-playwright-backend
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :browser-open)
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [result (tool/execute-tool :browser-open {"url" "https://example.com"
+                                                 "backend" "playwright"}
+                                  {:channel :scheduler})]
+    (try
+      (is (= :playwright (:backend result)))
+      (is (= "Example Domain" (:title result)))
+      (finally
+        (browser/close-session (:session-id result))))))

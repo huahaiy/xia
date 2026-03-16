@@ -131,21 +131,41 @@
                                           :autonomous-run?  true
                                           :approval-bypass? true
                                           :audit-log        (atom [])}]
-    (with-redefs [xia.browser/open-session (fn [_url] {:session-id "sess-1"})
-                  xia.browser/get-session  (fn [_session-id] {:client ::client})
-                  xia.browser/current-page (fn [_client] ::page)
-                  xia.browser/do-login     (fn [session-id _page username-field password-field username password form-selector extra-fields]
+    (with-redefs [xia.browser/open-session (fn [_url & _] {:session-id "sess-1"})
+                  xia.browser/fill-form    (fn [session-id fields & {:keys [form-selector submit]}]
                                              (is (= "sess-1" session-id))
-                                             (is (= "username" username-field))
-                                             (is (= "password" password-field))
-                                             (is (= "hyang" username))
-                                             (is (= "pw" password))
+                                             (is (= {"username" "hyang"
+                                                     "password" "pw"}
+                                                    fields))
                                              (is (nil? form-selector))
-                                             (is (nil? extra-fields))
+                                             (is (= true submit))
                                              {:session-id session-id
                                               :content "ok"})]
       (is (= {:session-id "sess-1" :content "ok"}
              (browser/login :portal))))))
+
+(deftest login-passes-backend-override-to-open-session
+  (db/register-site-cred!
+    {:id             :portal
+     :login-url      "https://portal.example/login"
+     :username-field "username"
+     :password-field "password"
+     :username       "hyang"
+     :password       "pw"})
+  (with-redefs [xia.browser/open-session (fn [url & {:keys [backend]}]
+                                           (is (= "https://portal.example/login" url))
+                                           (is (= :playwright backend))
+                                           {:session-id "sess-1"})
+                xia.browser/fill-form    (fn [session-id fields & {:keys [submit]}]
+                                           (is (= "sess-1" session-id))
+                                           (is (= {"username" "hyang"
+                                                   "password" "pw"}
+                                                  fields))
+                                           (is (= true submit))
+                                           {:session-id session-id
+                                            :content "ok"})]
+    (is (= {:session-id "sess-1" :content "ok"}
+           (browser/login :portal :backend :playwright)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt mechanism
@@ -179,6 +199,32 @@
           clojure.lang.ExceptionInfo #"unavailable during autonomous execution"
           (browser/login-interactive "https://example.com"
             [{"name" "user" "label" "User"}])))))
+
+(deftest login-interactive-passes-backend-override-to-open-session
+  (prompt/register-prompt! (fn [label & _]
+                             (case label
+                               "User" "hyang"
+                               "Password" "pw")))
+  (try
+    (with-redefs [xia.browser/open-session (fn [url & {:keys [backend]}]
+                                             (is (= "https://example.com/login" url))
+                                             (is (= :playwright backend))
+                                             {:session-id "sess-1"})
+                  xia.browser/fill-form    (fn [session-id fields & {:keys [submit]}]
+                                             (is (= "sess-1" session-id))
+                                             (is (= {"user" "hyang"
+                                                     "password" "pw"}
+                                                    fields))
+                                             (is (= true submit))
+                                             {:session-id session-id
+                                              :content "ok"})]
+      (is (= {:session-id "sess-1" :content "ok"}
+             (browser/login-interactive "https://example.com/login"
+               [{"name" "user" "label" "User"}
+                {"name" "password" "label" "Password" "mask?" true}]
+               :backend :playwright))))
+    (finally
+      (prompt/register-prompt! nil))))
 
 ;; ---------------------------------------------------------------------------
 ;; Integration: login with stored credentials

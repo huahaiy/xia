@@ -1,0 +1,13 @@
+;; Prepare browser backend runtime support.
+;; Import with: /import-tool resources/tools/browser-bootstrap-runtime.edn
+
+{:id          :browser-bootstrap-runtime
+ :name        "browser-bootstrap-runtime"
+ :description "Prepare browser backend runtime support. Use this when Playwright needs setup before browser automation. Returns readiness information for one backend or for all backends when backend is auto."
+ :tags        #{:browser :web :runtime :bootstrap}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"backend" {"type" "string"
+                                        "description" "Optional backend to bootstrap: auto, htmlunit, or playwright."}}}
+ :handler     "(fn [args]
+                 (xia.browser/bootstrap-runtime! :backend (or (get args \"backend\") \"auto\")))"}

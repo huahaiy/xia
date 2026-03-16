@@ -13,7 +13,7 @@
   Runtime: in-memory atom. Snapshot to DB only on session events."
   (:require [charred.api :as json]
             [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.memory :as memory])

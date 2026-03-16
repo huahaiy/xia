@@ -11,7 +11,7 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.java.io :as io]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -29,6 +29,8 @@
   ["tools/web-search.edn"
    "tools/web-fetch.edn"
    "tools/web-extract.edn"
+   "tools/browser-runtime-status.edn"
+   "tools/browser-bootstrap-runtime.edn"
    "tools/browser-open.edn"
    "tools/browser-navigate.edn"
    "tools/browser-read-page.edn"
@@ -295,7 +297,14 @@
   []
   (reduce
     (fn [installed-count resource-path]
-      (let [data (some-> resource-path io/resource slurp edn/read-string)
+      (let [resource (io/resource resource-path)
+            _        (when-not resource
+                       (throw (ex-info "Bundled tool resource missing from classpath"
+                                       {:resource-path resource-path})))
+            data     (some-> resource slurp edn/read-string)
+            _        (when (nil? data)
+                       (throw (ex-info "Bundled tool resource was empty"
+                                       {:resource-path resource-path})))
             defs (if (vector? data) data [data])
             missing (filterv #(nil? (db/get-tool (:id %))) defs)]
         (doseq [tool-def missing]

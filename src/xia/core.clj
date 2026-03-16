@@ -4,7 +4,7 @@
    A xia = single binary + Datalevin DB.
    Download, run, answer a few questions, done."
   (:require [clojure.tools.cli :refer [parse-opts]]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [clojure.java.io :as io]
             [xia.crypto :as crypto]
             [xia.db :as db]
@@ -17,6 +17,7 @@
             [xia.tool :as tool]
             [xia.channel.terminal :as terminal]
             [xia.channel.http :as http])
+  (:import [java.nio.file Files Paths])
   (:gen-class))
 
 ;; ---------------------------------------------------------------------------
@@ -82,9 +83,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- ensure-db-dir! [db-path]
-  (let [parent (.getParentFile (java.io.File. db-path))]
-    (when-not (.exists parent)
-      (.mkdirs parent))))
+  (when-let [parent (.getParent (Paths/get db-path (make-array String 0)))]
+    (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0))))
 
 (defn- local-ui-url [bind port]
   (str "http://"

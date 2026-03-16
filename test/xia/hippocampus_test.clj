@@ -1,5 +1,7 @@
 (ns xia.hippocampus-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.string :as str]
+            [taoensso.timbre :as log]
             [xia.test-helpers :as th]
             [xia.db :as db]
             [xia.memory :as memory]
@@ -382,12 +384,16 @@
     (with-redefs [xia.hippocampus/summarize-conversation (constantly "summary")
                   xia.hippocampus/consolidate-pending!   (fn []
                                                            (throw (ex-info "boom" {:type :test})))
-                  clojure.tools.logging/log*
-                  (fn [_logger level throwable message]
-                    (when (= :error level)
-                      (deliver logged {:level level
-                                       :throwable throwable
-                                       :message message})))]
+                  log/-log!
+                  (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
+                    (let [vargs     @vargs_
+                          throwable (when (instance? Throwable (first vargs))
+                                      (first vargs))
+                          msg-args   (if throwable (rest vargs) vargs)]
+                      (when (= :error level)
+                        (deliver logged {:level level
+                                         :throwable throwable
+                                         :message (str/join " " msg-args)}))))]
       (hippo/record-conversation! session-id :terminal)
       (let [entry (deref logged 1000 ::timeout)]
         (is (not= ::timeout entry))

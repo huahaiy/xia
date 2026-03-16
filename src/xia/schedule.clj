@@ -12,7 +12,7 @@
    This namespace handles data operations only. The background executor
   lives in xia.scheduler (separate to avoid circular deps with agent)."
   (:require [clojure.edn :as edn]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.cron :as cron]
             [xia.db :as db]))
 

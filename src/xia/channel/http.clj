@@ -4,7 +4,7 @@
             [clojure.java.io :as io]
             [org.httpkit.server :as http]
             [charred.api :as json]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [xia.scratch :as scratch]
             [xia.autonomous :as autonomous]
             [xia.db :as db]

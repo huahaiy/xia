@@ -16,7 +16,7 @@
    exceeds a token budget, older messages are summarized into a recap."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [clojure.tools.logging :as log]
+            [taoensso.timbre :as log]
             [charred.api :as json]
             [xia.db :as db]
             [xia.identity :as identity]

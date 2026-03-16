@@ -100,8 +100,8 @@ Every interaction is recorded as an episode. A background consolidation process 
 
 Xia can interact with the live web through secure, sandboxed tools.
 
-- **Headless browser:** a stateful, JavaScript-enabled browser based on HtmlUnit.
-- **Resumable browser sessions:** cookies and current URL persist in Xia's DB.
+- **Headless browser backends:** Playwright for modern sites when runtime support is available, with HtmlUnit as a lightweight fallback.
+- **Resumable browser sessions:** backend-specific browser state and current URL persist in Xia's DB.
 - **Stealth authenticated login:** stored credentials are injected by a proxy, not exposed to the LLM.
 - **Interactive login:** for MFA or complex flows, Xia can prompt the user directly and avoid storage.
 - **Secure fetch and search:** SSRF-protected web fetching, structured extraction, and search.

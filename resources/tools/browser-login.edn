@@ -9,7 +9,10 @@
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"site" {"type"        "string"
-                                     "description" "The site keyword (e.g. \"workportal\", \"jira\"). Use browser list-sites to see available sites."}}
+                                     "description" "The site keyword (e.g. \"workportal\", \"jira\"). Use browser list-sites to see available sites."}
+                             "backend" {"type" "string"
+                                        "description" "Optional browser backend override: auto, htmlunit, or playwright when available."}}
                "required"   ["site"]}
  :handler     "(fn [args]
-                 (xia.browser/login (keyword (get args \"site\"))))"}
+                 (xia.browser/login (keyword (get args \"site\"))
+                                    :backend (get args \"backend\")))"}

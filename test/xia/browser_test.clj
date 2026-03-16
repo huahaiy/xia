@@ -1,6 +1,8 @@
 (ns xia.browser-test
   (:require [clojure.test :refer :all]
             [xia.browser :as browser]
+            [xia.browser.playwright]
+            [xia.db :as db]
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.net InetAddress URL]
            [org.htmlunit MockWebConnection WebClient WebRequest]
@@ -22,6 +24,12 @@
     (.setWebConnection client mock)
     {:client client
      :page   (.getPage client (.toString url))}))
+
+(defn- close-playwright-live-session!
+  [session-id]
+  (let [close-live-session! (var-get (ns-resolve 'xia.browser.playwright
+                                                 'close-live-session!))]
+    (close-live-session! session-id)))
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -105,6 +113,7 @@
 (deftest ^:integration open-and-close-session
   (let [result (browser/open-session "https://example.com")]
     (is (string? (:session-id result)))
+    (is (= :htmlunit (:backend result)))
     (is (= "Example Domain" (:title result)))
     (is (string? (:content result)))
     (is (vector? (:forms result)))
@@ -202,7 +211,9 @@
   (let [result (browser/open-session "https://example.com")
         sid    (:session-id result)
         listing (browser/list-sessions)]
-    (is (some #(= sid (:session-id %)) listing))
+    (is (some #(and (= sid (:session-id %))
+                    (= :htmlunit (:backend %)))
+              listing))
     (browser/close-session sid)))
 
 (deftest ^:integration list-sessions-includes-resumable-snapshots
@@ -290,6 +301,7 @@
 (deftest ^:integration page-map-structure
   (let [result (browser/open-session "https://example.com")
         sid    (:session-id result)]
+    (is (contains? result :backend))
     (is (contains? result :url))
     (is (contains? result :title))
     (is (contains? result :content))
@@ -298,3 +310,91 @@
     (is (contains? result :truncated?))
     (is (contains? result :session-id))
     (browser/close-session sid)))
+
+(deftest open-session-uses-configured-default-backend-when-auto
+  (db/set-config! :browser/backend-default "auto")
+  (let [result (browser/open-session "https://example.com")]
+    (try
+      (is (= :htmlunit (:backend result)))
+      (finally
+        (browser/close-session (:session-id result))))))
+
+(deftest open-session-auto-falls-back-when-playwright-is-unready
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [result (browser/open-session "https://example.com" :backend :auto)]
+    (try
+      (is (= :htmlunit (:backend result)))
+      (finally
+        (browser/close-session (:session-id result))))))
+
+(deftest ^:integration open-session-explicit-playwright-works
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [result (browser/open-session "https://example.com" :backend :playwright)]
+    (try
+      (is (= :playwright (:backend result)))
+      (is (= "Example Domain" (:title result)))
+      (is (string? (:content result)))
+      (finally
+        (browser/close-session (:session-id result))))))
+
+(deftest ^:integration playwright-list-sessions-includes-resumable-snapshots
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [result  (browser/open-session "https://example.com" :backend :playwright)
+        sid     (:session-id result)
+        _       (close-playwright-live-session! sid)
+        listing (browser/list-sessions)
+        entry   (some #(when (= sid (:session-id %)) %) listing)]
+    (is (some? entry))
+    (is (= :playwright (:backend entry)))
+    (is (= false (:live? entry)))
+    (is (= true (:resumable? entry)))
+    (browser/close-session sid)))
+
+(deftest ^:integration playwright-read-page-restores-from-snapshot
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [result (browser/open-session "https://example.com" :backend :playwright)
+        sid    (:session-id result)
+        _      (close-playwright-live-session! sid)
+        page   (browser/read-page sid)]
+    (is (= sid (:session-id page)))
+    (is (= :playwright (:backend page)))
+    (is (= "Example Domain" (:title page)))
+    (browser/close-session sid)))
+
+(deftest browser-runtime-status-reports-htmlunit-and-playwright
+  (let [status (browser/browser-runtime-status)
+        by-backend (into {} (map (juxt :backend identity) (:backends status)))]
+    (is (= :auto (:configured-default-backend status)))
+    (is (= :htmlunit (:selected-auto-backend status)))
+    (is (= :ready (:status (get by-backend :htmlunit))))
+    (is (= true (:ready? (get by-backend :htmlunit))))
+    (is (= :available (:status (get by-backend :playwright))))
+    (is (= true (:available? (get by-backend :playwright))))
+    (is (= false (:ready? (get by-backend :playwright))))))
+
+(deftest browser-runtime-status-reports-disabled-playwright
+  (db/set-config! :browser/playwright-enabled? "false")
+  (let [status (browser/browser-runtime-status)
+        by-backend (into {} (map (juxt :backend identity) (:backends status)))]
+    (is (= :htmlunit (:selected-auto-backend status)))
+    (is (= :disabled (:status (get by-backend :playwright))))
+    (is (= false (:available? (get by-backend :playwright))))
+    (is (= false (:ready? (get by-backend :playwright))))))
+
+(deftest open-session-explicit-playwright-throws-when-disabled
+  (db/set-config! :browser/playwright-enabled? "false")
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo #"disabled"
+        (browser/open-session "https://example.com" :backend :playwright))))
+
+(deftest bootstrap-browser-runtime-status-is-reported
+  (let [auto-result (browser/bootstrap-browser-runtime!)
+        playwright-result (browser/bootstrap-browser-runtime! :backend :playwright)
+        after (browser/browser-runtime-status)]
+    (is (= :auto (:requested-backend auto-result)))
+    (is (= #{:htmlunit :playwright}
+           (set (map :backend (:results auto-result)))))
+    (is (= :playwright (:backend playwright-result)))
+    (is (= :running (:status playwright-result)))
+    (is (= true (:ready? playwright-result)))
+    (is (= :playwright (:selected-auto-backend after)))))
