@@ -3,7 +3,8 @@
             [xia.core :as core]
             [xia.crypto :as crypto]
             [xia.db :as db]
-            [xia.pack :as pack])
+            [xia.pack :as pack]
+            [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]))
@@ -40,7 +41,7 @@
     (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-file-env k))}
       #(do
-         (db/connect! db-path)
+         (db/connect! db-path (th/test-connect-options))
          (try
            (db/set-config! :user/name "CLI Archive")
            (finally

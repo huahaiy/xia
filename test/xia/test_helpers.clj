@@ -1,6 +1,8 @@
 (ns xia.test-helpers
   "Shared test fixtures and helpers for xia tests."
-  (:require [xia.db :as db]
+  (:require [clojure.string :as str]
+            [datalevin.embedding :as emb]
+            [xia.db :as db]
             [xia.working-memory :as wm])
   (:import [java.io File]
            [java.nio.file Files]
@@ -10,12 +12,101 @@
   (str (Files/createTempDirectory "xia-test"
          (into-array FileAttribute []))))
 
+(def ^:private test-embedding-dimensions
+  32)
+
+(def ^:private synonym->canonical
+  {"auto" "vehicle"
+   "automobile" "vehicle"
+   "automobiles" "vehicle"
+   "car" "vehicle"
+   "cars" "vehicle"
+   "vehicle" "vehicle"
+   "vehicles" "vehicle"})
+
+(def ^:private test-embedding-metadata
+  {:embedding/provider {:kind :test
+                        :id :default
+                        :model-id "xia-test-embedder"}
+   :embedding/output   {:dimensions test-embedding-dimensions
+                        :normalize? true}
+   :embedding/artifact {:format :memory
+                        :file "xia-test-embedder"}})
+
+(defn- provider-text
+  [item]
+  (cond
+    (string? item) item
+    (map? item)    (or (:text item) "")
+    :else          (str item)))
+
+(defn- canonical-token
+  [token]
+  (get synonym->canonical token token))
+
+(defn- tokenize
+  [text]
+  (->> (str/split (str/lower-case (or text "")) #"[^\p{Alnum}]+")
+       (remove str/blank?)
+       (map canonical-token)))
+
+(defn- token-slot
+  [token]
+  (Math/floorMod (int (hash token)) (int test-embedding-dimensions)))
+
+(defn- normalize-vector
+  [values]
+  (let [norm (Math/sqrt
+               (reduce (fn [sum value]
+                         (+ sum (* value value)))
+                       0.0
+                       values))]
+    (if (pos? norm)
+      (mapv #(float (/ % norm)) values)
+      values)))
+
+(defn- embed-text
+  [text]
+  (normalize-vector
+    (reduce (fn [values token]
+              (update values (token-slot token) + 1.0))
+            (vec (repeat test-embedding-dimensions 0.0))
+            (tokenize text))))
+
+(defn test-embedding-provider
+  []
+  (reify
+    emb/IEmbeddingProvider
+    (embedding [_ items _opts]
+      (mapv (comp embed-text provider-text) items))
+    (embedding-metadata [_]
+      test-embedding-metadata)
+    (embedding-dimensions [_]
+      test-embedding-dimensions)
+    (close-provider [_]
+      nil)
+
+    java.lang.AutoCloseable
+    (close [_]
+      nil)))
+
+(defn test-connect-options
+  ([]
+   (test-connect-options nil))
+  ([options]
+   (update (merge options
+                  {:datalevin-opts
+                   {:embedding-providers {:default (test-embedding-provider)}}})
+           :datalevin-opts
+           #(merge (db/default-datalevin-opts) %))))
+
 (defn with-test-db
   "Fixture: create a temp Datalevin DB for the duration of the test."
   [f]
   (let [path (temp-db-path)]
     (wm/clear-wm!)
-    (db/connect! path {:passphrase-provider (constantly "xia-test-passphrase")})
+    (db/connect! path (test-connect-options
+                        {:passphrase-provider (constantly "xia-test-passphrase")}))
     (try
       (f)
       (finally

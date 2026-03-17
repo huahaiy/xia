@@ -460,10 +460,29 @@
                 :utility    (double utility)}))))
 
 ;; ============================================================================
-;; Full-text Search (BM25 via Datalevin)
+;; Hybrid Search (FTS + Embedding via Datalevin)
 ;; ============================================================================
-;; These functions provide hybrid-ready search: FTS works today; vector search
-;; activates when Datalevin's embedding service becomes available.
+;; FTS keeps exact lexical recall strong, while embedding search improves
+;; synonym and intent-level matching over the same source datoms.
+
+(defn- dedupe-by
+  [key-fn coll]
+  (second
+    (reduce (fn [[seen items] item]
+              (let [k (key-fn item)]
+                (if (contains? seen k)
+                  [seen items]
+                  [(conj seen k) (conj items item)])))
+            [#{} []]
+            coll)))
+
+(defn- combine-search-results
+  [key-fn top & colls]
+  (->> colls
+       (apply concat)
+       (dedupe-by key-fn)
+       (take top)
+       vec))
 
 (defn- fts-datoms
   "Run fulltext search, return results as maps {:eid :attr :value}.
@@ -477,47 +496,106 @@
         (catch Exception _
           [])))))
 
+(defn- embedding-datoms
+  "Run semantic search against an embedding-enabled string attribute.
+   Returns maps {:eid :attr :value :distance}."
+  [attr query & {:keys [top] :or {top 10}}]
+  (when (and query (not (clojure.string/blank? query)))
+    (let [db     (d/db (db/conn))
+          domain (-> (str attr)
+                     (subs 1)
+                     (str/replace "/" "_"))
+          query-form `[:find ?e ?a ?v ?dist
+                       :in $ ?query
+                       :where
+                       [(~'embedding-neighbors $ ?query
+                         {:domains [~domain]
+                          :top ~top
+                          :display :refs+dists})
+                        [[?e ?a ?v ?dist]]]]]
+      (try
+        (->> (d/q query-form db query)
+             (mapv (fn [res]
+                     (let [[eid matched-attr value distance] res]
+                       {:eid      eid
+                        :attr     matched-attr
+                        :value    value
+                        :distance (double distance)}))))
+        (catch Exception _
+          [])))))
+
+(defn- node-result
+  [eid]
+  (let [e (into {} (d/entity (d/db (db/conn)) eid))]
+    {:eid  eid
+     :name (:kg.node/name e)
+     :type (:kg.node/type e)}))
+
+(defn- ref-eid
+  [value]
+  (or (:db/id value) value))
+
+(defn- fact-result
+  [eid]
+  (let [e (into {} (d/entity (d/db (db/conn)) eid))]
+    {:eid        eid
+     :node-eid   (ref-eid (:kg.fact/node e))
+     :content    (:kg.fact/content e)
+     :confidence (:kg.fact/confidence e)
+     :utility    (double (or (:kg.fact/utility e)
+                             default-fact-utility))}))
+
+(defn- episode-result
+  [eid]
+  (let [e (into {} (d/entity (d/db (db/conn)) eid))]
+     {:eid        eid
+      :summary    (:episode/summary e)
+      :context    (:episode/context e)
+      :timestamp  (:episode/timestamp e)
+      :importance (double (or (:episode/importance e)
+                              (:default-importance
+                                default-episode-retention-config)))}))
+
 (defn search-nodes
-  "Search KG nodes by name via FTS. Returns [{:eid :name :type}]."
-  [query & {:keys [top] :or {top 10}}]
-  (->> (fts-datoms query)
-       (filter #(= :kg.node/name (:attr %)))
-       (take top)
-       (mapv (fn [{:keys [eid]}]
-               (let [e (into {} (d/entity (d/db (db/conn)) eid))]
-                 {:eid  eid
-                  :name (:kg.node/name e)
-                  :type (:kg.node/type e)})))))
+  "Search KG nodes by name using lexical FTS plus semantic recall.
+   Returns [{:eid :name :type}]."
+  [query & {:keys [top fts-query] :or {top 10}}]
+  (let [fts-results      (->> (fts-datoms (or fts-query query))
+                              (filter #(= :kg.node/name (:attr %)))
+                              (take top)
+                              (mapv (comp node-result :eid)))
+        semantic-results (->> (embedding-datoms :kg.node/name query :top top)
+                              (mapv (comp node-result :eid)))]
+    (combine-search-results :eid top fts-results semantic-results)))
 
 (defn search-facts
-  "Search KG facts by content via FTS. Returns [{:eid :node-eid :content :confidence :utility}]."
-  [query & {:keys [top] :or {top 15}}]
-  (->> (fts-datoms query)
-       (filter #(= :kg.fact/content (:attr %)))
-       (take top)
-       (mapv (fn [{:keys [eid]}]
-               (let [e (into {} (d/entity (d/db (db/conn)) eid))]
-                 {:eid        eid
-                  :node-eid   (:kg.fact/node e)
-                  :content    (:kg.fact/content e)
-                  :confidence (:kg.fact/confidence e)
-                  :utility    (double (or (:kg.fact/utility e)
-                                          default-fact-utility))})))))
+  "Search KG facts by content using lexical FTS plus semantic recall.
+   Returns [{:eid :node-eid :content :confidence :utility}]."
+  [query & {:keys [top fts-query] :or {top 15}}]
+  (let [fts-results      (->> (fts-datoms (or fts-query query))
+                              (filter #(= :kg.fact/content (:attr %)))
+                              (take top)
+                              (mapv (comp fact-result :eid)))
+        semantic-results (->> (embedding-datoms :kg.fact/content query :top top)
+                              (mapv (comp fact-result :eid)))]
+    (combine-search-results :eid top fts-results semantic-results)))
 
 (defn search-episodes
-  "Search episodes by summary/context via FTS. Returns [{:eid :summary :context :timestamp :importance}]."
-  [query & {:keys [top] :or {top 5}}]
-  (->> (fts-datoms query)
-       (filter #(#{:episode/summary :episode/context} (:attr %)))
-       (take top)
-       (mapv (fn [{:keys [eid]}]
-               (let [e (into {} (d/entity (d/db (db/conn)) eid))]
-                  {:eid       eid
-                   :summary   (:episode/summary e)
-                   :context   (:episode/context e)
-                   :timestamp (:episode/timestamp e)
-                    :importance (double (or (:episode/importance e)
-                                          (:default-importance default-episode-retention-config)))})))))
+  "Search episodes by summary/context using lexical FTS plus semantic recall.
+   Returns [{:eid :summary :context :timestamp :importance}]."
+  [query & {:keys [top fts-query] :or {top 5}}]
+  (let [fts-results      (->> (fts-datoms (or fts-query query))
+                              (filter #(#{:episode/summary :episode/context} (:attr %)))
+                              (take top)
+                              (mapv (comp episode-result :eid)))
+        semantic-results (combine-search-results
+                           :eid
+                           top
+                           (mapv (comp episode-result :eid)
+                                 (embedding-datoms :episode/summary query :top top))
+                           (mapv (comp episode-result :eid)
+                                 (embedding-datoms :episode/context query :top top)))]
+    (combine-search-results :eid top fts-results semantic-results)))
 
 (defn search-edges
   "Search KG edges by label via FTS. Returns [{:eid :from-eid :to-eid :type :label}]."
@@ -528,8 +606,8 @@
        (mapv (fn [{:keys [eid]}]
                (let [e (into {} (d/entity (d/db (db/conn)) eid))]
                  {:eid      eid
-                  :from-eid (:kg.edge/from e)
-                  :to-eid   (:kg.edge/to e)
+                  :from-eid (ref-eid (:kg.edge/from e))
+                  :to-eid   (ref-eid (:kg.edge/to e))
                   :type     (:kg.edge/type e)
                   :label    (:kg.edge/label e)})))))
 

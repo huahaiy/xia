@@ -90,7 +90,19 @@
       (is (map? results))
       (is (contains? results :nodes))
       (is (contains? results :facts))
-      (is (contains? results :episodes)))))
+      (is (contains? results :episodes))))
+
+  (testing "returns semantic matches for synonym queries"
+    (let [node-eid (th/seed-node! "Car" "concept")]
+      (th/seed-fact! node-eid "parks the car in the garage")
+      (memory/record-episode! {:summary "Cleaned the car yesterday"})
+
+      (let [results (wm/search-knowledge ["automobile"] "automobile")]
+        (is (some #(= "Car" (:name %)) (:nodes results)))
+        (is (some #(= "parks the car in the garage" (:content %))
+                  (:facts results)))
+        (is (some #(= "Cleaned the car yesterday" (:summary %))
+                  (:episodes results)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Slot merge with properties

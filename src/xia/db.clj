@@ -3,6 +3,7 @@
    All state lives here: config, identity, memory, messages, skills, tools."
   (:require [clojure.string :as str]
             [datalevin.core :as d]
+            [datalevin.embedding :as emb]
             [xia.crypto :as crypto]
             [xia.sensitive :as sensitive]))
 
@@ -34,8 +35,14 @@
    ;; --- Episodic Memory ---
    :episode/id           {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :episode/type         {:db/valueType :db.type/keyword} ; :conversation :event :observation
-   :episode/summary      {:db/valueType :db.type/string  :db/fulltext true}
-   :episode/context      {:db/valueType :db.type/string  :db/fulltext true} ; situational context
+   :episode/summary      {:db/valueType :db.type/string
+                          :db/fulltext true
+                          :db/embedding true
+                          :db.embedding/autoDomain true}
+   :episode/context      {:db/valueType :db.type/string
+                          :db/fulltext true
+                          :db/embedding true
+                          :db.embedding/autoDomain true} ; situational context
    :episode/participants {:db/valueType :db.type/string}  ; who was involved
    :episode/channel      {:db/valueType :db.type/string}
    :episode/session-id   {:db/valueType :db.type/string}  ; link back to session
@@ -47,7 +54,10 @@
 
    ;; --- Knowledge Graph: Nodes ---
    :kg.node/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :kg.node/name       {:db/valueType :db.type/string  :db/fulltext true}
+   :kg.node/name       {:db/valueType :db.type/string
+                        :db/fulltext true
+                        :db/embedding true
+                        :db.embedding/autoDomain true}
    :kg.node/type       {:db/valueType :db.type/keyword} ; :person :place :thing :concept :preference
    :kg.node/properties {:db/valueType :db.type/idoc :db/domain "node-props"} ; structured properties (idoc)
    :kg.node/created-at {:db/valueType :db.type/instant}
@@ -66,7 +76,10 @@
    ;; --- Knowledge Graph: Facts (atomic knowledge about a node) ---
    :kg.fact/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :kg.fact/node       {:db/valueType :db.type/ref}     ; → kg.node
-   :kg.fact/content    {:db/valueType :db.type/string  :db/fulltext true}
+   :kg.fact/content    {:db/valueType :db.type/string
+                        :db/fulltext true
+                        :db/embedding true
+                        :db.embedding/autoDomain true}
    :kg.fact/confidence {:db/valueType :db.type/float}
    :kg.fact/utility    {:db/valueType :db.type/float}
    :kg.fact/source     {:db/valueType :db.type/ref}     ; → episode (provenance)
@@ -208,15 +221,84 @@
 (defonce ^:private conn-atom (atom nil))
 (declare migrate-secrets!)
 
+(def ^:private default-embedding-provider-spec
+  ;; Keep Xia's provider choice centralized so the default model can change
+  ;; without touching the rest of the DB wiring.
+  {:provider :default})
+
+(def ^:private default-datalevin-opts-map
+  {:embedding-opts      {:provider :default
+                         :metric-type :cosine}
+   :embedding-providers {:default default-embedding-provider-spec}})
+
+(defn- deep-merge
+  [left right]
+  (merge-with (fn [x y]
+                (if (and (map? x) (map? y))
+                  (deep-merge x y)
+                  y))
+              (or left {})
+              (or right {})))
+
+(defn default-datalevin-opts
+  []
+  default-datalevin-opts-map)
+
+(defn- resolve-datalevin-opts
+  [options]
+  (deep-merge default-datalevin-opts-map
+              (:datalevin-opts options)))
+
+(defn- resolve-embedding-provider-spec
+  [db-path datalevin-opts]
+  (let [provider-id   (or (get-in datalevin-opts [:embedding-opts :provider])
+                          :default)
+        runtime-entry (get-in datalevin-opts [:embedding-providers provider-id])]
+    (cond
+      (satisfies? emb/IEmbeddingProvider runtime-entry)
+      runtime-entry
+
+      (map? runtime-entry)
+      (merge {:provider provider-id
+              :dir      db-path}
+             runtime-entry)
+
+      (keyword? runtime-entry)
+      {:provider runtime-entry
+       :dir      db-path}
+
+      (nil? runtime-entry)
+      {:provider provider-id
+       :dir      db-path}
+
+      :else
+      runtime-entry)))
+
+(defn- bootstrap-embedding-provider!
+  [db-path datalevin-opts]
+  (let [provider-spec (resolve-embedding-provider-spec db-path datalevin-opts)]
+    (when-not (satisfies? emb/IEmbeddingProvider provider-spec)
+      (with-open [provider (d/new-embedding-provider provider-spec)]
+        (d/embedding-dimensions provider)))))
+
 (defn connect!
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
   ([db-path crypto-opts]
-   (let [c (d/get-conn db-path schema)]
-     (reset! conn-atom c)
-     (crypto/configure! db-path crypto-opts)
-     (migrate-secrets!)
-     c)))
+   (let [datalevin-opts (resolve-datalevin-opts crypto-opts)
+         c              (d/get-conn db-path schema datalevin-opts)]
+     (try
+       (reset! conn-atom c)
+       (crypto/configure! db-path crypto-opts)
+       (bootstrap-embedding-provider! db-path datalevin-opts)
+       (migrate-secrets!)
+       c
+       (catch Throwable t
+         (reset! conn-atom nil)
+         (try
+           (d/close c)
+           (catch Exception _))
+         (throw t))))))
 
 (defn conn
   "Return the current connection. Throws if not connected."

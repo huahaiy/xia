@@ -165,13 +165,14 @@ Rules:
     "we're" "we've" "they're" "they've" "that's" "there's"})
 
 ;; ============================================================================
-;; Stage 1: Keyword Extraction (pure Clojure, zero LLM cost)
+;; Stage 1: Keyword Extraction (cheap lexical hints)
 ;; ============================================================================
 
 (defn extract-search-terms
   "Extract search terms from a user message.
    Splits words, filters stopwords, extracts proper nouns,
-   includes entity names already in working memory."
+   includes entity names already in working memory.
+   These terms are used as a lexical hint for FTS, not as the only recall path."
   ([message]
    (extract-search-terms nil message))
   ([session-id message]
@@ -200,14 +201,18 @@ Rules:
 ;; ============================================================================
 
 (defn search-knowledge
-  "Search across nodes, facts, and episodes using FTS.
+  "Search across nodes, facts, and episodes using hybrid lexical + semantic retrieval.
    Returns {:nodes [...] :facts [...] :episodes [...]}."
-  [terms]
-  (let [query (str/join " " terms)]
-    (when-not (str/blank? query)
-      {:nodes    (memory/search-nodes query :top 10)
-       :facts    (memory/search-facts query :top 15)
-       :episodes (memory/search-episodes query :top 5)})))
+  ([terms]
+   (search-knowledge terms nil))
+  ([terms semantic-query]
+   (let [fts-query      (str/join " " terms)
+         semantic-query (or semantic-query fts-query)]
+    (when (or (not (str/blank? fts-query))
+              (not (str/blank? semantic-query)))
+      {:nodes    (memory/search-nodes semantic-query :fts-query fts-query :top 10)
+       :facts    (memory/search-facts semantic-query :fts-query fts-query :top 15)
+       :episodes (memory/search-episodes semantic-query :fts-query fts-query :top 5)}))))
 
 ;; ============================================================================
 ;; Stage 3: Graph Expansion (spreading activation)
@@ -538,7 +543,7 @@ Rules:
       (when (session-wm sid)
         (update-session-wm! sid #(update % :turn-count inc))
         (let [terms   (extract-search-terms sid user-message)
-              results (when (seq terms) (search-knowledge terms))]
+              results (search-knowledge terms user-message)]
           (when results
             (let [matched-eids (mapv :eid (:nodes results))
                   expanded     (when (seq matched-eids)
@@ -611,7 +616,7 @@ Rules:
                (log/info "Warm start from previous session:" prev-context)
                (update-session-wm! sid #(assoc % :prev-topics prev-context))
                (let [terms (extract-search-terms sid prev-context)
-                     results (when (seq terms) (search-knowledge terms))]
+                     results (search-knowledge terms prev-context)]
                  (when results
                    (let [matched-eids (mapv :eid (:nodes results))
                          expanded (when (seq matched-eids) (expand-graph matched-eids))]

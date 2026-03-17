@@ -2,7 +2,8 @@
   (:require [clojure.edn :as edn]
             [clojure.test :refer :all]
             [xia.db :as db]
-            [xia.pack :as pack])
+            [xia.pack :as pack]
+            [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]
@@ -44,7 +45,8 @@
   (let [dir         (temp-dir)
         db-path     (str dir "/db")
         archive     (str dir "/backup.xia")]
-    (db/connect! db-path {:passphrase-provider (constantly "pack-passphrase")})
+    (db/connect! db-path (th/test-connect-options
+                           {:passphrase-provider (constantly "pack-passphrase")}))
     (try
       (db/set-config! :token/github "gh-secret")
       (finally
@@ -72,7 +74,7 @@
     (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-file-env k))}
       #(do
-         (db/connect! db-path)
+         (db/connect! db-path (th/test-connect-options))
          (try
            (db/set-config! :user/name "Pack Test")
            (finally
@@ -96,7 +98,8 @@
   (let [dir      (temp-dir)
         db-path  (str dir "/db")
         archive  (str dir "/backup.xia")]
-    (db/connect! db-path {:passphrase-provider (constantly "open-passphrase")})
+    (db/connect! db-path (th/test-connect-options
+                           {:passphrase-provider (constantly "open-passphrase")}))
     (try
       (db/set-config! :token/github "gh-open-secret")
       (finally
@@ -121,7 +124,7 @@
     (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (fn [k] (get key-file-env k))}
       #(do
-         (db/connect! db-path)
+         (db/connect! db-path (th/test-connect-options))
          (try
            (db/set-config! :user/name "Archive Restore")
            (finally
@@ -134,7 +137,8 @@
       (is (= {:key-file key-path
               :allow-insecure-key-file? true}
              (:crypto-opts opened)))
-      (db/connect! (:db-path opened) (:crypto-opts opened))
+      (db/connect! (:db-path opened)
+                   (th/test-connect-options (:crypto-opts opened)))
       (try
         (is (= "Archive Restore" (db/get-config :user/name)))
         (finally

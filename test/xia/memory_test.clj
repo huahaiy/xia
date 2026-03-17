@@ -351,6 +351,31 @@
       (is (pos? (count results)))
       (is (= "Talked about functional programming" (:summary (first results)))))))
 
+(deftest test-search-nodes-semantic
+  (th/seed-node! "Car" "concept")
+
+  (testing "finds semantically similar nodes without lexical overlap"
+    (let [results (memory/search-nodes "automobile")]
+      (is (pos? (count results)))
+      (is (= "Car" (:name (first results)))))))
+
+(deftest test-search-facts-semantic
+  (let [node-eid (th/seed-node! "Garage" "place")]
+    (th/seed-fact! node-eid "stores a car indoors")
+
+    (testing "finds semantically similar facts without lexical overlap"
+      (let [results (memory/search-facts "automobile")]
+        (is (pos? (count results)))
+        (is (= "stores a car indoors" (:content (first results))))))))
+
+(deftest test-search-episodes-semantic
+  (memory/record-episode! {:summary "Fixed the car before the trip"})
+
+  (testing "finds semantically similar episodes without lexical overlap"
+    (let [results (memory/search-episodes "automobile")]
+      (is (pos? (count results)))
+      (is (= "Fixed the car before the trip" (:summary (first results)))))))
+
 (deftest test-search-edges
   (let [n1 (th/seed-node! "Alice" "person")
         n2 (th/seed-node! "Acme" "thing")]

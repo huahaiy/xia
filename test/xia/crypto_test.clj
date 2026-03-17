@@ -1,7 +1,8 @@
 (ns xia.crypto-test
   (:require [clojure.test :refer :all]
             [xia.crypto :as crypto]
-            [xia.db :as db])
+            [xia.db :as db]
+            [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]))
 
@@ -91,7 +92,8 @@
   (let [db-path (temp-db-path)]
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
       #(do
-         (db/connect! db-path {:passphrase-provider (constantly "db-passphrase")})
+         (db/connect! db-path (th/test-connect-options
+                                {:passphrase-provider (constantly "db-passphrase")}))
          (try
            (is (= :prompt-passphrase (:source (crypto/current-key-source))))
            (finally
