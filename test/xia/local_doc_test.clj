@@ -5,9 +5,28 @@
             [xia.db :as db]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
-            [xia.test-helpers :refer [with-test-db]]))
+            [xia.test-helpers :refer [with-test-db]])
+  (:import [java.io ByteArrayOutputStream]
+           [java.util Base64]
+           [org.apache.pdfbox.pdmodel PDDocument PDPage PDPageContentStream]
+           [org.apache.pdfbox.pdmodel.font PDType1Font Standard14Fonts$FontName]))
 
 (use-fixtures :each with-test-db)
+
+(defn- sample-pdf-base64
+  [text]
+  (with-open [doc (PDDocument.)
+              out (ByteArrayOutputStream.)]
+    (let [page (PDPage.)]
+      (.addPage doc page)
+      (with-open [content (PDPageContentStream. doc page)]
+        (.beginText content)
+        (.setFont content (PDType1Font. Standard14Fonts$FontName/HELVETICA) 12)
+        (.newLineAtOffset content 72 720)
+        (.showText content text)
+        (.endText content))
+      (.save doc out)
+      (.encodeToString (Base64/getEncoder) (.toByteArray out)))))
 
 (deftest local-documents-are-encrypted-at-rest-and-session-scoped
   (let [sid-a  (db/create-session! :http)
@@ -55,16 +74,27 @@
                "Uploaded local document second.txt"}
              (set (map :summary episodes)))))))
 
-(deftest pdf-uploads-are-rejected-clearly
+(deftest pdf-uploads-are-extracted-server-side
+  (let [sid (db/create-session! :http)]
+    (let [saved (local-doc/save-upload! {:session-id sid
+                                         :name "paper.pdf"
+                                         :media-type "application/pdf"
+                                         :bytes-base64 (sample-pdf-base64 "Hello PDF world")})]
+      (is (= "application/pdf" (:media-type saved)))
+      (is (.contains ^String (:text saved) "Hello PDF world"))
+      (is (.contains ^String (:preview saved) "Hello PDF world")))))
+
+(deftest invalid-pdf-uploads-fail-clearly
   (let [sid (db/create-session! :http)]
     (try
       (local-doc/save-upload! {:session-id sid
-                               :name "paper.pdf"
+                               :name "broken.pdf"
                                :media-type "application/pdf"
-                               :text "ignored"})
-      (is false "Expected PDF upload rejection")
+                               :bytes-base64 (.encodeToString (Base64/getEncoder)
+                                                              (.getBytes "not a real pdf"))})
+      (is false "Expected invalid PDF rejection")
       (catch clojure.lang.ExceptionInfo e
-        (is (= :local-doc/pdf-not-supported (:type (ex-data e))))))))
+        (is (= :local-doc/pdf-extraction-failed (:type (ex-data e))))))))
 
 (deftest local-document-note-and-delete-actions-create-event-episodes
   (let [sid   (db/create-session! :http)

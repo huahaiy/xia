@@ -17,6 +17,9 @@
   ;; HTML parsing (GraalVM native-image compatible)
   org.jsoup/jsoup              {:mvn/version "1.22.1"}
 
+  ;; PDF text extraction for local documents
+  org.apache.pdfbox/pdfbox    {:mvn/version "3.0.6"}
+
   ;; Headless browser — full DOM, JavaScript, cookies, form interaction
   ;; NOTE: needs reflection config for GraalVM native-image
   org.htmlunit/htmlunit         {:mvn/version "4.21.0"}

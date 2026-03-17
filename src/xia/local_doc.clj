@@ -3,14 +3,18 @@
   (:require [clojure.string :as str]
             [xia.db :as db]
             [xia.scratch :as scratch])
-  (:import [java.math BigInteger]
+  (:import [java.io IOException]
+           [java.math BigInteger]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
-           [java.util UUID]))
+           [java.util Base64 UUID]
+           [org.apache.pdfbox Loader]
+           [org.apache.pdfbox.text PDFTextStripper]))
 
 (def ^:private default-name "Untitled upload")
 (def ^:private default-source :upload)
 (def ^:private preview-char-limit 1200)
+ (def ^:private pdf-media-type "application/pdf")
 
 (def ^:private extension->media-type
   {"c" "text/x-c"
@@ -116,10 +120,10 @@
           str/trim
           not-empty))
 
-(defn- pdf-ex
+(defn- pdf-bytes-required-ex
   [name media-type]
-  (ex-info "PDF uploads are not supported yet"
-           {:type :local-doc/pdf-not-supported
+  (ex-info "PDF uploads require file bytes"
+           {:type :local-doc/pdf-bytes-required
             :name name
             :media-type media-type}))
 
@@ -140,7 +144,7 @@
     (cond
       (or (= "application/pdf" media-type*)
           (= "pdf" ext))
-      (throw (pdf-ex filename media-type))
+      pdf-media-type
 
       (and media-type* (or (contains? supported-media-types media-type*)
                            (str/starts-with? media-type* "text/")))
@@ -167,6 +171,10 @@
   [text]
   (.getBytes ^String text StandardCharsets/UTF_8))
 
+(defn- decode-base64
+  [text]
+  (.decode (Base64/getDecoder) ^String text))
+
 (defn- normalize-size-bytes
   [declared-size actual-size]
   (cond
@@ -186,6 +194,46 @@
     (if (> (count trimmed) preview-char-limit)
       (str (subs trimmed 0 (max 0 (dec preview-char-limit))) "…")
       trimmed)))
+
+(defn- extract-pdf-text
+  [name media-type ^bytes pdf-bytes]
+  (try
+    (with-open [doc (Loader/loadPDF pdf-bytes)]
+      (let [stripper (doto (PDFTextStripper.)
+                       (.setSortByPosition true)
+                       (.setAddMoreFormatting true))]
+        (normalize-text (.getText stripper doc))))
+    (catch IOException e
+      (throw (ex-info (.getMessage e)
+                      {:type :local-doc/pdf-extraction-failed
+                       :name name
+                       :media-type media-type}
+                      e)))))
+
+(defn- upload-source
+  [{:keys [name media-type text bytes-base64]}]
+  (let [name*       (normalize-name name)
+        media-type* (normalize-media-type name* media-type)]
+    (cond
+      (= pdf-media-type media-type*)
+      (if-let [encoded (some-> bytes-base64 str str/trim not-empty)]
+        (let [source-bytes (decode-base64 encoded)]
+          {:media-type   media-type*
+           :source-bytes source-bytes
+           :text         (extract-pdf-text name* media-type* source-bytes)})
+        (throw (pdf-bytes-required-ex name* media-type*)))
+
+      (some? bytes-base64)
+      (let [source-bytes (decode-base64 (str bytes-base64))]
+        {:media-type   media-type*
+         :source-bytes source-bytes
+         :text         (normalize-text (String. ^bytes source-bytes StandardCharsets/UTF_8))})
+
+      :else
+      (let [text* (normalize-text text)]
+        {:media-type   media-type*
+         :source-bytes (utf8-bytes text*)
+         :text         text*}))))
 
 (defn- entity-created-at
   [entity-map]
@@ -360,17 +408,20 @@
       doc)))
 
 (defn save-upload!
-  [{:keys [session-id name media-type size-bytes source text]}]
+  [{:keys [session-id name media-type size-bytes source text bytes-base64]}]
   (let [session-id*  (normalize-session-id session-id)
         session-eid* (session-eid session-id*)]
     (when-not session-eid*
       (throw (session-not-found-ex session-id*)))
     (let [name*       (normalize-name name)
-          text*       (normalize-text text)
-          bytes       (utf8-bytes text*)
-          media-type* (normalize-media-type name* media-type)
-          sha256      (sha256-hex bytes)
-          size-bytes* (normalize-size-bytes size-bytes (alength bytes))
+          {:keys [media-type source-bytes text]}
+          (upload-source {:name name*
+                          :media-type media-type
+                          :text text
+                          :bytes-base64 bytes-base64})
+          text*       text
+          sha256      (sha256-hex source-bytes)
+          size-bytes* (normalize-size-bytes size-bytes (alength source-bytes))
           existing    (existing-doc-eid session-eid* sha256)
           doc-id      (or (some-> existing db/entity :local.doc/id) (random-uuid))
           preview     (preview-text text*)
@@ -379,7 +430,7 @@
         [{:local.doc/id         doc-id
           :local.doc/session    session-eid*
           :local.doc/name       name*
-          :local.doc/media-type media-type*
+          :local.doc/media-type media-type
           :local.doc/source     (or source default-source)
           :local.doc/size-bytes size-bytes*
           :local.doc/sha256     sha256
@@ -387,12 +438,12 @@
           :local.doc/text       text*
           :local.doc/preview    preview}
          (upload-episode {:session-id session-id*
-                          :session-channel channel
-                          :name name*
-                          :media-type media-type*
-                          :size-bytes size-bytes*
-                          :sha256 sha256
-                          :preview preview
+                         :session-channel channel
+                         :name name*
+                         :media-type media-type
+                         :size-bytes size-bytes*
+                         :sha256 sha256
+                         :preview preview
                           :existing? (boolean existing)
                           :doc-id doc-id})])
       (document-from-eid (doc-eid doc-id)))))

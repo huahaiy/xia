@@ -1639,6 +1639,24 @@ function formatBytes(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + ' MB';
 }
 
+function isPdfFile(file) {
+  const name = (file && file.name ? String(file.name) : '').toLowerCase();
+  const type = (file && file.type ? String(file.type) : '').toLowerCase();
+  return type === 'application/pdf' || name.endsWith('.pdf');
+}
+
+function dataUrlBase64(dataUrl) {
+  const parts = String(dataUrl || '').split(',', 2);
+  return parts.length === 2 ? parts[1] : '';
+}
+
+function selectedPreviewText() {
+  const start = localDocPreviewEl.selectionStart;
+  const end = localDocPreviewEl.selectionEnd;
+  if (typeof start !== 'number' || typeof end !== 'number' || end <= start) return '';
+  return localDocPreviewEl.value.slice(start, end).trim();
+}
+
 function padTitle(pad) {
   return (pad && pad.title && pad.title.trim()) ? pad.title.trim() : 'Untitled note';
 }
@@ -1729,14 +1747,26 @@ async function ensureSession() {
 function readLocalFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (event) => resolve({
-      name: file.name,
-      media_type: file.type || '',
-      size_bytes: file.size,
-      text: typeof event.target.result === 'string' ? event.target.result : ''
-    });
+    reader.onload = (event) => {
+      if (isPdfFile(file)) {
+        resolve({
+          name: file.name,
+          media_type: file.type || 'application/pdf',
+          size_bytes: file.size,
+          bytes_base64: dataUrlBase64(event.target.result)
+        });
+        return;
+      }
+      resolve({
+        name: file.name,
+        media_type: file.type || '',
+        size_bytes: file.size,
+        text: typeof event.target.result === 'string' ? event.target.result : ''
+      });
+    };
     reader.onerror = () => reject(new Error('Failed to read ' + (file.name || 'selected file')));
-    reader.readAsText(file);
+    if (isPdfFile(file)) reader.readAsDataURL(file);
+    else reader.readAsText(file);
   });
 }
 
@@ -1971,7 +2001,10 @@ function trackScratchInput() {
 
 function localDocInsertText(doc) {
   if (!doc || !doc.text) return '';
-  return '--- Local Document: ' + localDocTitle(doc) + ' ---\n' + doc.text + '\n';
+  const selected = selectedPreviewText();
+  const content = selected || doc.text;
+  const label = selected ? 'Local Document Excerpt' : 'Local Document';
+  return '--- ' + label + ': ' + localDocTitle(doc) + ' ---\n' + content + '\n';
 }
 
 function insertLocalDocIntoComposer() {

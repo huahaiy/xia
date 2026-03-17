@@ -37,7 +37,7 @@
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
-(def ^:private max-request-body-bytes (* 5 1024 1024)) ; 5 MiB
+(def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
@@ -1248,6 +1248,7 @@
    :media-type (get entry "media_type")
    :size-bytes (get entry "size_bytes")
    :source     (get entry "source")
+   :bytes-base64 (get entry "bytes_base64")
    :text       (get entry "text")})
 
 (defn- local-doc-upload-entries
@@ -1311,6 +1312,7 @@
                                        :media-type (:media-type upload)
                                        :size-bytes (:size-bytes upload)
                                        :source     (:source upload)
+                                       :bytes-base64 (:bytes-base64 upload)
                                        :text       (:text upload)})))
                           (catch clojure.lang.ExceptionInfo e
                             (update acc :errors conj (local-doc-error->body upload e)))))
