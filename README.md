@@ -7,9 +7,9 @@
 > that tale: an autonomous AI assistant that quietly tends to the details of your digital life.
 
 Xia (/çja/, pronounced 'shyah') is a portable personal AI assistant for online
-work. It runs as a single local app, remembers context across sessions, works
-with any OpenAI-compatible LLM models, and helps with web research, browser
-automation, authenticated APIs, and recurring tasks.
+work. It runs as a single local application, remembers context across sessions,
+works with any OpenAI-compatible LLM models, and helps with web research,
+browser automation, authenticated APIs, and recurring tasks.
 
 ## What Xia Is For
 
@@ -47,9 +47,14 @@ xia backup.xia
 
 What to expect:
 
-- Xia stores its state in its database, so conversations, memory, settings, and
-  saved connections travel together.
+- Xia stores its state in its
+  [database](https://github.com/datalevin/datalevin), so conversations, memory,
+  settings, and saved connections travel together.
 - The local web UI is intended to be the main interface for non-technical users.
+- Semantic memory recall uses a local embedding model. On first use, Xia will
+download the default
+[`nomic-embed-text-v2-moe`](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe)
+GGUF model, which is about 512 MiB.
 - You still provide your own LLM provider credentials, and you can use multiple
   LLMs at the same time.
 - None of your credentials or secrets is exposed to LLM providers. Security is

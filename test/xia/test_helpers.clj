@@ -94,11 +94,12 @@
   ([]
    (test-connect-options nil))
   ([options]
-   (update (merge options
-                  {:datalevin-opts
-                   {:embedding-providers {:default (test-embedding-provider)}}})
-           :datalevin-opts
-           #(merge (db/default-datalevin-opts) %))))
+   (let [provider-id (get-in (db/default-datalevin-opts) [:embedding-opts :provider])]
+     (update (merge options
+                    {:datalevin-opts
+                     {:embedding-providers {provider-id (test-embedding-provider)}}})
+             :datalevin-opts
+             #(merge (db/default-datalevin-opts) %)))))
 
 (defn with-test-db
   "Fixture: create a temp Datalevin DB for the duration of the test."

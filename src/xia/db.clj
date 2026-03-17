@@ -1,11 +1,18 @@
 (ns xia.db
   "Datalevin database — the single source of truth for a xia instance.
    All state lives here: config, identity, memory, messages, skills, tools."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [datalevin.core :as d]
             [datalevin.embedding :as emb]
             [xia.crypto :as crypto]
-            [xia.sensitive :as sensitive]))
+            [xia.sensitive :as sensitive])
+  (:import [java.io InputStream]
+           [java.net URI]
+           [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
+           [java.nio.file Files Path Paths StandardCopyOption]
+           [java.nio.file.attribute FileAttribute]
+           [java.time Instant]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schema
@@ -235,15 +242,48 @@
 (defonce ^:private conn-atom (atom nil))
 (declare migrate-secrets!)
 
+(def ^:private default-embedding-provider-id
+  ;; Keep Xia's provider key stable even if the underlying model changes.
+  :xia-default)
+
+(def ^:private default-embedding-model-file
+  "nomic-embed-text-v2-moe-q8_0.gguf")
+
+(def ^:private default-embedding-model-url
+  (str "https://huggingface.co/ggml-org/Nomic-Embed-Text-V2-GGUF/resolve/main/"
+       default-embedding-model-file
+       "?download=true"))
+
+(def ^:private embedding-model-lock
+  (Object.))
+
 (def ^:private default-embedding-provider-spec
   ;; Keep Xia's provider choice centralized so the default model can change
   ;; without touching the rest of the DB wiring.
-  {:provider :default})
+  {:provider :llama.cpp
+   :model-id "nomic-ai/nomic-embed-text-v2-moe"
+   :model-filename default-embedding-model-file
+   :model-url default-embedding-model-url
+   :embedding-metadata
+   {:embedding/provider
+    {:kind :local
+     :id :llama.cpp
+     :model-id "nomic-ai/nomic-embed-text-v2-moe"}
+    :embedding/output
+    {:dimensions 768
+     :max-tokens 2048}
+    :embedding/artifact
+    {:format :gguf
+     :file default-embedding-model-file
+     :quantization :q8_0}}})
 
 (def ^:private default-datalevin-opts-map
-  {:embedding-opts      {:provider :default
+  {:embedding-opts      {:provider default-embedding-provider-id
                          :metric-type :cosine}
-   :embedding-providers {:default default-embedding-provider-spec}})
+   :validate-data?      true
+   :auto-entity-time?   true
+   :embedding-providers {default-embedding-provider-id
+                         default-embedding-provider-spec}})
 
 (defn- deep-merge
   [left right]
@@ -273,9 +313,18 @@
       runtime-entry
 
       (map? runtime-entry)
-      (merge {:provider provider-id
-              :dir      db-path}
-             runtime-entry)
+      (let [provider-spec (merge {:provider provider-id
+                                  :dir      db-path}
+                                 runtime-entry)]
+        (cond-> provider-spec
+          (and (nil? (:model provider-spec))
+               (nil? (:model-path provider-spec))
+               (string? (:model-filename provider-spec)))
+          (assoc :model-path
+                 (str db-path java.io.File/separator
+                      "embed"
+                      java.io.File/separator
+                      (:model-filename provider-spec)))))
 
       (keyword? runtime-entry)
       {:provider runtime-entry
@@ -288,9 +337,82 @@
       :else
       runtime-entry)))
 
+(defn- create-http-client
+  []
+  (-> (HttpClient/newBuilder)
+      (.followRedirects HttpClient$Redirect/NORMAL)
+      (.build)))
+
+(defn- move-file!
+  [^Path source ^Path target]
+  (try
+    (Files/move source target
+                (into-array java.nio.file.CopyOption
+                            [StandardCopyOption/ATOMIC_MOVE
+                             StandardCopyOption/REPLACE_EXISTING]))
+    (catch Exception _
+      (Files/move source target
+                  (into-array java.nio.file.CopyOption
+                              [StandardCopyOption/REPLACE_EXISTING])))))
+
+(defn- download-file!
+  [url target-path]
+  (let [^Path target  (Paths/get target-path (make-array String 0))
+        ^Path parent  (.getParent target)
+        tmp-dir       (or parent (Paths/get "." (make-array String 0)))
+        _             (when parent
+                        (Files/createDirectories parent (make-array FileAttribute 0)))
+        prefix        (str (.getFileName target) ".part-")
+        suffix        ".tmp"
+        tmp           (Files/createTempFile tmp-dir prefix suffix
+                                            (make-array FileAttribute 0))
+        ^HttpClient client (create-http-client)
+        ^HttpRequest req   (-> (HttpRequest/newBuilder (URI/create url))
+                               (.header "User-Agent" "xia")
+                               (.header "Accept" "application/octet-stream")
+                               (.GET)
+                               (.build))
+        ^"[Ljava.nio.file.CopyOption;" copy-opts
+        (into-array java.nio.file.CopyOption
+                    [StandardCopyOption/REPLACE_EXISTING])]
+    (try
+      (let [resp   (.send client req (HttpResponse$BodyHandlers/ofInputStream))
+            status (.statusCode resp)]
+        (when-not (= 200 status)
+          (throw (ex-info "Failed to download embedding model"
+                          {:url url :status status :target target-path})))
+        (with-open [^InputStream in (.body resp)]
+          (Files/copy in ^Path tmp copy-opts))
+        (move-file! tmp target)
+        target-path)
+      (finally
+        (when (Files/exists tmp (make-array java.nio.file.LinkOption 0))
+          (try
+            (Files/deleteIfExists tmp)
+            (catch Exception _)))))))
+
+(defn- ensure-managed-embedding-model!
+  [provider-spec]
+  (let [model-path (or (:model provider-spec) (:model-path provider-spec))]
+    (cond
+      (not (map? provider-spec))
+      provider-spec
+
+      (or (nil? model-path)
+          (nil? (:model-url provider-spec))
+          (.exists (io/file model-path)))
+      provider-spec
+
+      :else
+      (locking embedding-model-lock
+        (when-not (.exists (io/file model-path))
+          (download-file! (:model-url provider-spec) model-path))
+        provider-spec))))
+
 (defn- bootstrap-embedding-provider!
   [db-path datalevin-opts]
-  (let [provider-spec (resolve-embedding-provider-spec db-path datalevin-opts)]
+  (let [provider-spec (-> (resolve-embedding-provider-spec db-path datalevin-opts)
+                          ensure-managed-embedding-model!)]
     (when-not (satisfies? emb/IEmbeddingProvider provider-spec)
       (with-open [provider (d/new-embedding-provider provider-spec)]
         (d/embedding-dimensions provider)))))
@@ -345,6 +467,85 @@
     (crypto/encrypt value (config-aad k))
     (str value)))
 
+(defn- coerce-boolean
+  [value]
+  (cond
+    (boolean? value) value
+    (string? value)  (let [normalized (-> value str/trim str/lower-case)]
+                       (cond
+                         (#{"true" "1" "yes" "on"} normalized) true
+                         (#{"false" "0" "no" "off"} normalized) false
+                         :else value))
+    :else            value))
+
+(defn- coerce-ref
+  [value]
+  (cond
+    (number? value) value
+    (and (string? value) (re-matches #"-?\\d+" value)) (Long/parseLong value)
+    :else value))
+
+(defn- coerce-inst
+  [value]
+  (cond
+    (instance? java.util.Date value) value
+    (integer? value)                 (java.util.Date. (long value))
+    (string? value)                  (java.util.Date/from (Instant/parse value))
+    :else                            value))
+
+(defn- coerce-uuid
+  [value]
+  (cond
+    (uuid? value)   value
+    (string? value) (java.util.UUID/fromString value)
+    :else           value))
+
+(defn- coerce-scalar-by-type
+  [value-type value]
+  (if (nil? value)
+    nil
+    (case value-type
+      :db.type/string  (str value)
+      :db.type/bigint  (biginteger value)
+      :db.type/bigdec  (bigdec value)
+      :db.type/long    (if (string? value) (Long/parseLong value) (long value))
+      :db.type/ref     (coerce-ref value)
+      :db.type/float   (if (string? value) (Float/parseFloat value) (float value))
+      :db.type/double  (if (string? value) (Double/parseDouble value) (double value))
+      :db.type/keyword (if (keyword? value) value (keyword value))
+      :db.type/symbol  (if (symbol? value) value (symbol value))
+      :db.type/boolean (coerce-boolean value)
+      :db.type/instant (coerce-inst value)
+      :db.type/uuid    (coerce-uuid value)
+      :db.type/tuple   (if (vector? value) value (vec value))
+      value)))
+
+(defn- coerce-collection-like
+  [original values]
+  (cond
+    (set? original)    (set values)
+    (vector? original) (vec values)
+    (list? original)   (apply list values)
+    :else              (vec values)))
+
+(defn- coerce-attr-value
+  [attr value]
+  (let [value-type  (get-in schema [attr :db/valueType])
+        cardinality (get-in schema [attr :db/cardinality])]
+    (cond
+      (or (nil? value-type)
+          (nil? value))
+      value
+
+      (and (= :db.cardinality/many cardinality)
+           (coll? value)
+           (not (map? value))
+           (not (string? value)))
+      (coerce-collection-like value (map #(coerce-scalar-by-type value-type %) value))
+
+      :else
+      (coerce-scalar-by-type value-type value))))
+
 (defn- encrypt-secret-attrs [record]
   (reduce-kv
     (fn [acc k v]
@@ -355,24 +556,47 @@
     record
     record))
 
-(defn- prepare-tx-item [item]
+(defn- coerce-tx-item
+  [item]
   (cond
     (map? item)
-    (let [item (if (contains? item :config/key)
-                 (update item :config/value #(maybe-encrypt-config-value (:config/key item) %))
-                 item)]
-      (encrypt-secret-attrs item))
+    (reduce-kv (fn [acc k v]
+                 (assoc acc k
+                        (if (keyword? k)
+                          (coerce-attr-value k v)
+                          v)))
+               {}
+               item)
 
     (and (vector? item)
          (= :db/add (first item))
          (= 4 (count item))
-         (keyword? (nth item 2))
-         (sensitive/encrypted-attr? (nth item 2)))
+         (keyword? (nth item 2)))
     (let [[op eid attr value] item]
-      [op eid attr (crypto/encrypt value (attr-aad attr))])
+      [op eid attr (coerce-attr-value attr value)])
 
     :else
     item))
+
+(defn- prepare-tx-item [item]
+  (let [item (coerce-tx-item item)]
+    (cond
+      (map? item)
+      (let [item (if (contains? item :config/key)
+                   (update item :config/value #(maybe-encrypt-config-value (:config/key item) %))
+                   item)]
+        (encrypt-secret-attrs item))
+
+      (and (vector? item)
+           (= :db/add (first item))
+           (= 4 (count item))
+           (keyword? (nth item 2))
+           (sensitive/encrypted-attr? (nth item 2)))
+      (let [[op eid attr value] item]
+        [op eid attr (crypto/encrypt value (attr-aad attr))])
+
+      :else
+      item)))
 
 (defn transact! [tx-data]
   (d/transact! (conn) (mapv prepare-tx-item tx-data)))
@@ -386,6 +610,18 @@
                  (assoc acc k (decrypt-secret-attr k v)))
                {}
                e)))
+
+(defn- entity-created-at
+  [entity-map]
+  (or (:session/created-at entity-map)
+      (:message/created-at entity-map)
+      (some-> (:db/created-at entity-map) long java.util.Date.)))
+
+(defn- entity-updated-at
+  [entity-map]
+  (or (:wm/updated-at entity-map)
+      (:oauth.account/updated-at entity-map)
+      (some-> (:db/updated-at entity-map) long java.util.Date.)))
 
 (defn- raw-entity [eid]
   (into {} (d/entity (d/db (conn)) eid)))
@@ -632,7 +868,7 @@
                                     session-eid))]
         (let [wm-entity (into {} (d/entity (d/db (conn)) wm-eid))]
           {:topics (:wm/topics wm-entity)
-           :updated-at (:wm/updated-at wm-entity)})))))
+           :updated-at (entity-updated-at wm-entity)})))))
 
 (defn latest-session-episode
   "Get the most recent episode summary for any session."
@@ -657,24 +893,23 @@
   (let [id (random-uuid)]
     (transact! [{:session/id         id
                  :session/channel    channel
-                 :session/created-at (java.util.Date.)
                  :session/active?    true}])
     id))
 
 (defn list-sessions
   "List all sessions with basic metadata, newest first."
   []
-  (->> (q '[:find ?sid ?channel ?created ?active
+  (->> (q '[:find ?s ?sid ?channel ?active
             :where
             [?s :session/id ?sid]
             [?s :session/channel ?channel]
-            [?s :session/created-at ?created]
             [(get-else $ ?s :session/active? false) ?active]])
-       (map (fn [[sid channel created-at active?]]
-              {:id         sid
-               :channel    channel
-               :created-at created-at
-               :active?    active?}))
+       (map (fn [[eid sid channel active?]]
+              (let [entity-map (raw-entity eid)]
+                {:id         sid
+                 :channel    channel
+                 :created-at (entity-created-at entity-map)
+                 :active?    active?})))
        (sort-by :created-at #(compare %2 %1))
        vec))
 
@@ -708,8 +943,7 @@
     (transact! [(cond-> {:message/id         (random-uuid)
                          :message/session    session-eid
                          :message/role       role
-                         :message/content    (or content "")
-                         :message/created-at (java.util.Date.)}
+                         :message/content    (or content "")}
                   tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
                   (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
                   tool-id    (assoc :message/tool-id tool-id))])))
@@ -720,23 +954,22 @@
   "Get all messages for a session, ordered by creation time."
   [session-id]
   (sort-by :created-at
-           (map (fn [[content role created tool-calls tool-result tool-id]]
+           (map (fn [[eid content role tool-calls tool-result tool-id]]
                   (let [tool-result* (read-tool-result-doc tool-result)]
                     {:role        role
                      :content     (when-not (and (= role :tool) (some? tool-result*))
                                     (decrypt-secret-attr :message/content content))
-                     :created-at  created
+                     :created-at  (entity-created-at (raw-entity eid))
                      :tool-calls  (read-tool-calls-doc tool-calls)
                      :tool-result tool-result*
                      :tool-id     (empty->nil tool-id)}))
-                (q '[:find ?content ?role ?created ?tc ?tr ?tid
+                (q '[:find ?m ?content ?role ?tc ?tr ?tid
                      :in $ ?sid
                      :where
                      [?s :session/id ?sid]
                      [?m :message/session ?s]
                      [?m :message/role ?role]
                      [?m :message/content ?content]
-                     [?m :message/created-at ?created]
                      [(get-else $ ?m :message/tool-calls "") ?tc]
                      [(get-else $ ?m :message/tool-result "") ?tr]
                      [(get-else $ ?m :message/tool-id "") ?tid]]
