@@ -11,6 +11,12 @@
 ;; Schema
 ;; ---------------------------------------------------------------------------
 
+(def episode-text-domain "episode-text")
+(def kg-node-domain "kg-node")
+(def kg-fact-domain "kg-fact")
+(def kg-edge-domain "kg-edge")
+(def skill-content-domain "skill-content")
+
 (def schema
   {;; --- Config (key-value pairs) ---
    :config/key   {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
@@ -37,12 +43,14 @@
    :episode/type         {:db/valueType :db.type/keyword} ; :conversation :event :observation
    :episode/summary      {:db/valueType :db.type/string
                           :db/fulltext true
+                          :db.fulltext/domains [episode-text-domain]
                           :db/embedding true
-                          :db.embedding/autoDomain true}
+                          :db.embedding/domains [episode-text-domain]}
    :episode/context      {:db/valueType :db.type/string
                           :db/fulltext true
+                          :db.fulltext/domains [episode-text-domain]
                           :db/embedding true
-                          :db.embedding/autoDomain true} ; situational context
+                          :db.embedding/domains [episode-text-domain]} ; situational context
    :episode/participants {:db/valueType :db.type/string}  ; who was involved
    :episode/channel      {:db/valueType :db.type/string}
    :episode/session-id   {:db/valueType :db.type/string}  ; link back to session
@@ -56,8 +64,9 @@
    :kg.node/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :kg.node/name       {:db/valueType :db.type/string
                         :db/fulltext true
+                        :db.fulltext/domains [kg-node-domain]
                         :db/embedding true
-                        :db.embedding/autoDomain true}
+                        :db.embedding/domains [kg-node-domain]}
    :kg.node/type       {:db/valueType :db.type/keyword} ; :person :place :thing :concept :preference
    :kg.node/properties {:db/valueType :db.type/idoc :db/domain "node-props"} ; structured properties (idoc)
    :kg.node/created-at {:db/valueType :db.type/instant}
@@ -68,7 +77,9 @@
    :kg.edge/from       {:db/valueType :db.type/ref}     ; → kg.node
    :kg.edge/to         {:db/valueType :db.type/ref}     ; → kg.node
    :kg.edge/type       {:db/valueType :db.type/keyword} ; :knows :likes :works-at :uses etc.
-   :kg.edge/label      {:db/valueType :db.type/string  :db/fulltext true} ; human-readable description
+   :kg.edge/label      {:db/valueType :db.type/string
+                        :db/fulltext true
+                        :db.fulltext/domains [kg-edge-domain]} ; human-readable description
    :kg.edge/weight     {:db/valueType :db.type/float}   ; confidence/strength
    :kg.edge/source     {:db/valueType :db.type/ref}     ; → episode (provenance)
    :kg.edge/created-at {:db/valueType :db.type/instant}
@@ -78,8 +89,9 @@
    :kg.fact/node       {:db/valueType :db.type/ref}     ; → kg.node
    :kg.fact/content    {:db/valueType :db.type/string
                         :db/fulltext true
+                        :db.fulltext/domains [kg-fact-domain]
                         :db/embedding true
-                        :db.embedding/autoDomain true}
+                        :db.embedding/domains [kg-fact-domain]}
    :kg.fact/confidence {:db/valueType :db.type/float}
    :kg.fact/utility    {:db/valueType :db.type/float}
    :kg.fact/source     {:db/valueType :db.type/ref}     ; → episode (provenance)
@@ -108,7 +120,9 @@
    :skill/id           {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :skill/name         {:db/valueType :db.type/string}
    :skill/description  {:db/valueType :db.type/string}  ; short summary for selection
-   :skill/content      {:db/valueType :db.type/string  :db/fulltext true} ; raw markdown for prompt injection + FTS
+   :skill/content      {:db/valueType :db.type/string
+                        :db/fulltext true
+                        :db.fulltext/domains [skill-content-domain]} ; raw markdown for prompt injection + FTS
    :skill/doc          {:db/valueType :db.type/idoc   :db/idocFormat :markdown :db/domain "skills"} ; parsed structure for section queries
    :skill/version      {:db/valueType :db.type/string}
    :skill/tags         {:db/valueType :db.type/keyword :db/cardinality :db.cardinality/many}

@@ -1,5 +1,6 @@
 (ns xia.memory-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [datalevin.built-ins :as builtins]
             [xia.test-helpers :as th]
             [xia.db :as db]
             [xia.memory :as memory]))
@@ -359,6 +360,44 @@
       (is (pos? (count results)))
       (is (= "Car" (:name (first results)))))))
 
+(deftest test-search-nodes-rrf-prefers-dual-signal-match
+  (th/seed-node! "Vehicle" "concept")
+  (th/seed-node! "Car" "concept")
+  (Thread/sleep 100)
+
+  (testing "RRF ranks an exact lexical + semantic hit ahead of semantic-only matches"
+    (let [results (memory/search-nodes "car")]
+      (is (pos? (count results)))
+      (is (= "Car" (:name (first results)))))))
+
+(deftest test-search-candidate-pool-size-uses-config
+  (db/set-config! :memory/search-node-candidate-pool-size 37)
+  (let [fts-top (atom nil)
+        sem-top (atom nil)]
+    (with-redefs [builtins/fulltext (fn [_db _query opts]
+                                      (reset! fts-top (:top opts))
+                                      [])
+                  builtins/embedding-neighbors (fn [_db _query opts]
+                                                 (reset! sem-top (:top opts))
+                                                 [])]
+      (is (= [] (memory/search-nodes "car")))
+      (is (= 37 @fts-top))
+      (is (= 37 @sem-top)))))
+
+(deftest test-search-candidate-pool-size-never-drops-below-top
+  (db/set-config! :memory/search-node-candidate-pool-size 3)
+  (let [fts-top (atom nil)
+        sem-top (atom nil)]
+    (with-redefs [builtins/fulltext (fn [_db _query opts]
+                                      (reset! fts-top (:top opts))
+                                      [])
+                  builtins/embedding-neighbors (fn [_db _query opts]
+                                                 (reset! sem-top (:top opts))
+                                                 [])]
+      (is (= [] (memory/search-nodes "car" :top 10)))
+      (is (= 10 @fts-top))
+      (is (= 10 @sem-top)))))
+
 (deftest test-search-facts-semantic
   (let [node-eid (th/seed-node! "Garage" "place")]
     (th/seed-fact! node-eid "stores a car indoors")
@@ -375,6 +414,18 @@
     (let [results (memory/search-episodes "automobile")]
       (is (pos? (count results)))
       (is (= "Fixed the car before the trip" (:summary (first results)))))))
+
+(deftest test-search-episodes-context-domain
+  (memory/record-episode! {:summary "Travel planning"
+                           :context "Seattle ferry schedule and hotel list"})
+  (Thread/sleep 100)
+
+  (testing "shared episode domain returns context matches"
+    (let [results (memory/search-episodes "ferry schedule")]
+      (is (pos? (count results)))
+      (is (= "Travel planning" (:summary (first results))))
+      (is (= "Seattle ferry schedule and hotel list"
+             (:context (first results)))))))
 
 (deftest test-search-edges
   (let [n1 (th/seed-node! "Alice" "person")

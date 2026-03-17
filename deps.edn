@@ -2,7 +2,7 @@
 
  :deps
  {org.clojure/clojure       {:mvn/version "1.12.4"}
-  org.datalevin/datalevin-embedded {:mvn/version "0.10.8"}
+  org.datalevin/datalevin-embedded {:mvn/version "0.10.9"}
   org.clojure/tools.cli      {:mvn/version "1.4.256"}
 
   ;; HTTP client for LLM API calls

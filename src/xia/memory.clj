@@ -11,6 +11,7 @@
                                                                   ↓
                                                         recalled into context"
   (:require [clojure.string :as str]
+            [datalevin.built-ins :as builtins]
             [datalevin.core :as d]
             [xia.config :as cfg]
             [xia.db :as db]))
@@ -465,64 +466,134 @@
 ;; FTS keeps exact lexical recall strong, while embedding search improves
 ;; synonym and intent-level matching over the same source datoms.
 
-(defn- dedupe-by
-  [key-fn coll]
-  (second
-    (reduce (fn [[seen items] item]
-              (let [k (key-fn item)]
-                (if (contains? seen k)
-                  [seen items]
-                  [(conj seen k) (conj items item)])))
-            [#{} []]
-            coll)))
+(def ^:private rrf-k 60.0)
+(def ^:private lexical-rrf-weight 1.0)
+(def ^:private semantic-rrf-weight 1.0)
+(def ^:private default-candidate-pool-multiplier 4)
+(def ^:private minimum-candidate-pool-size 20)
 
-(defn- combine-search-results
-  [key-fn top & colls]
-  (->> colls
-       (apply concat)
-       (dedupe-by key-fn)
-       (take top)
-       vec))
+(def ^:private candidate-pool-config-keys
+  {:nodes    :memory/search-node-candidate-pool-size
+   :facts    :memory/search-fact-candidate-pool-size
+   :episodes :memory/search-episode-candidate-pool-size
+   :edges    :memory/search-edge-candidate-pool-size})
 
-(defn- fts-datoms
-  "Run fulltext search, return results as maps {:eid :attr :value}.
-   Datalevin fulltext-datoms returns [eid attr value] vectors."
-  [query]
-  (when (and query (not (clojure.string/blank? query)))
-    (let [db (d/db (db/conn))]
+(defn- candidate-pool-size
+  [kind top]
+  (let [default-size (max minimum-candidate-pool-size
+                          (* default-candidate-pool-multiplier top))
+        configured   (cfg/positive-long (get candidate-pool-config-keys kind)
+                                        default-size)]
+    (-> configured
+        (max top)
+        int)))
+
+(defn- fulltext-domain-hits
+  [domain query & {:keys [top] :or {top 10}}]
+  (if (str/blank? query)
+    []
+    (let [dbv  (d/db (db/conn))
+          opts {:domains [domain]
+                :top top
+                :display :refs+scores}]
       (try
-        (mapv (fn [d] {:eid (nth d 0) :attr (nth d 1) :value (nth d 2)})
-              (d/fulltext-datoms db query))
+        (->> (builtins/fulltext dbv query opts)
+             (map-indexed
+               (fn [idx tuple]
+                 (let [[eid attr value score] (vec tuple)]
+                   {:eid       eid
+                    :attr      attr
+                    :value     value
+                    :lex-score (double score)
+                    :lex-rank  (inc idx)})))
+             vec)
         (catch Exception _
           [])))))
 
-(defn- embedding-datoms
-  "Run semantic search against an embedding-enabled string attribute.
-   Returns maps {:eid :attr :value :distance}."
-  [attr query & {:keys [top] :or {top 10}}]
-  (when (and query (not (clojure.string/blank? query)))
-    (let [db     (d/db (db/conn))
-          domain (-> (str attr)
-                     (subs 1)
-                     (str/replace "/" "_"))
-          query-form `[:find ?e ?a ?v ?dist
-                       :in $ ?query
-                       :where
-                       [(~'embedding-neighbors $ ?query
-                         {:domains [~domain]
-                          :top ~top
-                          :display :refs+dists})
-                        [[?e ?a ?v ?dist]]]]]
+(defn- embedding-domain-hits
+  [domain query & {:keys [top] :or {top 10}}]
+  (if (str/blank? query)
+    []
+    (let [dbv  (d/db (db/conn))
+          opts {:domains [domain]
+                :top top
+                :display :refs+dists}]
       (try
-        (->> (d/q query-form db query)
-             (mapv (fn [res]
-                     (let [[eid matched-attr value distance] res]
-                       {:eid      eid
-                        :attr     matched-attr
-                        :value    value
-                        :distance (double distance)}))))
+        (->> (builtins/embedding-neighbors dbv query opts)
+             (map-indexed
+               (fn [idx tuple]
+                 (let [[eid attr value distance] (vec tuple)]
+                   {:eid          eid
+                    :attr         attr
+                    :value        value
+                    :sem-distance (double distance)
+                    :sem-rank     (inc idx)})))
+             vec)
         (catch Exception _
           [])))))
+
+(defn- update-best-rank
+  [current rank]
+  (if current
+    (min current rank)
+    rank))
+
+(defn- update-best-score
+  [current score]
+  (if current
+    (max current score)
+    score))
+
+(defn- update-best-distance
+  [current distance]
+  (if current
+    (min current distance)
+    distance))
+
+(defn- merge-domain-hit
+  [acc {:keys [eid attr lex-score lex-rank sem-distance sem-rank]}]
+  (update acc eid
+          (fn [candidate]
+            (cond-> (or candidate {:eid eid})
+              attr         (update :matched-attrs (fnil conj #{}) attr)
+              lex-score    (assoc :lex-score (update-best-score (:lex-score candidate)
+                                                                lex-score))
+              lex-rank     (assoc :lex-rank (update-best-rank (:lex-rank candidate)
+                                                              lex-rank))
+              sem-distance (assoc :sem-distance
+                                  (update-best-distance (:sem-distance candidate)
+                                                        sem-distance))
+              sem-rank     (assoc :sem-rank (update-best-rank (:sem-rank candidate)
+                                                              sem-rank))))))
+
+(defn- rrf-component
+  [weight rank]
+  (if rank
+    (/ weight (+ rrf-k (double rank)))
+    0.0))
+
+(defn- hybrid-rrf-score
+  [{:keys [lex-rank sem-rank]}]
+  (+ (rrf-component lexical-rrf-weight lex-rank)
+     (rrf-component semantic-rrf-weight sem-rank)))
+
+(defn- rank-domain-candidates
+  [domain query & {:keys [top fts-query pool-size] :or {top 10}}]
+  (let [pool-size       (or pool-size
+                            (max minimum-candidate-pool-size
+                                 (* default-candidate-pool-multiplier top)))
+        lexical-hits    (fulltext-domain-hits domain (or fts-query query) :top pool-size)
+        semantic-hits   (embedding-domain-hits domain query :top pool-size)
+        merged-hits     (vals (reduce merge-domain-hit {} (concat lexical-hits semantic-hits)))]
+    (->> merged-hits
+         (map #(assoc % :rrf-score (hybrid-rrf-score %)))
+         (sort-by (fn [{:keys [rrf-score lex-score sem-distance eid]}]
+                    [(- rrf-score)
+                     (- (double (or lex-score 0.0)))
+                     (double (or sem-distance Double/POSITIVE_INFINITY))
+                     eid]))
+         (take top)
+         vec)))
 
 (defn- node-result
   [eid]
@@ -556,60 +627,55 @@
                               (:default-importance
                                 default-episode-retention-config)))}))
 
+(defn- edge-result
+  [eid]
+  (let [e (into {} (d/entity (d/db (db/conn)) eid))]
+    {:eid      eid
+     :from-eid (ref-eid (:kg.edge/from e))
+     :to-eid   (ref-eid (:kg.edge/to e))
+     :type     (:kg.edge/type e)
+     :label    (:kg.edge/label e)}))
+
 (defn search-nodes
   "Search KG nodes by name using lexical FTS plus semantic recall.
    Returns [{:eid :name :type}]."
   [query & {:keys [top fts-query] :or {top 10}}]
-  (let [fts-results      (->> (fts-datoms (or fts-query query))
-                              (filter #(= :kg.node/name (:attr %)))
-                              (take top)
-                              (mapv (comp node-result :eid)))
-        semantic-results (->> (embedding-datoms :kg.node/name query :top top)
-                              (mapv (comp node-result :eid)))]
-    (combine-search-results :eid top fts-results semantic-results)))
+  (->> (rank-domain-candidates db/kg-node-domain
+                               query
+                               :top top
+                               :fts-query fts-query
+                               :pool-size (candidate-pool-size :nodes top))
+       (mapv (comp node-result :eid))))
 
 (defn search-facts
   "Search KG facts by content using lexical FTS plus semantic recall.
    Returns [{:eid :node-eid :content :confidence :utility}]."
   [query & {:keys [top fts-query] :or {top 15}}]
-  (let [fts-results      (->> (fts-datoms (or fts-query query))
-                              (filter #(= :kg.fact/content (:attr %)))
-                              (take top)
-                              (mapv (comp fact-result :eid)))
-        semantic-results (->> (embedding-datoms :kg.fact/content query :top top)
-                              (mapv (comp fact-result :eid)))]
-    (combine-search-results :eid top fts-results semantic-results)))
+  (->> (rank-domain-candidates db/kg-fact-domain
+                               query
+                               :top top
+                               :fts-query fts-query
+                               :pool-size (candidate-pool-size :facts top))
+       (mapv (comp fact-result :eid))))
 
 (defn search-episodes
   "Search episodes by summary/context using lexical FTS plus semantic recall.
    Returns [{:eid :summary :context :timestamp :importance}]."
   [query & {:keys [top fts-query] :or {top 5}}]
-  (let [fts-results      (->> (fts-datoms (or fts-query query))
-                              (filter #(#{:episode/summary :episode/context} (:attr %)))
-                              (take top)
-                              (mapv (comp episode-result :eid)))
-        semantic-results (combine-search-results
-                           :eid
-                           top
-                           (mapv (comp episode-result :eid)
-                                 (embedding-datoms :episode/summary query :top top))
-                           (mapv (comp episode-result :eid)
-                                 (embedding-datoms :episode/context query :top top)))]
-    (combine-search-results :eid top fts-results semantic-results)))
+  (->> (rank-domain-candidates db/episode-text-domain
+                               query
+                               :top top
+                               :fts-query fts-query
+                               :pool-size (candidate-pool-size :episodes top))
+       (mapv (comp episode-result :eid))))
 
 (defn search-edges
   "Search KG edges by label via FTS. Returns [{:eid :from-eid :to-eid :type :label}]."
   [query & {:keys [top] :or {top 10}}]
-  (->> (fts-datoms query)
-       (filter #(= :kg.edge/label (:attr %)))
-       (take top)
-       (mapv (fn [{:keys [eid]}]
-               (let [e (into {} (d/entity (d/db (db/conn)) eid))]
-                 {:eid      eid
-                  :from-eid (ref-eid (:kg.edge/from e))
-                  :to-eid   (ref-eid (:kg.edge/to e))
-                  :type     (:kg.edge/type e)
-                  :label    (:kg.edge/label e)})))))
+  (->> (fulltext-domain-hits db/kg-edge-domain
+                             query
+                             :top (candidate-pool-size :edges top))
+       (mapv (comp edge-result :eid))))
 
 (defn node-facts-with-eids
   "Get all facts about a node, including fact eids (for dedup)."
