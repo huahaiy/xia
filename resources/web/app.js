@@ -7,6 +7,10 @@ const state = {
   pendingApproval: null,
   sending: false,
   approvalSubmitting: false,
+  localDocs: [],
+  activeLocalDocId: '',
+  activeLocalDoc: null,
+  localDocUploading: false,
   scratchPads: [],
   activePadId: '',
   activePad: null,
@@ -157,6 +161,13 @@ const toolListEl = document.getElementById('tool-list');
 const skillListEl = document.getElementById('skill-list');
 const fileInputEl = document.getElementById('file-input');
 const uploadBtnEl = document.getElementById('upload-btn');
+const localUploadBtnEl = document.getElementById('local-upload-btn');
+const localDocListEl = document.getElementById('local-doc-list');
+const localDocPreviewEl = document.getElementById('local-doc-preview');
+const localDocStatusEl = document.getElementById('local-doc-status');
+const localDocInsertEl = document.getElementById('local-doc-insert');
+const localDocScratchEl = document.getElementById('local-doc-scratch');
+const localDocDeleteEl = document.getElementById('local-doc-delete');
 const tabLinks = document.querySelectorAll('.tab-link');
 const tabPanels = document.querySelectorAll('.tab-panel');
 const advancedToggleEl = document.getElementById('advanced-toggle');
@@ -179,33 +190,14 @@ advancedToggleEl.addEventListener('change', () => {
 });
 
 uploadBtnEl.addEventListener('click', () => fileInputEl.click());
+localUploadBtnEl.addEventListener('click', () => fileInputEl.click());
 
 fileInputEl.addEventListener('change', async () => {
-  const files = Array.from(fileInputEl.files);
-  if (!files.length) return;
-
-  const contents = await Promise.all(files.map((file) => {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (e) => resolve(`--- File: ${file.name} ---\n${e.target.result}\n`);
-      reader.onerror = () => resolve(`--- File: ${file.name} (Error reading file) ---\n`);
-      reader.readAsText(file);
-    });
-  }));
-
-  const text = contents.join('\n');
-  const start = composerEl.selectionStart == null ? composerEl.value.length : composerEl.selectionStart;
-  const end = composerEl.selectionEnd == null ? composerEl.value.length : composerEl.selectionEnd;
-  const prefix = composerEl.value.slice(0, start);
-  const suffix = composerEl.value.slice(end);
-  const before = prefix && !prefix.endsWith('\n') ? '\n' : '';
-  const after = suffix && !text.endsWith('\n') ? '\n' : '';
-  
-  composerEl.value = prefix + before + text + after + suffix;
-  updateComposerState();
-  composerEl.focus();
-  fileInputEl.value = ''; // Reset for next selection
-  setStatus('Files uploaded into chat composer');
+  try {
+    await handleSelectedLocalFiles(Array.from(fileInputEl.files || []));
+  } finally {
+    fileInputEl.value = '';
+  }
 });
 
 function persistSession() {
@@ -1536,6 +1528,117 @@ function updateComposerState() {
   clearInputEl.disabled = state.sending || !composerEl.value.length;
 }
 
+function insertTextIntoComposer(text, statusText) {
+  if (!text) return;
+  const start = composerEl.selectionStart == null ? composerEl.value.length : composerEl.selectionStart;
+  const end = composerEl.selectionEnd == null ? composerEl.value.length : composerEl.selectionEnd;
+  const prefix = composerEl.value.slice(0, start);
+  const suffix = composerEl.value.slice(end);
+  const before = prefix && !prefix.endsWith('\n') ? '\n' : '';
+  const after = suffix && !text.endsWith('\n') ? '\n' : '';
+  composerEl.value = prefix + before + text + after + suffix;
+  updateComposerState();
+  composerEl.focus();
+  if (statusText) setStatus(statusText);
+}
+
+function localDocTitle(doc) {
+  return (doc && doc.name && doc.name.trim()) ? doc.name.trim() : 'Untitled upload';
+}
+
+function localDocMeta(doc) {
+  const bits = [];
+  if (doc.media_type) bits.push(doc.media_type);
+  if (typeof doc.size_bytes === 'number') bits.push(formatBytes(doc.size_bytes));
+  if (doc.updated_at) bits.push('Updated ' + formatStamp(doc.updated_at));
+  return bits.join(' • ');
+}
+
+function sortLocalDocs() {
+  state.localDocs.sort((left, right) => {
+    const a = Date.parse((left && left.updated_at) || '') || 0;
+    const b = Date.parse((right && right.updated_at) || '') || 0;
+    return b - a;
+  });
+}
+
+function upsertLocalDocMeta(doc) {
+  const meta = {
+    id: doc.id,
+    name: doc.name,
+    media_type: doc.media_type,
+    size_bytes: doc.size_bytes,
+    status: doc.status,
+    error: doc.error,
+    preview: doc.preview,
+    created_at: doc.created_at,
+    updated_at: doc.updated_at
+  };
+  const index = state.localDocs.findIndex((entry) => entry.id === doc.id);
+  if (index >= 0) state.localDocs[index] = meta;
+  else state.localDocs.push(meta);
+  sortLocalDocs();
+}
+
+function renderLocalDocList() {
+  localDocListEl.innerHTML = '';
+  if (!state.localDocs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = state.localDocUploading
+      ? 'Uploading local documents...'
+      : 'Choose a local file to make it available to Xia in this session.';
+    localDocListEl.appendChild(empty);
+    return;
+  }
+  state.localDocs.forEach((doc) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'admin-item' + (doc.id === state.activeLocalDocId ? ' active' : '');
+    const title = document.createElement('div');
+    title.className = 'admin-item-title';
+    title.textContent = localDocTitle(doc);
+    const meta = document.createElement('div');
+    meta.className = 'admin-item-meta';
+    meta.textContent = localDocMeta(doc);
+    button.appendChild(title);
+    button.appendChild(meta);
+    button.addEventListener('click', () => loadLocalDoc(doc.id));
+    localDocListEl.appendChild(button);
+  });
+}
+
+function syncLocalDocPanel(statusText) {
+  const doc = state.activeLocalDoc;
+  localDocPreviewEl.value = doc ? (doc.text || doc.preview || '') : '';
+  localDocStatusEl.textContent = statusText
+    || (state.localDocUploading
+      ? 'Uploading local documents...'
+      : doc
+        ? (doc.error || localDocMeta(doc) || 'Local document ready.')
+        : 'No local document selected.');
+  const hasDoc = !!doc;
+  localDocInsertEl.disabled = !hasDoc || state.localDocUploading;
+  localDocScratchEl.disabled = !hasDoc || state.localDocUploading;
+  localDocDeleteEl.disabled = !hasDoc || state.localDocUploading;
+  renderLocalDocList();
+}
+
+function resetLocalDocs(statusText) {
+  state.localDocs = [];
+  state.activeLocalDocId = '';
+  state.activeLocalDoc = null;
+  state.localDocUploading = false;
+  syncLocalDocPanel(statusText || 'No local document selected.');
+}
+
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < (1024 * 1024)) return (bytes / 1024).toFixed(1).replace(/\.0$/, '') + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + ' MB';
+}
+
 function padTitle(pad) {
   return (pad && pad.title && pad.title.trim()) ? pad.title.trim() : 'Untitled note';
 }
@@ -1623,6 +1726,136 @@ async function ensureSession() {
   return state.sessionId;
 }
 
+function readLocalFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => resolve({
+      name: file.name,
+      media_type: file.type || '',
+      size_bytes: file.size,
+      text: typeof event.target.result === 'string' ? event.target.result : ''
+    });
+    reader.onerror = () => reject(new Error('Failed to read ' + (file.name || 'selected file')));
+    reader.readAsText(file);
+  });
+}
+
+async function loadLocalDocs(options) {
+  const keepActive = !options || options.keepActive !== false;
+  if (!state.sessionId) {
+    resetLocalDocs();
+    return;
+  }
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/local-documents');
+    state.localDocs = Array.isArray(data.documents) ? data.documents : [];
+    sortLocalDocs();
+    if (keepActive && state.activeLocalDocId && state.localDocs.some((doc) => doc.id === state.activeLocalDocId)) {
+      renderLocalDocList();
+      return;
+    }
+    if (state.localDocs.length) await loadLocalDoc(state.localDocs[0].id);
+    else resetLocalDocs('No local document selected.');
+  } catch (err) {
+    syncLocalDocPanel(err.message || 'Failed to load local documents.');
+  }
+}
+
+async function loadLocalDoc(docId) {
+  if (!docId || !state.sessionId) return;
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/local-documents/' + encodeURIComponent(docId));
+    state.activeLocalDocId = docId;
+    state.activeLocalDoc = data.document || null;
+    if (state.activeLocalDoc) upsertLocalDocMeta(state.activeLocalDoc);
+    syncLocalDocPanel();
+  } catch (err) {
+    syncLocalDocPanel(err.message || 'Failed to load local document.');
+  }
+}
+
+async function handleSelectedLocalFiles(files) {
+  if (!files.length) return;
+  state.localDocUploading = true;
+  let finalStatus = '';
+  syncLocalDocPanel('Reading local files...');
+  try {
+    await ensureSession();
+    const readResults = await Promise.allSettled(files.map((file) => readLocalFile(file)));
+    const documents = [];
+    const readErrors = [];
+    readResults.forEach((entry, index) => {
+      if (entry.status === 'fulfilled') {
+        documents.push(entry.value);
+      } else {
+        readErrors.push({
+          name: (files[index] && files[index].name) || '',
+          error: entry.reason && entry.reason.message ? entry.reason.message : 'Failed to read selected file'
+        });
+      }
+    });
+    if (!documents.length && readErrors.length) {
+      finalStatus = readErrors[0].error;
+      syncLocalDocPanel(finalStatus);
+      setStatus(finalStatus);
+      return;
+    }
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/local-documents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents: documents })
+    });
+    const created = Array.isArray(data.documents) ? data.documents : [];
+    const errors = readErrors.concat(Array.isArray(data.errors) ? data.errors : []);
+    created.forEach(upsertLocalDocMeta);
+    if (created.length) {
+      state.activeLocalDocId = created[0].id || '';
+      await loadLocalDoc(state.activeLocalDocId);
+      setStatus(created.length === 1 ? 'Local document uploaded' : (created.length + ' local documents uploaded'));
+    } else {
+      state.activeLocalDoc = null;
+      state.activeLocalDocId = '';
+    }
+    if (errors.length) {
+      finalStatus = created.length
+        ? ('Some uploads failed: ' + errors.map((entry) => entry.name || entry.error).join(', '))
+        : (errors[0].error || 'Failed to upload local documents');
+      syncLocalDocPanel(finalStatus);
+      setStatus(finalStatus);
+    }
+    await loadHistorySessions();
+  } catch (err) {
+    finalStatus = err.message || 'Failed to upload local documents.';
+    syncLocalDocPanel(finalStatus);
+    setStatus(finalStatus);
+  } finally {
+    state.localDocUploading = false;
+    syncLocalDocPanel(finalStatus);
+  }
+}
+
+async function createScratchPadFromContent(title, content) {
+  if (!discardScratchChanges()) return;
+  try {
+    await ensureSession();
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title || 'Untitled note', content: content || '' })
+    });
+    state.activePad = data.pad || null;
+    state.activePadId = state.activePad ? state.activePad.id : '';
+    state.scratchDirty = false;
+    if (state.activePad) upsertScratchMeta(state.activePad);
+    syncScratchEditor(title ? 'Created note from local document.' : 'New note ready.');
+    switchTab('notes-tab');
+    scratchTitleEl.focus();
+    scratchTitleEl.select();
+  } catch (err) {
+    scratchStatusEl.textContent = err.message || 'Failed to create.';
+  }
+}
+
 async function loadScratchPads(options) {
   const keepActive = !options || options.keepActive !== false;
   if (!state.sessionId) {
@@ -1671,26 +1904,7 @@ async function loadScratchPad(padId, bypassDirtyCheck) {
 }
 
 async function createScratchPad() {
-  if (!discardScratchChanges()) return;
-  try {
-    await ensureSession();
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'Untitled note', content: '' })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Failed to create');
-    state.activePad = data.pad || null;
-    state.activePadId = state.activePad ? state.activePad.id : '';
-    state.scratchDirty = false;
-    if (state.activePad) upsertScratchMeta(state.activePad);
-    syncScratchEditor('New note ready.');
-    scratchTitleEl.focus();
-    scratchTitleEl.select();
-  } catch (err) {
-    scratchStatusEl.textContent = err.message || 'Failed to create.';
-  }
+  await createScratchPadFromContent('Untitled note', '');
 }
 
 async function saveScratchPad() {
@@ -1742,18 +1956,7 @@ async function deleteScratchPad() {
 }
 
 function insertScratchIntoComposer() {
-  const text = scratchEditorEl.value;
-  if (!text) return;
-  const start = composerEl.selectionStart == null ? composerEl.value.length : composerEl.selectionStart;
-  const end = composerEl.selectionEnd == null ? composerEl.value.length : composerEl.selectionEnd;
-  const prefix = composerEl.value.slice(0, start);
-  const suffix = composerEl.value.slice(end);
-  const before = prefix && !prefix.endsWith('\n') ? '\n' : '';
-  const after = suffix && !text.endsWith('\n') ? '\n' : '';
-  composerEl.value = prefix + before + text + after + suffix;
-  updateComposerState();
-  composerEl.focus();
-  setStatus('Note inserted into chat');
+  insertTextIntoComposer(scratchEditorEl.value, 'Note inserted into chat');
 }
 
 function trackScratchInput() {
@@ -1764,6 +1967,58 @@ function trackScratchInput() {
   });
   state.scratchDirty = true;
   syncScratchEditor('Unsaved changes.');
+}
+
+function localDocInsertText(doc) {
+  if (!doc || !doc.text) return '';
+  return '--- Local Document: ' + localDocTitle(doc) + ' ---\n' + doc.text + '\n';
+}
+
+function insertLocalDocIntoComposer() {
+  if (!state.activeLocalDoc) return;
+  insertTextIntoComposer(localDocInsertText(state.activeLocalDoc), 'Local document inserted into chat');
+}
+
+async function createScratchPadFromLocalDoc() {
+  if (!state.activeLocalDoc || !state.sessionId) return;
+  if (!discardScratchChanges()) return;
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId)
+      + '/local-documents/' + encodeURIComponent(state.activeLocalDoc.id)
+      + '/scratch-pads', {
+      method: 'POST'
+    });
+    state.activePad = data.pad || null;
+    state.activePadId = state.activePad ? state.activePad.id : '';
+    state.scratchDirty = false;
+    if (state.activePad) upsertScratchMeta(state.activePad);
+    syncScratchEditor('Created note from local document.');
+    switchTab('notes-tab');
+    scratchTitleEl.focus();
+    scratchTitleEl.select();
+    setStatus('Created note from local document');
+  } catch (err) {
+    scratchStatusEl.textContent = err.message || 'Failed to create.';
+  }
+}
+
+async function deleteLocalDoc() {
+  if (!state.activeLocalDoc || !state.sessionId || state.localDocUploading) return;
+  if (!window.confirm('Delete this local document?')) return;
+  const deletingId = state.activeLocalDoc.id;
+  try {
+    await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/local-documents/' + encodeURIComponent(deletingId), {
+      method: 'DELETE'
+    });
+    state.localDocs = state.localDocs.filter((doc) => doc.id !== deletingId);
+    state.activeLocalDoc = null;
+    state.activeLocalDocId = '';
+    if (state.localDocs.length) await loadLocalDoc(state.localDocs[0].id);
+    else syncLocalDocPanel('Deleted.');
+    setStatus('Local document deleted');
+  } catch (err) {
+    syncLocalDocPanel(err.message || 'Failed to delete local document.');
+  }
 }
 
 async function pollApproval() {
@@ -1932,6 +2187,9 @@ newScratchEl.addEventListener('click', () => createScratchPad());
 saveScratchEl.addEventListener('click', () => saveScratchPad());
 deleteScratchEl.addEventListener('click', () => deleteScratchPad());
 insertScratchEl.addEventListener('click', () => insertScratchIntoComposer());
+localDocInsertEl.addEventListener('click', () => insertLocalDocIntoComposer());
+localDocScratchEl.addEventListener('click', () => createScratchPadFromLocalDoc());
+localDocDeleteEl.addEventListener('click', () => deleteLocalDoc());
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
 
@@ -1978,6 +2236,10 @@ newChatEl.addEventListener('click', () => {
   state.messages = [];
   state.pendingApproval = null;
   state.liveStatus = null;
+  state.localDocs = [];
+  state.activeLocalDocId = '';
+  state.activeLocalDoc = null;
+  state.localDocUploading = false;
   state.scratchPads = [];
   state.activePadId = '';
   state.activePad = null;
@@ -1985,6 +2247,7 @@ newChatEl.addEventListener('click', () => {
   persistSession();
   renderApproval();
   renderMessages();
+  syncLocalDocPanel('No local document selected.');
   syncScratchEditor('No note selected.');
   loadHistorySessions();
   setStatus('Ready');
@@ -2011,6 +2274,7 @@ window.addEventListener('message', (event) => {
 persistSession();
 renderApproval();
 renderMessages();
+syncLocalDocPanel('No local document selected.');
 syncScratchEditor('No note selected.');
 resetProviderForm('Loading...');
 resetMemoryRetentionForm('Loading...');
@@ -2022,6 +2286,7 @@ updateAdminButtons();
 updateComposerState();
 composerEl.focus();
 loadSessionMessages();
+loadLocalDocs();
 loadScratchPads();
 loadAdminConfig();
 loadHistorySessions();

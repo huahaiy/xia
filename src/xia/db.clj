@@ -123,6 +123,19 @@
    :message/tool-result {:db/valueType :db.type/idoc :db/domain "message-tool-result"}
    :message/tool-id    {:db/valueType :db.type/string}  ; for tool-result messages
 
+   ;; --- Local Documents (user-selected local file content) ---
+   :local.doc/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :local.doc/session    {:db/valueType :db.type/ref}
+   :local.doc/name       {:db/valueType :db.type/string}
+   :local.doc/media-type {:db/valueType :db.type/string}
+   :local.doc/source     {:db/valueType :db.type/keyword}
+   :local.doc/size-bytes {:db/valueType :db.type/long}
+   :local.doc/sha256     {:db/valueType :db.type/string}
+   :local.doc/status     {:db/valueType :db.type/keyword}
+   :local.doc/error      {:db/valueType :db.type/string}
+   :local.doc/text       {:db/valueType :db.type/string}
+   :local.doc/preview    {:db/valueType :db.type/string}
+
    ;; --- Skill (markdown/text instructions the LLM follows) ---
    :skill/id           {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :skill/name         {:db/valueType :db.type/string}

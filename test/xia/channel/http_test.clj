@@ -33,7 +33,7 @@
     (first (str/split (get-in response [:headers "Set-Cookie"]) #";"))))
 
 (defn- ui-headers []
-  {"origin" "http://localhost:18790"
+  {"origin" "http://localhost:3008"
    "cookie" (local-session-cookie)})
 
 (defn- wait-for
@@ -56,6 +56,7 @@
     (is (re-find #"<title>Xia</title>" (:body response)))
     (is (re-find #"Approval Required" (:body response)))
     (is (re-find #"Copy transcript" (:body response)))
+    (is (re-find #"Local Documents" (:body response)))
     (is (re-find #"Notes" (:body response)))
     (is (re-find #"History" (:body response)))
     (is (re-find #"Scheduled Runs" (:body response)))
@@ -212,7 +213,7 @@
 (deftest chat-route-blocks-missing-session-secret
   (let [response (#'http/router {:uri            "/chat"
                                  :request-method :post
-                                 :headers        {"origin" "http://localhost:18790"}
+                                 :headers        {"origin" "http://localhost:3008"}
                                  :body           (request-body {"message" "hello"})})
         body     (response-json response)]
     (is (= 401 (:status response)))
@@ -327,7 +328,7 @@
                                                   ::websocket-upgraded)]
       (let [response (#'http/router {:uri            "/ws"
                                      :request-method :get
-                                     :headers        {"origin" "http://localhost:18790"}})
+                                     :headers        {"origin" "http://localhost:3008"}})
             body     (response-json response)]
         (is (= 401 (:status response)))
         (is (= "missing or invalid local session secret" (get body "error")))
@@ -459,7 +460,7 @@
 (deftest session-messages-route-blocks-missing-session-secret
   (let [response (#'http/router {:uri            (str "/sessions/" (random-uuid) "/messages")
                                  :request-method :get
-                                 :headers        {"origin" "http://localhost:18790"}})
+                                 :headers        {"origin" "http://localhost:3008"}})
         body     (response-json response)]
     (is (= 401 (:status response)))
     (is (= "missing or invalid local session secret" (get body "error")))))
@@ -656,6 +657,70 @@
                                     :headers        (ui-headers)})
           list-body (response-json list-res)]
       (is (= [] (get list-body "pads"))))))
+
+(deftest local-document-routes-round-trip
+  (let [sid         (str (db/create-session! :http))
+        create-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents")
+                                    :request-method :post
+                                    :headers        (ui-headers)
+                                    :body           (request-body {"documents" [{"name" "notes.md"
+                                                                                 "media_type" "text/markdown"
+                                                                                 "size_bytes" 22
+                                                                                 "text" "# Local\n\ncontent"}]})})
+        create-body (response-json create-res)
+        doc-id      (get-in create-body ["documents" 0 "id"])]
+    (is (= 201 (:status create-res)))
+    (is (= "notes.md" (get-in create-body ["documents" 0 "name"])))
+    (is (= "text/markdown" (get-in create-body ["documents" 0 "media_type"])))
+    (is (string? (get-in create-body ["documents" 0 "preview"])))
+    (let [list-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents")
+                                    :request-method :get
+                                    :headers        (ui-headers)})
+          list-body (response-json list-res)]
+      (is (= 200 (:status list-res)))
+      (is (= 1 (count (get list-body "documents"))))
+      (is (= doc-id (get-in list-body ["documents" 0 "id"]))))
+    (let [get-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          get-body (response-json get-res)]
+      (is (= 200 (:status get-res)))
+      (is (= "# Local\n\ncontent" (get-in get-body ["document" "text"]))))
+    (let [note-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id "/scratch-pads")
+                                    :request-method :post
+                                    :headers        (ui-headers)})
+          note-body (response-json note-res)]
+      (is (= 201 (:status note-res)))
+      (is (= "notes.md" (get-in note-body ["pad" "title"])))
+      (is (= "# Local\n\ncontent" (get-in note-body ["pad" "content"]))))
+    (let [delete-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id)
+                                      :request-method :delete
+                                      :headers        (ui-headers)})
+          delete-body (response-json delete-res)]
+      (is (= 200 (:status delete-res)))
+      (is (= "deleted" (get delete-body "status"))))
+    (let [list-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents")
+                                    :request-method :get
+                                    :headers        (ui-headers)})
+          list-body (response-json list-res)]
+      (is (= [] (get list-body "documents"))))))
+
+(deftest local-document-create-route-reports-partial-upload-errors
+  (let [sid        (str (db/create-session! :http))
+        response   (#'http/router {:uri            (str "/sessions/" sid "/local-documents")
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"documents" [{"name" "notes.txt"
+                                                                                "media_type" "text/plain"
+                                                                                "text" "ok"}
+                                                                               {"name" "paper.pdf"
+                                                                                "media_type" "application/pdf"
+                                                                                "text" "ignored"}]})})
+        body       (response-json response)]
+    (is (= 201 (:status response)))
+    (is (= 1 (count (get body "documents"))))
+    (is (= 1 (count (get body "errors"))))
+    (is (= "paper.pdf" (get-in body ["errors" 0 "name"])))))
 
 (deftest approval-route-allows-round-trip
   (let [sid    (str (db/create-session! :http))
@@ -907,7 +972,7 @@
   (with-redefs [xia.oauth/start-authorization!
                 (fn [account-id callback-url]
                   (is (= :google account-id))
-                  (is (= "http://localhost:18790/oauth/callback" callback-url))
+                  (is (= "http://localhost:3008/oauth/callback" callback-url))
                   {:authorization-url "https://accounts.google.com/o/oauth2/v2/auth?state=abc"
                    :redirect-uri callback-url})]
     (let [response (#'http/router {:uri            "/admin/oauth-accounts/google/connect"

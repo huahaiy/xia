@@ -9,6 +9,7 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
+            [xia.local-doc :as local-doc]
             [xia.llm :as llm]
             [xia.memory :as memory]
             [xia.oauth :as oauth]
@@ -36,7 +37,7 @@
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
-(def ^:private max-request-body-bytes (* 1024 1024)) ; 1 MiB
+(def ^:private max-request-body-bytes (* 5 1024 1024)) ; 5 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
@@ -642,6 +643,26 @@
   [pad]
   (dissoc (scratch-pad->body pad) :content))
 
+(defn- local-doc->body
+  [doc]
+  {:id         (some-> (:id doc) str)
+   :session_id (:session-id doc)
+   :name       (:name doc)
+   :media_type (:media-type doc)
+   :source     (some-> (:source doc) name)
+   :size_bytes (:size-bytes doc)
+   :sha256     (:sha256 doc)
+   :status     (some-> (:status doc) name)
+   :error      (:error doc)
+   :text       (:text doc)
+   :preview    (:preview doc)
+   :created_at (instant->str (:created-at doc))
+   :updated_at (instant->str (:updated-at doc))})
+
+(defn- local-doc-metadata->body
+  [doc]
+  (dissoc (local-doc->body doc) :text :sha256))
+
 (defn- nonblank-str
   [value]
   (let [s (some-> value str str/trim)]
@@ -874,6 +895,10 @@
                (= :session (:scope pad))
                (= session-id (:session-id pad)))
       pad)))
+
+(defn- session-local-doc
+  [session-id doc-id]
+  (local-doc/get-session-doc session-id doc-id))
 
 (defn- handle-create-session []
   (let [sid (db/create-session! :http)]
@@ -1216,6 +1241,139 @@
       (json-response 200 {:status "deleted"
                           :session_id session-id
                           :pad_id pad-id}))))
+
+(defn- parse-local-doc-upload
+  [entry]
+  {:name       (get entry "name")
+   :media-type (get entry "media_type")
+   :size-bytes (get entry "size_bytes")
+   :source     (get entry "source")
+   :text       (get entry "text")})
+
+(defn- local-doc-upload-entries
+  [data]
+  (let [entries (cond
+                  (sequential? (get data "documents"))
+                  (get data "documents")
+
+                  (map? data)
+                  [data]
+
+                  :else
+                  [])]
+    (->> entries
+         (filter map?)
+         (mapv parse-local-doc-upload))))
+
+(defn- local-doc-error->body
+  [upload e]
+  {:name  (get upload :name)
+   :error (.getMessage e)
+   :code  (some-> (ex-data e) :type name)})
+
+(defn- handle-list-local-docs [session-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (do
+      (touch-rest-session! session-id)
+      (json-response 200
+                     {:session_id session-id
+                      :documents  (mapv local-doc-metadata->body
+                                        (local-doc/list-docs session-id))}))))
+
+(defn- handle-create-local-docs [session-id req]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (let [data    (or (read-body req) {})
+          uploads (local-doc-upload-entries data)]
+      (if-not (seq uploads)
+        (json-response 400 {:error "missing local documents"})
+        (let [{:keys [documents errors]}
+              (reduce (fn [acc upload]
+                        (try
+                          (update acc :documents conj
+                                  (local-doc-metadata->body
+                                    (local-doc/save-upload!
+                                      {:session-id session-id
+                                       :name       (:name upload)
+                                       :media-type (:media-type upload)
+                                       :size-bytes (:size-bytes upload)
+                                       :source     (:source upload)
+                                       :text       (:text upload)})))
+                          (catch clojure.lang.ExceptionInfo e
+                            (update acc :errors conj (local-doc-error->body upload e)))))
+                      {:documents [] :errors []}
+                      uploads)
+              status (if (seq documents) 201 400)]
+          (touch-rest-session! session-id)
+          (json-response status
+                         {:session_id session-id
+                          :documents  documents
+                          :errors     errors}))))))
+
+(defn- handle-get-local-doc [session-id doc-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (if-let [doc (session-local-doc session-id doc-id)]
+      (do
+        (touch-rest-session! session-id)
+        (json-response 200 {:session_id session-id
+                            :document   (local-doc->body doc)}))
+      (json-response 404 {:error "local document not found"}))))
+
+(defn- handle-delete-local-doc [session-id doc-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    (nil? (session-local-doc session-id doc-id))
+    (json-response 404 {:error "local document not found"})
+
+    :else
+    (do
+      (local-doc/delete-doc! session-id doc-id)
+      (touch-rest-session! session-id)
+      (json-response 200 {:status "deleted"
+                          :session_id session-id
+                          :doc_id doc-id}))))
+
+(defn- handle-create-local-doc-scratch-pad [session-id doc-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    (nil? (session-local-doc session-id doc-id))
+    (json-response 404 {:error "local document not found"})
+
+    :else
+    (let [{:keys [pad]} (local-doc/create-scratch-pad-from-doc! session-id doc-id)]
+      (touch-rest-session! session-id)
+      (json-response 201 {:session_id session-id
+                          :pad        (scratch-pad->body pad)}))))
 
 (defn- handle-admin-config [_req]
   (json-response
@@ -1662,6 +1820,9 @@
           scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
           scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
           scratch-edit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)/edit" uri)
+          local-doc-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/local-documents" uri)
+          local-doc-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/local-documents/([^/]+)" uri)
+          local-doc-scratch-match (re-matches #"/sessions/([0-9a-fA-F-]+)/local-documents/([^/]+)/scratch-pads" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
           admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
@@ -1734,6 +1895,24 @@
         (protected-route-response req #(handle-edit-scratch-pad (second scratch-edit-match)
                                                                 (nth scratch-edit-match 2)
                                                                 req))
+
+        (and (= method :get) local-doc-list-match)
+        (protected-route-response req #(handle-list-local-docs (second local-doc-list-match)))
+
+        (and (= method :post) local-doc-list-match)
+        (protected-route-response req #(handle-create-local-docs (second local-doc-list-match) req))
+
+        (and (= method :get) local-doc-match)
+        (protected-route-response req #(handle-get-local-doc (second local-doc-match)
+                                                             (nth local-doc-match 2)))
+
+        (and (= method :delete) local-doc-match)
+        (protected-route-response req #(handle-delete-local-doc (second local-doc-match)
+                                                                (nth local-doc-match 2)))
+
+        (and (= method :post) local-doc-scratch-match)
+        (protected-route-response req #(handle-create-local-doc-scratch-pad (second local-doc-scratch-match)
+                                                                            (nth local-doc-scratch-match 2)))
 
         (and (= method :get) (= uri "/admin/config"))
         (protected-route-response req #(handle-admin-config req))

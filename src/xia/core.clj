@@ -30,7 +30,7 @@
    ["-b" "--bind HOST" "HTTP/WebSocket bind address (default: 127.0.0.1)"
     :default "127.0.0.1"]
    ["-p" "--port PORT" "HTTP/WebSocket port"
-    :default 18790
+    :default 3008
     :parse-fn #(Integer/parseInt %)]
    ["-m" "--mode MODE" "Run mode: terminal, server, both"
     :default "terminal"]

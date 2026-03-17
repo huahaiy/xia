@@ -181,6 +181,8 @@ h1 {
   display: grid;
   gap: 18px;
   min-height: 62vh;
+  grid-template-columns: minmax(0, 1.8fr) minmax(320px, 0.95fr);
+  align-items: start;
 }
 .side-stack {
   display: grid;
@@ -370,6 +372,13 @@ button:disabled { opacity: 0.55; cursor: wait; }
   background: rgba(255, 255, 255, 0.42);
   line-height: 1.5;
 }
+.local-doc-list {
+  display: grid;
+  gap: 10px;
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 4px;
+}
 .scratch-item {
   width: 100%;
   border-radius: 18px;
@@ -379,6 +388,16 @@ button:disabled { opacity: 0.55; cursor: wait; }
   text-align: left;
   display: grid;
   gap: 4px;
+}
+.local-doc-preview {
+  min-height: 240px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.88rem;
+}
+.local-doc-status {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
 }
 .scratch-item.active {
   border-color: rgba(178, 76, 50, 0.28);

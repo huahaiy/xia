@@ -94,14 +94,38 @@
               <div class="composer-foot">
                 <div class="hint">Shift+Enter for new line. Cmd+Enter to send.</div>
                 <div class="actions">
-                  <input type="file" id="file-input" hidden multiple>
-                  <button type="button" class="secondary" id="upload-btn" title="Upload text files">📎</button>
+                  <input type="file" id="file-input" hidden multiple accept=".c,.cc,.clj,.cljs,.cljc,.cpp,.csv,.edn,.htm,.html,.java,.js,.json,.log,.md,.markdown,.py,.rb,.sh,.sql,.text,.ts,.tsv,.txt,.xml,.yaml,.yml,text/*">
+                  <button type="button" class="secondary" id="upload-btn" title="Upload local documents">📎</button>
                   <button type="button" class="secondary" id="clear-input" disabled>Clear</button>
                   <button type="submit" class="primary" id="send" disabled>Send to Xia</button>
                 </div>
               </div>
             </form>
           </section>
+          <aside class="side-stack">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2 class="panel-title">Local Documents</h2>
+                  <p class="panel-note">Upload text-like local files, keep them in this session, and insert them into chat or notes when needed.</p>
+                </div>
+                <button type="button" class="secondary" id="local-upload-btn">Upload</button>
+              </div>
+              <div class="local-doc-list" id="local-doc-list">
+                <div class="scratch-empty">Choose a local file to make it available to Xia in this session.</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="local-doc-preview">Preview</label>
+                <textarea id="local-doc-preview" class="local-doc-preview" placeholder="Select a local document to preview it here." readonly></textarea>
+              </div>
+              <div class="local-doc-status" id="local-doc-status">No local document selected.</div>
+              <div class="actions">
+                <button type="button" class="secondary" id="local-doc-insert" disabled>Insert in Chat</button>
+                <button type="button" class="secondary" id="local-doc-scratch" disabled>Create Note</button>
+                <button type="button" class="secondary" id="local-doc-delete" disabled>Delete</button>
+              </div>
+            </section>
+          </aside>
         </main>
       </div>
 

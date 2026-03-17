@@ -75,11 +75,12 @@ Or run both interfaces together:
 xia --mode both
 ```
 
-By default, the web UI listens on `http://127.0.0.1:18790/`.
+By default, the web UI listens on `http://localhost:3008/`.
 
 What the local web UI is for:
 
 - chat with Xia from a browser instead of the terminal
+- upload local text-like documents and insert them into chat or notes
 - use scratch pads for copied notes and working context
 - configure LLM providers, OAuth accounts, services, and saved site logins
 - manage scheduled tasks and other local assistant settings
