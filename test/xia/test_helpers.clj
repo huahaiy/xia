@@ -73,6 +73,16 @@
             (vec (repeat test-embedding-dimensions 0.0))
             (tokenize text))))
 
+(defn- truncate-provider-item
+  [item max-tokens]
+  (let [text      (provider-text item)
+        truncated (->> (tokenize text)
+                       (take max-tokens)
+                       (str/join " "))]
+    (if (map? item)
+      (assoc item :text truncated)
+      truncated)))
+
 (defn test-embedding-provider
   []
   (reify
@@ -85,6 +95,12 @@
       test-embedding-dimensions)
     (close-provider [_]
       nil)
+
+    emb/ITokenCounter
+    (token-count* [_ item _opts]
+      (count (tokenize (provider-text item))))
+    (truncate-item* [_ item max-tokens _opts]
+      (truncate-provider-item item max-tokens))
 
     java.lang.AutoCloseable
     (close [_]

@@ -1,12 +1,17 @@
 (ns xia.context-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [datalevin.embedding :as emb]
             [xia.test-helpers :as th]
             [xia.db :as db]
             [xia.context :as ctx]
             [xia.working-memory :as wm]))
 
 (use-fixtures :each th/with-test-db)
+
+(defn- token-rich-text
+  [prefix n]
+  (str/join " " (map #(str prefix "-" %) (range n))))
 
 ;; ---------------------------------------------------------------------------
 ;; Token estimation
@@ -17,29 +22,41 @@
     (is (= 0 (ctx/estimate-tokens "")))
     (is (= 0 (ctx/estimate-tokens nil))))
 
-  (testing "simple prose stays close to the existing estimate"
-    (is (= 3 (ctx/estimate-tokens "hello world!")))
+  (testing "uses the embedding provider token counter when available"
+    (let [provider (reify emb/ITokenCounter
+                     (token-count* [_ _item _opts]
+                       42)
+                     (truncate-item* [_ item _max-tokens _opts]
+                       item))]
+      (with-redefs [db/current-embedding-provider (constantly provider)]
+        (is (= 42 (ctx/estimate-tokens "hello world!"))))))
+
+  (testing "test provider counts lexical tokens instead of chars"
+    (is (= 2 (ctx/estimate-tokens "hello world!")))
     (is (pos? (ctx/estimate-tokens "some text"))))
 
-  (testing "CJK text is priced more conservatively without assuming 1 char per token"
-    (let [text "你好世界"
-          naive (quot (count text) 4)]
-      (is (= 2 (ctx/estimate-tokens text)))
-      (is (> (ctx/estimate-tokens text) naive))))
+  (testing "fallback heuristic is still available when no provider exists"
+    (with-redefs [db/current-embedding-provider (constantly nil)]
+      (is (= 3 (ctx/estimate-tokens "hello world!")))
+      (is (pos? (ctx/estimate-tokens "some text")))))
 
-  (testing "long code identifiers are discounted"
+  (testing "CJK text is counted by the provider instead of the char heuristic"
+    (let [text "你好世界"
+          estimate (ctx/estimate-tokens text)]
+      (is (pos? estimate))
+      (is (= 1 estimate))))
+
+  (testing "long code identifiers use model token counts"
     (let [identifier "veryLongIdentifierNameWithSeveralCamelCaseSegments"
-          naive      (quot (count identifier) 4)
           estimate   (ctx/estimate-tokens identifier)]
       (is (pos? estimate))
-      (is (< estimate naive))))
+      (is (= 1 estimate))))
 
-  (testing "path-like code spans are discounted"
+  (testing "path-like code spans use lexical segments rather than raw chars"
     (let [path     "src/xia/http_client/really_long_identifier_name.cljs"
-          naive    (quot (count path) 4)
           estimate (ctx/estimate-tokens path)]
       (is (pos? estimate))
-      (is (< estimate naive)))))
+      (is (= 9 estimate)))))
 
 ;; ---------------------------------------------------------------------------
 ;; flatten-props
@@ -228,7 +245,7 @@
       (let [docs (mapv (fn [i]
                          {:name (str "doc-" i ".txt")
                           :media-type "text/plain"
-                          :preview (apply str (repeat 150 "x"))
+                          :preview (token-rich-text (str "preview" i) 40)
                           :relevance (- 1.0 (* i 0.1))})
                        (range 10))
             result (rd docs 80)]
@@ -254,7 +271,7 @@
     (testing "budget-aware truncation"
       (let [skills (mapv (fn [i]
                            {:skill/name    (str "skill-" i)
-                            :skill/content (apply str (repeat 500 "x"))})
+                            :skill/content (token-rich-text (str "skill" i) 80)})
                          (range 10))
             result (rs skills 200)]
         ;; Should not include all 10 skills
@@ -328,7 +345,7 @@
   (testing "compacts long history via LLM"
     (let [msgs (vec (for [i (range 10)]
                       {:role    (if (even? i) :user :assistant)
-                       :content (str "message " i " " (apply str (repeat 200 "x")))}))
+                       :content (str "message " i " " (token-rich-text (str "m" i) 200))}))
           called? (atom false)]
       (with-redefs [xia.llm/chat-simple (fn [_]
                                           (reset! called? true)
@@ -340,7 +357,7 @@
   (testing "forwards workload routing to the LLM"
     (let [msgs (vec (for [i (range 10)]
                       {:role    (if (even? i) :user :assistant)
-                       :content (str "message " i " " (apply str (repeat 200 "x")))}))
+                       :content (str "message " i " " (token-rich-text (str "m" i) 200))}))
           opts-seen (atom nil)]
       (with-redefs [xia.llm/chat-simple (fn [_messages & opts]
                                           (reset! opts-seen opts)
@@ -353,7 +370,7 @@
                        "function" {"name" "web-search"
                                    "arguments" "{\"q\":\"weather in sf\"}"}}]
           msgs       [{:role "user"
-                       :content (str "Please check the weather. " (apply str (repeat 120 "x")))}
+                       :content (str "Please check the weather. " (token-rich-text "weather" 120))}
                       {:role "assistant"
                        :content "I will search for the latest forecast."
                        :tool_calls tool-calls}
@@ -363,13 +380,13 @@
                       {:role "assistant"
                        :content "The forecast says it will rain later today."}
                       {:role "user"
-                       :content (str "Thanks. " (apply str (repeat 120 "y")))}
+                       :content (str "Thanks. " (token-rich-text "thanks" 120))}
                       {:role "assistant"
-                       :content (str "You're welcome. " (apply str (repeat 120 "z")))}
+                       :content (str "You're welcome. " (token-rich-text "welcome" 120))}
                       {:role "user"
-                       :content (str "Anything else? " (apply str (repeat 120 "q")))}
+                       :content (str "Anything else? " (token-rich-text "else" 120))}
                       {:role "assistant"
-                       :content (str "No. " (apply str (repeat 120 "w")))}]
+                       :content (str "No. " (token-rich-text "no" 120))}]
           llm-input  (atom nil)]
       (with-redefs [xia.llm/chat-simple (fn [messages & _]
                                           (reset! llm-input messages)

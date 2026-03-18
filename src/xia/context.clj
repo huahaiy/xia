@@ -16,6 +16,7 @@
    exceeds a token budget, older messages are summarized into a recap."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [datalevin.embedding :as emb]
             [taoensso.timbre :as log]
             [charred.api :as json]
             [xia.db :as db]
@@ -76,8 +77,8 @@
                    (+ discount (- baseline adjusted))))
                0)))
 
-(defn estimate-tokens
-  "Heuristic token estimate.
+(defn- heuristic-estimate-tokens
+  "Fallback token estimate.
 
    Uses ~4 chars/token as the prose baseline, counts CJK characters more
    conservatively, and discounts long code/identifier spans that would
@@ -92,6 +93,18 @@
                               (quot cjk-chars 4))
             code-discount  (codeish-discount text)]
         (max 1 (- (+ baseline cjk-adjustment) code-discount))))))
+
+(defn estimate-tokens
+  [s]
+  (let [text (str s)]
+    (if (str/blank? text)
+      0
+      (if-let [provider (db/current-embedding-provider)]
+        (try
+          (max 1 (long (emb/token-count provider text)))
+          (catch Throwable _
+            (heuristic-estimate-tokens text)))
+        (heuristic-estimate-tokens text)))))
 
 ;; ============================================================================
 ;; Budget config

@@ -491,6 +491,48 @@
            (:kg.fact/confidence (db/entity low-fact-eid)))
         "High-utility facts should decay more slowly than low-utility facts")))
 
+(deftest test-due-for-decay-facts-selects-only_due_rows
+  (let [settings        (hippo/knowledge-decay-settings)
+        node-eid        (th/seed-node! "DecayQueryEntity" "concept")
+        now-ms          (System/currentTimeMillis)
+        as-of           (java.util.Date. now-ms)
+        stale-updated   (java.util.Date. (- now-ms
+                                            (:maintenance-step-ms settings)
+                                            (* 2 24 60 60 1000)))
+        old-maintained-updated (java.util.Date. (- now-ms
+                                                   (:maintenance-step-ms settings)
+                                                   (* 6 24 60 60 1000)))
+        fresh-updated   (java.util.Date. (- now-ms
+                                            (quot (:maintenance-step-ms settings) 2)))
+        recent-decayed  (java.util.Date. (- now-ms
+                                            (quot (:maintenance-step-ms settings) 2)))
+        old-decayed     (java.util.Date. (- now-ms
+                                            (:maintenance-step-ms settings)
+                                            (* 3 24 60 60 1000)))
+        stale-eid       (th/seed-fact! node-eid "stale fact" :confidence 1.0)
+        fresh-eid       (th/seed-fact! node-eid "fresh fact" :confidence 1.0)
+        recent-eid      (th/seed-fact! node-eid "recently maintained fact" :confidence 1.0)
+        old-eid         (th/seed-fact! node-eid "old maintained fact" :confidence 1.0)]
+    (db/transact! [[:db/add stale-eid :kg.fact/updated-at stale-updated]
+                   [:db/add fresh-eid :kg.fact/updated-at fresh-updated]
+                   [:db/add recent-eid :kg.fact/updated-at stale-updated]
+                   [:db/add recent-eid :kg.fact/decayed-at recent-decayed]
+                   [:db/add old-eid :kg.fact/updated-at old-maintained-updated]
+                   [:db/add old-eid :kg.fact/decayed-at old-decayed]])
+    (let [rows (#'xia.hippocampus/due-for-decay-facts as-of settings)
+          by-eid (into {} (map (fn [[eid confidence utility updated last-decayed]]
+                                 [eid {:confidence confidence
+                                       :utility utility
+                                       :updated updated
+                                       :last-decayed last-decayed}]))
+                       rows)]
+      (is (contains? by-eid stale-eid))
+      (is (contains? by-eid old-eid))
+      (is (not (contains? by-eid fresh-eid)))
+      (is (not (contains? by-eid recent-eid)))
+      (is (= stale-updated (:last-decayed (get by-eid stale-eid))))
+      (is (= old-decayed (:last-decayed (get by-eid old-eid)))))))
+
 (deftest test-maintain-knowledge-archives-bottomed-out-facts
   (let [settings   (hippo/knowledge-decay-settings)
         node-eid   (th/seed-node! "ArchiveEntity" "concept")
@@ -510,6 +552,31 @@
     (hippo/maintain-knowledge! now)
     (is (empty? (into {} (db/entity fact-eid)))
         "Facts that have stayed at the confidence floor past the archive window should be removed")))
+
+(deftest test-due-for-archive-eids-selects_old_bottomed_facts
+  (let [settings       (hippo/knowledge-decay-settings)
+        node-eid       (th/seed-node! "ArchiveQueryEntity" "concept")
+        now-ms         (System/currentTimeMillis)
+        as-of          (java.util.Date. now-ms)
+        old-bottomed   (java.util.Date. (- now-ms
+                                           (:archive-after-bottom-ms settings)
+                                           (* 2 24 60 60 1000)))
+        recent-bottomed (java.util.Date. (- now-ms
+                                            (quot (:archive-after-bottom-ms settings) 2)))
+        stale-eid      (th/seed-fact! node-eid "stale archive fact"
+                                      :confidence (:min-confidence settings)
+                                      :utility 0.5)
+        recent-eid     (th/seed-fact! node-eid "recent bottomed fact"
+                                      :confidence (:min-confidence settings)
+                                      :utility 0.5)
+        active-eid     (th/seed-fact! node-eid "still above floor"
+                                      :confidence 0.9
+                                      :utility 0.5)]
+    (db/transact! [[:db/add stale-eid :kg.fact/bottomed-at old-bottomed]
+                   [:db/add recent-eid :kg.fact/bottomed-at recent-bottomed]
+                   [:db/add active-eid :kg.fact/bottomed-at old-bottomed]])
+    (is (= #{stale-eid}
+           (set (#'xia.hippocampus/due-for-archive-eids as-of settings))))))
 
 (deftest test-dedup-refresh-clears-bottomed-at
   (let [settings   (hippo/knowledge-decay-settings)

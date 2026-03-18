@@ -607,12 +607,11 @@ Rules:
           (.getTime updated-at)
           (:grace-period-ms decay-config))))
 
-(defn- decayed-at
-  [fact-entity ^java.util.Date updated-at]
-  (let [last-decayed (:kg.fact/decayed-at fact-entity)]
-    (if (and last-decayed (.before ^java.util.Date last-decayed updated-at))
-      updated-at
-      (or last-decayed updated-at))))
+(defn- effective-decayed-at
+  [^java.util.Date updated-at ^java.util.Date last-decayed]
+  (if (and last-decayed (.before ^java.util.Date last-decayed updated-at))
+    updated-at
+    (or last-decayed updated-at)))
 
 (defn- bottomed-out-confidence?
   [confidence decay-config]
@@ -636,6 +635,70 @@ Rules:
        (>= (- (.getTime as-of) (.getTime bottomed-at))
            (:archive-after-bottom-ms decay-config))))
 
+(defn- due-for-decay-facts
+  [^java.util.Date as-of decay-config]
+  (let [step-ms       (:maintenance-step-ms decay-config)
+        cutoff        (java.util.Date. (- (.getTime as-of) step-ms))
+        never-decayed (db/q '[:find ?f ?confidence ?utility ?updated ?updated
+                              :in $ ?cutoff
+                              :where
+                              [?f :kg.fact/confidence ?confidence]
+                              [(get-else $ ?f :kg.fact/utility 0.5) ?utility]
+                              [?f :kg.fact/updated-at ?updated]
+                              (not [?f :kg.fact/decayed-at _])
+                              [(compare ?updated ?cutoff) ?cmp]
+                              [(<= ?cmp 0)]]
+                            cutoff)
+        previously-decayed
+        (->> (db/q '[:find ?f ?confidence ?utility ?updated ?decayed
+                     :in $ ?cutoff
+                     :where
+                     [?f :kg.fact/confidence ?confidence]
+                     [(get-else $ ?f :kg.fact/utility 0.5) ?utility]
+                     [?f :kg.fact/updated-at ?updated]
+                     [?f :kg.fact/decayed-at ?decayed]
+                     [(compare ?decayed ?cutoff) ?cmp]
+                     [(<= ?cmp 0)]]
+                   cutoff)
+             (mapv (fn [[eid confidence utility updated decayed]]
+                     [eid
+                      confidence
+                      utility
+                      updated
+                      (effective-decayed-at updated decayed)]))
+             (filterv (fn [[_ _ _ _ last-decayed]]
+                        (>= (- (.getTime as-of) (.getTime ^java.util.Date last-decayed))
+                            step-ms))))]
+    (into (vec never-decayed) previously-decayed)))
+
+(defn- fact-bottomed-at-map
+  [fact-eids]
+  (if (seq fact-eids)
+    (into {}
+          (db/q '[:find ?f ?bottomed
+                  :in $ [?f ...]
+                  :where
+                  [?f :kg.fact/bottomed-at ?bottomed]]
+                fact-eids))
+    {}))
+
+(defn- due-for-archive-eids
+  [^java.util.Date as-of decay-config]
+  (let [cutoff        (java.util.Date. (- (.getTime as-of)
+                                          (:archive-after-bottom-ms decay-config)))
+        max-confidence (+ (double (:min-confidence decay-config)) 1.0e-9)]
+    (->> (db/q '[:find ?f
+                 :in $ ?cutoff ?max-confidence
+                 :where
+                 [?f :kg.fact/confidence ?confidence]
+                 [?f :kg.fact/bottomed-at ?bottomed]
+                 [(<= ?confidence ?max-confidence)]
+                 [(compare ?bottomed ?cutoff) ?cmp]
+                 [(<= ?cmp 0)]]
+               cutoff
+               max-confidence)
+         (mapv first))))
+
 (defn- next-confidence
   [confidence utility ^java.util.Date updated-at ^java.util.Date last-decayed ^java.util.Date as-of decay-config]
   (let [previous-window (decay-window-ms updated-at last-decayed decay-config)
@@ -657,48 +720,39 @@ Rules:
   ([] (maintain-knowledge! (java.util.Date.)))
   ([^java.util.Date as-of]
    (let [decay-config (knowledge-decay-settings)
-         facts (db/q '[:find ?f ?confidence ?utility ?updated
-                       :where
-                       [?f :kg.fact/confidence ?confidence]
-                       [(get-else $ ?f :kg.fact/utility 0.5) ?utility]
-                       [?f :kg.fact/updated-at ?updated]])
-         step-ms (:maintenance-step-ms decay-config)
-         {:keys [decay-tx archive-eids]}
+         archive-eids  (due-for-archive-eids as-of decay-config)
+         archive-eid-set (set archive-eids)
+         facts         (->> (due-for-decay-facts as-of decay-config)
+                            (remove (fn [[eid]] (contains? archive-eid-set eid)))
+                            vec)
+         bottomed-map  (fact-bottomed-at-map (mapv first facts))
+         {:keys [decay-tx]}
          (reduce
-           (fn [{:keys [decay-tx archive-eids] :as acc} [eid confidence utility updated]]
-             (let [fact-entity    (db/entity eid)
-                   last-decayed   (decayed-at fact-entity updated)
-                   due?           (>= (- (.getTime as-of) (.getTime last-decayed))
-                                      step-ms)
-                   decayed-conf   (when due?
-                                    (next-confidence confidence utility updated last-decayed as-of decay-config))
+           (fn [{:keys [decay-tx] :as acc} [eid confidence utility updated last-decayed]]
+             (let [decayed-conf   (next-confidence confidence utility updated last-decayed as-of decay-config)
                    effective-conf (double (or decayed-conf confidence))
-                   bottomed-at    (inferred-bottomed-at fact-entity
-                                                       confidence
-                                                       effective-conf
+                   bottomed-at    (inferred-bottomed-at {:kg.fact/bottomed-at (get bottomed-map eid)}
+                                                        confidence
+                                                        effective-conf
                                                        updated
                                                        last-decayed
                                                        as-of
                                                        decay-config)]
-               (cond
-                 (archive-bottomed-fact? effective-conf bottomed-at as-of decay-config)
-                 (update acc :archive-eids conj eid)
+               (let [existing-bottomed-at (get bottomed-map eid)
+                     new-tx (cond-> []
+                              (and decayed-conf
+                                   (> (Math/abs (- effective-conf (double confidence)))
+                                      1.0e-9))
+                              (into [[:db/add eid :kg.fact/confidence (float effective-conf)]
+                                     [:db/add eid :kg.fact/decayed-at as-of]])
 
-                 :else
-                 (let [new-tx (cond-> []
-                                (and decayed-conf
-                                     (> (Math/abs (- effective-conf (double confidence)))
-                                        1.0e-9))
-                                (into [[:db/add eid :kg.fact/confidence (float effective-conf)]
-                                       [:db/add eid :kg.fact/decayed-at as-of]])
-
-                                (and bottomed-at
-                                     (not= bottomed-at (:kg.fact/bottomed-at fact-entity)))
-                                (conj [:db/add eid :kg.fact/bottomed-at bottomed-at]))]
-                   (if (seq new-tx)
-                     (update acc :decay-tx into new-tx)
-                     acc)))))
-           {:decay-tx [] :archive-eids []}
+                              (and bottomed-at
+                                   (not= bottomed-at existing-bottomed-at))
+                              (conj [:db/add eid :kg.fact/bottomed-at bottomed-at]))]
+                 (if (seq new-tx)
+                   (update acc :decay-tx into new-tx)
+                   acc))))
+           {:decay-tx []}
            facts)]
      (when (seq decay-tx)
        (log/info "Updated confidence of" (count (filter #(= :kg.fact/confidence (nth % 2 nil)) decay-tx)) "stale fact fields")

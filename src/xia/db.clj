@@ -272,6 +272,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private conn-atom (atom nil))
+(defonce ^:private embedding-provider-atom (atom nil))
 (declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
@@ -441,13 +442,31 @@
           (download-file! (:model-url provider-spec) model-path))
         provider-spec))))
 
-(defn- bootstrap-embedding-provider!
+(defn- close-embedding-provider! []
+  (when-let [provider @embedding-provider-atom]
+    (try
+      (d/close-embedding-provider provider)
+      (catch Exception _))
+    (reset! embedding-provider-atom nil)))
+
+(defn- init-embedding-provider!
   [db-path datalevin-opts]
   (let [provider-spec (-> (resolve-embedding-provider-spec db-path datalevin-opts)
                           ensure-managed-embedding-model!)]
-    (when-not (satisfies? emb/IEmbeddingProvider provider-spec)
-      (with-open [provider (d/new-embedding-provider provider-spec)]
-        (d/embedding-dimensions provider)))))
+    (close-embedding-provider!)
+    (let [provider (if (satisfies? emb/IEmbeddingProvider provider-spec)
+                     provider-spec
+                     (d/new-embedding-provider provider-spec))]
+      (try
+        (d/embedding-dimensions provider)
+        (reset! embedding-provider-atom provider)
+        provider
+        (catch Throwable t
+          (when-not (identical? provider provider-spec)
+            (try
+              (d/close-embedding-provider provider)
+              (catch Exception _)))
+          (throw t))))))
 
 (defn connect!
   "Open (or create) the Datalevin database at `db-path`."
@@ -458,10 +477,11 @@
      (try
        (reset! conn-atom c)
        (crypto/configure! db-path crypto-opts)
-       (bootstrap-embedding-provider! db-path datalevin-opts)
+       (init-embedding-provider! db-path datalevin-opts)
        (migrate-secrets!)
        c
        (catch Throwable t
+         (close-embedding-provider!)
          (reset! conn-atom nil)
          (try
            (d/close c)
@@ -474,7 +494,12 @@
   (or @conn-atom
       (throw (ex-info "Database not connected. Call (xia.db/connect!) first." {}))))
 
+(defn current-embedding-provider
+  []
+  @embedding-provider-atom)
+
 (defn close! []
+  (close-embedding-provider!)
   (when-let [c @conn-atom]
     (d/close c)
     (reset! conn-atom nil)))
