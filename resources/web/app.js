@@ -90,6 +90,7 @@ const providerWorkloadsEl = document.getElementById('provider-workloads');
 const providerWorkloadsNoteEl = document.getElementById('provider-workloads-note');
 const providerSystemPromptBudgetEl = document.getElementById('provider-system-prompt-budget');
 const providerHistoryBudgetEl = document.getElementById('provider-history-budget');
+const providerVisionEl = document.getElementById('provider-vision');
 const providerApiKeyEl = document.getElementById('provider-api-key');
 const providerDefaultEl = document.getElementById('provider-default');
 const providerStatusEl = document.getElementById('provider-status');
@@ -362,6 +363,7 @@ function providerMeta(provider) {
       : '';
     bits.push(label + suffix);
   }
+  if (provider.vision) bits.push('Vision');
   if (provider.default) bits.push('Default');
   bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
   return bits.join(' • ');
@@ -723,6 +725,7 @@ function resetProviderForm(statusText) {
   providerWorkloadsEl.value = '';
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
+  providerVisionEl.checked = false;
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !state.admin.providers.some((provider) => provider.default);
   providerStatusEl.textContent = statusText || 'Create a model or select an existing one.';
@@ -823,6 +826,7 @@ function selectProvider(provider) {
   providerWorkloadsEl.value = Array.isArray(provider.workloads) ? provider.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
+  providerVisionEl.checked = !!provider.vision;
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !!provider.default;
   providerStatusEl.textContent = provider.api_key_configured
@@ -1158,6 +1162,7 @@ async function saveProvider() {
         workloads: parseProviderWorkloadsInput(),
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
+        vision: providerVisionEl.checked,
         api_key: providerApiKeyEl.value,
         default: providerDefaultEl.checked
       })

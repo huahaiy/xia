@@ -1,0 +1,21 @@
+;; Capture a browser screenshot for visual interpretation.
+;; Import with: /import-tool resources/tools/browser-screenshot.edn
+
+{:id          :browser-screenshot
+ :name        "browser-screenshot"
+ :description "Capture a screenshot from the current Playwright browser session for visual interpretation, such as charts, diagrams, maps, or layout issues. Do not use this to bypass CAPTCHAs or anti-bot challenges."
+ :tags        #{:browser :web :vision :image :screenshot}
+ :execution-mode :parallel-safe
+ :parameters  {"type"       "object"
+               "properties" {"session_id" {"type"        "string"
+                                           "description" "The browser session ID to capture"}
+                             "full_page" {"type"        "boolean"
+                                          "description" "Capture the full scrollable page instead of only the current viewport"}
+                             "detail" {"type"        "string"
+                                       "enum"        ["auto" "low" "high"]
+                                       "description" "Optional image detail hint for the vision model"}}
+               "required"   ["session_id"]}
+ :handler     "(fn [args]
+                 (xia.browser/screenshot (get args \"session_id\")
+                                         :full-page (boolean (get args \"full_page\"))
+                                         :detail (or (get args \"detail\") \"auto\")))"}

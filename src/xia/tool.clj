@@ -14,6 +14,7 @@
             [taoensso.timbre :as log]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]
             [xia.working-memory :as wm]))
@@ -35,6 +36,7 @@
    "tools/browser-open.edn"
    "tools/browser-navigate.edn"
    "tools/browser-read-page.edn"
+   "tools/browser-screenshot.edn"
    "tools/browser-wait.edn"
    "tools/browser-click.edn"
    "tools/browser-fill-form.edn"
@@ -263,11 +265,16 @@
 
 (defn- tool-visible?
   [tool context]
-  (if-not (autonomous-run? context)
-    true
-    (let [{:keys [policy]} (tool-approval-policy tool)]
-      (or (= :auto policy)
-          (autonomous-tool-allowed? tool context)))))
+  (let [requires-vision? (contains? (set (:tool/tags tool)) :vision)
+        vision-allowed?  (or (not requires-vision?)
+                             (llm/vision-capable? (:assistant-provider context))
+                             (llm/vision-capable? (:assistant-provider-id context)))]
+    (and vision-allowed?
+         (if-not (autonomous-run? context)
+           true
+           (let [{:keys [policy]} (tool-approval-policy tool)]
+             (or (= :auto policy)
+                 (autonomous-tool-allowed? tool context)))))))
 
 (defn- execution-mode
   [tool]

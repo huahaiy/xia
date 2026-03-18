@@ -20,6 +20,8 @@
     "Fill and optionally submit a form in an existing session.")
   (read-page* [this session-id]
     "Read the current page in an existing session.")
+  (screenshot* [this session-id opts]
+    "Capture a screenshot in an existing session.")
   (wait-for-page* [this session-id opts]
     "Wait for the current page to settle or satisfy a condition.")
   (close-session* [this session-id]

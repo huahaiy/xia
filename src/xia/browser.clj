@@ -782,6 +782,12 @@
    :status :unsupported-backend
    :message "HtmlUnit does not require Playwright system dependencies."})
 
+(defn- htmlunit-screenshot
+  [_session-id _opts]
+  (throw (ex-info "HtmlUnit does not support screenshots. Use the Playwright backend."
+                  {:backend htmlunit-backend-id
+                   :status :unsupported-operation})))
+
 (defonce ^:private registered-backends (atom {}))
 
 (defn- register-backend!
@@ -853,6 +859,7 @@
                                       :form-selector (:form-selector opts)
                                       :submit (:submit opts)))
      :read-page htmlunit-read-page
+     :screenshot htmlunit-screenshot
      :wait-for-page (fn [session-id opts]
                       (htmlunit-wait-for-page session-id
                                               :timeout-ms (or (:timeout-ms opts) 10000)
@@ -949,6 +956,22 @@
   [session-id]
   (browser.backend/read-page* (backend-by-id (session-backend-id session-id))
                               session-id))
+
+(defn screenshot
+  "Capture a screenshot in a browser session.
+
+   Options:
+     :full-page — capture the full scrollable page instead of the viewport
+     :detail    — optional image detail hint for downstream vision models
+
+   Returns screenshot metadata and a data URL for downstream multimodal use."
+  [session-id & {:keys [full-page detail]
+                 :or {full-page false
+                      detail "auto"}}]
+  (browser.backend/screenshot* (backend-by-id (session-backend-id session-id))
+                               session-id
+                               {:full-page full-page
+                                :detail detail}))
 
 (defn wait-for-page
   "Wait for JS/rendering in a browser session, optionally until a selector,

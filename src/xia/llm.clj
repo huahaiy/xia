@@ -73,6 +73,15 @@
   (set (or (:llm.provider/workloads provider)
            (:workloads provider))))
 
+(defn vision-capable?
+  "True when a provider is configured to accept image input."
+  [provider-or-id]
+  (let [provider (cond
+                   (nil? provider-or-id) nil
+                   (map? provider-or-id) provider-or-id
+                   :else (db/get-provider provider-or-id))]
+    (boolean (:llm.provider/vision? provider))))
+
 (defn- now-ms []
   (System/currentTimeMillis))
 

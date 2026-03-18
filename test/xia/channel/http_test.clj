@@ -1221,6 +1221,7 @@
                                                                 "name" "OpenAI"
                                                                 "base_url" "https://api.openai.com/v1"
                                                                 "model" "gpt-5-mini"
+                                                                "vision" true
                                                                 "workloads" ["assistant"
                                                                               "history-compaction"]
                                                                 "system_prompt_budget" "16000"
@@ -1231,12 +1232,14 @@
     (is (= 200 (:status response)))
     (is (= "openai" (get-in body ["provider" "id"])))
     (is (= "gpt-5-mini" (get-in body ["provider" "model"])))
+    (is (= true (get-in body ["provider" "vision"])))
     (is (= ["assistant" "history-compaction"] (get-in body ["provider" "workloads"])))
     (is (= 16000 (get-in body ["provider" "system_prompt_budget"])))
     (is (= 32000 (get-in body ["provider" "history_budget"])))
     (is (= "openai-key" (:llm.provider/api-key (db/get-provider :openai))))
     (is (= #{:assistant :history-compaction}
            (set (:llm.provider/workloads (db/get-provider :openai)))))
+    (is (= true (:llm.provider/vision? (db/get-provider :openai))))
     (is (= 16000 (:llm.provider/system-prompt-budget (db/get-provider :openai))))
     (is (= 32000 (:llm.provider/history-budget (db/get-provider :openai))))
     (is (= true (:llm.provider/default? (db/get-provider :openai))))

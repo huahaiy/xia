@@ -43,6 +43,7 @@
    :llm.provider/model    {:db/valueType :db.type/string}
    :llm.provider/workloads {:db/valueType :db.type/keyword
                             :db/cardinality :db.cardinality/many}
+   :llm.provider/vision? {:db/valueType :db.type/boolean}
    :llm.provider/system-prompt-budget {:db/valueType :db.type/long}
    :llm.provider/history-budget {:db/valueType :db.type/long}
    :llm.provider/default? {:db/valueType :db.type/boolean}
@@ -750,8 +751,12 @@
                                          (:system-prompt-budget provider))
         history-budget               (or (:llm.provider/history-budget provider)
                                          (:history-budget provider))
+        vision?                      (or (:llm.provider/vision? provider)
+                                         (:vision? provider))
         has-workloads?               (or (contains? provider :llm.provider/workloads)
                                          (contains? provider :workloads))
+        has-vision?                  (or (contains? provider :llm.provider/vision?)
+                                         (contains? provider :vision?))
         has-system-prompt-budget?    (or (contains? provider :llm.provider/system-prompt-budget)
                                          (contains? provider :system-prompt-budget))
         has-history-budget?          (or (contains? provider :llm.provider/history-budget)
@@ -776,6 +781,8 @@
                                        (and has-workloads?
                                             (seq workloads))
                                        (assoc :llm.provider/workloads workloads)
+                                       has-vision?
+                                       (assoc :llm.provider/vision? (boolean vision?))
                                        (and has-system-prompt-budget?
                                             (some? system-prompt-budget))
                                        (assoc :llm.provider/system-prompt-budget system-prompt-budget)

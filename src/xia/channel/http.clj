@@ -798,6 +798,7 @@
                                  (map name)
                                  sort
                                  vec)
+     :vision                (boolean (:llm.provider/vision? provider))
      :system_prompt_budget  (:llm.provider/system-prompt-budget provider)
      :history_budget        (:llm.provider/history-budget provider)
      :health_status         (name (:status health))
@@ -1521,6 +1522,8 @@
           name         (or (nonblank-str (get data "name"))
                            (name provider-id))
           api-key      (nonblank-str (get data "api_key"))
+          vision?      (when (contains? data "vision")
+                         (true? (get data "vision")))
           workloads    (when (contains? data "workloads")
                          (parse-provider-workloads (get data "workloads")))
           system-prompt-budget (parse-optional-positive-long (get data "system_prompt_budget")
@@ -1539,6 +1542,8 @@
                                     :model    model
                                     :system-prompt-budget system-prompt-budget
                                     :history-budget history-budget}
+                             (contains? data "vision")
+                             (assoc :vision? vision?)
                              (contains? data "workloads")
                              (assoc :workloads workloads)
                              api-key

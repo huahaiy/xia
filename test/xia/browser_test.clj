@@ -1,5 +1,6 @@
 (ns xia.browser-test
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
             [org.httpkit.server :as http-server]
             [taoensso.timbre :as timbre]
             [xia.browser :as browser]
@@ -541,6 +542,32 @@
     (is (= :playwright (:backend page)))
     (is (= "Example Domain" (:title page)))
     (browser/close-session sid)))
+
+(deftest ^:integration playwright-screenshot-returns-data-url
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [result (browser/open-session "https://example.com" :backend :playwright)
+        sid    (:session-id result)
+        shot   (browser/screenshot sid :full-page true :detail "high")]
+    (try
+      (is (= sid (:session-id shot)))
+      (is (= :playwright (:backend shot)))
+      (is (= "image/png" (:mime_type shot)))
+      (is (= true (:full_page shot)))
+      (is (= "high" (:detail shot)))
+      (is (pos? (:byte_count shot)))
+      (is (str/starts-with? (:image_data_url shot) "data:image/png;base64,"))
+      (finally
+        (browser/close-session sid)))))
+
+(deftest htmlunit-screenshot-is-explicitly-unsupported
+  (let [result (browser/open-session "https://example.com")
+        sid    (:session-id result)]
+    (try
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"does not support screenshots"
+            (browser/screenshot sid)))
+      (finally
+        (browser/close-session sid)))))
 
 (deftest browser-runtime-status-reports-htmlunit-and-playwright
   (db/set-config! :browser/playwright-enabled? "true")

@@ -21,6 +21,30 @@
     (is (= "gpt-test" (get body "model")))
     (is (= 128 (get body "max_tokens")))))
 
+(deftest build-request-preserves-multimodal-message-content
+  (let [req  (#'llm/build-request {:base-url "https://api.example.com/v1"
+                                   :api-key  "sk-test"
+                                   :model    "gpt-4o"}
+                                  [{"role" "user"
+                                    "content" [{"type" "text" "text" "interpret this"}
+                                               {"type" "image_url"
+                                                "image_url" {"url" "https://cdn.example.com/chart.png"
+                                                             "detail" "high"}}]}]
+                                  {})
+        body (json/read-json (:body req))]
+    (is (= "interpret this"
+           (get-in body ["messages" 0 "content" 0 "text"])))
+    (is (= "https://cdn.example.com/chart.png"
+           (get-in body ["messages" 0 "content" 1 "image_url" "url"])))
+    (is (= "high"
+           (get-in body ["messages" 0 "content" 1 "image_url" "detail"])))))
+
+(deftest vision-capable-checks-provider-flag
+  (is (true? (llm/vision-capable? {:llm.provider/id :vision
+                                   :llm.provider/vision? true})))
+  (is (false? (llm/vision-capable? {:llm.provider/id :text
+                                    :llm.provider/vision? false}))))
+
 (deftest resolve-provider-selection-round-robins-workload
   (with-redefs [xia.db/list-providers
                 (constantly [{:llm.provider/id :openai-a

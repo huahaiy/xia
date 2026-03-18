@@ -29,3 +29,17 @@
       (is (= :terminal (:session/channel entity)))
       (is (integer? (:db/created-at entity)))
       (is (instance? java.util.Date (:created-at session))))))
+
+(deftest providers-persist-vision-capability
+  (db/upsert-provider! {:id       :openai
+                        :name     "OpenAI"
+                        :base-url "https://api.openai.com/v1"
+                        :model    "gpt-4o"
+                        :vision?  true})
+  (is (true? (:llm.provider/vision? (db/get-provider :openai))))
+  (db/upsert-provider! {:id       :openai
+                        :name     "OpenAI"
+                        :base-url "https://api.openai.com/v1"
+                        :model    "gpt-4o-mini"
+                        :vision?  false})
+  (is (false? (:llm.provider/vision? (db/get-provider :openai)))))

@@ -122,6 +122,59 @@
             :assistant-response "All set."}
            @reviewed))))
 
+(deftest process-message-injects-visual-tool-results-as-follow-up-user-input
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom [])]
+    (with-redefs [xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "browser-screenshot"
+                                                                              :parameters {}}}])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :vision
+                                                                              :llm.provider/vision? true}
+                                                                  :provider-id :vision})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                       {:summary "Captured chart from the browser."
+                                                        :detail "high"
+                                                        :image_data_url "data:image/png;base64,AAAA"})
+                  xia.llm/chat-with-tools            (fn [messages _tools & _opts]
+                                                       (swap! llm-calls conj messages)
+                                                       (if (= 1 (count @llm-calls))
+                                                         {"content" ""
+                                                          "tool_calls" [{"id" "call-1"
+                                                                         "function" {"name" "browser-screenshot"
+                                                                                     "arguments" "{}"}}]}
+                                                         {"content" "done"}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "done"
+             (agent/process-message session-id "interpret the chart" :channel :terminal))))
+    (let [second-call (second @llm-calls)
+          tool-msg    (some #(when (= "tool" (:role %)) %) second-call)
+          image-msg   (last second-call)
+          persisted-tool (some #(when (= :tool (:role %)) %) (db/session-messages session-id))]
+      (is (= "Captured chart from the browser." (:content tool-msg)))
+      (is (= "user" (:role image-msg)))
+      (is (= "text" (get-in image-msg [:content 0 "type"])))
+      (is (= "image_url" (get-in image-msg [:content 1 "type"])))
+      (is (= "data:image/png;base64,AAAA"
+             (get-in image-msg [:content 1 "image_url" "url"])))
+      (is (= "high" (get-in image-msg [:content 1 "image_url" "detail"])))
+      (is (= {:summary "Captured chart from the browser."
+              :detail "high"}
+             (:tool-result persisted-tool))))))
+
+(deftest multimodal-follow-up-messages-accept-public-image-urls
+  (with-redefs [xia.ssrf/validate-url! (fn [_] nil)]
+    (let [messages (#'agent/multimodal-follow-up-messages
+                    {:summary "Read this remote chart."
+                     :image_url "https://cdn.example.com/chart.png"})]
+      (is (= "user" (get-in messages [0 :role])))
+      (is (= "https://cdn.example.com/chart.png"
+             (get-in messages [0 :content 1 "image_url" "url"])))))) 
+
 (deftest process-message-rejects-oversized-user-message-by-char-count
   (let [session-id  (db/create-session! :terminal)
         wm-calls    (atom 0)

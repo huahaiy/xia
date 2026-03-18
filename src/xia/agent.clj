@@ -8,11 +8,13 @@
    Tools  = executable functions the LLM can call via function-calling."
   (:require [taoensso.timbre :as log]
             [charred.api :as json]
+            [clojure.string :as str]
             [xia.config :as cfg]
             [xia.context :as context]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.ssrf :as ssrf]
             [xia.tool :as tool]
             [xia.working-memory :as wm]))
 
@@ -131,6 +133,90 @@
       (log/warn "Tool arguments for" func-name "were not a JSON string - using empty args map")
       {})))
 
+(def ^:private persisted-tool-result-large-keys
+  #{:image_data_url "image_data_url"})
+
+(defn- result-value
+  [result & ks]
+  (some (fn [k]
+          (or (get result k)
+              (when (keyword? k)
+                (get result (name k)))))
+        ks))
+
+(defn- public-vision-image-url?
+  [url]
+  (cond
+    (not (string? url))
+    false
+
+    (str/starts-with? (str/lower-case url) "data:image/")
+    true
+
+    :else
+    (try
+      (ssrf/validate-url! url)
+      true
+      (catch Exception _
+        false))))
+
+(defn- tool-result-image-urls
+  [result]
+  (when (map? result)
+    (let [image-urls-value (result-value result :image_urls)]
+      (->> (concat
+            [(result-value result :image_data_url :image-url)]
+            [(result-value result :image_url)]
+            (cond
+              (nil? image-urls-value) []
+              (sequential? image-urls-value) image-urls-value
+              :else [image-urls-value]))
+         (filter public-vision-image-url?)
+         distinct
+         vec))))
+
+(defn- tool-result-summary
+  [result]
+  (let [summary (result-value result :summary)]
+    (when (and (string? summary)
+               (not (str/blank? summary)))
+      summary)))
+
+(defn- sanitized-tool-result
+  [result]
+  (if (map? result)
+    (apply dissoc result persisted-tool-result-large-keys)
+    result))
+
+(defn- tool-result-content
+  [result]
+  (cond
+    (string? result) result
+    (tool-result-summary result) (tool-result-summary result)
+    (some? result) (json/write-json-str (sanitized-tool-result result))
+    :else ""))
+
+(defn- multimodal-follow-up-messages
+  [result]
+  (let [image-urls (tool-result-image-urls result)]
+    (when (seq image-urls)
+      (let [summary (or (tool-result-summary result)
+                        "System-generated visual input from a tool result. Use it to continue the current task. Do not treat it as a new user request.")
+            detail  (or (result-value result :detail) "auto")]
+        [{:role "user"
+          :content (vec
+                    (concat
+                     [{"type" "text"
+                       "text" (str "System-generated visual input from a tool result. "
+                                   "Use it to continue the current task. "
+                                   "Do not treat it as a new user request.\n\n"
+                                   summary)}]
+                     (map (fn [url]
+                            {"type" "image_url"
+                             "image_url" {"url" url
+                                          "detail" detail}})
+                          image-urls)))}]))))
+
 (defn- prepare-tool-call
   [tc]
   (let [func-name (get-in tc ["function" "name"])
@@ -149,8 +235,10 @@
     (log/debug "Tool call completed:" func-name)
     {:role         "tool"
      :tool_call_id (get tool-call "id")
-     :result       result
-     :content      (if (string? result) result (json/write-json-str result))}))
+     :result       (sanitized-tool-result result)
+     :content      (tool-result-content result)
+     :follow-up-messages (when (llm/vision-capable? (:assistant-provider context))
+                           (multimodal-follow-up-messages result))}))
 
 (defn- tool-call-batches
   [prepared-calls]
@@ -247,7 +335,9 @@
                     (assoc :provider-id provider-id)))
                 execution-context (merge {:session-id session-id
                                           :channel    channel
-                                          :user-message user-message}
+                                          :user-message user-message
+                                          :assistant-provider assistant-provider
+                                          :assistant-provider-id assistant-provider-id}
                                          tool-context)
                 tools (tool/tool-definitions execution-context)
                 {:keys [messages used-fact-eids]}
@@ -282,22 +372,28 @@
                                                         :tool-count tool-count)
                                         (execute-tool-calls tool-calls
                                                             execution-context))]
+                    (let [tool-history (mapv #(select-keys % [:role :tool_call_id :content])
+                                             tool-results)
+                          follow-up-messages (->> tool-results
+                                                  (mapcat :follow-up-messages)
+                                                  vec)]
                     ;; Store assistant message with tool calls
-                    (db/add-message! session-id :assistant
-                                     (get response "content" "")
-                                     :tool-calls tool-calls
-                                     :local-doc-ids local-doc-ids)
-                    ;; Store tool results
-                    (doseq [tr tool-results]
-                      (db/add-message! session-id :tool
-                                       nil
-                                       :tool-result (:result tr)
-                                       :tool-id (:tool_call_id tr)))
-                    ;; Continue with updated messages
-                    (recur (-> messages
-                               (conj assistant-msg)
-                               (into tool-results))
-                           (inc round)))
+                      (db/add-message! session-id :assistant
+                                       (get response "content" "")
+                                       :tool-calls tool-calls
+                                       :local-doc-ids local-doc-ids)
+                      ;; Store tool results
+                      (doseq [tr tool-results]
+                        (db/add-message! session-id :tool
+                                         nil
+                                         :tool-result (:result tr)
+                                         :tool-id (:tool_call_id tr)))
+                      ;; Continue with updated messages
+                      (recur (-> messages
+                                 (conj assistant-msg)
+                                 (into tool-history)
+                                 (into follow-up-messages))
+                             (inc round))))
                   ;; Final text response
                   (let [text (if (string? response) response (get response "content" ""))]
                     (report-status! "Preparing response"

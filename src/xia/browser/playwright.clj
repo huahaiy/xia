@@ -9,6 +9,7 @@
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
            [com.microsoft.playwright.impl.driver Driver]
            [java.nio.file Files LinkOption Paths]
+           [java.util Base64]
            [java.util.concurrent ConcurrentHashMap]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Element]))
@@ -375,6 +376,11 @@
   (assoc result :session-id session-id
                 :backend backend-id))
 
+(defn- bytes->data-url
+  [mime-type ^bytes data]
+  (str "data:" mime-type ";base64,"
+       (.encodeToString (Base64/getEncoder) data)))
+
 (defn- snapshot-backend-id
   [snapshot]
   (some-> (get snapshot "backend") keyword))
@@ -668,6 +674,30 @@
                               (.title page)
                               (.content page))))
 
+(defn- screenshot-result
+  [session-id ^Page page {:keys [full-page detail]}]
+  (let [opts (doto (com.microsoft.playwright.Page$ScreenshotOptions.)
+               (.setFullPage (boolean full-page)))
+        data (.screenshot page opts)
+        mime-type "image/png"
+        title (.title page)
+        url (.url page)]
+    (page-result
+     session-id
+     {:url url
+      :title title
+      :mime_type mime-type
+      :byte_count (alength ^bytes data)
+      :full_page (boolean full-page)
+      :detail (or detail "auto")
+      :summary (str "Captured browser screenshot"
+                    (when (seq title)
+                      (str " of \"" title "\""))
+                    (when (seq url)
+                      (str " at " url))
+                    ".")
+      :image_data_url (bytes->data-url mime-type data)})))
+
 (defn- current-page-or-throw
   [session-id session-atom]
   (or (current-page* session-atom)
@@ -808,6 +838,15 @@
           page (current-page-or-throw session-id session-atom)]
       (persist-session! ops session-id)
       (session-page-result session-id page)))
+  (screenshot* [_ session-id {:keys [full-page detail]
+                              :or {full-page false
+                                   detail "auto"}}]
+    (let [_sess (get-session ops session-id)
+          session-atom (.get sessions session-id)
+          page (current-page-or-throw session-id session-atom)]
+      (persist-session! ops session-id)
+      (screenshot-result session-id page {:full-page full-page
+                                          :detail detail})))
   (wait-for-page* [_ session-id {:keys [timeout-ms interval-ms selector text url-contains]
                                  :or {timeout-ms 10000
                                       interval-ms 500}}]

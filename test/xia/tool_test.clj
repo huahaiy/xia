@@ -196,6 +196,23 @@
           names (set (map #(get-in % [:function :name]) defs))]
       (is (= #{"web-search" "schedule-manage"} names)))))
 
+(deftest vision-tagged-tools-require-vision-capable-provider
+  (db/install-tool! {:id          :vision-tool
+                     :name        "vision-tool"
+                     :description "Interpret a screenshot"
+                     :tags        #{:vision :image}
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :vision-tool)
+  (let [without-vision (set (map #(get-in % [:function :name])
+                                 (tool/tool-definitions {:assistant-provider {:llm.provider/id :text-only
+                                                                               :llm.provider/vision? false}})))
+        with-vision    (set (map #(get-in % [:function :name])
+                                 (tool/tool-definitions {:assistant-provider {:llm.provider/id :vision
+                                                                               :llm.provider/vision? true}})))]
+    (is (not (contains? without-vision "vision-tool")))
+    (is (contains? with-vision "vision-tool"))))
+
 (deftest autonomous-tool-definitions-hide-unavailable-privileged-tools
   (db/register-service! {:id                   :github
                          :name                 "GitHub"
@@ -325,6 +342,7 @@
     (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
     (is (= :browser-install-deps (:tool/id (db/get-tool :browser-install-deps))))
     (is (= :browser-open (:tool/id (db/get-tool :browser-open))))
+    (is (= :browser-screenshot (:tool/id (db/get-tool :browser-screenshot))))
     (is (= :browser-navigate (:tool/id (db/get-tool :browser-navigate))))
     (is (= :browser-read-page (:tool/id (db/get-tool :browser-read-page))))
     (is (= :browser-wait (:tool/id (db/get-tool :browser-wait))))
@@ -334,6 +352,7 @@
     (is (= :browser-list-sites (:tool/id (db/get-tool :browser-list-sites))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :web-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-runtime-status))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-screenshot))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-read))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-list-sessions))))
@@ -370,6 +389,25 @@
         (prompt/register-approval! :terminal nil)
         (tool/clear-session-approvals! session-id)
         (browser/close-all-sessions!)))))
+
+(deftest browser-screenshot-tool-executes-through-sci
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :browser-screenshot)
+  (db/set-config! :browser/playwright-enabled? "true")
+  (let [opened (browser/open-session "https://example.com" :backend :playwright)
+        session-id (:session-id opened)]
+    (try
+      (let [result (tool/execute-tool :browser-screenshot {"session_id" session-id
+                                                           "full_page" true
+                                                           "detail" "high"}
+                                      {:channel :scheduler})]
+        (is (= session-id (:session-id result)))
+        (is (= :playwright (:backend result)))
+        (is (= true (:full_page result)))
+        (is (= "high" (:detail result)))
+        (is (string? (:image_data_url result))))
+      (finally
+        (browser/close-session session-id)))))
 
 (deftest local-doc-tools-execute-through-sci
   (tool/ensure-bundled-tools!)

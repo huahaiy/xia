@@ -22,6 +22,8 @@
     ((:fill-form ops) session-id fields opts))
   (read-page* [_ session-id]
     ((:read-page ops) session-id))
+  (screenshot* [_ session-id opts]
+    ((:screenshot ops) session-id opts))
   (wait-for-page* [_ session-id opts]
     ((:wait-for-page ops) session-id opts))
   (close-session* [_ session-id]
