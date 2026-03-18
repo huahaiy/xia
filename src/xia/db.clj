@@ -113,6 +113,9 @@
    ;; --- Session ---
    :session/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :session/channel    {:db/valueType :db.type/keyword} ; :terminal :http
+   :session/parent-id  {:db/valueType :db.type/uuid}
+   :session/worker?    {:db/valueType :db.type/boolean}
+   :session/label      {:db/valueType :db.type/string}
    :session/created-at {:db/valueType :db.type/instant}
    :session/active?    {:db/valueType :db.type/boolean}
 
@@ -964,29 +967,53 @@
 ;; Sessions & Messages
 ;; ---------------------------------------------------------------------------
 
-(defn create-session! [channel]
-  (let [id (random-uuid)]
-    (transact! [{:session/id         id
-                 :session/channel    channel
-                 :session/active?    true}])
-    id))
+(defn create-session!
+  ([channel]
+   (create-session! channel nil))
+  ([channel {:keys [parent-session-id worker? label active?]
+             :or   {worker? false
+                    active? true}}]
+   (let [id (random-uuid)]
+     (transact!
+       [(cond-> {:session/id      id
+                 :session/channel channel
+                 :session/worker? worker?
+                 :session/active? active?}
+          parent-session-id (assoc :session/parent-id parent-session-id)
+          (some? label) (assoc :session/label label))])
+     id)))
 
 (defn list-sessions
   "List all sessions with basic metadata, newest first."
-  []
-  (->> (q '[:find ?s ?sid ?channel ?active
-            :where
-            [?s :session/id ?sid]
-            [?s :session/channel ?channel]
-            [(get-else $ ?s :session/active? false) ?active]])
-       (map (fn [[eid sid channel active?]]
-              (let [entity-map (raw-entity eid)]
-                {:id         sid
-                 :channel    channel
-                 :created-at (entity-created-at entity-map)
-                 :active?    active?})))
-       (sort-by :created-at #(compare %2 %1))
-       vec))
+  ([] (list-sessions nil))
+  ([{:keys [include-workers?] :or {include-workers? false}}]
+   (->> (q '[:find ?s ?sid ?channel ?active ?worker
+             :where
+             [?s :session/id ?sid]
+             [?s :session/channel ?channel]
+             [(get-else $ ?s :session/active? false) ?active]
+             [(get-else $ ?s :session/worker? false) ?worker]])
+        (remove (fn [[_ _ _ _ worker?]]
+                  (and worker? (not include-workers?))))
+        (map (fn [[eid sid channel active? worker?]]
+               (let [entity-map (raw-entity eid)]
+                 {:id         sid
+                  :channel    channel
+                  :created-at (entity-created-at entity-map)
+                  :active?    active?
+                  :worker?    worker?
+                  :parent-id  (:session/parent-id entity-map)
+                  :label      (:session/label entity-map)})))
+        (sort-by :created-at #(compare %2 %1))
+        vec)))
+
+(defn set-session-active!
+  [session-id active?]
+  (when-let [session-eid (ffirst (q '[:find ?e :in $ ?sid
+                                      :where [?e :session/id ?sid]]
+                                    session-id))]
+    (transact! [[:db/add session-eid :session/active? (boolean active?)]])
+    true))
 
 (defn- tool-calls-doc
   [tool-calls]

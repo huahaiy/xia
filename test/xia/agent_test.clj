@@ -218,7 +218,7 @@
         wm-calls   (atom 0)
         llm-calls  (atom 0)]
     (db/set-config! :agent/max-user-message-chars 1000)
-    (db/set-config! :agent/max-user-message-tokens 2)
+    (db/set-config! :agent/max-user-message-tokens 1)
     (with-redefs [xia.working-memory/update-wm!      (fn [& _]
                                                        (swap! wm-calls inc))
                   xia.tool/tool-definitions          (constantly [])
@@ -233,18 +233,18 @@
                   xia.llm/chat-simple                (fn [& _]
                                                        (swap! llm-calls inc)
                                                        "unreachable")]
-      (let [err (try
+        (let [err (try
                   (agent/process-message session-id text :channel :terminal)
                   (catch clojure.lang.ExceptionInfo e
                     e))]
         (is (instance? clojure.lang.ExceptionInfo err))
-        (is (re-find #"User message too large: ~3 tokens \(max 2\)"
+        (is (re-find #"User message too large: ~2 tokens \(max 1\)"
                      (.getMessage ^Exception err)))
         (is (= {:type           :user-message-too-large
                 :status         413
                 :error          "user message too large"
-                :token-estimate 3
-                :max-tokens     2}
+                :token-estimate 2
+                :max-tokens     1}
                (select-keys (ex-data err)
                             [:type :status :error :token-estimate :max-tokens])))))
     (is (zero? @wm-calls))
@@ -289,6 +289,44 @@
            (->> (db/session-messages session-id)
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
+
+(deftest run-branch-tasks-creates-worker-sessions-with_isolated_context
+  (let [parent-session-id (db/create-session! :terminal)
+        seen              (atom [])]
+    (with-redefs [xia.agent/process-message
+                  (fn [session-id message & {:keys [channel provider-id resource-session-id
+                                                   max-tool-rounds tool-context]}]
+                    (swap! seen conj {:session-id session-id
+                                      :message message
+                                      :channel channel
+                                      :provider-id provider-id
+                                      :resource-session-id resource-session-id
+                                      :tool-context tool-context})
+                    (str "branch result for " session-id))]
+      (let [result (agent/run-branch-tasks
+                     [{:task "site a" :prompt "inspect site a"}
+                      {:task "site b" :prompt "inspect site b"}]
+                     :session-id parent-session-id
+                     :provider-id :default
+                     :objective "compare two sites"
+                     :max-parallel 2
+                     :max-tool-rounds 1)]
+        (is (= 2 (:branch_count result)))
+        (is (= 2 (:completed_count result)))
+        (is (= 0 (:failed_count result)))
+        (is (= 2 (count (:results result))))
+        (is (every? #(= "completed" (:status %)) (:results result)))
+        (is (every? #(not= parent-session-id (:session-id %)) @seen))
+        (is (every? #(= :branch (:channel %)) @seen))
+        (is (every? #(= :default (:provider-id %)) @seen))
+        (is (every? #(= parent-session-id (:resource-session-id %)) @seen))
+        (is (every? true? (map #(get-in % [:tool-context :branch-worker?]) @seen)))
+        (is (every? #(= parent-session-id (get-in % [:tool-context :parent-session-id])) @seen))
+        (let [worker-sessions (db/list-sessions {:include-workers? true})]
+          (is (= 1 (count (db/list-sessions))))
+          (is (= 3 (count worker-sessions)))
+          (is (= 2 (count (filter :worker? worker-sessions))))
+          (is (every? false? (map :active? (filter :worker? worker-sessions)))))))))
 
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)

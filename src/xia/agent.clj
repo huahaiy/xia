@@ -18,10 +18,13 @@
             [xia.tool :as tool]
             [xia.working-memory :as wm]))
 
-(def ^:private max-tool-rounds 10)
+(def ^:private default-max-tool-rounds 10)
 (def ^:private default-max-tool-calls-per-round 12)
 (def ^:private default-max-user-message-chars 32768)
 (def ^:private default-max-user-message-tokens 8000)
+(def ^:private default-max-branch-tasks 5)
+(def ^:private default-max-parallel-branches 3)
+(def ^:private default-max-branch-tool-rounds 2)
 (def ^:private session-turn-lock-count 256)
 (defonce ^:private session-turn-locks
   (vec (repeatedly session-turn-lock-count #(Object.))))
@@ -51,6 +54,26 @@
   []
   (cfg/positive-long :agent/max-user-message-tokens
                      default-max-user-message-tokens))
+
+(defn- configured-max-tool-rounds
+  []
+  (cfg/positive-long :agent/max-tool-rounds
+                     default-max-tool-rounds))
+
+(defn- max-branch-tasks
+  []
+  (cfg/positive-long :agent/max-branch-tasks
+                     default-max-branch-tasks))
+
+(defn- max-parallel-branches
+  []
+  (cfg/positive-long :agent/max-parallel-branches
+                     default-max-parallel-branches))
+
+(defn- max-branch-tool-rounds
+  []
+  (cfg/positive-long :agent/max-branch-tool-rounds
+                     default-max-branch-tool-rounds))
 
 (defn- validate-user-message!
   [user-message]
@@ -114,6 +137,59 @@
         (wm/review-fact-utility! fact-eids user-message assistant-response)
         (catch Exception e
           (log/warn "Failed to review fact utility:" (.getMessage e)))))))
+
+(defn- normalize-branch-task
+  [task]
+  (cond
+    (string? task)
+    {:task task
+     :prompt task}
+
+    (map? task)
+    (let [label  (or (:task task)
+                     (:title task)
+                     (get task "task")
+                     (get task "title")
+                     (get task "label"))
+          prompt (or (:prompt task)
+                     (:message task)
+                     (get task "prompt")
+                     (get task "message")
+                     label)]
+      {:task   (str (or label prompt "branch task"))
+       :prompt (str (or prompt label ""))})
+
+    :else
+    {:task   (str task)
+     :prompt (str task)}))
+
+(defn- branch-task-prompt
+  [{:keys [task prompt]} objective]
+  (str "You are a temporary branch worker for the main Xia agent.\n"
+       "You are not talking directly to the user. Work independently on the assigned subtask and report back to the parent agent.\n"
+       "Rules:\n"
+       "- Do not ask the user questions.\n"
+       "- Use tools only when they help complete this subtask.\n"
+       "- Do not create schedules, request approvals, or perform privileged actions.\n"
+       "- Focus only on the assigned subtask.\n"
+       "- Return concise, factual results for the parent agent.\n"
+       "- End with short sections titled Findings, Evidence, and Open Questions.\n\n"
+       (when (and objective (not (str/blank? objective)))
+         (str "Parent objective:\n" objective "\n\n"))
+       "Assigned subtask:\n"
+       task
+       "\n\n"
+       "What to do:\n"
+       prompt))
+
+(defn- branch-result-summary
+  [results]
+  (let [completed (count (filter #(= "completed" (:status %)) results))
+        failed    (count (filter #(= "failed" (:status %)) results))]
+    (str "Completed " completed " branch task"
+         (when (not= 1 completed) "s")
+         (when (pos? failed)
+           (str "; " failed " failed")))))
 
 (defn- parse-tool-args
   [func-name args-str]
@@ -313,7 +389,8 @@
   3. Calls the LLM with available tools (function-calling)
   4. If the LLM wants to use tools, executes them and loops
   5. Returns the final text response"
-  [session-id user-message & {:keys [channel tool-context provider-id local-doc-ids]
+  [session-id user-message & {:keys [channel tool-context provider-id local-doc-ids
+                                     max-tool-rounds resource-session-id]
                               :or   {channel :terminal
                                      tool-context {}}}]
   (with-session-turn-lock
@@ -326,7 +403,8 @@
           (db/add-message! session-id :user user-message :local-doc-ids local-doc-ids)
           (report-status! "Updating working memory"
                           :phase :working-memory)
-          (wm/update-wm! user-message session-id channel)
+          (wm/update-wm! user-message session-id channel
+                         {:resource-session-id resource-session-id})
           (let [{assistant-provider    :provider
                  assistant-provider-id :provider-id}
                 (llm/resolve-provider-selection
@@ -336,6 +414,7 @@
                 execution-context (merge {:session-id session-id
                                           :channel    channel
                                           :user-message user-message
+                                          :resource-session-id resource-session-id
                                           :assistant-provider assistant-provider
                                           :assistant-provider-id assistant-provider-id}
                                          tool-context)
@@ -347,7 +426,7 @@
                                               :compaction-workload :history-compaction})]
             (loop [messages messages
                    round    0]
-              (when (>= round max-tool-rounds)
+              (when (>= round (or max-tool-rounds (configured-max-tool-rounds)))
                 (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
               (report-status! (if (zero? round)
                                 "Calling model"
@@ -409,3 +488,94 @@
                              :phase :error
                              :message (str "Request failed: " (.getMessage e))})
             (throw e)))))))
+
+(defn- run-branch-task*
+  [parent-session-id {:keys [task prompt] :as branch-task}
+   {:keys [channel provider-id resource-session-id objective
+           max-tool-rounds tool-context]
+    :or   {channel :terminal}}]
+  (let [child-session-id (db/create-session! :branch
+                                             {:parent-session-id parent-session-id
+                                              :worker? true
+                                              :label task})]
+    (try
+      (wm/create-wm! child-session-id)
+      (let [result (process-message child-session-id
+                                    (branch-task-prompt branch-task objective)
+                                    :channel :branch
+                                    :provider-id provider-id
+                                    :resource-session-id (or resource-session-id
+                                                             parent-session-id)
+                                    :max-tool-rounds max-tool-rounds
+                                    :tool-context (merge {:branch-worker? true
+                                                          :parent-session-id parent-session-id
+                                                          :resource-session-id (or resource-session-id
+                                                                                   parent-session-id)}
+                                                         tool-context))
+            wm-context (wm/wm->context child-session-id)]
+        {:task       task
+         :status     "completed"
+         :session-id child-session-id
+         :topics     (:topics wm-context)
+         :result     result})
+      (catch Throwable t
+        {:task       task
+         :status     "failed"
+         :session-id child-session-id
+         :error      (.getMessage t)})
+      (finally
+        (db/set-session-active! child-session-id false)
+        (wm/clear-wm! child-session-id)))))
+
+(defn run-branch-tasks
+  "Run independent branch tasks in separate worker sessions with isolated
+   working memory and shared long-term memory access. Returns structured
+   branch results for the parent agent."
+  [tasks & {:keys [session-id channel provider-id resource-session-id objective
+                   max-parallel max-tool-rounds tool-context]
+            :or   {channel :terminal
+                   tool-context {}}}]
+  (let [parent-context      prompt/*interaction-context*
+        parent-session-id   (or session-id (:session-id parent-context))
+        channel*            (or channel (:channel parent-context) :terminal)
+        provider-id*        (or provider-id
+                                (:assistant-provider-id parent-context))
+        resource-session-id* (or resource-session-id parent-session-id)
+        branch-tasks        (->> tasks (map normalize-branch-task) (remove #(str/blank? (:prompt %))) vec)
+        task-count          (count branch-tasks)
+        max-tasks           (max-branch-tasks)
+        max-parallel*       (min (max 1 (or max-parallel (max-parallel-branches)))
+                                 (max 1 max-tasks))]
+    (when (zero? task-count)
+      (throw (ex-info "Branch tasks require at least one task" {})))
+    (when (> task-count max-tasks)
+      (throw (ex-info (str "Too many branch tasks: " task-count " (max " max-tasks ")")
+                      {:task-count task-count
+                       :max-tasks  max-tasks})))
+    (report-status! (str "Running " task-count " branch task"
+                         (when (not= 1 task-count) "s"))
+                    :phase :branch
+                    :branch-count task-count
+                    :parallel true)
+    (let [results (vec
+                    (mapcat (fn [batch]
+                              (let [futures (mapv (fn [branch-task]
+                                                    (future
+                                                      (run-branch-task* parent-session-id
+                                                                        branch-task
+                                                                        {:channel channel*
+                                                                         :provider-id provider-id*
+                                                                         :resource-session-id resource-session-id*
+                                                                         :objective objective
+                                                                         :max-tool-rounds (or max-tool-rounds
+                                                                                              (max-branch-tool-rounds))
+                                                                         :tool-context tool-context})))
+                                                  batch)]
+                                (mapv deref futures)))
+                            (partition-all max-parallel* branch-tasks)))]
+      {:summary            (branch-result-summary results)
+       :parent_session_id  parent-session-id
+       :branch_count       task-count
+       :completed_count    (count (filter #(= "completed" (:status %)) results))
+       :failed_count       (count (filter #(= "failed" (:status %)) results))
+       :results            results})))

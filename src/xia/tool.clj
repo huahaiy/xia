@@ -45,6 +45,7 @@
    "tools/browser-close.edn"
    "tools/browser-login.edn"
    "tools/browser-login-interactive.edn"
+   "tools/branch-tasks.edn"
    "tools/local-doc-search.edn"
    "tools/local-doc-read.edn"
    "tools/schedule-list.edn"
@@ -57,6 +58,14 @@
 (def ^:private ignored-selection-terms
   #{"a" "an" "and" "any" "for" "from" "get" "how" "i" "in" "into" "is"
     "it" "me" "my" "of" "on" "or" "the" "to" "up" "use" "using" "with"})
+
+(def ^:private branch-worker-blocked-tool-ids
+  #{:branch-tasks
+    :browser-bootstrap-runtime
+    :browser-install-deps
+    :schedule-list
+    :schedule-create
+    :schedule-manage})
 
 (def ^:private privileged-handler-rules
   [{:match "xia.service/request"
@@ -268,13 +277,20 @@
   (let [requires-vision? (contains? (set (:tool/tags tool)) :vision)
         vision-allowed?  (or (not requires-vision?)
                              (llm/vision-capable? (:assistant-provider context))
-                             (llm/vision-capable? (:assistant-provider-id context)))]
+                             (llm/vision-capable? (:assistant-provider-id context)))
+        {:keys [policy]} (tool-approval-policy tool)
+        branch-worker?   (:branch-worker? context)
+        branch-allowed?  (and branch-worker?
+                              (= :auto policy)
+                              (not (contains? branch-worker-blocked-tool-ids
+                                              (:tool/id tool))))]
     (and vision-allowed?
-         (if-not (autonomous-run? context)
-           true
-           (let [{:keys [policy]} (tool-approval-policy tool)]
-             (or (= :auto policy)
-                 (autonomous-tool-allowed? tool context)))))))
+         (cond
+           branch-worker? branch-allowed?
+           (autonomous-run? context)
+           (or (= :auto policy)
+               (autonomous-tool-allowed? tool context))
+           :else true))))
 
 (defn- execution-mode
   [tool]
@@ -525,11 +541,21 @@
      (if (fn? handler)
        (try
          (binding [prompt/*interaction-context* context
-                   wm/*session-id*            (:session-id context)]
-           (let [{:keys [allowed? error policy mode]} (ensure-approved tool-id
-                                                                       tool
-                                                                       arguments
-                                                                       context)]
+                   wm/*session-id*            (or (:resource-session-id context)
+                                                  (:session-id context))]
+           (let [branch-blocked? (and (:branch-worker? context)
+                                      (not (tool-visible? tool context)))
+                 {:keys [allowed? error policy mode]}
+                 (if branch-blocked?
+                   {:allowed? false
+                    :error    (str "tool " (name tool-id)
+                                   " is not available to branch workers")
+                    :policy   :branch
+                    :mode     :branch-blocked}
+                   (ensure-approved tool-id
+                                    tool
+                                    arguments
+                                    context))]
              (if allowed?
                (do
                  (prompt/status! {:state    :running

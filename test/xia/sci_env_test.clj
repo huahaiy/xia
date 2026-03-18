@@ -1,5 +1,6 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer :all]
+            [xia.agent :as agent]
             [xia.db]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
@@ -133,3 +134,11 @@
         (is (= (:id saved) (:id doc)))
         (is (= "The autom" (:text doc)))
         (is (true? (:truncated? doc)))))))
+
+(deftest branch-task-runner-is-exposed-through-sci
+  (with-redefs [agent/run-branch-tasks (fn [tasks & opts]
+                                         {:tasks tasks :opts opts})]
+    (is (= {:tasks [{"task" "a"}]
+            :opts  [:objective "test"]}
+           (sci-env/eval-string
+             "(xia.agent/run-branch-tasks [{\"task\" \"a\"}] :objective \"test\")")))))

@@ -108,6 +108,14 @@
    'login-interactive browser/login-interactive
    'list-sites        browser/list-sites})
 
+(defn- run-branch-tasks
+  [& args]
+  (let [f (requiring-resolve 'xia.agent/run-branch-tasks)]
+    (apply f args)))
+
+(def ^:private xia-agent-ns
+  {'run-branch-tasks run-branch-tasks})
+
 (def ^:private xia-schedule-ns
   {'create-schedule!  schedule/create-schedule!
    'get-schedule      schedule/get-schedule
@@ -188,6 +196,7 @@
                   'xia.service        xia-service-ns
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns
+                  'xia.agent          xia-agent-ns
                   'xia.db             xia-db-ns}
      :deny       denied-sci-symbols
      :classes    {'java.util.Date java.util.Date

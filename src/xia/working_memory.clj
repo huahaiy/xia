@@ -212,14 +212,17 @@ Rules:
   ([terms semantic-query]
    (search-knowledge nil terms semantic-query))
   ([session-id terms semantic-query]
+   (search-knowledge session-id terms semantic-query nil))
+  ([session-id terms semantic-query resource-session-id]
    (let [fts-query      (str/join " " terms)
-         semantic-query (or semantic-query fts-query)]
+         semantic-query (or semantic-query fts-query)
+         local-doc-session-id (or resource-session-id session-id)]
     (when (or (not (str/blank? fts-query))
               (not (str/blank? semantic-query)))
       {:nodes    (memory/search-nodes semantic-query :fts-query fts-query :top 10)
        :facts    (memory/search-facts semantic-query :fts-query fts-query :top 15)
        :episodes (memory/search-episodes semantic-query :fts-query fts-query :top 5)
-       :local-docs (memory/search-local-docs session-id semantic-query
+       :local-docs (memory/search-local-docs local-doc-session-id semantic-query
                                              :fts-query fts-query
                                              :top 4)}))))
 
@@ -567,37 +570,39 @@ Rules:
   4. Merge results, decay, evict
   5. Check for topic shift → auto-segment if needed
   6. Periodically update topic summary"
-  [user-message session-id channel]
-  (run-session-op! session-id
-    (fn [sid]
-      (when (session-wm sid)
-        (update-session-wm! sid #(update % :turn-count inc))
-        (let [terms   (extract-search-terms sid user-message)
-              results (search-knowledge sid terms user-message)]
-          (when results
-            (let [matched-eids (mapv :eid (:nodes results))
-                  expanded     (when (seq matched-eids)
-                                 (expand-graph matched-eids))]
-              (merge-results! sid results expanded)
-              (update-session-wm! sid
-                (fn [wm]
-                  (let [factor    (get-in wm [:config :decay-factor])
-                        threshold (get-in wm [:config :eviction-threshold])
-                        max-slots (get-in wm [:config :max-slots])
-                        decayed   (decay-slot-map (:slots wm) factor)
-                        filtered  (prune-slot-map decayed threshold max-slots)]
-                    (assoc wm :slots filtered))))))
-          (let [wm (session-wm sid)]
-            (when (and wm
-                       (> (:turn-count wm) 3)
-                       (detect-topic-shift? sid terms))
-              (auto-segment! sid channel))
-            (when wm
-              (let [interval    (get-in wm [:config :topic-update-interval])
-                    turns-since (- (:turn-count wm) (:topic-turn wm))]
-                (when (and interval (>= turns-since interval))
-                  (future (update-topics! sid)))))))
-        (get-wm sid)))))
+  ([user-message session-id channel]
+   (update-wm! user-message session-id channel nil))
+  ([user-message session-id channel {:keys [resource-session-id]}]
+   (run-session-op! session-id
+     (fn [sid]
+       (when (session-wm sid)
+         (update-session-wm! sid #(update % :turn-count inc))
+         (let [terms   (extract-search-terms sid user-message)
+               results (search-knowledge sid terms user-message resource-session-id)]
+           (when results
+             (let [matched-eids (mapv :eid (:nodes results))
+                   expanded     (when (seq matched-eids)
+                                  (expand-graph matched-eids))]
+               (merge-results! sid results expanded)
+               (update-session-wm! sid
+                 (fn [wm]
+                   (let [factor    (get-in wm [:config :decay-factor])
+                         threshold (get-in wm [:config :eviction-threshold])
+                         max-slots (get-in wm [:config :max-slots])
+                         decayed   (decay-slot-map (:slots wm) factor)
+                         filtered  (prune-slot-map decayed threshold max-slots)]
+                     (assoc wm :slots filtered))))))
+           (let [wm (session-wm sid)]
+             (when (and wm
+                        (> (:turn-count wm) 3)
+                        (detect-topic-shift? sid terms))
+               (auto-segment! sid channel))
+             (when wm
+               (let [interval    (get-in wm [:config :topic-update-interval])
+                     turns-since (- (:turn-count wm) (:topic-turn wm))]
+                 (when (and interval (>= turns-since interval))
+                   (future (update-topics! sid)))))))
+         (get-wm sid))))))
 
 ;; ============================================================================
 ;; Lifecycle

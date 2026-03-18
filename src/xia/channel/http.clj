@@ -2106,7 +2106,7 @@
 
 (defn stop! []
   (when-let [s @server-atom]
-    (doseq [{:keys [id channel active?]} (db/list-sessions)
+    (doseq [{:keys [id channel active?]} (db/list-sessions {:include-workers? true})
             :when (and (= :http channel) active?)]
       (finalize-rest-session! id :server-stop))
     (s) ; http-kit stop fn

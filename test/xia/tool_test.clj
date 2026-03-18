@@ -337,6 +337,7 @@
 (deftest ensure-bundled-tools-installs-default-set
   (let [count (tool/ensure-bundled-tools!)]
     (is (pos? count))
+    (is (= :branch-tasks (:tool/id (db/get-tool :branch-tasks))))
     (is (= :web-search (:tool/id (db/get-tool :web-search))))
     (is (= :browser-runtime-status (:tool/id (db/get-tool :browser-runtime-status))))
     (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
@@ -359,10 +360,25 @@
     (is (nil? (:tool/execution-mode (db/get-tool :browser-open))))
     (is (contains? (get-in (db/get-tool :browser-open) [:tool/parameters "properties"])
                    "backend"))
+    (is (contains? (get-in (db/get-tool :branch-tasks) [:tool/parameters "properties"])
+                   "tasks"))
     (is (contains? (get-in (db/get-tool :browser-login) [:tool/parameters "properties"])
                    "backend"))
     (is (contains? (get-in (db/get-tool :browser-login-interactive) [:tool/parameters "properties"])
                    "backend"))))
+
+(deftest branch-workers-cannot-run-branch-tasks-recursively
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :branch-tasks)
+  (let [session-id (db/create-session! :terminal)
+        result     (tool/execute-tool :branch-tasks
+                                      {"tasks" [{"task" "nested"
+                                                  "prompt" "should not run"}]}
+                                      {:channel :terminal
+                                       :session-id session-id
+                                       :branch-worker? true})]
+    (is (= "Tool branch-tasks blocked: tool branch-tasks is not available to branch workers"
+           (:error result)))))
 
 (deftest browser-runtime-tools-execute-through-sci
   (tool/ensure-bundled-tools!)

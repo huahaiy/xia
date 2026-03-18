@@ -43,3 +43,17 @@
                         :model    "gpt-4o-mini"
                         :vision?  false})
   (is (false? (:llm.provider/vision? (db/get-provider :openai)))))
+
+(deftest worker-sessions-are-hidden-by-default
+  (let [parent (db/create-session! :terminal)
+        child  (db/create-session! :branch {:parent-session-id parent
+                                            :worker? true
+                                            :label "site-a"})]
+    (is (= [parent]
+           (mapv :id (db/list-sessions))))
+    (is (= #{parent child}
+           (set (map :id (db/list-sessions {:include-workers? true})))))
+    (let [worker (some #(when (= child (:id %)) %) (db/list-sessions {:include-workers? true}))]
+      (is (true? (:worker? worker)))
+      (is (= parent (:parent-id worker)))
+      (is (= "site-a" (:label worker))))))
