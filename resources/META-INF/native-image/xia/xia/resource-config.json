@@ -11,6 +11,12 @@
         "pattern": "\\Qexample-skill.md\\E"
       },
       {
+        "pattern": "\\Qlog4j2.component.properties\\E"
+      },
+      {
+        "pattern": "\\Qlog4j2.simplelog.properties\\E"
+      },
+      {
         "pattern": "\\Qtools/\\E.*"
       },
       {

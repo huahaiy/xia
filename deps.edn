@@ -19,6 +19,7 @@
 
   ;; PDF text extraction for local documents
   org.apache.pdfbox/pdfbox    {:mvn/version "3.0.6"}
+  org.apache.poi/poi-ooxml    {:mvn/version "5.5.1"}
 
   ;; Headless browser — full DOM, JavaScript, cookies, form interaction
   ;; NOTE: needs reflection config for GraalVM native-image

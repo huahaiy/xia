@@ -16,6 +16,8 @@
   ["oauth_providers.edn"
    "example-tool.edn"
    "example-skill.md"
+   "log4j2.component.properties"
+   "log4j2.simplelog.properties"
    "tools/"
    "web/"])
 

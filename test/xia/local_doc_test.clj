@@ -4,9 +4,14 @@
             [xia.db :as db]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
-            [xia.test-helpers :refer [with-test-db]])
-  (:import [java.io ByteArrayOutputStream]
+            [xia.test-helpers :refer [with-test-db]]
+            [xia.working-memory :as wm])
+  (:import [java.awt Rectangle]
+           [java.io ByteArrayOutputStream]
            [java.util Base64]
+           [org.apache.poi.xslf.usermodel XMLSlideShow]
+           [org.apache.poi.xssf.usermodel XSSFWorkbook]
+           [org.apache.poi.xwpf.usermodel XWPFDocument]
            [org.apache.pdfbox.pdmodel PDDocument PDPage PDPageContentStream]
            [org.apache.pdfbox.pdmodel.font PDType1Font Standard14Fonts$FontName]))
 
@@ -25,6 +30,42 @@
         (.showText content text)
         (.endText content))
       (.save doc out)
+      (.encodeToString (Base64/getEncoder) (.toByteArray out)))))
+
+(defn- sample-docx-base64
+  [text]
+  (with-open [doc (XWPFDocument.)
+              out (ByteArrayOutputStream.)]
+    (let [paragraph (.createParagraph doc)
+          run (.createRun paragraph)]
+      (.setText run text)
+      (.write doc out)
+      (.encodeToString (Base64/getEncoder) (.toByteArray out)))))
+
+(defn- sample-xlsx-base64
+  [sheet-name rows]
+  (with-open [workbook (XSSFWorkbook.)
+              out (ByteArrayOutputStream.)]
+    (let [sheet (.createSheet workbook sheet-name)]
+      (doseq [[row-idx values] (map-indexed vector rows)]
+        (let [row (.createRow sheet row-idx)]
+          (doseq [[cell-idx value] (map-indexed vector values)]
+            (.setCellValue (.createCell row cell-idx) (str value)))))
+      (.write workbook out)
+      (.encodeToString (Base64/getEncoder) (.toByteArray out)))))
+
+(defn- sample-pptx-base64
+  [title body]
+  (with-open [slideshow (XMLSlideShow.)
+              out (ByteArrayOutputStream.)]
+    (let [slide (.createSlide slideshow)
+          title-box (.createTextBox slide)
+          body-box (.createTextBox slide)]
+      (.setAnchor title-box (Rectangle. 40 40 500 60))
+      (.setText title-box title)
+      (.setAnchor body-box (Rectangle. 40 140 600 300))
+      (.setText body-box body)
+      (.write slideshow out)
       (.encodeToString (Base64/getEncoder) (.toByteArray out)))))
 
 (deftest local-documents-are-searchable-at-rest-and-session-scoped
@@ -82,6 +123,50 @@
       (is (= "application/pdf" (:media-type saved)))
       (is (.contains ^String (:text saved) "Hello PDF world"))
       (is (.contains ^String (:preview saved) "Hello PDF world")))))
+
+(deftest docx-uploads-are-extracted-and-searchable
+  (let [sid (db/create-session! :http)
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "paper.docx"
+                                       :media-type "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                       :bytes-base64 (sample-docx-base64 "Automobile research brief")})]
+    (is (= "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+           (:media-type saved)))
+    (is (.contains ^String (:text saved) "Automobile research brief"))
+    (binding [wm/*session-id* sid]
+      (is (= "paper.docx" (:name (first (local-doc/search-docs "car"))))))))
+
+(deftest xlsx-uploads-are-extracted-and-searchable
+  (let [sid (db/create-session! :http)
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "table.xlsx"
+                                       :media-type "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                       :bytes-base64 (sample-xlsx-base64 "Revenue"
+                                                                         [["Quarter" "Amount"]
+                                                                          ["Q1" "42"]
+                                                                          ["Q2" "55"]])})]
+    (is (= "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+           (:media-type saved)))
+    (is (.contains ^String (:text saved) "## Sheet: Revenue"))
+    (is (.contains ^String (:text saved) "Quarter\tAmount"))
+    (is (.contains ^String (:text saved) "Q2\t55"))
+    (binding [wm/*session-id* sid]
+      (is (= "table.xlsx" (:name (first (local-doc/search-docs "Revenue"))))))))
+
+(deftest pptx-uploads-are-extracted-and-searchable
+  (let [sid (db/create-session! :http)
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "deck.pptx"
+                                       :media-type "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                                       :bytes-base64 (sample-pptx-base64 "Project Update"
+                                                                         "The roadmap includes vehicle testing.")})]
+    (is (= "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+           (:media-type saved)))
+    (is (.contains ^String (:text saved) "## Slide 1"))
+    (is (.contains ^String (:text saved) "Project Update"))
+    (is (.contains ^String (:text saved) "vehicle testing"))
+    (binding [wm/*session-id* sid]
+      (is (= "deck.pptx" (:name (first (local-doc/search-docs "roadmap"))))))))
 
 (deftest invalid-pdf-uploads-fail-clearly
   (let [sid (db/create-session! :http)]

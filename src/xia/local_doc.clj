@@ -5,11 +5,16 @@
             [xia.memory :as memory]
             [xia.working-memory :as wm]
             [xia.scratch :as scratch])
-  (:import [java.io IOException]
+  (:import [java.io ByteArrayInputStream IOException]
            [java.math BigInteger]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
            [java.util Base64 UUID]
+           [org.apache.poi.ss.usermodel Cell DataFormatter]
+           [org.apache.poi.xslf.usermodel XMLSlideShow XSLFTextShape]
+           [org.apache.poi.xssf.usermodel XSSFWorkbook]
+           [org.apache.poi.xwpf.extractor XWPFWordExtractor]
+           [org.apache.poi.xwpf.usermodel XWPFDocument]
            [org.apache.pdfbox Loader]
            [org.apache.pdfbox.text PDFTextStripper]))
 
@@ -17,6 +22,9 @@
 (def ^:private default-source :upload)
 (def ^:private preview-char-limit 1200)
 (def ^:private pdf-media-type "application/pdf")
+(def ^:private docx-media-type "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+(def ^:private xlsx-media-type "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+(def ^:private pptx-media-type "application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
 (def ^:private extension->media-type
   {"c" "text/x-c"
@@ -26,6 +34,7 @@
    "cljc" "text/x-clojure"
    "cpp" "text/x-c++"
    "csv" "text/csv"
+   "docx" docx-media-type
    "edn" "application/edn"
    "htm" "text/html"
    "html" "text/html"
@@ -35,6 +44,7 @@
    "log" "text/plain"
    "md" "text/markdown"
    "markdown" "text/markdown"
+   "pptx" pptx-media-type
    "py" "text/x-python"
    "rb" "text/x-ruby"
    "sh" "text/x-shellscript"
@@ -43,6 +53,7 @@
    "ts" "text/typescript"
    "tsv" "text/tab-separated-values"
    "txt" "text/plain"
+   "xlsx" xlsx-media-type
    "xml" "application/xml"
    "yaml" "application/yaml"
    "yml" "application/yaml"})
@@ -50,6 +61,8 @@
 (def ^:private supported-media-types
   #{"application/edn"
     "application/json"
+    docx-media-type
+    pptx-media-type
     "application/xml"
     "application/yaml"
     "text/csv"
@@ -66,7 +79,13 @@
     "text/x-python"
     "text/x-ruby"
     "text/x-shellscript"
-    "text/x-sql"})
+    "text/x-sql"
+    xlsx-media-type})
+
+(def ^:private office-media-types
+  #{docx-media-type
+    xlsx-media-type
+    pptx-media-type})
 
 (defn- invalid-id-ex
   [message type-key field value]
@@ -135,6 +154,13 @@
             :name name
             :media-type media-type}))
 
+(defn- office-bytes-required-ex
+  [name media-type]
+  (ex-info "Office document uploads require file bytes"
+           {:type :local-doc/office-bytes-required
+            :name name
+            :media-type media-type}))
+
 (defn- unsupported-format-ex
   [name media-type]
   (ex-info "Unsupported local document format"
@@ -174,6 +200,16 @@
              (str/starts-with? value "\uFEFF"))
       (subs value 1)
       (str value))))
+
+(defn- office-media-type?
+  [media-type]
+  (contains? office-media-types media-type))
+
+(defn- previewable-binary-media-type?
+  [media-type]
+  (and media-type
+       (not= media-type pdf-media-type)
+       (not (office-media-type? media-type))))
 
 (defn- utf8-bytes
   [text]
@@ -218,6 +254,92 @@
                        :media-type media-type}
                       e)))))
 
+(defn- office-extraction-failed
+  [type-key name media-type cause]
+  (throw (ex-info (.getMessage ^Throwable cause)
+                  {:type type-key
+                   :name name
+                   :media-type media-type}
+                  cause)))
+
+(defn- nonblank-lines
+  [lines]
+  (->> lines
+       (map #(some-> % normalize-text str/trim))
+       (remove str/blank?)))
+
+(defn- cell-display
+  [^DataFormatter formatter evaluator ^Cell cell]
+  (let [value (try
+                (.formatCellValue formatter cell evaluator)
+                (catch Exception _
+                  (str cell)))]
+    (normalize-text value)))
+
+(defn- extract-docx-text
+  [name media-type ^bytes docx-bytes]
+  (try
+    (with-open [in (ByteArrayInputStream. docx-bytes)
+                doc (XWPFDocument. in)
+                extractor (XWPFWordExtractor. doc)]
+      (normalize-text (.getText extractor)))
+    (catch Exception e
+      (office-extraction-failed :local-doc/docx-extraction-failed name media-type e))))
+
+(defn- extract-xlsx-text
+  [name media-type ^bytes xlsx-bytes]
+  (try
+    (with-open [in (ByteArrayInputStream. xlsx-bytes)
+                workbook (XSSFWorkbook. in)]
+      (let [formatter (DataFormatter.)
+            evaluator (.createFormulaEvaluator (.getCreationHelper workbook))
+            sheets    (for [sheet (iterator-seq (.sheetIterator workbook))]
+                        (let [rows (->> (iterator-seq (.rowIterator sheet))
+                                        (map (fn [row]
+                                               (->> (iterator-seq (.cellIterator row))
+                                                    (map #(cell-display formatter evaluator %))
+                                                    (remove str/blank?)
+                                                    (str/join "\t"))))
+                                        (remove str/blank?))
+                              header (str "## Sheet: " (.getSheetName sheet))]
+                          (str/join "\n" (cons header rows))))]
+        (normalize-text (str/join "\n\n" (remove str/blank? sheets)))))
+    (catch Exception e
+      (office-extraction-failed :local-doc/xlsx-extraction-failed name media-type e))))
+
+(defn- extract-pptx-text
+  [name media-type ^bytes pptx-bytes]
+  (try
+    (with-open [in (ByteArrayInputStream. pptx-bytes)
+                slideshow (XMLSlideShow. in)]
+      (let [slides (map-indexed
+                     (fn [idx slide]
+                       (let [text-lines (->> (.getShapes slide)
+                                             (keep (fn [shape]
+                                                     (when (instance? XSLFTextShape shape)
+                                                       (some-> (.getText ^XSLFTextShape shape)
+                                                               normalize-text
+                                                               str/trim
+                                                               not-empty)))))
+                             header (str "## Slide " (inc idx))]
+                         (str/join "\n" (cons header (nonblank-lines text-lines)))))
+                     (.getSlides slideshow))]
+        (normalize-text (str/join "\n\n" (remove str/blank? slides)))))
+    (catch Exception e
+      (office-extraction-failed :local-doc/pptx-extraction-failed name media-type e))))
+
+(defn- extract-office-text
+  [name media-type ^bytes office-bytes]
+  (case media-type
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    (extract-docx-text name media-type office-bytes)
+
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    (extract-xlsx-text name media-type office-bytes)
+
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    (extract-pptx-text name media-type office-bytes)))
+
 (defn- upload-source
   [{:keys [name media-type text bytes bytes-base64]}]
   (let [name*       (normalize-name name)
@@ -231,6 +353,15 @@
            :source-bytes source-bytes
            :text         (extract-pdf-text name* media-type* source-bytes)})
         (throw (pdf-bytes-required-ex name* media-type*)))
+
+      (office-media-type? media-type*)
+      (if-let [source-bytes (or bytes
+                                (some-> bytes-base64 str str/trim not-empty decode-base64))]
+        (let [source-bytes ^bytes source-bytes]
+          {:media-type   media-type*
+           :source-bytes source-bytes
+           :text         (extract-office-text name* media-type* source-bytes)})
+        (throw (office-bytes-required-ex name* media-type*)))
 
       (some? bytes)
       (let [source-bytes ^bytes bytes]
@@ -283,11 +414,11 @@
       (seq text)
       (preview-text (normalize-text text))
 
-      (and (not= media-type* pdf-media-type)
+      (and (previewable-binary-media-type? media-type*)
            (some? bytes))
       (preview-text (normalize-text (String. ^bytes bytes StandardCharsets/UTF_8)))
 
-      (and (not= media-type* pdf-media-type)
+      (and (previewable-binary-media-type? media-type*)
            (some? bytes-base64))
       (preview-text (normalize-text (String. ^bytes (decode-base64 (str bytes-base64))
                                                    StandardCharsets/UTF_8)))
