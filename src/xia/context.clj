@@ -102,6 +102,7 @@
    :identity   300
    :topic      100
    :entities   1500
+   :local-docs 400
    :episodes   500
    :skills     1500})
 
@@ -361,6 +362,40 @@
                    (conj lines line)
                    (+ tokens line-tokens))))))))
 
+(defn- local-doc-line
+  [{:keys [name media-type preview]}]
+  (let [preview* (some-> preview
+                         str
+                         str/trim
+                         (str/replace #"\s+" " ")
+                         not-empty)
+        preview* (when preview*
+                   (if (> (count preview*) 220)
+                     (str (subs preview* 0 219) "…")
+                     preview*))]
+    (str "- " (or name "Untitled document")
+         (when media-type
+           (str " (" media-type ")"))
+         (when preview*
+           (str ": " preview*)))))
+
+(defn render-local-docs
+  "Render relevant local documents into compact format, within token budget."
+  [docs budget]
+  (when (seq docs)
+    (loop [remaining docs
+           lines ["### Local Documents"]
+           tokens 12]
+      (if (empty? remaining)
+        (str/join "\n" lines)
+        (let [line (local-doc-line (first remaining))
+              line-tokens (estimate-tokens line)]
+          (if (> (+ tokens line-tokens) budget)
+            (str/join "\n" lines)
+            (recur (rest remaining)
+                   (conj lines line)
+                   (+ tokens line-tokens))))))))
+
 (defn render-skills
   "Render skills into prompt format, within token budget."
   [skills budget]
@@ -385,13 +420,14 @@
 
 (defn assemble-system-prompt-data
   "Build the complete system prompt with budget enforcement and return prompt metadata.
-   Priority: identity (P0) > topic (P0) > entities (P1) > episodes (P2) > skills (P3)."
+   Priority: identity (P0) > topic (P0) > entities (P1) > local docs (P2)
+   > episodes (P3) > skills (P4)."
   ([session-id]
    (assemble-system-prompt-data session-id nil))
   ([session-id opts]
    (let [budget     (resolve-system-prompt-budget (resolve-context-provider opts))
         wm-context (or (wm/wm->context session-id)
-                       {:topics nil :entities [] :episodes [] :turn-count 0})
+                       {:topics nil :entities [] :local-docs [] :episodes [] :turn-count 0})
         skills     (skill/skills-for-context wm-context)
 
         ;; P0: Identity (always included)
@@ -413,19 +449,26 @@
         ent-tokens  (estimate-tokens (or ent-section ""))
         remaining   (- remaining ent-tokens)
 
-        ;; P2: Episodes (cut second)
+        ;; P2: Local documents
+        doc-budget  (min (:local-docs budget) (max 0 remaining))
+        doc-section (render-local-docs (:local-docs wm-context) doc-budget)
+        doc-tokens  (estimate-tokens (or doc-section ""))
+        remaining   (- remaining doc-tokens)
+
+        ;; P3: Episodes
         ep-budget  (min (:episodes budget) (max 0 remaining))
         ep-section (render-episodes (:episodes wm-context) ep-budget)
         ep-tokens  (estimate-tokens (or ep-section ""))
         remaining  (- remaining ep-tokens)
 
-        ;; P3: Skills (lowest priority — cut first)
+        ;; P4: Skills (lowest priority — cut first)
         skill-budget  (min (:skills budget) (max 0 remaining))
         skill-section (render-skills skills skill-budget)
         skill-tokens  (estimate-tokens (or skill-section ""))]
     {:prompt         (str id-section
                           (when topic-section (str "## Context\n" topic-section))
                           (when ent-section (str ent-section "\n\n"))
+                          (when doc-section (str doc-section "\n\n"))
                           (when ep-section (str ep-section "\n\n"))
                           (when skill-section (str skill-section "\n\n")))
      :used-fact-eids (:used-fact-eids ent-data)})))

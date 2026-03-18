@@ -1,6 +1,7 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer :all]
             [xia.db]
+            [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.schedule :as schedule]
             [xia.sci-env :as sci-env]
@@ -117,3 +118,18 @@
     (is (= :running (:status bootstrap)))
     (is (= :htmlunit (:backend deps)))
     (is (= :unsupported-backend (:status deps)))))
+
+(deftest local-doc-functions-are-exposed-through-sci
+  (let [sid   (xia.db/create-session! :http)
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "paper.txt"
+                                       :media-type "text/plain"
+                                       :text "The automobile paper lives here."})]
+    (binding [xia.working-memory/*session-id* sid]
+      (let [results (sci-env/eval-string "(xia.local-doc/search-docs \"car\")")
+            doc     (sci-env/eval-string
+                      (str "(xia.local-doc/read-doc \"" (:id saved) "\" :max-chars 9)"))]
+        (is (= "paper.txt" (:name (first results))))
+        (is (= (:id saved) (:id doc)))
+        (is (= "The autom" (:text doc)))
+        (is (true? (:truncated? doc)))))))

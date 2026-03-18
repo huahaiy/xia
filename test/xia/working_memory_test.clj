@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [xia.test-helpers :as th]
             [xia.db :as db]
+            [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.working-memory :as wm]))
 
@@ -19,6 +20,7 @@
       (is (= 0 (:turn-count state)))
       (is (= {} (:slots state)))
       (is (= [] (:episode-refs state)))
+      (is (= [] (:local-doc-refs state)))
       (is (some? (:config state)))))
 
   (testing "get-wm returns current state"
@@ -90,19 +92,27 @@
       (is (map? results))
       (is (contains? results :nodes))
       (is (contains? results :facts))
-      (is (contains? results :episodes))))
+      (is (contains? results :episodes))
+      (is (contains? results :local-docs))))
 
   (testing "returns semantic matches for synonym queries"
-    (let [node-eid (th/seed-node! "Car" "concept")]
+    (let [sid      (db/create-session! :http)
+          node-eid (th/seed-node! "Car" "concept")]
       (th/seed-fact! node-eid "parks the car in the garage")
       (memory/record-episode! {:summary "Cleaned the car yesterday"})
+      (local-doc/save-upload! {:session-id sid
+                               :name "garage.txt"
+                               :media-type "text/plain"
+                               :text "The car stays inside the garage."})
 
-      (let [results (wm/search-knowledge ["automobile"] "automobile")]
+      (let [results (wm/search-knowledge sid ["automobile"] "automobile")]
         (is (some #(= "Car" (:name %)) (:nodes results)))
         (is (some #(= "parks the car in the garage" (:content %))
                   (:facts results)))
         (is (some #(= "Cleaned the car yesterday" (:summary %))
-                  (:episodes results)))))))
+                  (:episodes results)))
+        (is (some #(= "garage.txt" (:name %))
+                  (:local-docs results)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Slot merge with properties
@@ -204,9 +214,13 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest test-wm-context-export
-  (let [sid (random-uuid)]
+  (let [sid (db/create-session! :terminal)]
     (wm/create-wm! sid)
-    (let [node-eid (th/seed-node! "Hong" "person")]
+    (let [node-eid (th/seed-node! "Hong" "person")
+          doc      (local-doc/save-upload! {:session-id sid
+                                            :name "research-notes.md"
+                                            :media-type "text/markdown"
+                                            :text "Clojure notes for the Seattle project"})]
     (memory/set-node-property! node-eid [:location] "Seattle")
     (th/seed-fact! node-eid "likes Clojure")
 
@@ -217,6 +231,12 @@
              (fn [slots] (merge-fn slots node-eid "Hong" :person 0.9 1))))
 
     (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "discussing Clojure")
+    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :local-doc-refs]
+           [{:doc-id (:id doc)
+             :name (:name doc)
+             :media-type (:media-type doc)
+             :preview (:preview doc)
+             :relevance 0.75}])
 
     (let [ctx (wm/wm->context sid)]
       (testing "exports topics"
@@ -233,6 +253,11 @@
         (let [entity (first (:entities ctx))]
           (is (= 1 (count (:facts entity))))
           (is (= "likes Clojure" (:content (first (:facts entity)))))))
+
+      (testing "exports local documents"
+        (let [doc (first (:local-docs ctx))]
+          (is (= "research-notes.md" (:name doc)))
+          (is (= "text/markdown" (:media-type doc)))))
 
       (testing "exports turn count"
         (is (= 0 (:turn-count ctx))))))
@@ -279,12 +304,17 @@
 
 (deftest test-update-wm-integration
   (let [sid (random-uuid)]
+    (db/transact! [{:session/id sid :session/channel :terminal :session/active? true}])
     (wm/create-wm! sid)
 
     ;; Seed some knowledge
     (let [node-eid (th/seed-node! "Clojure" "concept")]
       (memory/set-node-property! node-eid [:paradigm] "functional")
       (th/seed-fact! node-eid "runs on the JVM"))
+    (local-doc/save-upload! {:session-id sid
+                             :name "functional-notes.md"
+                             :media-type "text/markdown"
+                             :text "Clojure is a functional language that runs on the JVM."})
 
     (Thread/sleep 100) ; FTS indexing
 
@@ -295,6 +325,11 @@
         ;; Should have found Clojure node
         (let [slot-names (->> (:slots state) vals (map :name) set)]
           (is (contains? slot-names "Clojure")))))
+
+    (testing "update-wm! populates local document refs from search"
+      (let [state (wm/get-wm sid)
+            doc-names (->> (:local-doc-refs state) (map :name) set)]
+        (is (contains? doc-names "functional-notes.md"))))
 
     (testing "slot includes properties"
       (let [state (wm/get-wm sid)

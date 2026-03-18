@@ -2,6 +2,8 @@
   "Session-scoped local documents uploaded explicitly by the user."
   (:require [clojure.string :as str]
             [xia.db :as db]
+            [xia.memory :as memory]
+            [xia.working-memory :as wm]
             [xia.scratch :as scratch])
   (:import [java.io IOException]
            [java.math BigInteger]
@@ -14,7 +16,7 @@
 (def ^:private default-name "Untitled upload")
 (def ^:private default-source :upload)
 (def ^:private preview-char-limit 1200)
- (def ^:private pdf-media-type "application/pdf")
+(def ^:private pdf-media-type "application/pdf")
 
 (def ^:private extension->media-type
   {"c" "text/x-c"
@@ -91,6 +93,12 @@
 (defn- normalize-session-id
   [session-id]
   (normalize-uuid session-id "session_id" :local-doc/invalid-session-id))
+
+(defn- require-session-id
+  []
+  (or wm/*session-id*
+      (throw (ex-info "session id is required"
+                      {:type :local-doc/session-required}))))
 
 (defn- normalize-doc-id
   [doc-id]
@@ -211,17 +219,24 @@
                       e)))))
 
 (defn- upload-source
-  [{:keys [name media-type text bytes-base64]}]
+  [{:keys [name media-type text bytes bytes-base64]}]
   (let [name*       (normalize-name name)
         media-type* (normalize-media-type name* media-type)]
     (cond
       (= pdf-media-type media-type*)
-      (if-let [encoded (some-> bytes-base64 str str/trim not-empty)]
-        (let [source-bytes (decode-base64 encoded)]
+      (if-let [source-bytes (or bytes
+                                (some-> bytes-base64 str str/trim not-empty decode-base64))]
+        (let [source-bytes ^bytes source-bytes]
           {:media-type   media-type*
            :source-bytes source-bytes
            :text         (extract-pdf-text name* media-type* source-bytes)})
         (throw (pdf-bytes-required-ex name* media-type*)))
+
+      (some? bytes)
+      (let [source-bytes ^bytes bytes]
+        {:media-type   media-type*
+         :source-bytes source-bytes
+         :text         (normalize-text (String. source-bytes StandardCharsets/UTF_8))})
 
       (some? bytes-base64)
       (let [source-bytes (decode-base64 (str bytes-base64))]
@@ -234,6 +249,51 @@
         {:media-type   media-type*
          :source-bytes (utf8-bytes text*)
          :text         text*}))))
+
+(defn- raw-upload-bytes
+  [{:keys [text bytes bytes-base64]}]
+  (cond
+    (some? bytes)
+    ^bytes bytes
+
+    (some? bytes-base64)
+    (decode-base64 (str bytes-base64))
+
+    (some? text)
+    (utf8-bytes (normalize-text text))
+
+    :else
+    nil))
+
+(defn- best-effort-media-type
+  [name media-type]
+  (let [name*      (normalize-name name)
+        ext        (file-extension name*)
+        media-type* (base-media-type media-type)]
+    (or (when (or (= media-type* pdf-media-type)
+                  (= ext "pdf"))
+          pdf-media-type)
+        media-type*
+        (get extension->media-type ext))))
+
+(defn- text-preview-for-failure
+  [{:keys [text bytes bytes-base64 name media-type]}]
+  (let [media-type* (best-effort-media-type name media-type)]
+    (cond
+      (seq text)
+      (preview-text (normalize-text text))
+
+      (and (not= media-type* pdf-media-type)
+           (some? bytes))
+      (preview-text (normalize-text (String. ^bytes bytes StandardCharsets/UTF_8)))
+
+      (and (not= media-type* pdf-media-type)
+           (some? bytes-base64))
+      (preview-text (normalize-text (String. ^bytes (decode-base64 (str bytes-base64))
+                                                   StandardCharsets/UTF_8)))
+
+      :else
+      nil)))
 
 (defn- entity-created-at
   [entity-map]
@@ -326,6 +386,35 @@
                                                     :existing? existing?
                                                     :doc-id doc-id})}))
 
+(defn- failed-upload-episode-context
+  [{:keys [media-type size-bytes sha256 preview doc-id error-message]}]
+  (let [lines (cond-> []
+                (seq media-type)
+                (conj (str "Media type: " media-type))
+                (some? size-bytes)
+                (conj (str "Size bytes: " size-bytes))
+                (seq sha256)
+                (conj (str "SHA256: " sha256))
+                doc-id
+                (conj (str "Stored failed document id: " doc-id))
+                (seq error-message)
+                (conj (str "Error: " error-message))
+                (seq preview)
+                (conj (str "Preview: " preview)))]
+    (str/join "\n" lines)))
+
+(defn- failed-upload-episode
+  [{:keys [session-id session-channel name media-type size-bytes sha256 preview doc-id error-message]}]
+  (event-episode {:session-id session-id
+                  :session-channel session-channel
+                  :summary (str "Failed to upload local document " name)
+                  :context (failed-upload-episode-context {:media-type media-type
+                                                           :size-bytes size-bytes
+                                                           :sha256 sha256
+                                                           :preview preview
+                                                           :doc-id doc-id
+                                                           :error-message error-message})}))
+
 (defn- delete-episode-context
   [{:keys [media-type size-bytes sha256 preview doc-id]}]
   (let [lines (cond-> [(str "Media type: " media-type)
@@ -383,17 +472,18 @@
        :updated-at (entity-updated-at entity)})))
 
 (defn list-docs
-  [session-id]
-  (let [session-id* (normalize-session-id session-id)
+  ([] (list-docs (require-session-id)))
+  ([session-id]
+   (let [session-id* (normalize-session-id session-id)
         session-eid* (session-eid session-id*)]
-    (when-not session-eid*
-      (throw (session-not-found-ex session-id*)))
-    (->> (db/q '[:find ?e :in $ ?session :where [?e :local.doc/session ?session]]
-               session-eid*)
-         (map first)
-         (map document-from-eid)
-         (sort-by :updated-at #(compare %2 %1))
-         vec)))
+     (when-not session-eid*
+       (throw (session-not-found-ex session-id*)))
+     (->> (db/q '[:find ?e :in $ ?session :where [?e :local.doc/session ?session]]
+                session-eid*)
+          (map first)
+          (map document-from-eid)
+          (sort-by :updated-at #(compare %2 %1))
+          vec))))
 
 (defn get-doc
   [doc-id]
@@ -407,8 +497,51 @@
     (when (and doc (= (str session-id*) (:session-id doc)))
       doc)))
 
+(defn- read-session-doc
+  [session-id doc-id & {:keys [offset max-chars]
+                        :or {offset 0
+                             max-chars 4000}}]
+  (let [session-id* (normalize-session-id session-id)
+        doc-id*     (normalize-doc-id doc-id)
+        offset*     (max 0 (int (or offset 0)))
+        max-chars*  (max 1 (int (or max-chars 4000)))]
+    (when-let [doc (get-session-doc session-id* doc-id*)]
+      (let [text        (or (:text doc) "")
+            text-length (count text)
+            start       (min offset* text-length)
+            end         (min text-length (+ start max-chars*))]
+        {:id          (:id doc)
+         :name        (:name doc)
+         :media-type  (:media-type doc)
+         :status      (:status doc)
+         :size-bytes  (:size-bytes doc)
+         :preview     (:preview doc)
+         :text        (subs text start end)
+         :offset      start
+         :end-offset  end
+         :total-chars text-length
+         :truncated?  (< end text-length)}))))
+
+(defn search-docs
+  "Search local documents visible to the current session."
+  [query & {:keys [top fts-query] :or {top 5}}]
+  (memory/search-local-docs (require-session-id)
+                            query
+                            :top top
+                            :fts-query fts-query))
+
+(defn read-doc
+  "Read a local document visible to the current session, optionally slicing the text."
+  [doc-id & {:keys [offset max-chars]
+             :or {offset 0
+                  max-chars 4000}}]
+  (read-session-doc (require-session-id)
+                    doc-id
+                    :offset offset
+                    :max-chars max-chars))
+
 (defn save-upload!
-  [{:keys [session-id name media-type size-bytes source text bytes-base64]}]
+  [{:keys [session-id name media-type size-bytes source text bytes bytes-base64]}]
   (let [session-id*  (normalize-session-id session-id)
         session-eid* (session-eid session-id*)]
     (when-not session-eid*
@@ -418,6 +551,7 @@
           (upload-source {:name name*
                           :media-type media-type
                           :text text
+                          :bytes bytes
                           :bytes-base64 bytes-base64})
           text*       text
           sha256      (sha256-hex source-bytes)
@@ -446,6 +580,55 @@
                          :preview preview
                           :existing? (boolean existing)
                           :doc-id doc-id})])
+      (document-from-eid (doc-eid doc-id)))))
+
+(defn save-failed-upload!
+  [{:keys [session-id name media-type size-bytes source text bytes bytes-base64]} error]
+  (let [session-id*  (normalize-session-id session-id)
+        session-eid* (session-eid session-id*)]
+    (when-not session-eid*
+      (throw (session-not-found-ex session-id*)))
+    (let [name*          (normalize-name name)
+          source-bytes   (try
+                           (raw-upload-bytes {:text text
+                                              :bytes bytes
+                                              :bytes-base64 bytes-base64})
+                           (catch Exception _
+                             nil))
+          media-type*    (best-effort-media-type name* media-type)
+          size-bytes*    (cond
+                           (some? size-bytes) (normalize-size-bytes size-bytes (or (some-> source-bytes alength) 0))
+                           source-bytes       (long (alength ^bytes source-bytes))
+                           :else              nil)
+          sha256         (some-> source-bytes sha256-hex)
+          preview        (text-preview-for-failure {:name name*
+                                                    :media-type media-type*
+                                                    :text text
+                                                    :bytes bytes
+                                                    :bytes-base64 bytes-base64})
+          channel        (session-channel session-eid*)
+          doc-id         (random-uuid)
+          error-message  (.getMessage error)]
+      (db/transact!
+        [(cond-> {:local.doc/id      doc-id
+                  :local.doc/session session-eid*
+                  :local.doc/name    name*
+                  :local.doc/source  (or source default-source)
+                  :local.doc/status  :failed
+                  :local.doc/error   error-message}
+           media-type* (assoc :local.doc/media-type media-type*)
+           (some? size-bytes*) (assoc :local.doc/size-bytes size-bytes*)
+           sha256 (assoc :local.doc/sha256 sha256)
+           preview (assoc :local.doc/preview preview))
+         (failed-upload-episode {:session-id session-id*
+                                 :session-channel channel
+                                 :name name*
+                                 :media-type media-type*
+                                 :size-bytes size-bytes*
+                                 :sha256 sha256
+                                 :preview preview
+                                 :doc-id doc-id
+                                 :error-message error-message})])
       (document-from-eid (doc-eid doc-id)))))
 
 (defn delete-doc!

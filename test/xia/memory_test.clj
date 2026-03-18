@@ -3,6 +3,7 @@
             [datalevin.built-ins :as builtins]
             [xia.test-helpers :as th]
             [xia.db :as db]
+            [xia.local-doc :as local-doc]
             [xia.memory :as memory]))
 
 (use-fixtures :each th/with-test-db)
@@ -438,6 +439,50 @@
       (let [results (memory/search-edges "Acme Corp")]
         (is (pos? (count results)))
         (is (= :works-at (:type (first results))))))))
+
+(deftest test-search-local-docs
+  (let [sid-a (db/create-session! :http)
+        sid-b (db/create-session! :http)]
+    (local-doc/save-upload! {:session-id sid-a
+                             :name "garage-notes.md"
+                             :media-type "text/markdown"
+                             :text "The car is stored indoors in the garage."})
+    (local-doc/save-upload! {:session-id sid-b
+                             :name "travel.txt"
+                             :media-type "text/plain"
+                             :text "Book ferry tickets for the weekend."})
+
+    (testing "finds session-scoped local documents semantically"
+      (let [results (memory/search-local-docs sid-a "automobile")]
+        (is (= 1 (count results)))
+        (is (= "garage-notes.md" (:name (first results)))))))
+
+  (testing "does not leak other session documents"
+    (let [sid-a (db/create-session! :http)
+          sid-b (db/create-session! :http)]
+      (local-doc/save-upload! {:session-id sid-b
+                               :name "budget-private.csv"
+                               :media-type "text/csv"
+                               :text "line item,cost\nzxqtravelonly,200"})
+      (let [results (memory/search-local-docs sid-a "zxqtravelonly")]
+        (is (= [] results))))))
+
+(deftest test-search-local-docs-candidate-pool-size-uses-config
+  (let [sid (db/create-session! :http)
+        fts-top (atom nil)
+        sem-top (atom nil)]
+    (db/set-config! :memory/search-local-doc-candidate-pool-size 19)
+    (with-redefs [xia.memory/local-doc-fulltext-hits
+                  (fn [_session-id _query & {:keys [top]}]
+                    (reset! fts-top top)
+                    [])
+                  xia.memory/local-doc-embedding-hits
+                  (fn [_session-id _query & {:keys [top]}]
+                    (reset! sem-top top)
+                    [])]
+      (is (= [] (memory/search-local-docs sid "car" :top 5)))
+      (is (= 19 @fts-top))
+      (is (= 19 @sem-top)))))
 
 ;; ---------------------------------------------------------------------------
 ;; recall-knowledge

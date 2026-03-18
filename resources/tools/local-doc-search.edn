@@ -1,0 +1,17 @@
+;; Search uploaded local documents for the current session.
+;; Import with: /import-tool resources/tools/local-doc-search.edn
+
+{:id             :local-doc-search
+ :name           "local-doc-search"
+ :description    "Search the uploaded local documents for the current session. Returns matching document ids, names, media types, and previews so you can inspect the right local file before reading it."
+ :tags           #{:local :document :search :retrieval}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"query" {"type"        "string"
+                                         "description" "What to search for in the current session's uploaded local documents."}
+                                "top"   {"type"        "integer"
+                                         "description" "Maximum number of matching documents to return (default 5)."}}
+                  "required"   ["query"]}
+ :handler        "(fn [args]
+                    (xia.local-doc/search-docs (get args \"query\")
+                                               :top (or (get args \"top\") 5)))"}

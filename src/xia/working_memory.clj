@@ -115,6 +115,7 @@
 (def ^:private default-config
   {:max-slots             15
    :max-episode-refs      5
+   :max-local-doc-refs    4
    :decay-factor          0.85
    :eviction-threshold    0.1
    :topic-update-interval 5})   ; update topic summary every N turns
@@ -191,6 +192,9 @@ Rules:
                         vals
                         (map :name)
                         (remove nil?)
+                        (concat (->> (:local-doc-refs wm)
+                                     (map :name)
+                                     (remove nil?)))
                         (map str/lower-case)))
         ;; Combine, deduplicate
         all-terms (distinct (concat proper-nouns meaningful wm-names))]
@@ -202,17 +206,22 @@ Rules:
 
 (defn search-knowledge
   "Search across nodes, facts, and episodes using hybrid lexical + semantic retrieval.
-   Returns {:nodes [...] :facts [...] :episodes [...]}."
+   Returns {:nodes [...] :facts [...] :episodes [...] :local-docs [...]}."
   ([terms]
    (search-knowledge terms nil))
   ([terms semantic-query]
+   (search-knowledge nil terms semantic-query))
+  ([session-id terms semantic-query]
    (let [fts-query      (str/join " " terms)
          semantic-query (or semantic-query fts-query)]
     (when (or (not (str/blank? fts-query))
               (not (str/blank? semantic-query)))
       {:nodes    (memory/search-nodes semantic-query :fts-query fts-query :top 10)
        :facts    (memory/search-facts semantic-query :fts-query fts-query :top 15)
-       :episodes (memory/search-episodes semantic-query :fts-query fts-query :top 5)}))))
+       :episodes (memory/search-episodes semantic-query :fts-query fts-query :top 5)
+       :local-docs (memory/search-local-docs session-id semantic-query
+                                             :fts-query fts-query
+                                             :top 4)}))))
 
 ;; ============================================================================
 ;; Stage 3: Graph Expansion (spreading activation)
@@ -325,10 +334,29 @@ Rules:
                                     (apply max-key :relevance dups)))
                              (sort-by :relevance >)
                              (take max-refs)
+                             vec)
+            max-doc-refs (get-in wm [:config :max-local-doc-refs])
+            new-doc-refs (->> (:local-docs search-results)
+                              (map-indexed
+                                (fn [idx {:keys [id name media-type preview]}]
+                                  {:doc-id     id
+                                   :name       name
+                                   :media-type media-type
+                                   :preview    preview
+                                   :relevance  (max 0.45 (- 0.8 (* idx 0.1)))}))
+                              vec)
+            merged-doc-refs (->> (concat (:local-doc-refs wm) new-doc-refs)
+                                 (group-by :doc-id)
+                                 vals
+                                 (map (fn [dups]
+                                        (apply max-key :relevance dups)))
+                                 (sort-by :relevance >)
+                                 (take max-doc-refs)
                              vec)]
         (assoc wm
                :slots        slots-with-expanded
-               :episode-refs merged-refs)))))
+               :episode-refs merged-refs
+               :local-doc-refs merged-doc-refs)))))
 
 (defn- decay-slot-map
   [slots factor]
@@ -391,8 +419,10 @@ Rules:
      (fn [sid]
        (let [wm       (session-wm sid)
              entities (->> (:slots wm) vals (map :name) (remove nil?) (str/join ", "))
+             local-docs (->> (:local-doc-refs wm) (map :name) (remove nil?) (str/join ", "))
              episodes (->> (:episode-refs wm) (map :summary) (str/join "; "))
              prompt   (str "Current entities in focus: " entities
+                           "\nRelevant local documents: " local-docs
                            "\nRecent relevant episodes: " episodes
                            "\n\nSummarize the current conversation focus in ONE sentence.")]
          (when wm
@@ -543,7 +573,7 @@ Rules:
       (when (session-wm sid)
         (update-session-wm! sid #(update % :turn-count inc))
         (let [terms   (extract-search-terms sid user-message)
-              results (search-knowledge terms user-message)]
+              results (search-knowledge sid terms user-message)]
           (when results
             (let [matched-eids (mapv :eid (:nodes results))
                   expanded     (when (seq matched-eids)
@@ -581,11 +611,12 @@ Rules:
       (let [wm {:session-id   sid
                 :topics       nil
                 :prev-topics  nil
-                :turn-count   0
-                :topic-turn   0
-                :slots        {}
-                :episode-refs []
-                :config       default-config}]
+               :turn-count   0
+               :topic-turn   0
+               :slots        {}
+               :episode-refs []
+               :local-doc-refs []
+               :config       default-config}]
         (swap! wm-atom assoc sid wm)
         wm))))
 
@@ -616,7 +647,7 @@ Rules:
                (log/info "Warm start from previous session:" prev-context)
                (update-session-wm! sid #(assoc % :prev-topics prev-context))
                (let [terms (extract-search-terms sid prev-context)
-                     results (search-knowledge terms prev-context)]
+                     results (search-knowledge sid terms prev-context)]
                  (when results
                    (let [matched-eids (mapv :eid (:nodes results))
                          expanded (when (seq matched-eids) (expand-graph matched-eids))]
@@ -692,6 +723,14 @@ Rules:
                                 {:summary   summary
                                  :timestamp timestamp
                                  :relevance relevance})))
+     :local-docs   (->> (:local-doc-refs wm)
+                        (sort-by :relevance >)
+                        (mapv (fn [{:keys [doc-id name media-type preview relevance]}]
+                                {:id         doc-id
+                                 :name       name
+                                 :media-type media-type
+                                 :preview    preview
+                                 :relevance  relevance})))
      :turn-count   (:turn-count wm)})))
 
 ;; ============================================================================

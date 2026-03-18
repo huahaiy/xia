@@ -104,20 +104,26 @@
       (is (= {:result {"token" "top-secret"}}
              (:message/tool-result (:tool raw-messages))))
       (is (= [{:role :user
+               :id (:id (first messages))
                :content "pasted local secret"
                :created-at (:created-at (first messages))
+               :local-docs nil
                :tool-calls nil
                :tool-result nil
                :tool-id nil}
               {:role :assistant
+               :id (:id (second messages))
                :content "checking service"
                :created-at (:created-at (second messages))
+               :local-docs nil
                :tool-calls tool-calls
                :tool-result nil
                :tool-id nil}
               {:role :tool
+               :id (:id (nth messages 2))
                :content nil
                :created-at (:created-at (nth messages 2))
+               :local-docs nil
                :tool-calls nil
                :tool-result {"token" "top-secret"}
                :tool-id "call_1"}]

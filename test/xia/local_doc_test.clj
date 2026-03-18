@@ -1,7 +1,6 @@
 (ns xia.local-doc-test
   (:require [clojure.test :refer :all]
             [datalevin.core :as d]
-            [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
@@ -28,7 +27,7 @@
       (.save doc out)
       (.encodeToString (Base64/getEncoder) (.toByteArray out)))))
 
-(deftest local-documents-are-encrypted-at-rest-and-session-scoped
+(deftest local-documents-are-searchable-at-rest-and-session-scoped
   (let [sid-a  (db/create-session! :http)
         sid-b  (db/create-session! :http)
         saved  (local-doc/save-upload! {:session-id sid-a
@@ -39,9 +38,9 @@
         eid    (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
                               (:id saved)))
         raw    (into {} (d/entity (d/db (db/conn)) eid))]
-    (is (crypto/encrypted? (:local.doc/name raw)))
-    (is (crypto/encrypted? (:local.doc/text raw)))
-    (is (crypto/encrypted? (:local.doc/preview raw)))
+    (is (= "notes.md" (:local.doc/name raw)))
+    (is (= "# secret" (:local.doc/text raw)))
+    (is (= "# secret" (:local.doc/preview raw)))
     (is (= [(:id saved)]
            (mapv :id (local-doc/list-docs sid-a))))
     (is (= [] (local-doc/list-docs sid-b)))
@@ -95,6 +94,22 @@
       (is false "Expected invalid PDF rejection")
       (catch clojure.lang.ExceptionInfo e
         (is (= :local-doc/pdf-extraction-failed (:type (ex-data e))))))))
+
+(deftest failed-local-document-uploads-can-be-persisted
+  (let [sid (db/create-session! :http)
+        err (ex-info "Unsupported local document format"
+                     {:type :local-doc/unsupported-format})
+        doc (local-doc/save-failed-upload! {:session-id sid
+                                            :name "bad.bin"
+                                            :media-type "application/octet-stream"
+                                            :bytes (.getBytes "raw")}
+                                           err)]
+    (is (= :failed (:status doc)))
+    (is (= "bad.bin" (:name doc)))
+    (is (= "Unsupported local document format" (:error doc)))
+    (is (= [(:id doc)] (mapv :id (local-doc/list-docs sid))))
+    (is (= #{"Failed to upload local document bad.bin"}
+           (set (map :summary (memory/recent-episodes 5)))))))
 
 (deftest local-document-note-and-delete-actions-create-event-episodes
   (let [sid   (db/create-session! :http)

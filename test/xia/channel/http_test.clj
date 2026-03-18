@@ -5,17 +5,51 @@
             [xia.agent]
             [xia.channel.http :as http]
             [xia.db :as db]
+            [xia.local-doc :as local-doc]
             [xia.schedule :as schedule]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.io ByteArrayInputStream]
+  (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
            [java.nio.charset StandardCharsets]
-           [java.util UUID]))
+           [java.util UUID]
+           [org.apache.pdfbox.pdmodel PDDocument PDPage PDPageContentStream]
+           [org.apache.pdfbox.pdmodel.font PDType1Font Standard14Fonts$FontName]))
 
 (use-fixtures :each with-test-db)
 
 (defn- request-body [payload]
   (ByteArrayInputStream.
     (.getBytes (json/write-json-str payload) StandardCharsets/UTF_8)))
+
+(declare ui-headers)
+
+(defn- multipart-body
+  [boundary parts]
+  (let [encoding StandardCharsets/UTF_8]
+    (with-open [out (ByteArrayOutputStream.)]
+      (doseq [{:keys [field-name filename content-type body-bytes]} parts]
+        (.write out (.getBytes (str "--" boundary "\r\n") encoding))
+        (.write out (.getBytes (str "Content-Disposition: form-data; name=\""
+                                    field-name
+                                    "\"; filename=\""
+                                    filename
+                                    "\"\r\n")
+                               encoding))
+        (when content-type
+          (.write out (.getBytes (str "Content-Type: " content-type "\r\n") encoding)))
+        (.write out (.getBytes "\r\n" encoding))
+        (.write out ^bytes body-bytes)
+        (.write out (.getBytes "\r\n" encoding)))
+      (.write out (.getBytes (str "--" boundary "--\r\n") encoding))
+      (.toByteArray out))))
+
+(defn- multipart-request
+  [uri parts]
+  (let [boundary (str "----xia-test-boundary-" (random-uuid))]
+    {:uri            uri
+     :request-method :post
+     :headers        (assoc (ui-headers)
+                            "content-type" (str "multipart/form-data; boundary=" boundary))
+     :body           (ByteArrayInputStream. (multipart-body boundary parts))}))
 
 (defn- oversized-request-body []
   (let [size (inc (var-get #'http/max-request-body-bytes))
@@ -35,6 +69,21 @@
 (defn- ui-headers []
   {"origin" "http://localhost:3008"
    "cookie" (local-session-cookie)})
+
+(defn- sample-pdf-bytes
+  [text]
+  (with-open [doc (PDDocument.)
+              out (ByteArrayOutputStream.)]
+    (let [page (PDPage.)]
+      (.addPage doc page)
+      (with-open [content (PDPageContentStream. doc page)]
+        (.beginText content)
+        (.setFont content (PDType1Font. Standard14Fonts$FontName/HELVETICA) 12)
+        (.newLineAtOffset content 72 720)
+        (.showText content text)
+        (.endText content))
+      (.save doc out)
+      (.toByteArray out))))
 
 (defn- wait-for
   [f]
@@ -433,9 +482,13 @@
     (is (= "request body too large" (get body "error")))))
 
 (deftest session-messages-route-returns-transcript
-  (let [sid (db/create-session! :http)]
-    (db/add-message! sid :user "hello")
-    (db/add-message! sid :assistant "hi there")
+  (let [sid (db/create-session! :http)
+        doc (local-doc/save-upload! {:session-id sid
+                                     :name "notes.md"
+                                     :media-type "text/markdown"
+                                     :text "# notes"})]
+    (db/add-message! sid :user "hello" :local-doc-ids [(:id doc)])
+    (db/add-message! sid :assistant "hi there" :local-doc-ids [(:id doc)])
     (db/add-message! sid :tool "internal")
     (let [response (#'http/router {:uri            (str "/sessions/" sid "/messages")
                                    :request-method :get
@@ -446,8 +499,10 @@
       (is (= 2 (count messages)))
       (is (= "user" (get (first messages) "role")))
       (is (= "hello" (get (first messages) "content")))
+      (is (= "notes.md" (get-in (first messages) ["local_docs" 0 "name"])))
       (is (= "assistant" (get (second messages) "role")))
-      (is (= "hi there" (get (second messages) "content"))))))
+      (is (= "hi there" (get (second messages) "content")))
+      (is (= (str (:id doc)) (get-in (second messages) ["local_docs" 0 "id"]))))))
 
 (deftest session-messages-route-blocks-non-local-origins
   (let [response (#'http/router {:uri            (str "/sessions/" (random-uuid) "/messages")
@@ -718,9 +773,94 @@
                                                                                 "text" "ignored"}]})})
         body       (response-json response)]
     (is (= 201 (:status response)))
-    (is (= 1 (count (get body "documents"))))
+    (is (= 2 (count (get body "documents"))))
     (is (= 1 (count (get body "errors"))))
+    (is (= "failed" (get-in body ["documents" 1 "status"])))
     (is (= "paper.pdf" (get-in body ["errors" 0 "name"])))))
+
+(deftest local-document-multipart-route-round-trip
+  (let [sid         (str (db/create-session! :http))
+        create-res  (#'http/router
+                      (multipart-request
+                        (str "/sessions/" sid "/local-documents")
+                        [{:field-name   "documents"
+                          :filename     "notes.md"
+                          :content-type "text/markdown"
+                          :body-bytes   (.getBytes "# Local\n\ncontent"
+                                                  StandardCharsets/UTF_8)}]))
+        create-body (response-json create-res)
+        doc-id      (get-in create-body ["documents" 0 "id"])]
+    (is (= 201 (:status create-res)))
+    (is (= "notes.md" (get-in create-body ["documents" 0 "name"])))
+    (is (= "text/markdown" (get-in create-body ["documents" 0 "media_type"])))
+    (let [get-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          get-body (response-json get-res)]
+      (is (= 200 (:status get-res)))
+      (is (= "# Local\n\ncontent" (get-in get-body ["document" "text"]))))))
+
+(deftest local-document-multipart-route-extracts-pdf
+  (let [sid         (str (db/create-session! :http))
+        create-res  (#'http/router
+                      (multipart-request
+                        (str "/sessions/" sid "/local-documents")
+                        [{:field-name   "documents"
+                          :filename     "paper.pdf"
+                          :content-type "application/pdf"
+                          :body-bytes   (sample-pdf-bytes "Hello multipart PDF")}]))
+        create-body (response-json create-res)
+        doc-id      (get-in create-body ["documents" 0 "id"])
+        get-res     (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id)
+                                    :request-method :get
+                                    :headers        (ui-headers)})
+        get-body    (response-json get-res)]
+    (is (= 201 (:status create-res)))
+    (is (= "application/pdf" (get-in create-body ["documents" 0 "media_type"])))
+    (is (= 200 (:status get-res)))
+    (is (.contains ^String (get-in get-body ["document" "text"]) "Hello multipart PDF"))))
+
+(deftest local-document-multipart-route-reports-partial-upload-errors
+  (let [sid      (str (db/create-session! :http))
+        response (#'http/router
+                   (multipart-request
+                     (str "/sessions/" sid "/local-documents")
+                     [{:field-name   "documents"
+                       :filename     "notes.txt"
+                       :content-type "text/plain"
+                       :body-bytes   (.getBytes "ok" StandardCharsets/UTF_8)}
+                      {:field-name   "documents"
+                       :filename     "bad.bin"
+                       :content-type "application/octet-stream"
+                       :body-bytes   (.getBytes "raw" StandardCharsets/UTF_8)}]))
+        body     (response-json response)]
+    (is (= 201 (:status response)))
+    (is (= 2 (count (get body "documents"))))
+    (is (= 1 (count (get body "errors"))))
+    (is (= "failed" (get-in body ["documents" 1 "status"])))
+    (is (= "bad.bin" (get-in body ["errors" 0 "name"])))))
+
+(deftest chat-route-forwards-explicit-local-document-refs
+  (let [sid      (db/create-session! :http)
+        doc      (local-doc/save-upload! {:session-id sid
+                                          :name "paper.md"
+                                          :media-type "text/markdown"
+                                          :text "content"})
+        seen-opts (atom nil)]
+    (with-redefs [xia.agent/process-message (fn [_session-id _user-message & {:as opts}]
+                                              (reset! seen-opts opts)
+                                              "ok")]
+      (let [response (#'http/router {:uri            "/chat"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "summarize this"
+                                                                    "session_id" (str sid)
+                                                                    "local_doc_ids" [(str (:id doc))]})})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= "ok" (get body "content")))
+        (is (= :http (:channel @seen-opts)))
+        (is (= [(str (:id doc))] (mapv str (:local-doc-ids @seen-opts))))))))
 
 (deftest approval-route-allows-round-trip
   (let [sid    (str (db/create-session! :http))

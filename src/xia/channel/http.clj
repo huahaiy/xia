@@ -4,6 +4,7 @@
             [clojure.java.io :as io]
             [org.httpkit.server :as http]
             [charred.api :as json]
+            [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
             [xia.scratch :as scratch]
             [xia.autonomous :as autonomous]
@@ -42,6 +43,7 @@
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private ms-per-day (* 24 60 60 1000))
+(def ^:private byte-array-class (Class/forName "[B"))
 (defonce ^:private local-session-secret
   (delay
     (let [bytes (byte-array 32)
@@ -180,7 +182,14 @@
             :error "invalid JSON request body"}
            cause))
 
+(declare read-body-bytes)
+
 (defn- read-body-text
+  [body]
+  (when-let [body-bytes (read-body-bytes body)]
+    (String. ^bytes body-bytes StandardCharsets/UTF_8)))
+
+(defn- read-body-bytes
   [body]
   (cond
     (nil? body)
@@ -190,13 +199,13 @@
     (let [body-bytes (.getBytes ^String body StandardCharsets/UTF_8)]
       (when (> (alength body-bytes) max-request-body-bytes)
         (throw (request-body-too-large-ex)))
-      body)
+      body-bytes)
 
-    (instance? (class (byte-array 0)) body)
+    (instance? byte-array-class body)
     (let [body-bytes ^bytes body]
       (when (> (alength body-bytes) max-request-body-bytes)
         (throw (request-body-too-large-ex)))
-      (String. body-bytes StandardCharsets/UTF_8))
+      body-bytes)
 
     :else
     (with-open [^InputStream in (io/input-stream body)
@@ -206,7 +215,7 @@
           (let [read-count (.read in buffer)]
             (cond
               (neg? read-count)
-              (.toString out "UTF-8")
+              (.toByteArray out)
 
               (> (+ total read-count) max-request-body-bytes)
               (throw (request-body-too-large-ex))
@@ -235,6 +244,17 @@
                 (when (= target (str/lower-case (str k)))
                   v))
               (:headers req)))))
+
+(defn- request-content-type
+  [req]
+  (some-> (request-header req "content-type")
+          str
+          str/lower-case))
+
+(defn- multipart-form-request?
+  [req]
+  (some-> (request-content-type req)
+          (str/starts-with? "multipart/form-data")))
 
 (declare nonblank-str parse-session-id session-exists?)
 
@@ -663,6 +683,12 @@
   [doc]
   (dissoc (local-doc->body doc) :text :sha256))
 
+(defn- local-doc-ref->body
+  [doc]
+  {:id     (some-> (:id doc) str)
+   :name   (:name doc)
+   :status (some-> (:status doc) name)})
+
 (defn- nonblank-str
   [value]
   (let [s (some-> value str str/trim)]
@@ -914,7 +940,10 @@
   [req]
   (let [data       (read-body req)
         message    (get data "message")
-        session-id (get data "session_id")]
+        session-id (get data "session_id")
+        local-doc-ids (when (sequential? (get data "local_doc_ids"))
+                        (vec (keep #(when (some? %) (str %))
+                                   (get data "local_doc_ids"))))]
     (cond
       (not message)
       {:response (json-response 400 {:error "missing 'message' field"})}
@@ -933,12 +962,16 @@
         (cancel-rest-session-finalizer! sid)
         (clear-session-status! sid)
         {:session-id sid
-         :message    message}))))
+         :message    message
+         :local-doc-ids local-doc-ids}))))
 
 (defn- process-chat!
-  [{:keys [session-id message]}]
+  [{:keys [session-id message local-doc-ids]}]
   (try
-    (let [response (agent/process-message session-id message :channel :http)]
+    (let [response (agent/process-message session-id
+                                          message
+                                          :channel :http
+                                          :local-doc-ids local-doc-ids)]
       (json-response 200 {:session_id (str session-id)
                           :role       "assistant"
                           :content    response}))
@@ -1034,10 +1067,11 @@
     (let [sid      (java.util.UUID/fromString session-id)
           messages (->> (db/session-messages sid)
                         (filter #(#{:user :assistant} (:role %)))
-                        (mapv (fn [{:keys [role content created-at]}]
+                        (mapv (fn [{:keys [role content created-at local-docs]}]
                                 {:role       (name role)
                                  :content    content
-                                 :created_at (some-> created-at .toInstant str)})))]
+                                 :created_at (some-> created-at .toInstant str)
+                                 :local_docs (mapv local-doc-ref->body (or local-docs []))})))]
       (touch-rest-session! session-id)
       (json-response 200 {:session_id session-id
                           :messages   messages}))
@@ -1251,7 +1285,7 @@
    :bytes-base64 (get entry "bytes_base64")
    :text       (get entry "text")})
 
-(defn- local-doc-upload-entries
+(defn- json-local-doc-upload-entries
   [data]
   (let [entries (cond
                   (sequential? (get data "documents"))
@@ -1265,6 +1299,60 @@
     (->> entries
          (filter map?)
          (mapv parse-local-doc-upload))))
+
+(defn- multipart-local-doc-upload?
+  [value]
+  (and (map? value)
+       (or (contains? value :tempfile)
+           (contains? value "tempfile")
+           (contains? value :filename)
+           (contains? value "filename"))))
+
+(defn- local-doc-part-bytes
+  [part]
+  (let [tempfile (or (:tempfile part) (get part "tempfile"))
+        body     (or tempfile
+                     (:bytes part)
+                     (get part "bytes")
+                     (:stream part)
+                     (get part "stream"))]
+    (when-not body
+      (throw (ex-info "missing uploaded file bytes"
+                      {:type :local-doc/missing-file-bytes
+                       :name (or (:filename part) (get part "filename"))})))
+    (try
+      (read-body-bytes body)
+      (finally
+        (when tempfile
+          (.delete tempfile))))))
+
+(defn- multipart-local-doc-upload-entry
+  [part]
+  {:name       (or (:filename part) (get part "filename"))
+   :media-type (or (:content-type part) (get part "content-type"))
+   :size-bytes (or (:size part) (get part "size"))
+   :source     (get part "source")
+   :bytes      (local-doc-part-bytes part)})
+
+(defn- multipart-local-doc-upload-entries
+  [req]
+  (let [params  (or (:multipart-params req) (:params req))
+        uploads (or (get params "documents")
+                    (get params :documents)
+                    (get params "documents[]")
+                    (get params :documents[]))]
+    (->> (cond
+           (sequential? uploads) uploads
+           (some? uploads)       [uploads]
+           :else                 [])
+         (filter multipart-local-doc-upload?)
+         (mapv multipart-local-doc-upload-entry))))
+
+(defn- local-doc-upload-entries
+  [req]
+  (if (multipart-form-request? req)
+    (multipart-local-doc-upload-entries req)
+    (json-local-doc-upload-entries (or (read-body req) {}))))
 
 (defn- local-doc-error->body
   [upload e]
@@ -1297,8 +1385,7 @@
     (json-response 404 {:error "session not found"})
 
     :else
-    (let [data    (or (read-body req) {})
-          uploads (local-doc-upload-entries data)]
+    (let [uploads (local-doc-upload-entries req)]
       (if-not (seq uploads)
         (json-response 400 {:error "missing local documents"})
         (let [{:keys [documents errors]}
@@ -1308,14 +1395,30 @@
                                   (local-doc-metadata->body
                                     (local-doc/save-upload!
                                       {:session-id session-id
-                                       :name       (:name upload)
-                                       :media-type (:media-type upload)
-                                       :size-bytes (:size-bytes upload)
-                                       :source     (:source upload)
-                                       :bytes-base64 (:bytes-base64 upload)
-                                       :text       (:text upload)})))
+                                      :name       (:name upload)
+                                      :media-type (:media-type upload)
+                                      :size-bytes (:size-bytes upload)
+                                      :source     (:source upload)
+                                      :bytes      (:bytes upload)
+                                      :bytes-base64 (:bytes-base64 upload)
+                                      :text       (:text upload)})))
                           (catch clojure.lang.ExceptionInfo e
-                            (update acc :errors conj (local-doc-error->body upload e)))))
+                            (let [failed-doc (try
+                                               (local-doc/save-failed-upload!
+                                                 {:session-id session-id
+                                                  :name       (:name upload)
+                                                  :media-type (:media-type upload)
+                                                  :size-bytes (:size-bytes upload)
+                                                  :source     (:source upload)
+                                                  :bytes      (:bytes upload)
+                                                  :bytes-base64 (:bytes-base64 upload)
+                                                  :text       (:text upload)}
+                                                 e)
+                                               (catch Exception _
+                                                 nil))]
+                              (cond-> (update acc :errors conj (local-doc-error->body upload e))
+                                failed-doc
+                                (update :documents conj (local-doc-metadata->body failed-doc)))))))
                       {:documents [] :errors []}
                       uploads)
               status (if (seq documents) 201 400)]
@@ -1810,7 +1913,7 @@
 ;; Router
 ;; ---------------------------------------------------------------------------
 
-(defn- router [req]
+(defn- router* [req]
   (try
     (let [uri    (:uri req)
           method (:request-method req)
@@ -1959,6 +2062,18 @@
         (json-response 404 {:error "not found"})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
+
+(def ^:private multipart-router
+  (multipart/wrap-multipart-params router*))
+
+(defn- router
+  [req]
+  (try
+    (multipart-router req)
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))
+    (catch Exception e
+      (json-response 400 {:error (.getMessage e)}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle

@@ -43,6 +43,8 @@
    "tools/browser-close.edn"
    "tools/browser-login.edn"
    "tools/browser-login-interactive.edn"
+   "tools/local-doc-search.edn"
+   "tools/local-doc-read.edn"
    "tools/schedule-list.edn"
    "tools/schedule-create.edn"
    "tools/schedule-manage.edn"])

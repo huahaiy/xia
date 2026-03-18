@@ -493,8 +493,13 @@ Rules:
   "Use the LLM to create a summary of a conversation for episodic storage."
   [messages]
   (let [convo-text (->> messages
-                        (map (fn [{:keys [role content]}]
-                               (str (name role) ": " content)))
+                        (map (fn [{:keys [role content local-docs]}]
+                               (str (name role) ": " content
+                                    (when (seq local-docs)
+                                      (str "\n[local documents: "
+                                           (str/join ", "
+                                                     (keep :name local-docs))
+                                           "]")))))
                         (clojure.string/join "\n"))
         response   (llm/chat-simple
                      [{:role "system"
@@ -506,17 +511,35 @@ Rules:
                      :workload :memory-summary)]
     response))
 
+(defn- referenced-local-doc-names
+  [messages]
+  (->> messages
+       (mapcat :local-docs)
+       (keep :name)
+       (remove str/blank?)
+       distinct
+       vec))
+
 (defn record-conversation!
   "Record a conversation as an episodic memory and trigger consolidation.
    Includes WM topic summary as episode context for richer consolidation."
   [session-id channel & {:keys [topics]}]
   (let [messages (db/session-messages session-id)]
     (when (> (count messages) 1) ; at least one exchange
-      (let [summary (summarize-conversation messages)]
+      (let [summary    (summarize-conversation messages)
+            doc-names  (referenced-local-doc-names messages)
+            context    (not-empty
+                         (str/join "\n"
+                                   (cond-> []
+                                     topics
+                                     (conj (str "Topic: " topics))
+                                     (seq doc-names)
+                                     (conj (str "Local documents referenced: "
+                                                (str/join ", " doc-names))))))]
         (memory/record-episode!
           {:type         :conversation
            :summary      summary
-           :context      (when topics (str "Topic: " topics))
+           :context      context
            :channel      channel
            :session-id   session-id
            :participants (db/get-config :user/name)})

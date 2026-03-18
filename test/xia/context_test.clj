@@ -209,6 +209,36 @@
       (is (nil? (re nil 500))))))
 
 ;; ---------------------------------------------------------------------------
+;; render-local-docs
+;; ---------------------------------------------------------------------------
+
+(deftest test-render-local-docs
+  (let [rd #'xia.context/render-local-docs]
+    (testing "renders local documents with preview"
+      (let [docs [{:name "paper.pdf"
+                   :media-type "application/pdf"
+                   :preview "This paper studies retrieval in scientific corpora."
+                   :relevance 0.8}]
+            result (rd docs 500)]
+        (is (str/includes? result "### Local Documents"))
+        (is (str/includes? result "paper.pdf"))
+        (is (str/includes? result "scientific corpora"))))
+
+    (testing "budget-aware truncation"
+      (let [docs (mapv (fn [i]
+                         {:name (str "doc-" i ".txt")
+                          :media-type "text/plain"
+                          :preview (apply str (repeat 150 "x"))
+                          :relevance (- 1.0 (* i 0.1))})
+                       (range 10))
+            result (rd docs 80)]
+        (is (str/includes? result "### Local Documents"))
+        (is (< (count (re-seq #"- doc-" result)) 10))))
+
+    (testing "empty docs"
+      (is (nil? (rd [] 500))))))
+
+;; ---------------------------------------------------------------------------
 ;; render-skills
 ;; ---------------------------------------------------------------------------
 
@@ -244,6 +274,7 @@
     (is (= 1200 (:identity budget)))
     (is (= 400 (:topic budget)))
     (is (= 6000 (:entities budget)))
+    (is (= 1600 (:local-docs budget)))
     (is (= 2000 (:episodes budget)))
     (is (= 6000 (:skills budget)))))
 
@@ -257,12 +288,23 @@
   ;; No WM active, no skills
   (let [sid    (db/create-session! :terminal)
         _      (wm/create-wm! sid)
+        _      (swap! @#'xia.working-memory/wm-atom
+                      assoc-in [sid :local-doc-refs]
+                      [{:doc-id (random-uuid)
+                        :name "notes.md"
+                        :media-type "text/markdown"
+                        :preview "Important local grounding material."
+                        :relevance 0.8}])
         prompt (ctx/assemble-system-prompt sid)]
     (testing "includes identity"
       (is (str/includes? prompt "TestXia")))
 
     (testing "is a string"
       (is (string? prompt)))
+
+    (testing "includes local documents"
+      (is (str/includes? prompt "### Local Documents"))
+      (is (str/includes? prompt "notes.md")))
 
     (wm/clear-wm! sid)))
 

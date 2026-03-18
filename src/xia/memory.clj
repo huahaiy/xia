@@ -476,7 +476,8 @@
   {:nodes    :memory/search-node-candidate-pool-size
    :facts    :memory/search-fact-candidate-pool-size
    :episodes :memory/search-episode-candidate-pool-size
-   :edges    :memory/search-edge-candidate-pool-size})
+   :edges    :memory/search-edge-candidate-pool-size
+   :local-docs :memory/search-local-doc-candidate-pool-size})
 
 (defn- candidate-pool-size
   [kind top]
@@ -636,6 +637,91 @@
      :type     (:kg.edge/type e)
      :label    (:kg.edge/label e)}))
 
+(defn- local-doc-fulltext-hits
+  [session-id query & {:keys [top] :or {top 10}}]
+  (if (or (nil? session-id) (str/blank? query))
+    []
+    (let [opts {:domains [db/local-doc-domain]
+                :top top
+                :display :refs+scores}]
+      (try
+        (->> (db/q '[:find ?e ?a ?v ?score
+                     :in $ ?sid ?query ?opts
+                     :where
+                     [?session :session/id ?sid]
+                     [?e :local.doc/session ?session]
+                     [?e :local.doc/status :ready]
+                     [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
+                   session-id query opts)
+             (sort-by #(double (nth % 3)) >)
+             (map-indexed
+               (fn [idx [eid attr value score]]
+                 {:eid       eid
+                  :attr      attr
+                  :value     value
+                  :lex-score (double score)
+                  :lex-rank  (inc idx)}))
+             vec)
+        (catch Exception _
+          [])))))
+
+(defn- local-doc-embedding-hits
+  [session-id query & {:keys [top] :or {top 10}}]
+  (if (or (nil? session-id) (str/blank? query))
+    []
+    (let [opts {:domains [db/local-doc-domain]
+                :top top
+                :display :refs+dists}]
+      (try
+        (->> (db/q '[:find ?e ?a ?v ?dist
+                     :in $ ?sid ?query ?opts
+                     :where
+                     [?session :session/id ?sid]
+                     [?e :local.doc/session ?session]
+                     [?e :local.doc/status :ready]
+                     [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
+                   session-id query opts)
+             (sort-by #(double (nth % 3)))
+             (map-indexed
+               (fn [idx [eid attr value distance]]
+                 {:eid          eid
+                  :attr         attr
+                  :value        value
+                  :sem-distance (double distance)
+                  :sem-rank     (inc idx)}))
+             vec)
+        (catch Exception _
+          [])))))
+
+(defn- local-doc-result
+  [eid]
+  (let [e (db/entity eid)]
+    {:eid        eid
+     :id         (:local.doc/id e)
+     :name       (:local.doc/name e)
+     :media-type (:local.doc/media-type e)
+     :status     (:local.doc/status e)
+     :size-bytes (:local.doc/size-bytes e)
+     :preview    (:local.doc/preview e)}))
+
+(defn- rank-local-doc-candidates
+  [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
+  (let [pool-size     (or pool-size
+                          (max minimum-candidate-pool-size
+                               (* default-candidate-pool-multiplier top)))
+        lexical-hits  (local-doc-fulltext-hits session-id (or fts-query query) :top pool-size)
+        semantic-hits (local-doc-embedding-hits session-id query :top pool-size)
+        merged-hits   (vals (reduce merge-domain-hit {} (concat lexical-hits semantic-hits)))]
+    (->> merged-hits
+         (map #(assoc % :rrf-score (hybrid-rrf-score %)))
+         (sort-by (fn [{:keys [rrf-score lex-score sem-distance eid]}]
+                    [(- rrf-score)
+                     (- (double (or lex-score 0.0)))
+                     (double (or sem-distance Double/POSITIVE_INFINITY))
+                     eid]))
+         (take top)
+         vec)))
+
 (defn search-nodes
   "Search KG nodes by name using lexical FTS plus semantic recall.
    Returns [{:eid :name :type}]."
@@ -676,6 +762,17 @@
                              query
                              :top (candidate-pool-size :edges top))
        (mapv (comp edge-result :eid))))
+
+(defn search-local-docs
+  "Search session-scoped local documents by name/text using hybrid retrieval.
+   Returns [{:id :name :media-type :status :size-bytes :preview}]."
+  [session-id query & {:keys [top fts-query] :or {top 5}}]
+  (->> (rank-local-doc-candidates session-id
+                                  query
+                                  :top top
+                                  :fts-query fts-query
+                                  :pool-size (candidate-pool-size :local-docs top))
+       (mapv (comp local-doc-result :eid))))
 
 (defn node-facts-with-eids
   "Get all facts about a node, including fact eids (for dedup)."

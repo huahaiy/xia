@@ -9,9 +9,6 @@
     :oauth.account/client-secret
     :oauth.account/access-token
     :oauth.account/refresh-token
-    :local.doc/name
-    :local.doc/text
-    :local.doc/preview
     :site-cred/username
     :site-cred/password
     :message/content

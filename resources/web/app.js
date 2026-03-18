@@ -11,6 +11,7 @@ const state = {
   activeLocalDocId: '',
   activeLocalDoc: null,
   localDocUploading: false,
+  pendingLocalDocIds: [],
   scratchPads: [],
   activePadId: '',
   activePad: null,
@@ -1457,7 +1458,10 @@ function formatStamp(value) {
 function normalizeMessage(message) {
   if (!message) return null;
   return Object.assign({}, message, {
-    createdAt: message.createdAt || message.created_at || ''
+    createdAt: message.createdAt || message.created_at || '',
+    localDocs: Array.isArray(message.localDocs)
+      ? message.localDocs
+      : (Array.isArray(message.local_docs) ? message.local_docs : [])
   });
 }
 
@@ -1494,11 +1498,24 @@ function buildMessageEl(message) {
   }
   card.appendChild(head);
   card.appendChild(body);
+  if (Array.isArray(message.localDocs) && message.localDocs.length) {
+    const refs = document.createElement('div');
+    refs.className = 'message-meta';
+    refs.textContent = 'Local docs: ' + message.localDocs
+      .map((doc) => (doc && (doc.name || doc.id)) ? (doc.name || doc.id) : '')
+      .filter(Boolean)
+      .join(', ');
+    card.appendChild(refs);
+  }
   return card;
 }
 
-function addMessage(role, content) {
-  const message = { role: role, content: content, createdAt: new Date().toISOString() };
+function addMessage(role, content, extra) {
+  const message = Object.assign({
+    role: role,
+    content: content,
+    createdAt: new Date().toISOString()
+  }, extra || {});
   state.messages.push(message);
   if (state.messages.length === 1) {
     messagesEl.innerHTML = '';
@@ -1524,6 +1541,9 @@ function renderMessages() {
 
 function updateComposerState() {
   const empty = !composerEl.value.trim();
+  if (empty) {
+    state.pendingLocalDocIds = [];
+  }
   sendEl.disabled = state.sending || empty;
   clearInputEl.disabled = state.sending || !composerEl.value.length;
 }
@@ -1542,12 +1562,20 @@ function insertTextIntoComposer(text, statusText) {
   if (statusText) setStatus(statusText);
 }
 
+function rememberPendingLocalDoc(docId) {
+  if (!docId) return;
+  if (!state.pendingLocalDocIds.includes(docId)) {
+    state.pendingLocalDocIds.push(docId);
+  }
+}
+
 function localDocTitle(doc) {
   return (doc && doc.name && doc.name.trim()) ? doc.name.trim() : 'Untitled upload';
 }
 
 function localDocMeta(doc) {
   const bits = [];
+  if (doc.status === 'failed') bits.push('Failed');
   if (doc.media_type) bits.push(doc.media_type);
   if (typeof doc.size_bytes === 'number') bits.push(formatBytes(doc.size_bytes));
   if (doc.updated_at) bits.push('Updated ' + formatStamp(doc.updated_at));
@@ -1618,8 +1646,9 @@ function syncLocalDocPanel(statusText) {
         ? (doc.error || localDocMeta(doc) || 'Local document ready.')
         : 'No local document selected.');
   const hasDoc = !!doc;
-  localDocInsertEl.disabled = !hasDoc || state.localDocUploading;
-  localDocScratchEl.disabled = !hasDoc || state.localDocUploading;
+  const usableDoc = hasDoc && doc.status !== 'failed';
+  localDocInsertEl.disabled = !usableDoc || state.localDocUploading;
+  localDocScratchEl.disabled = !usableDoc || state.localDocUploading;
   localDocDeleteEl.disabled = !hasDoc || state.localDocUploading;
   renderLocalDocList();
 }
@@ -1637,17 +1666,6 @@ function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < (1024 * 1024)) return (bytes / 1024).toFixed(1).replace(/\.0$/, '') + ' KB';
   return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + ' MB';
-}
-
-function isPdfFile(file) {
-  const name = (file && file.name ? String(file.name) : '').toLowerCase();
-  const type = (file && file.type ? String(file.type) : '').toLowerCase();
-  return type === 'application/pdf' || name.endsWith('.pdf');
-}
-
-function dataUrlBase64(dataUrl) {
-  const parts = String(dataUrl || '').split(',', 2);
-  return parts.length === 2 ? parts[1] : '';
 }
 
 function selectedPreviewText() {
@@ -1744,32 +1762,6 @@ async function ensureSession() {
   return state.sessionId;
 }
 
-function readLocalFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (isPdfFile(file)) {
-        resolve({
-          name: file.name,
-          media_type: file.type || 'application/pdf',
-          size_bytes: file.size,
-          bytes_base64: dataUrlBase64(event.target.result)
-        });
-        return;
-      }
-      resolve({
-        name: file.name,
-        media_type: file.type || '',
-        size_bytes: file.size,
-        text: typeof event.target.result === 'string' ? event.target.result : ''
-      });
-    };
-    reader.onerror = () => reject(new Error('Failed to read ' + (file.name || 'selected file')));
-    if (isPdfFile(file)) reader.readAsDataURL(file);
-    else reader.readAsText(file);
-  });
-}
-
 async function loadLocalDocs(options) {
   const keepActive = !options || options.keepActive !== false;
   if (!state.sessionId) {
@@ -1808,40 +1800,33 @@ async function handleSelectedLocalFiles(files) {
   if (!files.length) return;
   state.localDocUploading = true;
   let finalStatus = '';
-  syncLocalDocPanel('Reading local files...');
+  syncLocalDocPanel('Uploading local files...');
   try {
     await ensureSession();
-    const readResults = await Promise.allSettled(files.map((file) => readLocalFile(file)));
-    const documents = [];
-    const readErrors = [];
-    readResults.forEach((entry, index) => {
-      if (entry.status === 'fulfilled') {
-        documents.push(entry.value);
-      } else {
-        readErrors.push({
-          name: (files[index] && files[index].name) || '',
-          error: entry.reason && entry.reason.message ? entry.reason.message : 'Failed to read selected file'
-        });
-      }
+    const formData = new FormData();
+    files.forEach((file) => {
+      formData.append('documents', file, file.name || 'upload');
     });
-    if (!documents.length && readErrors.length) {
-      finalStatus = readErrors[0].error;
-      syncLocalDocPanel(finalStatus);
-      setStatus(finalStatus);
-      return;
-    }
     const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/local-documents', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documents: documents })
+      body: formData
     });
     const created = Array.isArray(data.documents) ? data.documents : [];
-    const errors = readErrors.concat(Array.isArray(data.errors) ? data.errors : []);
+    const readyDocs = created.filter((doc) => doc && doc.status === 'ready');
+    const failedDocs = created.filter((doc) => doc && doc.status === 'failed');
+    const errors = Array.isArray(data.errors) ? data.errors : [];
     created.forEach(upsertLocalDocMeta);
     if (created.length) {
-      state.activeLocalDocId = created[0].id || '';
+      const firstDoc = readyDocs[0] || failedDocs[0] || created[0];
+      state.activeLocalDocId = firstDoc.id || '';
       await loadLocalDoc(state.activeLocalDocId);
-      setStatus(created.length === 1 ? 'Local document uploaded' : (created.length + ' local documents uploaded'));
+      if (readyDocs.length && !failedDocs.length) {
+        setStatus(readyDocs.length === 1 ? 'Local document uploaded' : (readyDocs.length + ' local documents uploaded'));
+      } else if (!readyDocs.length && failedDocs.length) {
+        setStatus(failedDocs.length === 1 ? 'Local document upload failed' : (failedDocs.length + ' local document uploads failed'));
+      } else {
+        setStatus(readyDocs.length + ' local documents uploaded, ' + failedDocs.length + ' failed');
+      }
     } else {
       state.activeLocalDoc = null;
       state.activeLocalDocId = '';
@@ -2010,6 +1995,7 @@ function localDocInsertText(doc) {
 function insertLocalDocIntoComposer() {
   if (!state.activeLocalDoc) return;
   insertTextIntoComposer(localDocInsertText(state.activeLocalDoc), 'Local document inserted into chat');
+  rememberPendingLocalDoc(state.activeLocalDoc.id);
 }
 
 async function createScratchPadFromLocalDoc() {
@@ -2113,7 +2099,13 @@ async function submitApproval(decision) {
   }
 }
 
-async function sendMessage(text) {
+async function sendMessage(text, options) {
+  const localDocIds = Array.isArray(options && options.localDocIds)
+    ? options.localDocIds.filter(Boolean)
+    : [];
+  const localDocs = Array.isArray(options && options.localDocs)
+    ? options.localDocs
+    : [];
   state.sending = true;
   state.liveStatus = null;
   updateComposerState();
@@ -2122,6 +2114,7 @@ async function sendMessage(text) {
     await ensureSession();
     const payload = { message: text };
     if (state.sessionId) payload.session_id = state.sessionId;
+    if (localDocIds.length) payload.local_doc_ids = localDocIds;
     const responsePromise = fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2135,7 +2128,7 @@ async function sendMessage(text) {
       state.sessionId = data.session_id;
       persistSession();
     }
-    addMessage('assistant', data.content || '');
+    addMessage('assistant', data.content || '', { localDocs: localDocs });
     await loadHistorySessions();
     state.liveStatus = null;
     setStatus('Ready');
@@ -2175,10 +2168,15 @@ composerFormEl.addEventListener('submit', async (event) => {
   event.preventDefault();
   const text = composerEl.value.trim();
   if (!text || state.sending) return;
-  addMessage('user', text);
+  const localDocIds = Array.from(new Set((state.pendingLocalDocIds || []).filter(Boolean)));
+  const localDocs = state.localDocs
+    .filter((doc) => localDocIds.includes(doc.id))
+    .map((doc) => ({ id: doc.id, name: doc.name, status: doc.status }));
+  addMessage('user', text, { localDocs: localDocs });
   composerEl.value = '';
+  state.pendingLocalDocIds = [];
   updateComposerState();
-  await sendMessage(text);
+  await sendMessage(text, { localDocIds: localDocIds, localDocs: localDocs });
 });
 
 composerEl.addEventListener('keydown', (event) => {
@@ -2192,6 +2190,7 @@ composerEl.addEventListener('input', updateComposerState);
 
 clearInputEl.addEventListener('click', () => {
   composerEl.value = '';
+  state.pendingLocalDocIds = [];
   updateComposerState();
   composerEl.focus();
 });

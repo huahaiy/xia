@@ -225,7 +225,7 @@
   3. Calls the LLM with available tools (function-calling)
   4. If the LLM wants to use tools, executes them and loops
   5. Returns the final text response"
-  [session-id user-message & {:keys [channel tool-context provider-id]
+  [session-id user-message & {:keys [channel tool-context provider-id local-doc-ids]
                               :or   {channel :terminal
                                      tool-context {}}}]
   (with-session-turn-lock
@@ -235,7 +235,7 @@
                                               :session-id session-id}]
         (try
           (validate-user-message! user-message)
-          (db/add-message! session-id :user user-message)
+          (db/add-message! session-id :user user-message :local-doc-ids local-doc-ids)
           (report-status! "Updating working memory"
                           :phase :working-memory)
           (wm/update-wm! user-message session-id channel)
@@ -285,7 +285,8 @@
                     ;; Store assistant message with tool calls
                     (db/add-message! session-id :assistant
                                      (get response "content" "")
-                                     :tool-calls tool-calls)
+                                     :tool-calls tool-calls
+                                     :local-doc-ids local-doc-ids)
                     ;; Store tool results
                     (doseq [tr tool-results]
                       (db/add-message! session-id :tool
@@ -301,7 +302,7 @@
                   (let [text (if (string? response) response (get response "content" ""))]
                     (report-status! "Preparing response"
                                     :phase :finalizing)
-                    (db/add-message! session-id :assistant text)
+                    (db/add-message! session-id :assistant text :local-doc-ids local-doc-ids)
                     (schedule-fact-utility-review! used-fact-eids user-message text)
                     (prompt/status! {:state :done
                                      :phase :complete

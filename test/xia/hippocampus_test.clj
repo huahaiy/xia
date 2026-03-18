@@ -4,6 +4,7 @@
             [taoensso.timbre :as log]
             [xia.test-helpers :as th]
             [xia.db :as db]
+            [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.hippocampus :as hippo]))
 
@@ -401,6 +402,22 @@
         (is (instance? Exception (:throwable entry)))
         (is (re-find #"Background consolidation failed for session"
                      (:message entry)))))))
+
+(deftest test-record-conversation-persists-explicit-local-document-references
+  (let [session-id (db/create-session! :terminal)
+        doc        (local-doc/save-upload! {:session-id session-id
+                                            :name "paper.md"
+                                            :media-type "text/markdown"
+                                            :text "# Research"})]
+    (db/add-message! session-id :user "summarize this" :local-doc-ids [(:id doc)])
+    (db/add-message! session-id :assistant "summary" :local-doc-ids [(:id doc)])
+    (with-redefs [xia.hippocampus/summarize-conversation (constantly "summary")
+                  xia.hippocampus/consolidate-pending!   (fn [] nil)]
+      (hippo/record-conversation! session-id :terminal :topics "research")
+      (let [episode (first (memory/recent-episodes 5))]
+        (is (= "summary" (:summary episode)))
+        (is (.contains ^String (:context episode) "Topic: research"))
+        (is (.contains ^String (:context episode) "Local documents referenced: paper.md"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; maintain-knowledge! — confidence decay

@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [xia.browser :as browser]
             [xia.db :as db]
+            [xia.local-doc :as local-doc]
             [xia.prompt :as prompt]
             [xia.test-helpers :refer [with-test-db]]
             [xia.tool :as tool]))
@@ -327,10 +328,14 @@
     (is (= :browser-navigate (:tool/id (db/get-tool :browser-navigate))))
     (is (= :browser-read-page (:tool/id (db/get-tool :browser-read-page))))
     (is (= :browser-wait (:tool/id (db/get-tool :browser-wait))))
+    (is (= :local-doc-search (:tool/id (db/get-tool :local-doc-search))))
+    (is (= :local-doc-read (:tool/id (db/get-tool :local-doc-read))))
     (is (= :browser-list-sessions (:tool/id (db/get-tool :browser-list-sessions))))
     (is (= :browser-list-sites (:tool/id (db/get-tool :browser-list-sites))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :web-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-runtime-status))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-search))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-read))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-list-sessions))))
     (is (nil? (:tool/execution-mode (db/get-tool :browser-open))))
     (is (contains? (get-in (db/get-tool :browser-open) [:tool/parameters "properties"])
@@ -365,6 +370,30 @@
         (prompt/register-approval! :terminal nil)
         (tool/clear-session-approvals! session-id)
         (browser/close-all-sessions!)))))
+
+(deftest local-doc-tools-execute-through-sci
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :local-doc-search)
+  (tool/load-tool! :local-doc-read)
+  (let [sid   (db/create-session! :http)
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "garage-notes.md"
+                                       :media-type "text/markdown"
+                                       :text "The car stays inside the garage overnight."})
+        search (tool/execute-tool :local-doc-search {"query" "automobile"}
+                                  {:channel :terminal
+                                   :session-id sid})]
+    (is (= "garage-notes.md" (:name (first search))))
+    (let [read (tool/execute-tool :local-doc-read {"doc_id" (str (:id saved))
+                                                   "max_chars" 12}
+                                  {:channel :terminal
+                                   :session-id sid})]
+      (is (= (:id saved) (:id read)))
+      (is (= "garage-notes.md" (:name read)))
+      (is (= 0 (:offset read)))
+      (is (= 12 (:end-offset read)))
+      (is (= "The car stay" (:text read)))
+      (is (true? (:truncated? read))))))
 
 (deftest browser-open-tool-accepts-playwright-backend
   (tool/ensure-bundled-tools!)

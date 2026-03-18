@@ -12,7 +12,8 @@
            [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
            [java.nio.file Files Path Paths StandardCopyOption]
            [java.nio.file.attribute FileAttribute]
-           [java.time Instant]))
+           [java.time Instant]
+           [java.util UUID]))
 
 ;; ---------------------------------------------------------------------------
 ;; Schema
@@ -22,6 +23,7 @@
 (def kg-node-domain "kg-node")
 (def kg-fact-domain "kg-fact")
 (def kg-edge-domain "kg-edge")
+(def local-doc-domain "local-doc")
 (def skill-content-domain "skill-content")
 
 (def schema
@@ -122,18 +124,29 @@
    :message/tool-calls {:db/valueType :db.type/idoc :db/domain "message-tool-calls"}
    :message/tool-result {:db/valueType :db.type/idoc :db/domain "message-tool-result"}
    :message/tool-id    {:db/valueType :db.type/string}  ; for tool-result messages
+   :message.local-doc-ref/id      {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :message.local-doc-ref/message {:db/valueType :db.type/ref}
+   :message.local-doc-ref/doc     {:db/valueType :db.type/ref}
 
    ;; --- Local Documents (user-selected local file content) ---
    :local.doc/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :local.doc/session    {:db/valueType :db.type/ref}
-   :local.doc/name       {:db/valueType :db.type/string}
+   :local.doc/name       {:db/valueType :db.type/string
+                          :db/fulltext true
+                          :db.fulltext/domains [local-doc-domain]
+                          :db/embedding true
+                          :db.embedding/domains [local-doc-domain]}
    :local.doc/media-type {:db/valueType :db.type/string}
    :local.doc/source     {:db/valueType :db.type/keyword}
    :local.doc/size-bytes {:db/valueType :db.type/long}
    :local.doc/sha256     {:db/valueType :db.type/string}
    :local.doc/status     {:db/valueType :db.type/keyword}
    :local.doc/error      {:db/valueType :db.type/string}
-   :local.doc/text       {:db/valueType :db.type/string}
+   :local.doc/text       {:db/valueType :db.type/string
+                          :db/fulltext true
+                          :db.fulltext/domains [local-doc-domain]
+                          :db/embedding true
+                          :db.embedding/domains [local-doc-domain]}
    :local.doc/preview    {:db/valueType :db.type/string}
 
    ;; --- Skill (markdown/text instructions the LLM follows) ---
@@ -166,6 +179,11 @@
    :wm.episode-ref/wm       {:db/valueType :db.type/ref}     ; → wm
    :wm.episode-ref/episode  {:db/valueType :db.type/ref}     ; → episode
    :wm.episode-ref/relevance {:db/valueType :db.type/float}
+
+   :wm.local-doc-ref/id        {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :wm.local-doc-ref/wm        {:db/valueType :db.type/ref}     ; → wm
+   :wm.local-doc-ref/doc       {:db/valueType :db.type/ref}     ; → local.doc
+   :wm.local-doc-ref/relevance {:db/valueType :db.type/float}
 
    ;; --- Site Credentials (login credentials for websites) ---
    :site-cred/id              {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
@@ -829,7 +847,7 @@
 
 (defn save-wm-snapshot!
   "Persist working memory state to DB for crash recovery."
-  [{:keys [session-id topics slots episode-refs]}]
+  [{:keys [session-id topics slots episode-refs local-doc-refs]}]
   (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                   :where [?e :session/id ?sid]]
                                 session-id))]
@@ -866,7 +884,19 @@
                    :wm.episode-ref/wm        wm-eid
                    :wm.episode-ref/episode   (:episode-eid eref)
                    :wm.episode-ref/relevance (float (:relevance eref))})
-                episode-refs))))
+                episode-refs)))
+      (when (seq local-doc-refs)
+        (transact!
+          (keep (fn [dref]
+                  (when-let [doc-eid (ffirst
+                                       (q '[:find ?e :in $ ?id
+                                            :where [?e :local.doc/id ?id]]
+                                          (:doc-id dref)))]
+                    {:wm.local-doc-ref/id        (random-uuid)
+                     :wm.local-doc-ref/wm        wm-eid
+                     :wm.local-doc-ref/doc       doc-eid
+                     :wm.local-doc-ref/relevance (float (:relevance dref))}))
+                local-doc-refs))))
     wm-id)))
 
 (defn load-wm-snapshot
@@ -949,17 +979,74 @@
     (= "" value)        nil
     :else               value))
 
-(defn add-message! [session-id role content & {:keys [tool-calls tool-id tool-result]}]
+(declare empty->nil)
+
+(defn- normalize-message-local-doc-id
+  [value]
+  (cond
+    (instance? UUID value) value
+    (string? value)        (try
+                             (UUID/fromString (str/trim value))
+                             (catch Exception _
+                               nil))
+    :else                  nil))
+
+(defn- valid-session-local-doc-ids
+  [session-id local-doc-ids]
+  (let [doc-ids (->> local-doc-ids
+                     (keep normalize-message-local-doc-id)
+                     distinct
+                     vec)]
+    (if-not (seq doc-ids)
+      []
+      (let [valid-ids (->> (q '[:find ?doc-id
+                                :in $ ?sid [?doc-id ...]
+                                :where
+                                [?session :session/id ?sid]
+                                [?doc :local.doc/session ?session]
+                                [?doc :local.doc/id ?doc-id]]
+                              session-id
+                              doc-ids)
+                           (map first)
+                           set)]
+        (filterv valid-ids doc-ids)))))
+
+(defn- message-local-docs
+  [message-eid]
+  (->> (q '[:find ?doc-id ?name ?status
+            :in $ ?message
+            :where
+            [?ref :message.local-doc-ref/message ?message]
+            [?ref :message.local-doc-ref/doc ?doc]
+            [?doc :local.doc/id ?doc-id]
+            [(get-else $ ?doc :local.doc/name "") ?name]
+            [(get-else $ ?doc :local.doc/status :ready) ?status]]
+          message-eid)
+       (mapv (fn [[doc-id name status]]
+               {:id     doc-id
+                :name   (empty->nil name)
+                :status status}))))
+
+(defn add-message! [session-id role content & {:keys [tool-calls tool-id tool-result local-doc-ids]}]
   (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                  :where [?e :session/id ?sid]]
-                               session-id))]
-    (transact! [(cond-> {:message/id         (random-uuid)
-                         :message/session    session-eid
-                         :message/role       role
-                         :message/content    (or content "")}
-                  tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
-                  (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
-                  tool-id    (assoc :message/tool-id tool-id))])))
+                               session-id))
+        message-id   (random-uuid)
+        doc-ids      (valid-session-local-doc-ids session-id local-doc-ids)]
+    (transact!
+      (into
+        [(cond-> {:message/id         message-id
+                  :message/session    session-eid
+                  :message/role       role
+                  :message/content    (or content "")}
+           tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
+           (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
+           tool-id    (assoc :message/tool-id tool-id))]
+        (map (fn [doc-id]
+               {:message.local-doc-ref/id      (random-uuid)
+                :message.local-doc-ref/message [:message/id message-id]
+                :message.local-doc-ref/doc     [:local.doc/id doc-id]})
+             doc-ids)))))
 
 (defn- empty->nil [s] (when-not (= "" s) s))
 
@@ -967,20 +1054,23 @@
   "Get all messages for a session, ordered by creation time."
   [session-id]
   (sort-by :created-at
-           (map (fn [[eid content role tool-calls tool-result tool-id]]
+           (map (fn [[eid mid content role tool-calls tool-result tool-id]]
                   (let [tool-result* (read-tool-result-doc tool-result)]
-                    {:role        role
+                    {:id          mid
+                     :role        role
                      :content     (when-not (and (= role :tool) (some? tool-result*))
                                     (decrypt-secret-attr :message/content content))
                      :created-at  (entity-created-at (raw-entity eid))
+                     :local-docs  (not-empty (message-local-docs eid))
                      :tool-calls  (read-tool-calls-doc tool-calls)
                      :tool-result tool-result*
                      :tool-id     (empty->nil tool-id)}))
-                (q '[:find ?m ?content ?role ?tc ?tr ?tid
+                (q '[:find ?m ?mid ?content ?role ?tc ?tr ?tid
                      :in $ ?sid
                      :where
                      [?s :session/id ?sid]
                      [?m :message/session ?s]
+                     [?m :message/id ?mid]
                      [?m :message/role ?role]
                      [?m :message/content ?content]
                      [(get-else $ ?m :message/tool-calls "") ?tc]

@@ -15,6 +15,7 @@
             [xia.browser :as browser]
             [xia.config :as cfg]
             [xia.cron :as cron]
+            [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.scratch :as scratch]
             [xia.schedule :as schedule]
@@ -75,6 +76,11 @@
    'save-pad!    scratch/save-pad!
    'edit-pad!    scratch/edit-pad!
    'delete-pad!  scratch/delete-pad!})
+
+(def ^:private xia-local-doc-ns
+  {'list-docs   local-doc/list-docs
+   'search-docs local-doc/search-docs
+   'read-doc    local-doc/read-doc})
 
 (def ^:private xia-service-ns
   {'request       service/request
@@ -176,6 +182,7 @@
                   'xia.skill          xia-skill-ns
                   'xia.schedule       xia-schedule-ns
                   'xia.scratch        xia-scratch-ns
+                  'xia.local-doc      xia-local-doc-ns
                   'xia.cron           xia-cron-ns
                   'xia.service        xia-service-ns
                   'xia.web            xia-web-ns
