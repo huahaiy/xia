@@ -722,17 +722,21 @@
                {}
                e)))
 
+(defn- epoch-millis->date
+  [millis]
+  (java.util.Date. (long millis)))
+
 (defn- entity-created-at
   [entity-map]
   (or (:session/created-at entity-map)
       (:message/created-at entity-map)
-      (some-> (:db/created-at entity-map) long java.util.Date.)))
+      (some-> (:db/created-at entity-map) long epoch-millis->date)))
 
 (defn- entity-updated-at
   [entity-map]
   (or (:wm/updated-at entity-map)
       (:oauth.account/updated-at entity-map)
-      (some-> (:db/updated-at entity-map) long java.util.Date.)))
+      (some-> (:db/updated-at entity-map) long epoch-millis->date)))
 
 (defn- raw-entity [eid]
   (into {} (d/entity (d/db (conn)) eid)))

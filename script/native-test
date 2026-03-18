@@ -12,11 +12,11 @@ elif ! command -v native-image >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$ROOT_DIR/target/native-tmp/.tmp" "$ROOT_DIR/target/native-image"
+mkdir -p "$ROOT_DIR/target/native-test-tmp/.tmp" "$ROOT_DIR/target/native-test-image"
 
 cd "$ROOT_DIR"
 
-clojure -T:build native-uber
+clojure -T:build native-test-uber
 
 NATIVE_IMAGE_HEAP="${XIA_NATIVE_IMAGE_HEAP:-10g}"
 NATIVE_IMAGE_FLAGS=(
@@ -34,11 +34,13 @@ if [ "${XIA_NATIVE_MARCH_NATIVE:-0}" = "1" ]; then
   NATIVE_IMAGE_FLAGS+=("-H:CCompilerOption=-march=native")
 fi
 
-env TMPDIR="$ROOT_DIR/target/native-tmp/.tmp" \
+env TMPDIR="$ROOT_DIR/target/native-test-tmp/.tmp" \
   native-image \
   --verbose \
-  -H:TempDirectory=target/native-tmp \
-  -H:Path=target/native-image \
+  -H:TempDirectory=target/native-test-tmp \
+  -H:Path=target/native-test-image \
   "${NATIVE_IMAGE_FLAGS[@]}" \
-  -jar target/xia.jar \
-  -H:Name=xia
+  -jar target/xia-tests.jar \
+  -H:Name=xia-tests
+
+exec "$ROOT_DIR/target/native-test-image/xia-tests" "$@"

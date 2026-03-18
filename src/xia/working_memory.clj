@@ -32,7 +32,7 @@
 (def ^:dynamic *session-op-thread* nil)
 
 (defonce ^:private wm-atom (atom {}))
-(defonce ^:private session-op-agents (ConcurrentHashMap.))
+(defonce ^ConcurrentHashMap ^:private session-op-agents (ConcurrentHashMap.))
 
 (declare get-wm warm-start!)
 

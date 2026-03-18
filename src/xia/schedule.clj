@@ -227,8 +227,8 @@
                                  (>= consecutive-failures pause-threshold))
         backoff-until       (when-not paused?
                               (java.util.Date.
-                                (+ (.getTime now)
-                                   (failure-backoff-ms consecutive-failures))))]
+                                (long (+ (.getTime ^java.util.Date now)
+                                         (failure-backoff-ms consecutive-failures)))))]
     (db/transact!
       (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
                         :schedule.state/status (if paused? :paused :backoff)

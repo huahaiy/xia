@@ -8,28 +8,16 @@
             [xia.browser.playwright]
             [xia.db :as db]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.net InetAddress ServerSocket URL]
-           [org.htmlunit MockWebConnection WebClient WebRequest]
-           [org.htmlunit.html HtmlInput]))
+  (:import [java.net InetAddress ServerSocket]))
 
 (use-fixtures :each
   with-test-db
   (fn [f]
     (browser/close-all-sessions!)
-    (db/set-config! :browser/playwright-enabled? "false")
+    (db/set-config! :browser/playwright-enabled? "true")
     (db/set-config! :browser/backend-default "auto")
     (f)
     (browser/close-all-sessions!)))
-
-(defn- mock-html-page
-  [html]
-  (let [client (WebClient.)
-        mock   (MockWebConnection.)
-        url    (URL. "https://example.com/form")]
-    (.setResponse mock url html)
-    (.setWebConnection client mock)
-    {:client client
-     :page   (.getPage client (.toString url))}))
 
 (defn- close-playwright-live-session!
   [session-id]
@@ -248,48 +236,6 @@
   (is (nil? (#'browser/validate-url! "https://example.com")))
   (is (nil? (#'browser/validate-url! "http://example.com"))))
 
-(deftest web-client-validates-every-request
-  (let [client (#'browser/make-client)]
-    (with-redefs-fn {#'browser/resolve-url!
-                     (fn [_]
-                       (throw (ex-info "blocked redirect target" {})))}
-      #(is (thrown-with-msg?
-             clojure.lang.ExceptionInfo #"blocked redirect target"
-             (.getResponse (.getWebConnection client)
-                           (WebRequest. (URL. "https://example.com"))))))
-    (.close client)))
-
-(deftest web-client-pins-each-request-resolution
-  (let [client (#'browser/make-client)
-        calls  (atom [])]
-    (with-redefs-fn {#'browser/resolve-host-addresses
-                     (fn [host]
-                       (case host
-                         "public.example"
-                         [(InetAddress/getByAddress "public.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))]
-                         "next.example"
-                         [(InetAddress/getByAddress "next.example" (byte-array [(byte 93) (byte -72) (byte 34) (byte 21)]))]))
-                     #'browser/send-browser-request!
-                     (fn [_client request resolution]
-                       (swap! calls conj {:url (str (.getUrl ^WebRequest request))
-                                          :host (:host resolution)
-                                          :addresses (mapv #(.getHostAddress ^InetAddress %)
-                                                           (:addresses resolution))})
-                       nil)}
-      #(do
-         (.getResponse (.getWebConnection client)
-                       (WebRequest. (URL. "https://public.example/start")))
-         (.getResponse (.getWebConnection client)
-                       (WebRequest. (URL. "https://next.example/next")))))
-    (is (= [{:url "https://public.example/start"
-             :host "public.example"
-             :addresses ["93.184.34.20"]}
-            {:url "https://next.example/next"
-             :host "next.example"
-             :addresses ["93.184.34.21"]}]
-           @calls))
-    (.close client)))
-
 ;; ---------------------------------------------------------------------------
 ;; Session lifecycle
 ;; ---------------------------------------------------------------------------
@@ -297,7 +243,7 @@
 (deftest ^:integration open-and-close-session
   (let [result (browser/open-session "https://example.com")]
     (is (string? (:session-id result)))
-    (is (= :htmlunit (:backend result)))
+    (is (= :playwright (:backend result)))
     (is (= "Example Domain" (:title result)))
     (is (string? (:content result)))
     (is (vector? (:forms result)))
@@ -347,22 +293,6 @@
           (browser/click sid "#nonexistent-button")))
     (browser/close-session sid)))
 
-(deftest find-form-field-element-matches-exact-id-with-css-metacharacters
-  (let [field-id "victim\"], #attacker"
-        {:keys [client page]} (mock-html-page
-                                (str "<html><body><form>"
-                                     "<input id='" field-id "' value='original'/>"
-                                     "<input id='attacker' value='sentinel'/>"
-                                     "</form></body></html>"))
-        form (first (.getForms page))]
-    (try
-      (let [el (#'browser/find-form-field-element form field-id)]
-        (is (some? el))
-        (is (= field-id (.getAttribute ^HtmlInput el "id")))
-        (is (not= "attacker" (.getAttribute ^HtmlInput el "id"))))
-      (finally
-        (.close client)))))
-
 ;; ---------------------------------------------------------------------------
 ;; Read page
 ;; ---------------------------------------------------------------------------
@@ -374,35 +304,6 @@
     (is (= "Example Domain" (:title page)))
     (is (string? (:content page)))
     (browser/close-session sid)))
-
-(deftest ^:integration query-elements-paginates-beyond-default-link-preview
-  (let [{:keys [client page]} (mock-html-page (dense-dashboard-html))
-        sid "dense-query-htmlunit"
-        sessions* (var-get (ns-resolve 'xia.browser 'sessions))
-        opened ((var-get (ns-resolve 'xia.browser 'page->map)) page)]
-    (.put sessions* sid (atom {:client client
-                               :backend :htmlunit
-                               :last-access (System/currentTimeMillis)
-                               :created-at-ms (System/currentTimeMillis)
-                               :js-enabled true}))
-    (try
-      (is (= 20 (count (:links opened))))
-      (is (= 40 (:link_count opened)))
-      (is (true? (:links_truncated? opened)))
-      (let [queried (browser/query-elements sid
-                                            :kind :links
-                                            :offset 20
-                                            :limit 10)]
-        (is (= :htmlunit (:backend queried)))
-        (is (= :links (:kind queried)))
-        (is (= 40 (:total_count queried)))
-        (is (= 10 (:returned_count queried)))
-        (is (true? (:truncated? queried)))
-        (is (= "Item 21" (get-in queried [:elements 0 :text])))
-        (is (= "/item/21" (get-in queried [:elements 0 :href])))
-        (is (string? (get-in queried [:elements 0 :selector]))))
-      (finally
-        (browser/close-session sid)))))
 
 (deftest ^:integration wait-for-page-matches-text
   (let [result  (browser/open-session "https://example.com")
@@ -425,14 +326,14 @@
         sid    (:session-id result)
         listing (browser/list-sessions)]
     (is (some #(and (= sid (:session-id %))
-                    (= :htmlunit (:backend %)))
+                    (= :playwright (:backend %)))
               listing))
     (browser/close-session sid)))
 
 (deftest ^:integration list-sessions-includes-resumable-snapshots
   (let [result  (browser/open-session "https://example.com")
         sid     (:session-id result)
-        _       ((var-get #'browser/close-live-session!) sid)
+        _       (close-playwright-live-session! sid)
         listing (browser/list-sessions)
         entry   (some #(when (= sid (:session-id %)) %) listing)]
     (is (some? entry))
@@ -443,50 +344,11 @@
 (deftest ^:integration read-page-restores-from-snapshot
   (let [result (browser/open-session "https://example.com")
         sid    (:session-id result)
-        _      ((var-get #'browser/close-live-session!) sid)
+        _      (close-playwright-live-session! sid)
         page   (browser/read-page sid)]
     (is (= sid (:session-id page)))
     (is (= "Example Domain" (:title page)))
     (browser/close-session sid)))
-
-(deftest concurrent-get-session-restores-once-per-session-id
-  (let [sid "restore-race"
-        url "https://example.com/restored"
-        snapshot {"session_id" sid
-                  "current_url" url
-                  "created_at_ms" (System/currentTimeMillis)
-                  "updated_at_ms" (System/currentTimeMillis)
-                  "last_access_ms" (System/currentTimeMillis)
-                  "js_enabled" true
-                  "cookies" []}
-        make-client-calls (atom 0)
-        first-restore-started (promise)
-        allow-restore (promise)]
-    ((var-get #'browser/write-session-snapshot!) sid snapshot)
-    (with-redefs [browser/make-client
-                  (fn []
-                    (swap! make-client-calls inc)
-                    (deliver first-restore-started true)
-                    @allow-restore
-                    (let [client (WebClient.)
-                          mock (MockWebConnection.)]
-                      (.setResponse mock (URL. url)
-                                    "<html><head><title>Restored</title></head><body>restored</body></html>")
-                      (.setWebConnection client mock)
-                      client))
-                  browser/wait-for-js! (fn [client _] client)
-                  browser/persist-session! (fn [_] nil)]
-      (let [f1 (future ((var-get #'browser/get-session) sid))
-            _ @first-restore-started
-            f2 (future ((var-get #'browser/get-session) sid))]
-        (Thread/sleep 100)
-        (is (= 1 @make-client-calls))
-        (deliver allow-restore true)
-        (let [sess1 @f1
-              sess2 @f2]
-          (is (= 1 @make-client-calls))
-          (is (identical? (:client sess1) (:client sess2)))
-          (browser/close-session sid))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Session limit
@@ -526,14 +388,13 @@
 
 (deftest open-session-uses-configured-default-backend-when-auto
   (db/set-config! :browser/backend-default "auto")
-  (db/set-config! :browser/playwright-enabled? "false")
   (let [result (browser/open-session "https://example.com")]
     (try
-      (is (= :htmlunit (:backend result)))
+      (is (= :playwright (:backend result)))
       (finally
         (browser/close-session (:session-id result))))))
 
-(deftest open-session-auto-falls-back-when-playwright-open-fails
+(deftest open-session-auto-surfaces-playwright-failure
   (let [calls (atom [])
         playwright-backend
         (reify browser.backend/BrowserBackend
@@ -555,46 +416,18 @@
           (wait-for-page* [_ _session-id _opts] nil)
           (close-session* [_ _session-id] nil)
           (close-all-sessions!* [_] nil)
-          (list-sessions* [_] []))
-        htmlunit-backend
-        (reify browser.backend/BrowserBackend
-          (backend-id [_] :htmlunit)
-          (runtime-status* [_] {:backend :htmlunit
-                                :available? true
-                                :ready? true
-                                :status :ready})
-          (bootstrap-runtime!* [_ _opts] nil)
-          (install-browser-deps!* [_ _opts] nil)
-          (open-session* [_ url _opts]
-            (swap! calls conj :htmlunit)
-            {:session-id "fallback-htmlunit"
-             :backend :htmlunit
-             :url url
-             :title "Fallback"
-             :content ""
-             :forms []
-             :links []
-             :truncated? false})
-          (navigate* [_ _session-id _url] nil)
-          (click* [_ _session-id _selector] nil)
-          (fill-form* [_ _session-id _fields _opts] nil)
-          (read-page* [_ _session-id] nil)
-          (query-elements* [_ _session-id _opts] nil)
-          (wait-for-page* [_ _session-id _opts] nil)
-          (close-session* [_ _session-id] nil)
-          (close-all-sessions!* [_] nil)
           (list-sessions* [_] []))]
     (with-redefs-fn {(ns-resolve 'xia.browser 'resolve-open-backend-id) (constantly :playwright)
                      (ns-resolve 'xia.browser 'backend-by-id) (fn [backend-id]
                                                                 (case backend-id
                                                                   :playwright playwright-backend
-                                                                  :htmlunit htmlunit-backend
                                                                   (throw (ex-info "unexpected backend"
                                                                                   {:backend backend-id}))))}
       #(timbre/with-min-level :fatal
-         (let [result (browser/open-session "https://example.com" :backend :auto)]
-           (is (= :htmlunit (:backend result)))
-           (is (= [:playwright :htmlunit] @calls)))))))
+         (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo #"Playwright launch failed"
+               (browser/open-session "https://example.com" :backend :auto)))
+         (is (= [:playwright] @calls))))))
 
 (deftest ^:integration open-session-explicit-playwright-works
   (db/set-config! :browser/playwright-enabled? "true")
@@ -646,24 +479,12 @@
       (finally
         (browser/close-session sid)))))
 
-(deftest htmlunit-screenshot-is-explicitly-unsupported
-  (let [result (browser/open-session "https://example.com")
-        sid    (:session-id result)]
-    (try
-      (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo #"does not support screenshots"
-            (browser/screenshot sid)))
-      (finally
-        (browser/close-session sid)))))
-
-(deftest browser-runtime-status-reports-htmlunit-and-playwright
-  (db/set-config! :browser/playwright-enabled? "true")
+(deftest browser-runtime-status-reports-playwright
   (let [status (browser/browser-runtime-status)
         by-backend (into {} (map (juxt :backend identity) (:backends status)))]
     (is (= :auto (:configured-default-backend status)))
     (is (= :playwright (:selected-auto-backend status)))
-    (is (= :ready (:status (get by-backend :htmlunit))))
-    (is (= true (:ready? (get by-backend :htmlunit))))
+    (is (= #{:playwright} (set (keys by-backend))))
     (is (= true (:available? (get by-backend :playwright))))
     (is (contains? #{:available :missing-browser}
                    (:status (get by-backend :playwright))))
@@ -784,7 +605,7 @@
   (db/set-config! :browser/playwright-enabled? "false")
   (let [status (browser/browser-runtime-status)
         by-backend (into {} (map (juxt :backend identity) (:backends status)))]
-    (is (= :htmlunit (:selected-auto-backend status)))
+    (is (= :playwright (:selected-auto-backend status)))
     (is (= :disabled (:status (get by-backend :playwright))))
     (is (= false (:available? (get by-backend :playwright))))
     (is (= false (:ready? (get by-backend :playwright))))))
@@ -801,7 +622,7 @@
         playwright-result (browser/bootstrap-browser-runtime! :backend :playwright)
         after (browser/browser-runtime-status)]
     (is (= :auto (:requested-backend auto-result)))
-    (is (= #{:htmlunit :playwright}
+    (is (= #{:playwright}
            (set (map :backend (:results auto-result)))))
     (is (= :playwright (:backend playwright-result)))
     (is (= :running (:status playwright-result)))

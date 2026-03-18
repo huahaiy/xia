@@ -107,8 +107,8 @@
   [spec ^java.util.Date after & {:keys [last-run]}]
   (if-let [interval (:interval-minutes spec)]
     ;; Interval mode: last-run + interval, or after + interval if no last-run
-    (let [base (or last-run after)]
-      (java.util.Date. (+ (.getTime base) (* interval 60 1000))))
+    (let [^java.util.Date base (or last-run after)]
+      (java.util.Date. (long (+ (.getTime base) (* interval 60 1000)))))
     ;; Calendar mode
     (let [norm  (normalize spec)
           zone  (ZoneId/systemDefault)

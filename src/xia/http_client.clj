@@ -4,10 +4,11 @@
             [taoensso.timbre :as log]
             [hato.client :as hc])
   (:import [java.net URI URLEncoder]
-           [java.net.http HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
+           [java.net.http HttpClient HttpHeaders HttpRequest HttpRequest$BodyPublishers
+            HttpResponse HttpResponse$BodyHandler HttpResponse$BodyHandlers]
            [java.nio.charset Charset StandardCharsets]
            [java.time Duration]
-           [java.util.concurrent ExecutionException TimeUnit TimeoutException]))
+           [java.util.concurrent CompletableFuture ExecutionException TimeUnit TimeoutException]))
 
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-request-timeout-ms 120000)
@@ -21,8 +22,8 @@
 
 (defn- http-client
   [connect-timeout-ms]
-  (or (get @http-clients connect-timeout-ms)
-      (let [client (hc/build-http-client {:connect-timeout connect-timeout-ms})]
+  (or ^HttpClient (get @http-clients connect-timeout-ms)
+      (let [^HttpClient client (hc/build-http-client {:connect-timeout connect-timeout-ms})]
         (get (swap! http-clients
                     #(if (contains? % connect-timeout-ms)
                        %
@@ -68,7 +69,7 @@
     (.build builder)))
 
 (defn- normalize-headers
-  [headers]
+  [^HttpHeaders headers]
   (into {}
         (map (fn [[header values]]
                [(str/lower-case header)
@@ -90,18 +91,30 @@
   [body-bytes headers]
   (String. ^bytes body-bytes ^Charset (response-charset headers)))
 
+(defn- response-body
+  [body headers body-format]
+  (case body-format
+    :byte-array body
+    :string (decode-body body headers)
+    (throw (ex-info "Unsupported HTTP response body format"
+                    {:body-format body-format}))))
+
 (defn- send-request!
-  [{:keys [connect-timeout timeout] :as req}]
+  [{:keys [connect-timeout timeout as]
+    :or   {as :string}
+    :as   req}]
   (let [http-request    (build-http-request req)
-        response-future (.sendAsync (http-client connect-timeout)
-                                    http-request
-                                    (HttpResponse$BodyHandlers/ofByteArray))]
+        ^HttpResponse$BodyHandler body-handler (HttpResponse$BodyHandlers/ofByteArray)
+        ^CompletableFuture response-future
+        (.sendAsync ^HttpClient (http-client connect-timeout)
+                    ^HttpRequest http-request
+                    body-handler)]
     (try
-      (let [response (.get response-future timeout TimeUnit/MILLISECONDS)
+      (let [^HttpResponse response (.get response-future timeout TimeUnit/MILLISECONDS)
             headers  (normalize-headers (.headers response))]
         {:status  (.statusCode response)
          :headers headers
-         :body    (decode-body (.body response) headers)})
+         :body    (response-body (.body response) headers as)})
       (catch TimeoutException e
         (.cancel response-future true)
         (throw (ex-info (str "HTTP request timed out after " timeout " ms")
@@ -128,7 +141,7 @@
 
 (defn- sleep-ms!
   [delay-ms]
-  (Thread/sleep delay-ms))
+  (Thread/sleep (long delay-ms)))
 
 (defn- backoff-ms
   [attempt initial-backoff-ms max-backoff-ms]
@@ -153,6 +166,7 @@
      :query-params         map appended to URL
      :timeout              full request timeout in ms, default 120000
      :connect-timeout      connect timeout in ms, default 30000
+     :as                   response body format, default :string; supports :string and :byte-array
      :max-attempts         retry attempts, default 3
      :initial-backoff-ms   default 1000
      :max-backoff-ms       default 8000

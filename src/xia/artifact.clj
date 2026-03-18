@@ -23,7 +23,11 @@
 (def ^:private artifact-blob-dbi "xia/artifact-blobs")
 (def ^:private default-blob-codec :zstd)
 (def ^:private zstd-level 3)
-(def ^:private byte-array-class (Class/forName "[B"))
+(def ^:private byte-array-class (class (byte-array 0)))
+
+(defn- epoch-millis->date
+  [millis]
+  (java.util.Date. (long millis)))
 
 (def ^:private kind-specs
   {:txt      {:kind :txt :media-type "text/plain"       :extension "txt"}
@@ -420,7 +424,7 @@
                    :bytes)
     {:blob-id               blob-id
      :blob-codec            codec
-     :compressed-size-bytes (long (alength encoded))}))
+     :compressed-size-bytes (long (alength ^bytes encoded))}))
 
 (defn- load-blob-bytes
   [blob-id codec]
@@ -445,11 +449,11 @@
 
 (defn- entity-created-at
   [entity-map]
-  (some-> (:db/created-at entity-map) long java.util.Date.))
+  (some-> (:db/created-at entity-map) long epoch-millis->date))
 
 (defn- entity-updated-at
   [entity-map]
-  (some-> (:db/updated-at entity-map) long java.util.Date.))
+  (some-> (:db/updated-at entity-map) long epoch-millis->date))
 
 (defn- session-eid
   [session-id]
@@ -700,7 +704,7 @@
           artifact-id (random-uuid)
           source      (or (value-of spec :source) default-source)
           payload     (or bytes (utf8-bytes text))
-          size-bytes  (long (alength payload))
+          size-bytes  (long (alength ^bytes payload))
           sha256      (sha256-hex payload)
           channel     (session-channel session-eid*)
           blob-info   (when bytes

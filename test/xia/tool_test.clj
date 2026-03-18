@@ -398,7 +398,7 @@
   (tool/load-tool! :browser-install-deps)
   (let [status (tool/execute-tool :browser-runtime-status {} {:channel :scheduler})
         session-id (random-uuid)]
-    (is (= #{:htmlunit :playwright}
+    (is (= #{:playwright}
            (set (map :backend (:backends status)))))
     (prompt/register-approval! :terminal (fn [_] true))
     (try
@@ -439,7 +439,7 @@
 (deftest browser-query-elements-tool-executes-through-sci
   (tool/ensure-bundled-tools!)
   (tool/load-tool! :browser-query-elements)
-  (let [opened (browser/open-session "https://example.com" :backend :htmlunit)
+  (let [opened (browser/open-session "https://example.com" :backend :playwright)
         session-id (:session-id opened)]
     (try
       (let [result (tool/execute-tool :browser-query-elements {"session_id" session-id
@@ -447,7 +447,7 @@
                                                                "limit" 1}
                                       {:channel :scheduler})]
         (is (= session-id (:session-id result)))
-        (is (= :htmlunit (:backend result)))
+        (is (= :playwright (:backend result)))
         (is (= :links (:kind result)))
         (is (= 1 (:returned_count result)))
         (is (pos? (:total_count result)))
@@ -531,4 +531,5 @@
       (is (= :playwright (:backend result)))
       (is (= "Example Domain" (:title result)))
       (finally
-        (browser/close-session (:session-id result))))))
+        (when-let [session-id (:session-id result)]
+          (browser/close-session session-id))))))

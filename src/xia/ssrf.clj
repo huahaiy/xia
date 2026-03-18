@@ -1,8 +1,7 @@
 (ns xia.ssrf
-  "Helpers for validating outbound URLs and pinning DNS results."
+  "Helpers for validating outbound URLs against SSRF risks."
   (:require [clojure.string :as str])
-  (:import [java.net InetAddress URI UnknownHostException]
-           [org.apache.http.conn DnsResolver]))
+  (:import [java.net InetAddress URI UnknownHostException]))
 
 (defn private-ip?
   "True if the address is private, loopback, or link-local."
@@ -51,19 +50,3 @@
   ([resolver url]
    (resolve-public-url! resolver url)
    nil))
-
-(defn pinned-dns-resolver
-  "Create an Apache HttpClient DnsResolver that only returns the validated
-   addresses for the expected host."
-  [{:keys [host addresses]}]
-  (let [expected-host (some-> host str/lower-case)
-        pinned-addrs  (into-array InetAddress addresses)]
-    (reify DnsResolver
-      (resolve [_ requested-host]
-        (if (= expected-host (some-> requested-host str/lower-case))
-          pinned-addrs
-          (throw (UnknownHostException.
-                   (str "Unexpected DNS lookup for "
-                        requested-host
-                        " while pinned to "
-                        host))))))))

@@ -120,7 +120,7 @@
 ;; Rate limiting
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private service-rate-limits (ConcurrentHashMap.))
+(defonce ^ConcurrentHashMap ^:private service-rate-limits (ConcurrentHashMap.))
 (def ^:private rate-limit-window-ms 60000)
 
 (defn effective-rate-limit-per-minute

@@ -1,16 +1,81 @@
 (ns xia.test-helpers
   "Shared test fixtures and helpers for xia tests."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [datalevin.embedding :as emb]
             [xia.db :as db]
             [xia.working-memory :as wm])
   (:import [java.io File]
            [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute]
+           [java.nio.charset StandardCharsets]
+           [java.util Base64]))
 
 (defn- temp-db-path []
   (str (Files/createTempDirectory "xia-test"
          (into-array FileAttribute []))))
+
+(defn- escape-pdf-text
+  [text]
+  (-> (str text)
+      (str/replace "\\" "\\\\")
+      (str/replace "(" "\\(")
+      (str/replace ")" "\\)")))
+
+(defn minimal-pdf-bytes
+  [text]
+  (let [stream  (str "BT\n/F1 12 Tf\n72 720 Td\n(" (escape-pdf-text text) ") Tj\nET\n")
+        objects [(str "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+                 (str "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+                 (str "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+                      " /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n")
+                 (str "4 0 obj\n<< /Length " (count stream) " >>\nstream\n"
+                      stream
+                      "endstream\nendobj\n")
+                 (str "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")]
+        header  "%PDF-1.4\n"
+        offsets (loop [remaining objects
+                       offset    (count header)
+                       acc       []]
+                  (if-let [object (first remaining)]
+                    (recur (next remaining)
+                           (+ offset (count object))
+                           (conj acc offset))
+                    acc))
+        xref-start (+ (count header) (reduce + (map count objects)))
+        xref       (str "xref\n0 6\n"
+                        "0000000000 65535 f \n"
+                        (apply str
+                               (map (fn [offset]
+                                      (format "%010d 00000 n \n" offset))
+                                    offsets))
+                        "trailer\n<< /Size 6 /Root 1 0 R >>\n"
+                        "startxref\n"
+                        xref-start
+                        "\n%%EOF\n")]
+    (.getBytes ^String (str header (apply str objects) xref)
+               StandardCharsets/US_ASCII)))
+
+(defn minimal-pdf-base64
+  [text]
+  (.encodeToString (Base64/getEncoder) ^bytes (minimal-pdf-bytes text)))
+
+(defonce ^:private office-fixtures*
+  (delay
+    (or (some-> "fixtures/local-doc/office-fixtures.edn"
+                io/resource
+                slurp
+                edn/read-string)
+        (throw (ex-info "Office fixture data is missing"
+                        {:resource "fixtures/local-doc/office-fixtures.edn"})))))
+
+(defn office-fixture-base64
+  [kind]
+  (or (get @office-fixtures* kind)
+      (throw (ex-info "Unknown office fixture kind"
+                      {:kind kind
+                       :known-kinds (sort (keys @office-fixtures*))}))))
 
 (def ^:private test-embedding-dimensions
   32)

@@ -8,6 +8,13 @@
 
 (use-fixtures :each th/with-test-db)
 
+(defn- abs-double
+  [value]
+  (let [value* (double value)]
+    (if (neg? value*)
+      (- value*)
+      value*)))
+
 ;; ---------------------------------------------------------------------------
 ;; Lifecycle
 ;; ---------------------------------------------------------------------------
@@ -272,8 +279,8 @@
                     (is (= [:workload :fact-utility] opts))
                     "{\"facts\":[{\"index\":0,\"utility\":1.0}]}")]
       (is (= 1 (wm/review-fact-utility! [fact-eid] "What does Hong like?" "Hong likes Clojure."))))
-    (is (< (Math/abs (- 0.7
-                        (double (:kg.fact/utility (db/entity fact-eid)))))
+    (is (< (abs-double (- 0.7
+                          (double (:kg.fact/utility (db/entity fact-eid)))))
            1.0e-6))))
 
 ;; ---------------------------------------------------------------------------
@@ -393,7 +400,7 @@
 (deftest clear-wm-cleans-up-session-op-agents
   (let [sid-a   (random-uuid)
         sid-b   (random-uuid)
-        agents  @#'xia.working-memory/session-op-agents]
+        ^java.util.Map agents @#'xia.working-memory/session-op-agents]
     (wm/create-wm! sid-a)
     (wm/create-wm! sid-b)
     (is (.containsKey agents sid-a))

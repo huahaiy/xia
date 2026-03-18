@@ -5,18 +5,17 @@
             [xia.memory :as memory]
             [xia.working-memory :as wm]
             [xia.scratch :as scratch])
-  (:import [java.io ByteArrayInputStream IOException]
+  (:import [java.io ByteArrayInputStream ByteArrayOutputStream IOException]
            [java.math BigInteger]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
-           [java.util Base64 UUID]
-           [org.apache.poi.ss.usermodel Cell DataFormatter]
-           [org.apache.poi.xslf.usermodel XMLSlideShow XSLFTextShape]
-           [org.apache.poi.xssf.usermodel XSSFWorkbook]
-           [org.apache.poi.xwpf.extractor XWPFWordExtractor]
-           [org.apache.poi.xwpf.usermodel XWPFDocument]
+           [java.util Base64 Date UUID]
+           [java.util.zip ZipEntry ZipInputStream]
+           [javax.xml XMLConstants]
+           [javax.xml.parsers DocumentBuilderFactory]
            [org.apache.pdfbox Loader]
-           [org.apache.pdfbox.text PDFTextStripper]))
+           [org.apache.pdfbox.text PDFTextStripper]
+           [org.w3c.dom Document Node]))
 
 (def ^:private default-name "Untitled upload")
 (def ^:private default-source :upload)
@@ -268,63 +267,276 @@
        (map #(some-> % normalize-text str/trim))
        (remove str/blank?)))
 
-(defn- cell-display
-  [^DataFormatter formatter evaluator ^Cell cell]
-  (let [value (try
-                (.formatCellValue formatter cell evaluator)
-                (catch Exception _
-                  (str cell)))]
-    (normalize-text value)))
+(defn- millis->date
+  [millis]
+  (when (some? millis)
+    (Date. (long millis))))
+
+(defn- byte-array-length
+  [data]
+  (when data
+    (alength ^bytes data)))
+
+(defn- copy-input-stream-bytes
+  [in]
+  (let [^ByteArrayOutputStream out (ByteArrayOutputStream.)
+        buffer (byte-array 8192)]
+    (loop [read-count (.read ^java.io.InputStream in buffer)]
+      (when (pos? read-count)
+        (.write out buffer 0 read-count)
+        (recur (.read ^java.io.InputStream in buffer))))
+    (.toByteArray out)))
+
+(defn- zip-entry-bytes-map
+  [^bytes archive-bytes]
+  (with-open [in (ByteArrayInputStream. archive-bytes)
+              ^ZipInputStream zip (ZipInputStream. in)]
+    (loop [^ZipEntry entry (.getNextEntry zip)
+           acc {}]
+      (if-not entry
+        acc
+        (let [entry-name (.getName entry)
+              next-acc (if (.isDirectory entry)
+                         acc
+                         (assoc acc entry-name (copy-input-stream-bytes zip)))]
+          (.closeEntry zip)
+          (recur (.getNextEntry zip) next-acc))))))
+
+(defn- secure-document-builder-factory
+  []
+  (doto (DocumentBuilderFactory/newInstance)
+    (.setNamespaceAware true)
+    (.setExpandEntityReferences false)
+    (.setXIncludeAware false)
+    (.setFeature XMLConstants/FEATURE_SECURE_PROCESSING true)
+    (.setFeature "http://apache.org/xml/features/disallow-doctype-decl" true)))
+
+(defn- parse-xml-bytes
+  [^bytes xml-bytes]
+  (with-open [in (ByteArrayInputStream. xml-bytes)]
+    (let [^DocumentBuilderFactory factory (secure-document-builder-factory)
+          ^Document document (.parse (.newDocumentBuilder factory) in)]
+      document)))
+
+(defn- child-nodes
+  [node]
+  (let [children (.getChildNodes ^org.w3c.dom.Node node)
+        total    (.getLength children)]
+    (loop [idx 0
+           acc []]
+      (if (>= idx total)
+        acc
+        (recur (inc idx) (conj acc (.item children idx)))))))
+
+(defn- element-node?
+  [node]
+  (= org.w3c.dom.Node/ELEMENT_NODE
+     (.getNodeType ^org.w3c.dom.Node node)))
+
+(defn- node-local-name
+  [node]
+  (let [^org.w3c.dom.Node node node
+        local-name (.getLocalName node)]
+    (or local-name (.getNodeName node))))
+
+(defn- descendant-elements-by-local-name
+  [node local-name]
+  (->> (tree-seq #(seq (child-nodes %)) child-nodes node)
+       rest
+       (filter #(and (element-node? %)
+                     (= local-name (node-local-name %))))))
+
+(defn- direct-child-elements-by-local-name
+  [node local-name]
+  (->> (child-nodes node)
+       (filter #(and (element-node? %)
+                     (= local-name (node-local-name %))))))
+
+(defn- node-text
+  [node]
+  (when node
+    (let [text (.getTextContent ^Node node)]
+      (some-> text
+              normalize-text
+              str/trim
+              not-empty))))
+
+(defn- element-attr
+  [element attr-name]
+  (let [value (.getAttribute ^org.w3c.dom.Element element ^String attr-name)]
+    (not-empty (str/trim value))))
+
+(def ^:private office-rel-ns
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+
+(defn- element-attr-ns
+  [element namespace-uri local-name fallback-attr]
+  (or (let [value (.getAttributeNS ^org.w3c.dom.Element element
+                                   ^String namespace-uri
+                                   ^String local-name)]
+        (not-empty (str/trim value)))
+      (element-attr element fallback-attr)))
+
+(defn- path-sort-key
+  [path]
+  (let [idx (some-> (re-find #"\d+" (str path))
+                    Integer/parseInt)]
+    [(or idx Long/MAX_VALUE) (str path)]))
+
+(defn- docx-paragraph-text
+  [paragraph]
+  (->> (descendant-elements-by-local-name paragraph "t")
+       (keep node-text)
+       (str/join "")))
+
+(defn- office-relationships
+  [entries rels-path prefix]
+  (if-let [rels-bytes (get entries rels-path)]
+    (let [^Document rels-doc (parse-xml-bytes rels-bytes)
+          doc (.getDocumentElement rels-doc)]
+      (into {}
+            (keep (fn [relationship]
+                    (let [id     (element-attr relationship "Id")
+                          target (some-> (element-attr relationship "Target")
+                                         (str/replace #"^\./" "")
+                                         (#(if (str/starts-with? % "/")
+                                             (subs % 1)
+                                             %))
+                                         (#(if (str/starts-with? % prefix)
+                                             %
+                                             (str prefix %))))]
+                      (when (and id target)
+                        [id target]))))
+            (descendant-elements-by-local-name doc "Relationship")))
+    {}))
+
+(defn- shared-string-item-text
+  [si]
+  (->> (descendant-elements-by-local-name si "t")
+       (keep node-text)
+       (str/join "")))
+
+(defn- xlsx-shared-strings
+  [entries]
+  (if-let [shared-strings-bytes (get entries "xl/sharedStrings.xml")]
+    (let [^Document shared-doc (parse-xml-bytes shared-strings-bytes)
+          doc (.getDocumentElement shared-doc)]
+      (mapv shared-string-item-text
+            (descendant-elements-by-local-name doc "si")))
+    []))
+
+(defn- xlsx-cell-text
+  [cell shared-strings]
+  (let [cell-type     (element-attr cell "t")
+        value-node    (first (descendant-elements-by-local-name cell "v"))
+        inline-node   (first (descendant-elements-by-local-name cell "is"))
+        inline-text   (some-> inline-node shared-string-item-text)
+        value-text    (node-text value-node)
+        resolved-text (case cell-type
+                        "s" (when value-text
+                              (nth shared-strings (Integer/parseInt value-text) ""))
+                        "inlineStr" inline-text
+                        "str" value-text
+                        (or value-text inline-text ""))]
+    (normalize-text resolved-text)))
+
+(defn- xlsx-sheet-descriptors
+  [entries]
+  (let [worksheet-paths (->> (keys entries)
+                             (filter #(re-matches #"xl/worksheets/sheet\d+\.xml" %))
+                             (sort-by path-sort-key)
+                             vec)
+        rel-map         (office-relationships entries "xl/_rels/workbook.xml.rels" "xl/")
+        workbook-bytes  (get entries "xl/workbook.xml")]
+    (if workbook-bytes
+      (let [^Document workbook-doc (parse-xml-bytes workbook-bytes)
+            doc (.getDocumentElement workbook-doc)
+            by-workbook
+            (->> (descendant-elements-by-local-name doc "sheet")
+                 (map-indexed
+                   (fn [idx sheet]
+                     (let [entry (or (some-> (element-attr-ns sheet office-rel-ns "id" "r:id")
+                                             rel-map)
+                                     (nth worksheet-paths idx nil))]
+                       (when entry
+                         {:name  (or (element-attr sheet "name")
+                                     (str "Sheet " (inc idx)))
+                          :entry entry}))))
+                 (remove nil?)
+                 vec)]
+        (if (seq by-workbook)
+          by-workbook
+          (mapv (fn [idx path]
+                  {:name (str "Sheet " (inc idx))
+                   :entry path})
+                (range (count worksheet-paths))
+                worksheet-paths)))
+      (mapv (fn [idx path]
+              {:name (str "Sheet " (inc idx))
+               :entry path})
+            (range (count worksheet-paths))
+            worksheet-paths))))
+
+(defn- slide-entry-paths
+  [entries]
+  (->> (keys entries)
+       (filter #(re-matches #"ppt/slides/slide\d+\.xml" %))
+       (sort-by path-sort-key)
+       vec))
 
 (defn- extract-docx-text
   [name media-type ^bytes docx-bytes]
   (try
-    (with-open [in (ByteArrayInputStream. docx-bytes)
-                doc (XWPFDocument. in)
-                extractor (XWPFWordExtractor. doc)]
-      (normalize-text (.getText extractor)))
+    (let [entries        (zip-entry-bytes-map docx-bytes)
+          document-bytes (or (get entries "word/document.xml")
+                             (throw (ex-info "Missing word/document.xml" {})))
+          ^Document document-doc (parse-xml-bytes document-bytes)
+          document-root  (.getDocumentElement document-doc)]
+      (->> (descendant-elements-by-local-name document-root "p")
+           (keep docx-paragraph-text)
+           (remove str/blank?)
+           (str/join "\n")
+           normalize-text))
     (catch Exception e
       (office-extraction-failed :local-doc/docx-extraction-failed name media-type e))))
 
 (defn- extract-xlsx-text
   [name media-type ^bytes xlsx-bytes]
   (try
-    (with-open [in (ByteArrayInputStream. xlsx-bytes)
-                workbook (XSSFWorkbook. in)]
-      (let [formatter (DataFormatter.)
-            evaluator (.createFormulaEvaluator (.getCreationHelper workbook))
-            sheets    (for [sheet (iterator-seq (.sheetIterator workbook))]
-                        (let [rows (->> (iterator-seq (.rowIterator sheet))
-                                        (map (fn [row]
-                                               (->> (iterator-seq (.cellIterator row))
-                                                    (map #(cell-display formatter evaluator %))
-                                                    (remove str/blank?)
-                                                    (str/join "\t"))))
-                                        (remove str/blank?))
-                              header (str "## Sheet: " (.getSheetName sheet))]
-                          (str/join "\n" (cons header rows))))]
-        (normalize-text (str/join "\n\n" (remove str/blank? sheets)))))
+    (let [entries         (zip-entry-bytes-map xlsx-bytes)
+          shared-strings  (xlsx-shared-strings entries)
+          sheet-sections  (for [{:keys [name entry]} (xlsx-sheet-descriptors entries)
+                                :let [sheet-bytes (get entries entry)]
+                                :when sheet-bytes]
+                            (let [^Document sheet-doc (parse-xml-bytes sheet-bytes)
+                                  sheet-root (.getDocumentElement sheet-doc)
+                                  rows       (->> (descendant-elements-by-local-name sheet-root "row")
+                                                  (map (fn [row]
+                                                         (->> (direct-child-elements-by-local-name row "c")
+                                                              (map #(xlsx-cell-text % shared-strings))
+                                                              (remove str/blank?)
+                                                              (str/join "\t"))))
+                                                  (remove str/blank?))]
+                              (str/join "\n" (cons (str "## Sheet: " name) rows))))]
+      (normalize-text (str/join "\n\n" (remove str/blank? sheet-sections))))
     (catch Exception e
       (office-extraction-failed :local-doc/xlsx-extraction-failed name media-type e))))
 
 (defn- extract-pptx-text
   [name media-type ^bytes pptx-bytes]
   (try
-    (with-open [in (ByteArrayInputStream. pptx-bytes)
-                slideshow (XMLSlideShow. in)]
-      (let [slides (map-indexed
-                     (fn [idx slide]
-                       (let [text-lines (->> (.getShapes slide)
-                                             (keep (fn [shape]
-                                                     (when (instance? XSLFTextShape shape)
-                                                       (some-> (.getText ^XSLFTextShape shape)
-                                                               normalize-text
-                                                               str/trim
-                                                               not-empty)))))
-                             header (str "## Slide " (inc idx))]
-                         (str/join "\n" (cons header (nonblank-lines text-lines)))))
-                     (.getSlides slideshow))]
-        (normalize-text (str/join "\n\n" (remove str/blank? slides)))))
+    (let [entries        (zip-entry-bytes-map pptx-bytes)
+          slide-sections (map-indexed
+                           (fn [idx entry-path]
+                             (let [^Document slide-doc (parse-xml-bytes (get entries entry-path))
+                                   slide-root (.getDocumentElement slide-doc)
+                                   text-lines (->> (descendant-elements-by-local-name slide-root "t")
+                                                   (keep node-text))]
+                               (str/join "\n"
+                                         (cons (str "## Slide " (inc idx))
+                                               (nonblank-lines text-lines)))))
+                           (slide-entry-paths entries))]
+      (normalize-text (str/join "\n\n" (remove str/blank? slide-sections))))
     (catch Exception e
       (office-extraction-failed :local-doc/pptx-extraction-failed name media-type e))))
 
@@ -428,11 +640,11 @@
 
 (defn- entity-created-at
   [entity-map]
-  (some-> (:db/created-at entity-map) long java.util.Date.))
+  (some-> (:db/created-at entity-map) long millis->date))
 
 (defn- entity-updated-at
   [entity-map]
-  (some-> (:db/updated-at entity-map) long java.util.Date.))
+  (some-> (:db/updated-at entity-map) long millis->date))
 
 (defn- session-eid
   [session-id]
@@ -686,7 +898,7 @@
                           :bytes-base64 bytes-base64})
           text*       text
           sha256      (sha256-hex source-bytes)
-          size-bytes* (normalize-size-bytes size-bytes (alength source-bytes))
+          size-bytes* (normalize-size-bytes size-bytes (byte-array-length source-bytes))
           existing    (existing-doc-eid session-eid* sha256)
           doc-id      (or (some-> existing db/entity :local.doc/id) (random-uuid))
           preview     (preview-text text*)
@@ -728,8 +940,8 @@
                              nil))
           media-type*    (best-effort-media-type name* media-type)
           size-bytes*    (cond
-                           (some? size-bytes) (normalize-size-bytes size-bytes (or (some-> source-bytes alength) 0))
-                           source-bytes       (long (alength ^bytes source-bytes))
+                           (some? size-bytes) (normalize-size-bytes size-bytes (or (byte-array-length source-bytes) 0))
+                           source-bytes       (long (byte-array-length source-bytes))
                            :else              nil)
           sha256         (some-> source-bytes sha256-hex)
           preview        (text-preview-for-failure {:name name*
@@ -739,7 +951,7 @@
                                                     :bytes-base64 bytes-base64})
           channel        (session-channel session-eid*)
           doc-id         (random-uuid)
-          error-message  (.getMessage error)]
+          error-message  (.getMessage ^Throwable error)]
       (db/transact!
         [(cond-> {:local.doc/id      doc-id
                   :local.doc/session session-eid*

@@ -11,6 +11,17 @@
 
 (use-fixtures :each th/with-test-db)
 
+(defn- abs-double
+  [value]
+  (let [value* (double value)]
+    (if (neg? value*)
+      (- value*)
+      value*)))
+
+(defn- date-at
+  ^java.util.Date [millis]
+  (java.util.Date. (long millis)))
+
 ;; ---------------------------------------------------------------------------
 ;; keywordize-props (private, test via merge-extraction! behavior)
 ;; ---------------------------------------------------------------------------
@@ -327,8 +338,8 @@
 
 (deftest test-consolidate-pending-rates-importance-in-one-batched-call
   (let [now               (System/currentTimeMillis)
-        ep-1              (th/seed-episode! "Episode 1" :timestamp (java.util.Date. (- now 2000)))
-        ep-2              (th/seed-episode! "Episode 2" :timestamp (java.util.Date. (- now 1000)))
+        ep-1              (th/seed-episode! "Episode 1" :timestamp (date-at (- now 2000)))
+        ep-2              (th/seed-episode! "Episode 2" :timestamp (date-at (- now 1000)))
         importance-calls   (atom 0)
         extraction-calls   (atom 0)]
     (with-redefs [xia.llm/chat-simple
@@ -347,11 +358,11 @@
       (hippo/consolidate-pending!))
     (is (= 1 @importance-calls))
     (is (= 2 @extraction-calls))
-    (is (< (Math/abs (- 0.9
-                        (double (:episode/importance (db/entity ep-1)))))
+    (is (< (abs-double (- 0.9
+                          (double (:episode/importance (db/entity ep-1)))))
            1.0e-6))
-    (is (< (Math/abs (- 0.2
-                        (double (:episode/importance (db/entity ep-2)))))
+    (is (< (abs-double (- 0.2
+                          (double (:episode/importance (db/entity ep-2)))))
            1.0e-6))))
 
 (deftest test-consolidate-pending-quarantines-invalid-episodes-and-processes-rest
@@ -454,8 +465,8 @@
         now-ms        (System/currentTimeMillis)
         elapsed-ms    (+ (:grace-period-ms settings)
                          (* 2 (:half-life-ms settings)))
-        now           (java.util.Date. now-ms)
-        old-updated   (java.util.Date. (- now-ms elapsed-ms))
+        now           (date-at now-ms)
+        old-updated   (date-at (- now-ms elapsed-ms))
         expected-conf (max (:min-confidence settings)
                            (Math/pow 0.5 (/ (- elapsed-ms (:grace-period-ms settings))
                                             (double (:half-life-ms settings)))))]
@@ -464,7 +475,7 @@
     (let [updated-conf (:kg.fact/confidence (db/entity fact-eid))
           decayed-at   (:kg.fact/decayed-at (db/entity fact-eid))]
       (is (< updated-conf 1.0) "Confidence should have decayed")
-      (is (< (Math/abs (- updated-conf expected-conf)) 1.0e-3)
+      (is (< (abs-double (- updated-conf expected-conf)) 1.0e-3)
           "Confidence should follow the documented exponential half-life")
       (is (= now decayed-at) "Maintenance should record when decay was applied"))))
 
@@ -473,10 +484,10 @@
         node-eid    (th/seed-node! "StableEntity" "concept")
         fact-eid    (th/seed-fact! node-eid "stable fact" :confidence 1.0)
         now-ms      (System/currentTimeMillis)
-        now         (java.util.Date. now-ms)
-        old-updated (java.util.Date. (- now-ms
-                                        (+ (:grace-period-ms settings)
-                                           (* 30 24 60 60 1000))))]
+        now         (date-at now-ms)
+        old-updated (date-at (- now-ms
+                                 (+ (:grace-period-ms settings)
+                                    (* 30 24 60 60 1000))))]
     (db/transact! [[:db/add fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
     (let [once-conf (:kg.fact/confidence (db/entity fact-eid))]
@@ -491,10 +502,10 @@
         low-fact-eid  (th/seed-fact! node-eid "low utility fact" :confidence 1.0 :utility 0.0)
         high-fact-eid (th/seed-fact! node-eid "high utility fact" :confidence 1.0 :utility 1.0)
         now-ms        (System/currentTimeMillis)
-        now           (java.util.Date. now-ms)
-        old-updated   (java.util.Date. (- now-ms
-                                          (+ (:grace-period-ms settings)
-                                             (* 2 (:half-life-ms settings)))))]
+        now           (date-at now-ms)
+        old-updated   (date-at (- now-ms
+                                  (+ (:grace-period-ms settings)
+                                     (* 2 (:half-life-ms settings)))))]
     (db/transact! [[:db/add low-fact-eid :kg.fact/updated-at old-updated]
                    [:db/add high-fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
@@ -506,20 +517,20 @@
   (let [settings        (hippo/knowledge-decay-settings)
         node-eid        (th/seed-node! "DecayQueryEntity" "concept")
         now-ms          (System/currentTimeMillis)
-        as-of           (java.util.Date. now-ms)
-        stale-updated   (java.util.Date. (- now-ms
-                                            (:maintenance-step-ms settings)
-                                            (* 2 24 60 60 1000)))
-        old-maintained-updated (java.util.Date. (- now-ms
-                                                   (:maintenance-step-ms settings)
-                                                   (* 6 24 60 60 1000)))
-        fresh-updated   (java.util.Date. (- now-ms
-                                            (quot (:maintenance-step-ms settings) 2)))
-        recent-decayed  (java.util.Date. (- now-ms
-                                            (quot (:maintenance-step-ms settings) 2)))
-        old-decayed     (java.util.Date. (- now-ms
-                                            (:maintenance-step-ms settings)
-                                            (* 3 24 60 60 1000)))
+        as-of           (date-at now-ms)
+        stale-updated   (date-at (- now-ms
+                                     (:maintenance-step-ms settings)
+                                     (* 2 24 60 60 1000)))
+        old-maintained-updated (date-at (- now-ms
+                                           (:maintenance-step-ms settings)
+                                           (* 6 24 60 60 1000)))
+        fresh-updated   (date-at (- now-ms
+                                     (quot (:maintenance-step-ms settings) 2)))
+        recent-decayed  (date-at (- now-ms
+                                     (quot (:maintenance-step-ms settings) 2)))
+        old-decayed     (date-at (- now-ms
+                                     (:maintenance-step-ms settings)
+                                     (* 3 24 60 60 1000)))
         stale-eid       (th/seed-fact! node-eid "stale fact" :confidence 1.0)
         fresh-eid       (th/seed-fact! node-eid "fresh fact" :confidence 1.0)
         recent-eid      (th/seed-fact! node-eid "recently maintained fact" :confidence 1.0)
@@ -551,12 +562,12 @@
                                   :confidence (:min-confidence settings)
                                   :utility 0.5)
         now-ms     (System/currentTimeMillis)
-        now        (java.util.Date. now-ms)
-        bottomed   (java.util.Date. (- now-ms
-                                       (:archive-after-bottom-ms settings)
-                                       (* 2 24 60 60 1000)))
-        updated-at (java.util.Date. (- (.getTime bottomed)
-                                       (* 30 24 60 60 1000)))]
+        now        (date-at now-ms)
+        bottomed   (date-at (- now-ms
+                                 (:archive-after-bottom-ms settings)
+                                 (* 2 24 60 60 1000)))
+        updated-at (date-at (- (.getTime bottomed)
+                                 (* 30 24 60 60 1000)))]
     (db/transact! [[:db/add fact-eid :kg.fact/updated-at updated-at]
                    [:db/add fact-eid :kg.fact/decayed-at bottomed]
                    [:db/add fact-eid :kg.fact/bottomed-at bottomed]])
@@ -568,12 +579,12 @@
   (let [settings       (hippo/knowledge-decay-settings)
         node-eid       (th/seed-node! "ArchiveQueryEntity" "concept")
         now-ms         (System/currentTimeMillis)
-        as-of          (java.util.Date. now-ms)
-        old-bottomed   (java.util.Date. (- now-ms
-                                           (:archive-after-bottom-ms settings)
-                                           (* 2 24 60 60 1000)))
-        recent-bottomed (java.util.Date. (- now-ms
-                                            (quot (:archive-after-bottom-ms settings) 2)))
+        as-of          (date-at now-ms)
+        old-bottomed   (date-at (- now-ms
+                                   (:archive-after-bottom-ms settings)
+                                   (* 2 24 60 60 1000)))
+        recent-bottomed (date-at (- now-ms
+                                    (quot (:archive-after-bottom-ms settings) 2)))
         stale-eid      (th/seed-fact! node-eid "stale archive fact"
                                       :confidence (:min-confidence settings)
                                       :utility 0.5)
@@ -595,9 +606,9 @@
         fact-eid   (th/seed-fact! node-eid "prefers tea"
                                   :confidence (:min-confidence settings)
                                   :utility 0.5)
-        bottomed   (java.util.Date. (- (System/currentTimeMillis)
-                                       (:archive-after-bottom-ms settings)
-                                       (* 2 24 60 60 1000)))]
+        bottomed   (date-at (- (System/currentTimeMillis)
+                                 (:archive-after-bottom-ms settings)
+                                 (* 2 24 60 60 1000)))]
     (db/transact! [[:db/add fact-eid :kg.fact/bottomed-at bottomed]])
     (#'xia.hippocampus/dedup-fact! node-eid "prefers tea" nil)
     (is (nil? (:kg.fact/bottomed-at (db/entity fact-eid)))

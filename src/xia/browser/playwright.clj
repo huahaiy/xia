@@ -10,11 +10,13 @@
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
            [com.microsoft.playwright.impl.driver Driver]
-           [java.nio.file Files LinkOption Paths]
-           [java.util Base64]
+           [com.microsoft.playwright.impl.driver.jar DriverJar]
+           [java.net URI]
+           [java.nio.file FileSystem FileSystemAlreadyExistsException FileSystems Files LinkOption Paths]
+           [java.util Base64 Collections Map]
            [java.util.concurrent ConcurrentHashMap]
            [org.jsoup Jsoup]
-           [org.jsoup.nodes Element]))
+           [org.jsoup.nodes Document Element]))
 
 (def ^:private backend-id :playwright)
 (def ^:private browser-name "chromium")
@@ -27,9 +29,10 @@
                                   :browser nil
                                   :bootstrapped? false
                                   :browser-installed? false
-                                  :browser-executable nil}))
+                                  :browser-executable nil
+                                  :driver-resource-fs nil}))
 (defonce ^:private runtime-lock (Object.))
-(defonce ^:private sessions (ConcurrentHashMap.))
+(defonce ^ConcurrentHashMap ^:private sessions (ConcurrentHashMap.))
 (defonce ^:private session-restore-locks
   (vec (repeatedly session-restore-lock-count #(Object.))))
 
@@ -92,6 +95,24 @@
 (defn- create-playwright
   []
   (let [env (playwright-env)]
+    (locking runtime-lock
+      (when-not (:driver-resource-fs @runtime)
+        (when-let [^URI resource-uri (try
+                                       (DriverJar/getDriverResourceURI)
+                                       (catch Exception e
+                                         (log/debug e "Unable to resolve Playwright driver resource URI")
+                                         nil))]
+          (when-not (= "jar" (.getScheme resource-uri))
+            (try
+              (let [^Map fs-env (Collections/emptyMap)
+                    ^FileSystem fs (FileSystems/newFileSystem resource-uri fs-env)]
+                (swap! runtime assoc :driver-resource-fs fs))
+              (catch FileSystemAlreadyExistsException _
+                (swap! runtime assoc :driver-resource-fs :already-exists))
+              (catch UnsupportedOperationException e
+                (log/debug e "Playwright driver resource URI does not support explicit filesystem initialization"))
+              (catch Exception e
+                (log/debug e "Failed to initialize Playwright driver resource filesystem")))))))
     (if (seq env)
       (Playwright/create (doto (Playwright$CreateOptions.)
                            (.setEnv env)))
@@ -107,7 +128,7 @@
 (defn- browser-installation-info
   ([]
    (try
-     (with-open [playwright (create-playwright)]
+     (with-open [^Playwright playwright (create-playwright)]
        (browser-installation-info playwright))
      (catch Exception e
        {:browser browser-name
@@ -252,11 +273,17 @@
         (when playwright
           (.close ^Playwright playwright))
         (catch Exception _))
+      (try
+        (when-let [driver-fs (:driver-resource-fs @runtime)]
+          (when (instance? FileSystem driver-fs)
+            (.close ^FileSystem driver-fs)))
+        (catch Exception _))
       (reset! runtime {:playwright nil
                        :browser nil
                        :bootstrapped? false
                        :browser-installed? false
-                       :browser-executable nil}))))
+                       :browser-executable nil
+                       :driver-resource-fs nil}))))
 
 (defn runtime-status
   []
@@ -370,7 +397,7 @@
             (reset! runtime state)
             state)
           (catch Exception e
-            (try (.close playwright) (catch Exception _))
+            (try (.close ^Playwright playwright) (catch Exception _))
             (throw e)))))))
 
 (defn- page-result
@@ -398,7 +425,7 @@
   (> (- (now-ms) last-access) live-session-ttl-ms))
 
 (defn- page-text
-  [doc]
+  [^Document doc]
   (some-> doc
           .body
           .text
@@ -430,7 +457,9 @@
 
 (defn- document->map
   [url title html]
-  (let [doc (Jsoup/parse (or html "") (or url "about:blank"))
+  (let [^String html* (or html "")
+        ^String url* (or url "about:blank")
+        ^Document doc (Jsoup/parse html* url*)
         text (page-text doc)
         [content truncated?] (truncate-content text)
         forms (.select doc "form")
@@ -632,10 +661,10 @@
 (defn- live-session->snapshot
   [session-id session-atom]
   (let [{:keys [context created-at-ms last-access js-enabled]} @session-atom
-        page (current-page* session-atom)]
+        ^Page page (current-page* session-atom)]
     {"session_id" session-id
      "backend" (name backend-id)
-     "current_url" (some-> page .url)
+     "current_url" (when page (.url page))
      "created_at_ms" (long (or created-at-ms (now-ms)))
      "updated_at_ms" (long (now-ms))
      "last_access_ms" (long (or last-access (now-ms)))
@@ -884,7 +913,7 @@
 
 (defn- field-locator
   [^Locator form field-name]
-  (let [locator (.locator form (field-selector field-name))]
+  (let [locator (.locator form ^String (field-selector field-name))]
     (when (pos? (.count ^Locator locator))
       (.first ^Locator locator))))
 
@@ -999,7 +1028,7 @@
   (query-elements* [_ session-id opts]
     (let [_sess (get-session ops session-id)
           session-atom (.get sessions session-id)
-          page (current-page-or-throw session-id session-atom)
+          ^Page page (current-page-or-throw session-id session-atom)
           opts* (browser.query/normalize-opts opts)
           payload-json (json/write-json-str {:selector (:selector opts*)
                                              :textContains (:text-contains opts*)
@@ -1007,7 +1036,7 @@
                                              :offset (:offset opts*)
                                              :limit (:limit opts*)})
           raw-json (try
-                     (.evaluate page query-elements-script payload-json)
+                     (.evaluate page ^String query-elements-script ^String payload-json)
                      (catch Exception e
                        (throw (ex-info "Invalid browser query selector"
                                        {:selector (:selector opts*)}
@@ -1028,7 +1057,7 @@
                                       interval-ms 500}}]
     (let [_sess (get-session ops session-id)
           session-atom (.get sessions session-id)
-          page (current-page-or-throw session-id session-atom)
+          ^Page page (current-page-or-throw session-id session-atom)
           timeout-ms* (long (max 0 timeout-ms))
           interval-ms* (long (max 50 interval-ms))
           condition? (or selector text url-contains)
@@ -1092,12 +1121,12 @@
                                    (backend-snapshots ops)))]
       (->> sessions
            (reduce (fn [acc [session-id sess]]
-                     (let [page (current-page* sess)
+                     (let [^Page page (current-page* sess)
                            state @sess]
                        (assoc acc session-id
                               {:session-id session-id
                                :backend backend-id
-                               :url (some-> page .url)
+                               :url (when page (.url page))
                                :age-seconds (quot (- (now-ms)
                                                      (:last-access state))
                                                   1000)

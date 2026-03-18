@@ -3,7 +3,8 @@
             [clojure.test :refer [deftest is testing]]
             [xia.embedding-eval :as eval]
             [xia.test-helpers :as th])
-  (:import [java.nio.file Files Path Paths]
+  (:import [java.nio.charset StandardCharsets]
+           [java.nio.file Files Path Paths]
            [java.nio.file.attribute FileAttribute]
            [java.util.zip ZipEntry ZipOutputStream]))
 
@@ -19,9 +20,10 @@
     (spit path content)))
 
 (defn- write-zip-entry!
-  [^ZipOutputStream zip entry-name content]
-  (.putNextEntry zip (ZipEntry. entry-name))
-  (.write zip (.getBytes content "UTF-8"))
+  [^ZipOutputStream zip ^String entry-name content]
+  (let [^ZipEntry entry (ZipEntry. ^String entry-name)]
+    (.putNextEntry zip entry))
+  (.write zip ^bytes (.getBytes ^String content StandardCharsets/UTF_8))
   (.closeEntry zip))
 
 (defn- fixture-dataset!

@@ -1,0 +1,243 @@
+[
+  {
+    "name": "com.microsoft.playwright.impl.driver.jar.DriverJar",
+    "allDeclaredConstructors": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.Message",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedArgument",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedValue",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedValue$E",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedValue$R",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedValue$O",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedError",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.SerializedError$Error",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.Channel",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.ExpectedTextValue",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.FrameExpectOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.impl.FrameExpectResult",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true,
+    "unsafeAllocated": true
+  },
+  {
+    "name": "com.microsoft.playwright.Playwright$CreateOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.BrowserType$LaunchOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Browser$NewContextOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.BrowserContext$CloseOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.BrowserContext$StorageStateOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.APIRequestContext$DisposeOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$ClickOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$FillOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$GetAttributeOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$InnerTextOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$NavigateOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$WaitForLoadStateOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Frame$WaitForSelectorOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Locator$ClickOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Locator$ElementHandleOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Locator$FillOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Locator$GetAttributeOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.ViewportSize",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.ScreenSize",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.RecordVideoSize",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.Proxy",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.HttpCredentials",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.Geolocation",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.Clip",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.Position",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.ClientCertificate",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.HttpHeader",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.Timing",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.HarContentPolicy",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.HarMode",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.options.LoadState",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Page$WaitForLoadStateOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "com.microsoft.playwright.Page$ScreenshotOptions",
+    "allDeclaredConstructors": true,
+    "allDeclaredFields": true
+  }
+]

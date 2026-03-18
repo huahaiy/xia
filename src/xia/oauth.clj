@@ -80,7 +80,7 @@
   [body]
   (into {}
         (keep (fn [part]
-                (let [[k v] (str/split part #"=" 2)]
+                (let [[^String k ^String v] (str/split part #"=" 2)]
                   (when (seq k)
                     [(URLDecoder/decode k "UTF-8")
                      (some-> v (URLDecoder/decode "UTF-8"))]))))

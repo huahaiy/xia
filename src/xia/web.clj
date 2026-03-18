@@ -11,15 +11,12 @@
   (:require [clojure.string :as str]
             [charred.api :as json]
             [xia.db :as db]
+            [xia.http-client :as http]
             [xia.ssrf :as ssrf])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
-           [org.apache.http Header]
-           [org.apache.http.client.config RequestConfig]
-           [org.apache.http.client.methods RequestBuilder]
-           [org.apache.http.impl.client HttpClientBuilder]
-           [java.io ByteArrayOutputStream InputStream]
-           [java.net URI]
+           [org.jsoup.select Elements]
+           [java.net URI URLEncoder URLDecoder]
            [java.nio.charset Charset StandardCharsets]
            [java.util.concurrent ConcurrentHashMap]))
 
@@ -57,7 +54,7 @@
 ;; Rate limiting — simple per-domain token bucket
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private rate-limits (ConcurrentHashMap.))
+(defonce ^ConcurrentHashMap ^:private rate-limits (ConcurrentHashMap.))
 
 (def ^:private rate-limit-max 10)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute
@@ -96,19 +93,6 @@
 ;; HTTP fetch
 ;; ---------------------------------------------------------------------------
 
-(defn- normalize-headers
-  [headers]
-  (reduce (fn [m ^Header header]
-            (let [header-name  (str/lower-case (.getName header))
-                  header-value (.getValue header)]
-              (update m header-name
-                      (fn [existing]
-                        (if existing
-                          (str existing "," header-value)
-                          header-value)))))
-          {}
-          headers))
-
 (defn- response-charset
   [headers]
   (let [content-type (get headers "content-type")]
@@ -124,66 +108,32 @@
   [body-bytes headers]
   (String. ^bytes body-bytes ^Charset (response-charset headers)))
 
-(defn- read-entity-bytes!
-  [entity url]
-  (if-not entity
-    (byte-array 0)
-    (let [declared-size (.getContentLength entity)]
-      (when (> declared-size max-body-bytes)
-        (throw (ex-info "Response too large"
-                        {:url   url
-                         :size  declared-size
-                         :limit max-body-bytes})))
-      (with-open [^InputStream in (.getContent entity)
-                  out            (ByteArrayOutputStream.)]
-        (let [buffer (byte-array 8192)]
-          (loop [total 0]
-            (let [read-count (.read in buffer)]
-              (if (neg? read-count)
-                (.toByteArray out)
-                (let [new-total (+ total read-count)]
-                  (when (> new-total max-body-bytes)
-                    (throw (ex-info "Response too large"
-                                    {:url   url
-                                     :size  new-total
-                                     :limit max-body-bytes})))
-                  (.write out buffer 0 read-count)
-                  (recur new-total))))))))))
-
-(defn- add-header!
-  [^RequestBuilder builder header value]
-  (if (sequential? value)
-    (doseq [item value]
-      (.addHeader builder (str header) (str item)))
-    (.addHeader builder (str header) (str value)))
-  builder)
+(defn- read-body-bytes!
+  [body-bytes url]
+  (let [body-bytes (or body-bytes (byte-array 0))
+        size       (alength ^bytes body-bytes)]
+    (when (> size max-body-bytes)
+      (throw (ex-info "Response too large"
+                      {:url   url
+                       :size  size
+                       :limit max-body-bytes})))
+    body-bytes))
 
 (defn- fetch-url!
-  [url headers resolution]
-  (let [request-config (-> (RequestConfig/custom)
-                           (.setConnectTimeout (int connect-timeout-ms))
-                           (.setConnectionRequestTimeout (int request-timeout-ms))
-                           (.setSocketTimeout (int request-timeout-ms))
-                           .build)
-        request-builder (doto (RequestBuilder/get url)
-                          (.setConfig request-config))
-        _               (doseq [[header value] headers]
-                          (add-header! request-builder header value))
-        dns-resolver    (ssrf/pinned-dns-resolver resolution)]
-    (with-open [client   (-> (HttpClientBuilder/create)
-                             (.disableAutomaticRetries)
-                             (.disableRedirectHandling)
-                             (.setDefaultRequestConfig request-config)
-                             (.setDnsResolver dns-resolver)
-                             .build)
-                response (.execute client (.build request-builder))]
-      (let [headers    (normalize-headers (.getAllHeaders response))
-            body-bytes (if-let [entity (.getEntity response)]
-                         (read-entity-bytes! entity url)
-                         (byte-array 0))]
-        {:status  (.getStatusCode (.getStatusLine response))
-         :headers headers
-         :body    (decode-body body-bytes headers)}))))
+  [url headers _resolution]
+  (let [{:keys [status headers body]}
+        (http/request {:url            url
+                       :method         :get
+                       :headers        headers
+                       :connect-timeout connect-timeout-ms
+                       :timeout        request-timeout-ms
+                       :max-attempts   1
+                       :retry-enabled? false
+                       :as             :byte-array})
+        body-bytes (read-body-bytes! body url)]
+    {:status  status
+     :headers headers
+     :body    (decode-body body-bytes headers)}))
 
 (defn- fetch-raw
   "Fetch a URL, return {:status :headers :body :final-url}."
@@ -206,7 +156,7 @@
              (when (>= redirects max-redirects)
                (throw (ex-info "Too many redirects"
                                {:url current-url :redirects redirects})))
-             (let [next-url (str (.resolve (URI. current-url) location))]
+             (let [next-url (str (.resolve (URI. ^String current-url) ^String location))]
                (recur next-url (inc redirects))))
            {:status    status
             :headers   (:headers resp)
@@ -239,7 +189,7 @@
   (or
     ;; Try known content selectors
     (some (fn [sel]
-            (let [els (.select doc sel)]
+            (let [^Elements els (.select doc ^String sel)]
               (when (pos? (.size els))
                 (.first els))))
           main-content-selectors)
@@ -249,7 +199,7 @@
 (defn- element->markdown
   "Convert a Jsoup Element to compact markdown-like text."
   [^Element elem include-links?]
-  (let [sb (StringBuilder.)]
+  (let [^StringBuilder sb (StringBuilder.)]
     (letfn [(walk [^Element el depth]
               (let [tag (str/lower-case (.tagName el))]
                 (case tag
@@ -272,9 +222,9 @@
                   ;; Lists
                   ("ul" "ol")
                   (do (when (pos? (.length sb)) (.append sb "\n"))
-                      (let [items (.select el "> li")]
+                      (let [^Elements items (.select el "> li")]
                         (dotimes [i (.size items)]
-                          (let [li     (.get items i)
+                          (let [^Element li (.get items i)
                                 prefix (if (= tag "ol")
                                          (str (inc i) ". ")
                                          "- ")]
@@ -326,15 +276,15 @@
                   ;; Tables
                   "table"
                   (do (when (pos? (.length sb)) (.append sb "\n\n"))
-                      (let [rows (.select el "tr")]
+                      (let [^Elements rows (.select el "tr")]
                         (dotimes [r (.size rows)]
-                          (let [row   (.get rows r)
-                                cells (.select row "td, th")]
+                          (let [^Element row   (.get rows r)
+                                ^Elements cells (.select row "td, th")]
                             (when (pos? (.size cells))
                               (.append sb "| ")
                               (dotimes [c (.size cells)]
                                 (when (pos? c) (.append sb " | "))
-                                (.append sb (str/trim (.text (.get cells c)))))
+                                (.append sb (str/trim (.text ^Element (.get cells c)))))
                               (.append sb " |\n")
                               ;; Header separator after first row
                               (when (and (zero? r) (pos? (.size (.select row "th"))))
@@ -447,10 +397,11 @@
         (if (or (str/includes? content-type "text/html")
                 (str/includes? content-type "application/xhtml"))
           ;; HTML response — parse and extract
-          (let [doc    (Jsoup/parse ^String body ^String (or final-url url))
-                _      (doseq [^Element el (.select doc noise-selectors)]
+          (let [^String base-url (or final-url url)
+                ^Document doc    (Jsoup/parse ^String body ^String base-url)
+                _      (doseq [^Element el (.select doc ^String noise-selectors)]
                          (.remove el))
-                main   (find-main-content doc)
+                ^Element main   (find-main-content doc)
                 title  (.title doc)
                 raw    (element->markdown main include-links)
                 content (truncate-to-tokens raw max-tokens)
@@ -483,7 +434,7 @@
       (let [start (+ (str/index-of href "uddg=") 5)
             end   (let [amp (str/index-of href "&" start)]
                     (if amp amp (count href)))]
-        (java.net.URLDecoder/decode (subs href start end) "UTF-8"))
+        (URLDecoder/decode ^String (subs href start end) "UTF-8"))
       ;; Not a redirect — return as-is, normalizing protocol-relative URLs
       (if (str/starts-with? href "//")
         (str "https:" href)
@@ -530,9 +481,9 @@
   [base-url params]
   (let [query-string (->> params
                           (map (fn [[k v]]
-                                 (str (java.net.URLEncoder/encode (name k) "UTF-8")
+                                 (str (URLEncoder/encode ^String (name k) "UTF-8")
                                       "="
-                                      (java.net.URLEncoder/encode (str v) "UTF-8"))))
+                                      (URLEncoder/encode ^String (str v) "UTF-8"))))
                           (str/join "&"))
         separator    (cond
                        (str/ends-with? base-url "?") ""
@@ -542,7 +493,7 @@
     (str base-url separator query-string)))
 
 (defn- select-first-any
-  [root selectors]
+  [^Element root selectors]
   (some (fn [selector]
           (.selectFirst root ^String selector))
         selectors))
@@ -558,13 +509,13 @@
     (or body "")))
 
 (defn- parse-ddg-html-result
-  [result-el]
-  (let [title-el (select-first-any result-el
+  [^Element result-el]
+  (let [^Element title-el (select-first-any result-el
                                    ["a.result__a"
                                     ".result__title a"
                                     "h2 a"
                                     "a[href]"])
-        snip-el  (select-first-any result-el
+        ^Element snip-el  (select-first-any result-el
                                    [".result__snippet"
                                     ".result__body"
                                     ".result__extras__snippet"
@@ -580,8 +531,8 @@
 
 (defn- parse-ddg-html-results
   [body max-results]
-  (let [doc          (Jsoup/parse ^String body)
-        result-nodes (.select doc ".result, .results_links, .web-result")
+  (let [^Document doc          (Jsoup/parse ^String body)
+        ^Elements result-nodes (.select doc ".result, .results_links, .web-result")
         parsed       (->> result-nodes
                           (map parse-ddg-html-result)
                           (filter some?)
@@ -631,7 +582,7 @@
   (case backend
     :duckduckgo-html
     (let [url  (str "https://html.duckduckgo.com/html/?q="
-                    (java.net.URLEncoder/encode query "UTF-8"))
+                    (URLEncoder/encode ^String (str query) "UTF-8"))
           body (fetch-search-body! url {"Accept" "text/html,application/xhtml+xml,*/*"})]
       (parse-ddg-html-results body max-results))
 
@@ -703,10 +654,10 @@
            :fallbacks (when (seq failures) failures)}
           (let [e       (:exception attempt)
                 failure {:backend (name backend-id)
-                         :error   (.getMessage e)}]
+                         :error   (.getMessage ^Throwable e)}]
             (if (seq more)
               (recur more (conj failures failure))
-              (throw (ex-info (.getMessage e)
+              (throw (ex-info (.getMessage ^Throwable e)
                               {:type     (or (:type (ex-data e))
                                              :search/backend-failed)
                                :backend  (name backend-id)
@@ -715,7 +666,7 @@
     (catch Exception e
       (cond-> {:success? false
                :query    query
-               :error    (.getMessage e)}
+               :error    (.getMessage ^Throwable e)}
         (:backend (ex-data e)) (assoc :backend (:backend (ex-data e)))
         (:failures (ex-data e)) (assoc :failures (:failures (ex-data e)))))))
 
@@ -743,10 +694,11 @@
     (let [{:keys [status body final-url]} (fetch-raw url)]
       (when-not (<= 200 status 299)
         (throw (ex-info (str "HTTP " status) {:url url :status status})))
-      (let [doc  (Jsoup/parse ^String body ^String (or final-url url))
+      (let [^String base-url (or final-url url)
+            ^Document doc  (Jsoup/parse ^String body ^String base-url)
             data (reduce-kv
                    (fn [m k sel]
-                     (let [els (.select doc ^String sel)]
+                     (let [^Elements els (.select doc ^String sel)]
                        (assoc m k
                          (mapv (fn [^Element el]
                                  (if (= "a" (str/lower-case (.tagName el)))

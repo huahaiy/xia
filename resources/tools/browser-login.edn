@@ -11,7 +11,7 @@
                "properties" {"site" {"type"        "string"
                                      "description" "The site keyword (e.g. \"workportal\", \"jira\"). Use browser list-sites to see available sites."}
                              "backend" {"type" "string"
-                                        "description" "Optional browser backend override: auto, htmlunit, or playwright when available."}}
+                                        "description" "Optional browser backend override: auto or playwright."}}
                "required"   ["site"]}
  :handler     "(fn [args]
                  (xia.browser/login (keyword (get args \"site\"))

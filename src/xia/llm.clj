@@ -280,7 +280,7 @@
      :request-label "LLM request"}))
 
 (defn- provider-error-message
-  [provider-id e]
+  [provider-id ^Throwable e]
   (or (some-> e ex-data :body)
       (.getMessage e)
       (str "provider " provider-id " request failed")))

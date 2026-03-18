@@ -19,11 +19,6 @@
 
   ;; PDF text extraction for local documents
   org.apache.pdfbox/pdfbox    {:mvn/version "3.0.6"}
-  org.apache.poi/poi-ooxml    {:mvn/version "5.5.1"}
-
-  ;; Headless browser — full DOM, JavaScript, cookies, form interaction
-  ;; NOTE: needs reflection config for GraalVM native-image
-  org.htmlunit/htmlunit         {:mvn/version "4.21.0"}
 
   ;; Real browser backend for modern web apps
   com.microsoft.playwright/playwright {:mvn/version "1.52.0"}
@@ -38,6 +33,7 @@
  :aliases
  {:dev
   {:extra-paths ["test" "dev" "dev-resources"]
+   :main-opts  ["-i" "dev/compiler_warnings.clj"]
    :extra-deps  {io.github.cognitect-labs/test-runner
                  {:git/tag "v0.5.1" :git/sha "dfb30dd"}}}
 
@@ -45,12 +41,13 @@
   {:extra-paths ["test" "dev" "dev-resources"]
    :extra-deps  {io.github.cognitect-labs/test-runner
                  {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-   :main-opts ["-m" "cognitect.test-runner"]
+   :main-opts ["-m" "xia.test-runner"]
    :exec-fn   cognitect.test-runner.api/test}
 
   :embedding-eval
   {:extra-paths ["dev" "dev-resources"]
-   :main-opts ["-m" "xia.embedding-eval"]}
+   :main-opts ["-i" "dev/compiler_warnings.clj"
+               "-m" "xia.embedding-eval"]}
 
   :native
   {:extra-deps {org.graalvm.nativeimage/svm {:mvn/version "25.0.2"}}

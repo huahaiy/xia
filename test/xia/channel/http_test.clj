@@ -7,19 +7,21 @@
             [xia.channel.http :as http]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
+            [xia.runtime :as runtime]
             [xia.schedule :as schedule]
-            [xia.test-helpers :refer [with-test-db]])
+            [xia.test-helpers :refer [minimal-pdf-bytes with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
            [java.nio.charset StandardCharsets]
-           [java.util Arrays Base64 UUID]
-           [org.apache.pdfbox.pdmodel PDDocument PDPage PDPageContentStream]
-           [org.apache.pdfbox.pdmodel.font PDType1Font Standard14Fonts$FontName]))
+           [java.util Arrays Base64 UUID]))
 
 (use-fixtures :each with-test-db)
 
+(def ^:private byte-array-class (class (byte-array 0)))
+
 (defn- request-body [payload]
-  (ByteArrayInputStream.
-    (.getBytes (json/write-json-str payload) StandardCharsets/UTF_8)))
+  (let [^String body (json/write-json-str payload)]
+    (ByteArrayInputStream.
+      (.getBytes body StandardCharsets/UTF_8))))
 
 (declare ui-headers)
 
@@ -53,12 +55,11 @@
      :body           (ByteArrayInputStream. (multipart-body boundary parts))}))
 
 (defn- oversized-request-body []
-  (let [size (inc (var-get #'http/max-request-body-bytes))
-        sb   (StringBuilder. size)]
-    (dotimes [_ size]
-      (.append sb "x"))
-    (ByteArrayInputStream.
-      (.getBytes (.toString sb) StandardCharsets/UTF_8))))
+  (let [size      (long (inc (var-get #'http/max-request-body-bytes)))
+        body-size (int size)
+        body      (byte-array body-size)]
+    (Arrays/fill body (byte (int \x)))
+    (ByteArrayInputStream. body)))
 
 (defn- response-json [response]
   (json/read-json (:body response)))
@@ -70,21 +71,6 @@
 (defn- ui-headers []
   {"origin" "http://localhost:3008"
    "cookie" (local-session-cookie)})
-
-(defn- sample-pdf-bytes
-  [text]
-  (with-open [doc (PDDocument.)
-              out (ByteArrayOutputStream.)]
-    (let [page (PDPage.)]
-      (.addPage doc page)
-      (with-open [content (PDPageContentStream. doc page)]
-        (.beginText content)
-        (.setFont content (PDType1Font. Standard14Fonts$FontName/HELVETICA) 12)
-        (.newLineAtOffset content 72 720)
-        (.showText content text)
-        (.endText content))
-      (.save doc out)
-      (.toByteArray out))))
 
 (defn- wait-for
   [f]
@@ -148,7 +134,7 @@
     (let [response (#'http/router {:uri "/favicon.ico" :request-method :get})]
       (is (= 200 (:status response)))
       (is (= "image/x-icon" (get-in response [:headers "Content-Type"])))
-      (is (instance? (Class/forName "[B") (:body response)))
+      (is (instance? byte-array-class (:body response)))
       (is (pos? (alength ^bytes (:body response))))))
   (testing "serves favicon manifest"
     (let [response (#'http/router {:uri "/favicon/site.webmanifest" :request-method :get})]
@@ -160,7 +146,7 @@
     (let [response (#'http/router {:uri "/favicon/favicon-32x32.png" :request-method :get})]
       (is (= 200 (:status response)))
       (is (= "image/png" (get-in response [:headers "Content-Type"])))
-      (is (instance? (Class/forName "[B") (:body response)))
+      (is (instance? byte-array-class (:body response)))
       (is (pos? (alength ^bytes (:body response)))))))
 
 (deftest create-session-route-returns-session-id
@@ -821,7 +807,7 @@
                         [{:field-name   "documents"
                           :filename     "paper.pdf"
                           :content-type "application/pdf"
-                          :body-bytes   (sample-pdf-bytes "Hello multipart PDF")}]))
+                          :body-bytes   (minimal-pdf-bytes "Hello multipart PDF")}]))
         create-body (response-json create-res)
         doc-id      (get-in create-body ["documents" 0 "id"])
         get-res     (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id)
@@ -831,7 +817,12 @@
     (is (= 201 (:status create-res)))
     (is (= "application/pdf" (get-in create-body ["documents" 0 "media_type"])))
     (is (= 200 (:status get-res)))
-    (is (.contains ^String (get-in get-body ["document" "text"]) "Hello multipart PDF"))))
+    (if (runtime/native-image?)
+      (do
+        (is (= "failed" (get-in create-body ["documents" 0 "status"])))
+        (is (= 1 (count (get create-body "errors"))))
+        (is (= "failed" (get-in get-body ["document" "status"]))))
+      (is (.contains ^String (get-in get-body ["document" "text"]) "Hello multipart PDF")))))
 
 (deftest local-document-multipart-route-reports-partial-upload-errors
   (let [sid      (str (db/create-session! :http))

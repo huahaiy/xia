@@ -14,13 +14,14 @@
          (into-array FileAttribute []))))
 
 (defn- zip-entry-names [archive-path]
-  (with-open [zip (ZipFile. archive-path)]
+  (with-open [zip (ZipFile. ^String archive-path)]
     (->> (enumeration-seq (.entries zip))
-         (map #(.getName %))
+         (map (fn [^java.util.zip.ZipEntry entry]
+                (.getName entry)))
          set)))
 
 (defn- read-zip-entry [archive-path entry-name]
-  (with-open [zip (ZipFile. archive-path)
+  (with-open [zip (ZipFile. ^String archive-path)
               in  (.getInputStream zip (.getEntry zip entry-name))]
     (slurp in)))
 
@@ -55,7 +56,7 @@
                      #(pack/pack! db-path archive))
           entries  (zip-entry-names archive)
           manifest (edn/read-string (read-zip-entry archive "manifest.edn"))]
-      (is (= (.getAbsolutePath (java.io.File. archive)) (:archive result)))
+      (is (= (.getAbsolutePath (java.io.File. ^String archive)) (:archive result)))
       (is (contains? entries "manifest.edn"))
       (is (contains? entries "db/.xia/master.salt"))
       (is (some #(= "db/data.mdb" %) entries))
@@ -109,7 +110,7 @@
              opened (pack/open-archive! archive)]
          (is (= (:archive result) (:archive-path opened)))
          (is (:refreshed? opened))
-         (is (.exists (java.io.File. (:db-path opened))))
+         (is (.exists (java.io.File. ^String (:db-path opened))))
          (is (contains? (zip-entry-names archive) "manifest.edn"))
          (is (= :prompt-passphrase (get-in opened [:manifest :key-source])))
          (is (= {} (:crypto-opts opened)))))))

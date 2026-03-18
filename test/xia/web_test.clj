@@ -7,7 +7,6 @@
   (:import [java.net InetAddress]
            [java.nio.charset StandardCharsets]
            [java.util.concurrent ConcurrentHashMap]
-           [org.apache.http.entity ByteArrayEntity]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element]))
 
@@ -69,13 +68,12 @@
               :cleaned    now}
              @state)))))
 
-(deftest read-entity-bytes-enforces-byte-limit-before-decoding
+(deftest read-body-bytes-enforces-byte-limit-before-decoding
   (let [char-count (inc (quot (var-get #'web/max-body-bytes) 3))
         text       (apply str (repeat char-count "界"))
         payload    (.getBytes ^String text StandardCharsets/UTF_8)
-        entity     (ByteArrayEntity. payload)
         ex         (try
-                     (#'web/read-entity-bytes! entity "https://example.com/cjk")
+                     (#'web/read-body-bytes! payload "https://example.com/cjk")
                      nil
                      (catch clojure.lang.ExceptionInfo e
                        e))]
@@ -161,18 +159,18 @@
 
 (deftest finds-article-as-main-content
   (let [doc (Jsoup/parse "<body><div>Noise</div><article>Main content here</article></body>")
-        main (#'web/find-main-content doc)]
+        ^Element main (#'web/find-main-content doc)]
     (is (= "article" (.tagName main)))
     (is (re-find #"Main content" (.text main)))))
 
 (deftest finds-main-element
   (let [doc (Jsoup/parse "<body><div>Noise</div><main>The real content</main></body>")
-        main (#'web/find-main-content doc)]
+        ^Element main (#'web/find-main-content doc)]
     (is (= "main" (.tagName main)))))
 
 (deftest falls-back-to-body
   (let [doc (Jsoup/parse "<body><div>Just divs</div></body>")
-        main (#'web/find-main-content doc)]
+        ^Element main (#'web/find-main-content doc)]
     (is (= "body" (.tagName main)))))
 
 ;; ---------------------------------------------------------------------------

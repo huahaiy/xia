@@ -24,7 +24,7 @@
              (catch clojure.lang.ExceptionInfo e
                e))]
     (is (some? ex))
-    (is (re-find #"SCI eval timed out" (.getMessage ex)))
+    (is (re-find #"SCI eval timed out" (.getMessage ^Throwable ex)))
     (is (= {:stage :eval
             :timeout-ms 100}
            (select-keys (ex-data ex) [:stage :timeout-ms])))))
@@ -38,7 +38,7 @@
                   (catch clojure.lang.ExceptionInfo e
                     e))]
     (is (some? ex))
-    (is (re-find #"SCI handler timed out" (.getMessage ex)))
+    (is (re-find #"SCI handler timed out" (.getMessage ^Throwable ex)))
     (is (= {:stage :handler
             :timeout-ms 100}
            (select-keys (ex-data ex) [:stage :timeout-ms])))))
@@ -113,23 +113,23 @@
 (deftest browser-runtime-functions-are-exposed-through-sci
   (let [status (sci-env/eval-string "(xia.browser/runtime-status)")
         bootstrap (sci-env/eval-string "(xia.browser/bootstrap-runtime! :backend :playwright)")
-        deps (sci-env/eval-string "(xia.browser/install-browser-deps! :backend :htmlunit)")]
+        deps (sci-env/eval-string "(xia.browser/install-browser-deps! :backend :playwright)")]
     (is (= :playwright (:selected-auto-backend status)))
-    (is (= #{:htmlunit :playwright}
+    (is (= #{:playwright}
            (set (map :backend (:backends status)))))
     (is (= :playwright (:backend bootstrap)))
     (is (= :running (:status bootstrap)))
-    (is (= :htmlunit (:backend deps)))
-    (is (= :unsupported-backend (:status deps)))))
+    (is (= :playwright (:backend deps)))
+    (is (contains? #{:unsupported-platform :dry-run} (:status deps)))))
 
 (deftest browser-query-elements-is-exposed-through-sci
-  (let [opened (browser/open-session "https://example.com" :backend :htmlunit)
+  (let [opened (browser/open-session "https://example.com" :backend :playwright)
         sid    (:session-id opened)]
     (try
       (let [result (sci-env/eval-string
                      (str "(xia.browser/query-elements \"" sid "\" :kind :links :limit 1)"))]
         (is (= sid (:session-id result)))
-        (is (= :htmlunit (:backend result)))
+        (is (= :playwright (:backend result)))
         (is (= :links (:kind result)))
         (is (= 1 (:returned_count result)))
         (is (pos? (:total_count result))))

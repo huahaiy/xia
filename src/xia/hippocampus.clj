@@ -112,6 +112,11 @@ Rules:
       (max 0.0)
       (min 1.0)))
 
+(defn- abs-double
+  ^double [x]
+  (let [x* (double x)]
+    (if (neg? x*) (- x*) x*)))
+
 (defn- episode-importance-defaults
   [episodes]
   (into {}
@@ -119,13 +124,18 @@ Rules:
                [eid default-episode-importance]))
         episodes))
 
+(defn- instant-string
+  [value]
+  (when (instance? java.util.Date value)
+    (str (.toInstant ^java.util.Date value))))
+
 (defn- rate-importance-batch
   [episodes]
   (let [user-msg (->> episodes
                       (map-indexed
                         (fn [idx {:keys [timestamp type summary context]}]
                           (str "Episode " idx
-                               "\nTimestamp: " (some-> timestamp .toInstant str)
+                               "\nTimestamp: " (instant-string timestamp)
                                "\nType: " (name type)
                                "\nSummary: " summary
                                (when context
@@ -657,7 +667,7 @@ Rules:
 (defn- due-for-decay-facts
   [^java.util.Date as-of decay-config]
   (let [step-ms       (:maintenance-step-ms decay-config)
-        cutoff        (java.util.Date. (- (.getTime as-of) step-ms))
+        cutoff        (java.util.Date. (long (- (.getTime as-of) step-ms)))
         never-decayed (db/q '[:find ?f ?confidence ?utility ?updated ?updated
                               :in $ ?cutoff
                               :where
@@ -703,8 +713,8 @@ Rules:
 
 (defn- due-for-archive-eids
   [^java.util.Date as-of decay-config]
-  (let [cutoff        (java.util.Date. (- (.getTime as-of)
-                                          (:archive-after-bottom-ms decay-config)))
+  (let [cutoff        (java.util.Date. (long (- (.getTime as-of)
+                                                (:archive-after-bottom-ms decay-config))))
         max-confidence (+ (double (:min-confidence decay-config)) 1.0e-9)]
     (->> (db/q '[:find ?f
                  :in $ ?cutoff ?max-confidence
@@ -760,7 +770,7 @@ Rules:
                (let [existing-bottomed-at (get bottomed-map eid)
                      new-tx (cond-> []
                               (and decayed-conf
-                                   (> (Math/abs (- effective-conf (double confidence)))
+                                   (> (abs-double (- effective-conf (double confidence)))
                                       1.0e-9))
                               (into [[:db/add eid :kg.fact/confidence (float effective-conf)]
                                      [:db/add eid :kg.fact/decayed-at as-of]])

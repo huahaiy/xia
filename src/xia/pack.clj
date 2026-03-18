@@ -5,6 +5,7 @@
             [clojure.string :as str])
   (:import [java.io BufferedInputStream BufferedOutputStream
             File FileInputStream FileOutputStream]
+           [java.nio.charset StandardCharsets]
            [java.nio.file Files Path Paths]
            [java.time Instant]
            [java.util.zip ZipEntry ZipFile ZipOutputStream]))
@@ -14,6 +15,10 @@
 (def ^:private archive-extension ".xia")
 (def ^:private support-dir-name ".xia")
 (def ^:private support-dir-entry "db/.xia")
+
+(defn- epoch-millis->date
+  [millis]
+  (java.util.Date. (long millis)))
 
 (defn- env-value [k]
   (System/getenv k))
@@ -122,7 +127,7 @@
 
 (defn- write-file-entry!
   [^ZipOutputStream zip {:keys [^File file entry]}]
-  (let [zip-entry (doto (ZipEntry. entry)
+  (let [zip-entry (doto (ZipEntry. ^String entry)
                     (.setTime (.lastModified file)))]
     (.putNextEntry zip zip-entry)
     (with-open [in (BufferedInputStream. (FileInputStream. file))]
@@ -136,8 +141,8 @@
 
 (defn- write-bytes-entry!
   [^ZipOutputStream zip entry data]
-  (.putNextEntry zip (ZipEntry. entry))
-  (.write zip (.getBytes ^String data "UTF-8"))
+  (.putNextEntry zip (ZipEntry. ^String entry))
+  (.write zip (.getBytes ^String data StandardCharsets/UTF_8))
   (.closeEntry zip))
 
 (defn default-archive-path
@@ -188,8 +193,9 @@
 
 (defn- safe-target-path
   [root-file entry-name]
-  (let [target (.normalize (.resolve ^Path (root-path root-file) ^String entry-name))]
-    (when-not (.startsWith target (root-path root-file))
+  (let [^Path root   (root-path root-file)
+        ^Path target (.normalize (.resolve root ^String entry-name))]
+    (when-not (.startsWith target root)
       (throw (ex-info "Archive entry escapes destination root"
                       {:entry entry-name
                        :root  (.getAbsolutePath ^File root-file)})))
@@ -197,22 +203,23 @@
 
 (defn- extract-entry!
   [^ZipFile zip ^File root-file ^java.util.zip.ZipEntry entry]
-  (let [target (safe-target-path root-file (.getName entry))]
+  (let [^Path target (safe-target-path root-file (.getName entry))]
     (if (.isDirectory entry)
       (Files/createDirectories target (make-array java.nio.file.attribute.FileAttribute 0))
       (do
-        (when-let [parent (.getParent target)]
+        (when-let [^Path parent (.getParent target)]
           (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0)))
-        (with-open [in  (.getInputStream zip entry)
-                    out (BufferedOutputStream. (FileOutputStream. (.toFile target)))]
-          (let [buffer (byte-array buffer-size)]
-            (loop []
-              (let [n (.read in buffer)]
-                (when (pos? n)
-                  (.write out buffer 0 n)
-                  (recur))))))
+        (let [^File target-file (.toFile target)]
+          (with-open [in  (.getInputStream zip entry)
+                      out (BufferedOutputStream. (FileOutputStream. target-file))]
+            (let [buffer (byte-array buffer-size)]
+              (loop []
+                (let [n (.read in buffer)]
+                  (when (pos? n)
+                    (.write out buffer 0 n)
+                    (recur)))))))
         (when (pos? (.getTime entry))
-          (.setLastModified (.toFile target) (.getTime entry)))))))
+          (.setLastModified ^File (.toFile target) (.getTime entry)))))))
 
 (defn unpack!
   [archive-path dest-root & {:keys [force?] :or {force? false}}]
@@ -296,7 +303,7 @@
    - required local support files under `db/.xia/`
    - `manifest.edn` with restore instructions"
   [db-path archive-path & {:keys [force?] :or {force? false}}]
-  (let [archive-file     (ensure-output-path! archive-path force?)
+  (let [^File archive-file (ensure-output-path! archive-path force?)
         db-files         (db-entries db-path)
         {:keys [key-source archive-entries restore-requires]} (key-context db-path)
         all-file-entries (dedupe-entries (vec (concat db-files archive-entries)))
@@ -307,7 +314,8 @@
                           :key-source       key-source
                           :archive-entries  (mapv :entry all-file-entries)
                           :restore-requires restore-requires}]
-    (with-open [out (-> archive-file FileOutputStream. BufferedOutputStream. ZipOutputStream.)]
+    (with-open [^FileOutputStream fos (FileOutputStream. ^File archive-file)
+                out (-> fos BufferedOutputStream. ZipOutputStream.)]
       (doseq [entry all-file-entries]
         (write-file-entry! out entry))
       (write-bytes-entry! out manifest-entry (pr-str manifest)))

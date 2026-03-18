@@ -14,7 +14,7 @@
                              "js"  {"type"        "boolean"
                                     "description" "Enable JavaScript (default true)"}
                              "backend" {"type" "string"
-                                        "description" "Optional browser backend override: auto, htmlunit, or playwright when available."}}
+                                        "description" "Optional browser backend override: auto or playwright."}}
                "required"   ["url"]}
  :handler     "(fn [args]
                  (let [js (get args \"js\")

@@ -3,7 +3,7 @@
 
 (defprotocol BrowserBackend
   (backend-id [this]
-    "Return the backend keyword, such as :htmlunit or :playwright.")
+    "Return the backend keyword, such as :playwright.")
   (runtime-status* [this]
     "Return a status map describing whether the backend is ready.")
   (bootstrap-runtime!* [this opts]

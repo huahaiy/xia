@@ -128,7 +128,7 @@
                  e))]
       (is (some? ex))
       (is (= 200 (:timeout-ms (ex-data ex))))
-      (is (re-find #"timed out" (.getMessage ex)))
+      (is (re-find #"timed out" (.getMessage ^Throwable ex)))
       (is (< (- (System/currentTimeMillis) t0) 800)))
     (is (not= ::timeout
               (deref worker 2000 ::timeout)))))

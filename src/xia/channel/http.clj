@@ -24,7 +24,7 @@
   (:import [java.io ByteArrayOutputStream InputStream]
     [java.nio.charset StandardCharsets]
     [java.security SecureRandom]
-    [java.util Base64]
+    [java.util Base64 Date]
     [java.util.concurrent Executors ScheduledExecutorService ScheduledFuture TimeUnit]))
 
 ;; ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private ms-per-day (* 24 60 60 1000))
-(def ^:private byte-array-class (Class/forName "[B"))
+(def ^:private byte-array-class (class (byte-array 0)))
 (defonce ^:private local-session-secret
   (delay
     (let [bytes (byte-array 32)
@@ -88,6 +88,22 @@
      :headers {"Content-Type" content-type}
      :body    content}
     {:status 404 :body "Not Found"}))
+
+(defn- throwable-message
+  [^Throwable e]
+  (.getMessage e))
+
+(defn- instant->str
+  [value]
+  (cond
+    (instance? Date value) (str (.toInstant ^Date value))
+    (instance? java.time.Instant value) (str value)
+    :else nil))
+
+(defn- date->millis
+  [value]
+  (when (instance? Date value)
+    (.getTime ^Date value)))
 
 (def ^:private web-static-assets
   {"/style.css"                     {:path "style.css" :content-type "text/css"}
@@ -280,10 +296,10 @@
   [query-string]
   (into {}
         (keep (fn [part]
-                (let [[k v] (str/split (str part) #"=" 2)]
+                (let [[^String k ^String v] (str/split (str part) #"=" 2)]
                   (when (seq k)
                     [(java.net.URLDecoder/decode k "UTF-8")
-                     (some-> v (java.net.URLDecoder/decode "UTF-8"))]))))
+                     (some-> v ^String (java.net.URLDecoder/decode "UTF-8"))]))))
         (str/split (or query-string "") #"&")))
 
 (defn- session-secret []
@@ -361,11 +377,11 @@
    :body    body})
 
 (defn- exception-response
-  [e]
+  [^Throwable e]
   (let [data    (ex-data e)
         status  (or (:status data) 400)
         details (not-empty (dissoc data :status :error :type))
-        body    (cond-> {:error (or (:error data) (.getMessage e))}
+        body    (cond-> {:error (or (:error data) (throwable-message e))}
                   details (assoc :details details))]
     (json-response status body)))
 
@@ -410,7 +426,7 @@
    :arguments   arguments
    :reason      reason
    :policy      (name policy)
-   :created_at  (some-> created-at .toInstant str)})
+   :created_at  (instant->str created-at)})
 
 (defn- clear-pending-approval!
   [session-id approval-id]
@@ -549,15 +565,12 @@
               (finalize-rest-session! sid :idle-timeout))]
         (swap! rest-session-finalizers assoc
                sid
-               (.schedule exec task delay-ms TimeUnit/MILLISECONDS))))))
+               (.schedule exec task (long delay-ms) TimeUnit/MILLISECONDS))))))
 
 (defn- touch-rest-session!
   [session-id]
   (when (session-active? session-id)
     (schedule-rest-session-finalizer! session-id)))
-
-(defn- instant->str [value]
-  (some-> value .toInstant str))
 
 (def ^:private history-session-channels #{:http :websocket :terminal})
 
@@ -999,8 +1012,8 @@
     (json-response 200 {:session_id (str sid)})))
 
 (defn- internal-server-error-response
-  [e]
-  (json-response 500 {:error (or (.getMessage e) "internal server error")}))
+  [^Throwable e]
+  (json-response 500 {:error (or (throwable-message e) "internal server error")}))
 
 (defn- chat-request
   [req]
@@ -1141,7 +1154,7 @@
                         (mapv (fn [{:keys [role content created-at local-docs artifacts]}]
                                 {:role       (name role)
                                  :content    content
-                                 :created_at (some-> created-at .toInstant str)
+                                 :created_at (instant->str created-at)
                                  :local_docs (mapv local-doc-ref->body (or local-docs []))
                                  :artifacts  (mapv artifact-ref->body (or artifacts []))})))]
       (touch-rest-session! session-id)
@@ -1177,8 +1190,8 @@
   (json-response 200
                  {:schedules (->> (schedule/list-schedules)
                                   (sort-by (fn [sched]
-                                             (or (some-> (:last-run sched) .getTime)
-                                                 (some-> (:next-run sched) .getTime)
+                                             (or (date->millis (:last-run sched))
+                                                 (date->millis (:next-run sched))
                                                  Long/MIN_VALUE))
                                            >)
                                   (mapv history-schedule->body))}))
@@ -1396,7 +1409,7 @@
       (read-body-bytes body)
       (finally
         (when tempfile
-          (.delete tempfile))))))
+          (.delete ^java.io.File tempfile))))))
 
 (defn- multipart-local-doc-upload-entry
   [part]
@@ -1427,9 +1440,9 @@
     (json-local-doc-upload-entries (or (read-body req) {}))))
 
 (defn- local-doc-error->body
-  [upload e]
+  [upload ^Throwable e]
   {:name  (get upload :name)
-   :error (.getMessage e)
+   :error (throwable-message e)
    :code  (some-> (ex-data e) :type name)})
 
 (defn- handle-list-local-docs [session-id]

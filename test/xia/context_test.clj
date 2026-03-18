@@ -148,11 +148,11 @@
         (is (not (str/includes? line "too low")))))
 
     (testing "utility influences fact ordering"
-      (let [line (re {:name  "Ranked"
-                      :type  :concept
-                      :facts [{:content "high confidence" :confidence 0.85 :utility 0.0}
-                              {:content "high utility" :confidence 0.7 :utility 1.0}]
-                      :edges {:outgoing [] :incoming []}})]
+      (let [^String line (re {:name  "Ranked"
+                              :type  :concept
+                              :facts [{:content "high confidence" :confidence 0.85 :utility 0.0}
+                                      {:content "high utility" :confidence 0.7 :utility 1.0}]
+                              :edges {:outgoing [] :incoming []}})]
         (is (< (.indexOf line "high utility")
                (.indexOf line "high confidence")))))
 
