@@ -11,7 +11,11 @@ const state = {
   activeLocalDocId: '',
   activeLocalDoc: null,
   localDocUploading: false,
+  artifacts: [],
+  activeArtifactId: '',
+  activeArtifact: null,
   pendingLocalDocIds: [],
+  pendingArtifactIds: [],
   scratchPads: [],
   activePadId: '',
   activePad: null,
@@ -170,6 +174,13 @@ const localDocStatusEl = document.getElementById('local-doc-status');
 const localDocInsertEl = document.getElementById('local-doc-insert');
 const localDocScratchEl = document.getElementById('local-doc-scratch');
 const localDocDeleteEl = document.getElementById('local-doc-delete');
+const artifactListEl = document.getElementById('artifact-list');
+const artifactPreviewEl = document.getElementById('artifact-preview');
+const artifactStatusEl = document.getElementById('artifact-status');
+const artifactInsertEl = document.getElementById('artifact-insert');
+const artifactScratchEl = document.getElementById('artifact-scratch');
+const artifactDownloadEl = document.getElementById('artifact-download');
+const artifactDeleteEl = document.getElementById('artifact-delete');
 const tabLinks = document.querySelectorAll('.tab-link');
 const tabPanels = document.querySelectorAll('.tab-panel');
 const advancedToggleEl = document.getElementById('advanced-toggle');
@@ -1466,7 +1477,10 @@ function normalizeMessage(message) {
     createdAt: message.createdAt || message.created_at || '',
     localDocs: Array.isArray(message.localDocs)
       ? message.localDocs
-      : (Array.isArray(message.local_docs) ? message.local_docs : [])
+      : (Array.isArray(message.local_docs) ? message.local_docs : []),
+    artifacts: Array.isArray(message.artifacts)
+      ? message.artifacts
+      : (Array.isArray(message.artifact_refs) ? message.artifact_refs : [])
   });
 }
 
@@ -1512,6 +1526,18 @@ function buildMessageEl(message) {
       .join(', ');
     card.appendChild(refs);
   }
+  if (Array.isArray(message.artifacts) && message.artifacts.length) {
+    const refs = document.createElement('div');
+    refs.className = 'message-meta';
+    refs.textContent = 'Artifacts: ' + message.artifacts
+      .map((artifact) => {
+        if (!artifact) return '';
+        return artifact.title || artifact.name || artifact.id || '';
+      })
+      .filter(Boolean)
+      .join(', ');
+    card.appendChild(refs);
+  }
   return card;
 }
 
@@ -1548,6 +1574,7 @@ function updateComposerState() {
   const empty = !composerEl.value.trim();
   if (empty) {
     state.pendingLocalDocIds = [];
+    state.pendingArtifactIds = [];
   }
   sendEl.disabled = state.sending || empty;
   clearInputEl.disabled = state.sending || !composerEl.value.length;
@@ -1571,6 +1598,13 @@ function rememberPendingLocalDoc(docId) {
   if (!docId) return;
   if (!state.pendingLocalDocIds.includes(docId)) {
     state.pendingLocalDocIds.push(docId);
+  }
+}
+
+function rememberPendingArtifact(artifactId) {
+  if (!artifactId) return;
+  if (!state.pendingArtifactIds.includes(artifactId)) {
+    state.pendingArtifactIds.push(artifactId);
   }
 }
 
@@ -1666,6 +1700,100 @@ function resetLocalDocs(statusText) {
   syncLocalDocPanel(statusText || 'No local document selected.');
 }
 
+function artifactTitle(artifact) {
+  return firstNonEmpty(artifact && artifact.title, firstNonEmpty(artifact && artifact.name, 'Untitled artifact'));
+}
+
+function artifactMeta(artifact) {
+  const bits = [];
+  if (artifact.kind) bits.push(String(artifact.kind).toUpperCase());
+  if (artifact.media_type) bits.push(artifact.media_type);
+  if (typeof artifact.size_bytes === 'number') bits.push(formatBytes(artifact.size_bytes));
+  if (artifact.updated_at) bits.push('Updated ' + formatStamp(artifact.updated_at));
+  return bits.join(' • ');
+}
+
+function sortArtifacts() {
+  state.artifacts.sort((left, right) => {
+    const a = Date.parse((left && left.updated_at) || '') || 0;
+    const b = Date.parse((right && right.updated_at) || '') || 0;
+    return b - a;
+  });
+}
+
+function upsertArtifactMeta(artifact) {
+  const meta = {
+    id: artifact.id,
+    name: artifact.name,
+    title: artifact.title,
+    kind: artifact.kind,
+    media_type: artifact.media_type,
+    size_bytes: artifact.size_bytes,
+    compressed_size_bytes: artifact.compressed_size_bytes,
+    status: artifact.status,
+    error: artifact.error,
+    has_blob: artifact.has_blob,
+    text_available: artifact.text_available,
+    preview: artifact.preview,
+    created_at: artifact.created_at,
+    updated_at: artifact.updated_at
+  };
+  const index = state.artifacts.findIndex((entry) => entry.id === artifact.id);
+  if (index >= 0) state.artifacts[index] = meta;
+  else state.artifacts.push(meta);
+  sortArtifacts();
+}
+
+function renderArtifactList() {
+  artifactListEl.innerHTML = '';
+  if (!state.artifacts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = 'Artifacts created by Xia will appear here for this session.';
+    artifactListEl.appendChild(empty);
+    return;
+  }
+  state.artifacts.forEach((artifact) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'admin-item' + (artifact.id === state.activeArtifactId ? ' active' : '');
+    const title = document.createElement('div');
+    title.className = 'admin-item-title';
+    title.textContent = artifactTitle(artifact);
+    const meta = document.createElement('div');
+    meta.className = 'admin-item-meta';
+    meta.textContent = artifactMeta(artifact);
+    button.appendChild(title);
+    button.appendChild(meta);
+    button.addEventListener('click', () => loadArtifact(artifact.id));
+    artifactListEl.appendChild(button);
+  });
+}
+
+function syncArtifactPanel(statusText) {
+  const artifact = state.activeArtifact;
+  artifactPreviewEl.value = artifact ? (artifact.text || artifact.preview || '') : '';
+  artifactStatusEl.textContent = statusText
+    || (artifact
+      ? (artifact.error || artifactMeta(artifact) || 'Artifact ready.')
+      : 'No artifact selected.');
+  const hasArtifact = !!artifact;
+  const canInsert = !!(artifact && artifact.text_available && artifact.text);
+  const canCreateNote = !!(artifact && (artifact.text || artifact.preview));
+  artifactInsertEl.disabled = !canInsert;
+  artifactScratchEl.disabled = !canCreateNote;
+  artifactDownloadEl.disabled = !hasArtifact;
+  artifactDeleteEl.disabled = !hasArtifact;
+  renderArtifactList();
+}
+
+function resetArtifacts(statusText) {
+  state.artifacts = [];
+  state.activeArtifactId = '';
+  state.activeArtifact = null;
+  syncArtifactPanel(statusText || 'No artifact selected.');
+}
+
 function formatBytes(bytes) {
   if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return bytes + ' B';
@@ -1678,6 +1806,13 @@ function selectedPreviewText() {
   const end = localDocPreviewEl.selectionEnd;
   if (typeof start !== 'number' || typeof end !== 'number' || end <= start) return '';
   return localDocPreviewEl.value.slice(start, end).trim();
+}
+
+function selectedArtifactPreviewText() {
+  const start = artifactPreviewEl.selectionStart;
+  const end = artifactPreviewEl.selectionEnd;
+  if (typeof start !== 'number' || typeof end !== 'number' || end <= start) return '';
+  return artifactPreviewEl.value.slice(start, end).trim();
 }
 
 function padTitle(pad) {
@@ -1798,6 +1933,40 @@ async function loadLocalDoc(docId) {
     syncLocalDocPanel();
   } catch (err) {
     syncLocalDocPanel(err.message || 'Failed to load local document.');
+  }
+}
+
+async function loadArtifacts(options) {
+  const keepActive = !options || options.keepActive !== false;
+  if (!state.sessionId) {
+    resetArtifacts();
+    return;
+  }
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/artifacts');
+    state.artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
+    sortArtifacts();
+    if (keepActive && state.activeArtifactId && state.artifacts.some((artifact) => artifact.id === state.activeArtifactId)) {
+      renderArtifactList();
+      return;
+    }
+    if (state.artifacts.length) await loadArtifact(state.artifacts[0].id);
+    else resetArtifacts('No artifact selected.');
+  } catch (err) {
+    syncArtifactPanel(err.message || 'Failed to load artifacts.');
+  }
+}
+
+async function loadArtifact(artifactId) {
+  if (!artifactId || !state.sessionId) return;
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/artifacts/' + encodeURIComponent(artifactId));
+    state.activeArtifactId = artifactId;
+    state.activeArtifact = data.artifact || null;
+    if (state.activeArtifact) upsertArtifactMeta(state.activeArtifact);
+    syncArtifactPanel();
+  } catch (err) {
+    syncArtifactPanel(err.message || 'Failed to load artifact.');
   }
 }
 
@@ -2045,6 +2214,99 @@ async function deleteLocalDoc() {
   }
 }
 
+function artifactInsertText(artifact) {
+  if (!artifact || !artifact.text) return '';
+  const selected = selectedArtifactPreviewText();
+  const content = selected || artifact.text;
+  const label = selected ? 'Artifact Excerpt' : 'Artifact';
+  return '--- ' + label + ': ' + artifactTitle(artifact) + ' ---\n' + content + '\n';
+}
+
+function insertArtifactIntoComposer() {
+  if (!state.activeArtifact) return;
+  insertTextIntoComposer(artifactInsertText(state.activeArtifact), 'Artifact inserted into chat');
+  rememberPendingArtifact(state.activeArtifact.id);
+}
+
+async function createScratchPadFromArtifact() {
+  if (!state.activeArtifact || !state.sessionId) return;
+  if (!discardScratchChanges()) return;
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId)
+      + '/artifacts/' + encodeURIComponent(state.activeArtifact.id)
+      + '/scratch-pads', {
+      method: 'POST'
+    });
+    state.activePad = data.pad || null;
+    state.activePadId = state.activePad ? state.activePad.id : '';
+    state.scratchDirty = false;
+    if (state.activePad) upsertScratchMeta(state.activePad);
+    syncScratchEditor('Created note from artifact.');
+    switchTab('notes-tab');
+    scratchTitleEl.focus();
+    scratchTitleEl.select();
+    setStatus('Created note from artifact');
+  } catch (err) {
+    scratchStatusEl.textContent = err.message || 'Failed to create.';
+  }
+}
+
+function downloadFilenameFromHeaders(headers, fallback) {
+  const disposition = headers.get('Content-Disposition') || headers.get('content-disposition') || '';
+  const match = disposition.match(/filename=\"?([^\";]+)\"?/i);
+  return (match && match[1]) ? match[1] : fallback;
+}
+
+async function downloadArtifact() {
+  if (!state.activeArtifact || !state.sessionId) return;
+  try {
+    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId)
+      + '/artifacts/' + encodeURIComponent(state.activeArtifact.id)
+      + '/download');
+    if (!response.ok) {
+      let message = 'Failed to download artifact';
+      try {
+        const data = await response.json();
+        message = data.error || message;
+      } catch (_err) {
+        // Ignore non-JSON error bodies.
+      }
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = href;
+    anchor.download = downloadFilenameFromHeaders(response.headers, state.activeArtifact.name || 'artifact');
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(href);
+    setStatus('Artifact downloaded');
+  } catch (err) {
+    syncArtifactPanel(err.message || 'Failed to download artifact.');
+  }
+}
+
+async function deleteArtifact() {
+  if (!state.activeArtifact || !state.sessionId) return;
+  if (!window.confirm('Delete this artifact?')) return;
+  const deletingId = state.activeArtifact.id;
+  try {
+    await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/artifacts/' + encodeURIComponent(deletingId), {
+      method: 'DELETE'
+    });
+    state.artifacts = state.artifacts.filter((artifact) => artifact.id !== deletingId);
+    state.activeArtifact = null;
+    state.activeArtifactId = '';
+    if (state.artifacts.length) await loadArtifact(state.artifacts[0].id);
+    else syncArtifactPanel('Deleted.');
+    setStatus('Artifact deleted');
+  } catch (err) {
+    syncArtifactPanel(err.message || 'Failed to delete artifact.');
+  }
+}
+
 async function pollApproval() {
   if (!state.sessionId) {
     state.pendingApproval = null;
@@ -2111,6 +2373,12 @@ async function sendMessage(text, options) {
   const localDocs = Array.isArray(options && options.localDocs)
     ? options.localDocs
     : [];
+  const artifactIds = Array.isArray(options && options.artifactIds)
+    ? options.artifactIds.filter(Boolean)
+    : [];
+  const artifacts = Array.isArray(options && options.artifacts)
+    ? options.artifacts
+    : [];
   state.sending = true;
   state.liveStatus = null;
   updateComposerState();
@@ -2120,6 +2388,7 @@ async function sendMessage(text, options) {
     const payload = { message: text };
     if (state.sessionId) payload.session_id = state.sessionId;
     if (localDocIds.length) payload.local_doc_ids = localDocIds;
+    if (artifactIds.length) payload.artifact_ids = artifactIds;
     const responsePromise = fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2133,8 +2402,9 @@ async function sendMessage(text, options) {
       state.sessionId = data.session_id;
       persistSession();
     }
-    addMessage('assistant', data.content || '', { localDocs: localDocs });
+    addMessage('assistant', data.content || '', { localDocs: localDocs, artifacts: artifacts });
     await loadHistorySessions();
+    await loadArtifacts();
     state.liveStatus = null;
     setStatus('Ready');
   } catch (err) {
@@ -2174,14 +2444,19 @@ composerFormEl.addEventListener('submit', async (event) => {
   const text = composerEl.value.trim();
   if (!text || state.sending) return;
   const localDocIds = Array.from(new Set((state.pendingLocalDocIds || []).filter(Boolean)));
+  const artifactIds = Array.from(new Set((state.pendingArtifactIds || []).filter(Boolean)));
   const localDocs = state.localDocs
     .filter((doc) => localDocIds.includes(doc.id))
     .map((doc) => ({ id: doc.id, name: doc.name, status: doc.status }));
-  addMessage('user', text, { localDocs: localDocs });
+  const artifacts = state.artifacts
+    .filter((artifact) => artifactIds.includes(artifact.id))
+    .map((artifact) => ({ id: artifact.id, name: artifact.name, title: artifact.title, status: artifact.status }));
+  addMessage('user', text, { localDocs: localDocs, artifacts: artifacts });
   composerEl.value = '';
   state.pendingLocalDocIds = [];
+  state.pendingArtifactIds = [];
   updateComposerState();
-  await sendMessage(text, { localDocIds: localDocIds, localDocs: localDocs });
+  await sendMessage(text, { localDocIds: localDocIds, localDocs: localDocs, artifactIds: artifactIds, artifacts: artifacts });
 });
 
 composerEl.addEventListener('keydown', (event) => {
@@ -2196,6 +2471,7 @@ composerEl.addEventListener('input', updateComposerState);
 clearInputEl.addEventListener('click', () => {
   composerEl.value = '';
   state.pendingLocalDocIds = [];
+  state.pendingArtifactIds = [];
   updateComposerState();
   composerEl.focus();
 });
@@ -2227,6 +2503,10 @@ insertScratchEl.addEventListener('click', () => insertScratchIntoComposer());
 localDocInsertEl.addEventListener('click', () => insertLocalDocIntoComposer());
 localDocScratchEl.addEventListener('click', () => createScratchPadFromLocalDoc());
 localDocDeleteEl.addEventListener('click', () => deleteLocalDoc());
+artifactInsertEl.addEventListener('click', () => insertArtifactIntoComposer());
+artifactScratchEl.addEventListener('click', () => createScratchPadFromArtifact());
+artifactDownloadEl.addEventListener('click', () => downloadArtifact());
+artifactDeleteEl.addEventListener('click', () => deleteArtifact());
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
 
@@ -2277,6 +2557,11 @@ newChatEl.addEventListener('click', () => {
   state.activeLocalDocId = '';
   state.activeLocalDoc = null;
   state.localDocUploading = false;
+  state.artifacts = [];
+  state.activeArtifactId = '';
+  state.activeArtifact = null;
+  state.pendingLocalDocIds = [];
+  state.pendingArtifactIds = [];
   state.scratchPads = [];
   state.activePadId = '';
   state.activePad = null;
@@ -2285,6 +2570,7 @@ newChatEl.addEventListener('click', () => {
   renderApproval();
   renderMessages();
   syncLocalDocPanel('No local document selected.');
+  syncArtifactPanel('No artifact selected.');
   syncScratchEditor('No note selected.');
   loadHistorySessions();
   setStatus('Ready');
@@ -2312,6 +2598,7 @@ persistSession();
 renderApproval();
 renderMessages();
 syncLocalDocPanel('No local document selected.');
+syncArtifactPanel('No artifact selected.');
 syncScratchEditor('No note selected.');
 resetProviderForm('Loading...');
 resetMemoryRetentionForm('Loading...');
@@ -2324,6 +2611,7 @@ updateComposerState();
 composerEl.focus();
 loadSessionMessages();
 loadLocalDocs();
+loadArtifacts();
 loadScratchPads();
 loadAdminConfig();
 loadHistorySessions();

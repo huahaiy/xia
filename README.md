@@ -22,8 +22,8 @@ system:
 - keeping long-term memory about people, projects, and ongoing work
 - running recurring background tasks on a schedule
 
-Xia is not a local computer-control agent. It does not edit arbitrary files on
-your machine or drive your terminal like a coding assistant.
+Xia is not a local computer-control agent. It does not access arbitrary
+files on your machine or drive your terminal like a coding assistant.
 
 ## Quick Start
 
@@ -57,8 +57,9 @@ download the default
 GGUF model, which is about 512 MiB.
 - You still provide your own LLM provider credentials, and you can use multiple
   LLMs at the same time.
-- None of your credentials or secrets is exposed to LLM providers. Security is
-  one of Xia's main value proposition.
+- None of your credentials or secrets is exposed to LLM providers. Prompt
+  injection cannot reveal secrets due to the lack of access. Security is
+  one of Xia's main value propositions.
 
 ## Local Web UI
 
@@ -82,6 +83,7 @@ What the local web UI is for:
 - chat with Xia from a browser instead of the terminal
 - upload local text-like documents and PDFs, then insert full text or a selected excerpt into chat or notes
 - use scratch pads for copied notes and working context
+- download Xia produced artifacts
 - configure LLM providers, OAuth accounts, services, and saved site logins
 - manage scheduled tasks and other local assistant settings
 

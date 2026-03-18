@@ -493,12 +493,18 @@ Rules:
   "Use the LLM to create a summary of a conversation for episodic storage."
   [messages]
   (let [convo-text (->> messages
-                        (map (fn [{:keys [role content local-docs]}]
+                        (map (fn [{:keys [role content local-docs artifacts]}]
                                (str (name role) ": " content
                                     (when (seq local-docs)
                                       (str "\n[local documents: "
                                            (str/join ", "
                                                      (keep :name local-docs))
+                                           "]"))
+                                    (when (seq artifacts)
+                                      (str "\n[artifacts: "
+                                           (str/join ", "
+                                                     (keep #(or (:title %) (:name %))
+                                                           artifacts))
                                            "]")))))
                         (clojure.string/join "\n"))
         response   (llm/chat-simple
@@ -520,14 +526,24 @@ Rules:
        distinct
        vec))
 
+(defn- referenced-artifact-names
+  [messages]
+  (->> messages
+       (mapcat :artifacts)
+       (keep #(or (:title %) (:name %)))
+       (remove str/blank?)
+       distinct
+       vec))
+
 (defn record-conversation!
   "Record a conversation as an episodic memory and trigger consolidation.
    Includes WM topic summary as episode context for richer consolidation."
   [session-id channel & {:keys [topics]}]
   (let [messages (db/session-messages session-id)]
     (when (> (count messages) 1) ; at least one exchange
-      (let [summary    (summarize-conversation messages)
-            doc-names  (referenced-local-doc-names messages)
+      (let [summary         (summarize-conversation messages)
+            doc-names       (referenced-local-doc-names messages)
+            artifact-names  (referenced-artifact-names messages)
             context    (not-empty
                          (str/join "\n"
                                    (cond-> []
@@ -535,7 +551,10 @@ Rules:
                                      (conj (str "Topic: " topics))
                                      (seq doc-names)
                                      (conj (str "Local documents referenced: "
-                                                (str/join ", " doc-names))))))]
+                                                (str/join ", " doc-names)))
+                                     (seq artifact-names)
+                                     (conj (str "Artifacts referenced: "
+                                                (str/join ", " artifact-names))))))]
         (memory/record-episode!
           {:type         :conversation
            :summary      summary

@@ -3,6 +3,7 @@
             [clojure.test :refer :all]
             [clojure.string :as str]
             [xia.agent]
+            [xia.artifact :as artifact]
             [xia.channel.http :as http]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
@@ -10,7 +11,7 @@
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
            [java.nio.charset StandardCharsets]
-           [java.util UUID]
+           [java.util Arrays Base64 UUID]
            [org.apache.pdfbox.pdmodel PDDocument PDPage PDPageContentStream]
            [org.apache.pdfbox.pdmodel.font PDType1Font Standard14Fonts$FontName]))
 
@@ -106,6 +107,7 @@
     (is (re-find #"Approval Required" (:body response)))
     (is (re-find #"Copy transcript" (:body response)))
     (is (re-find #"Local Documents" (:body response)))
+    (is (re-find #"Artifacts" (:body response)))
     (is (re-find #"Notes" (:body response)))
     (is (re-find #"History" (:body response)))
     (is (re-find #"Scheduled Runs" (:body response)))
@@ -486,9 +488,18 @@
         doc (local-doc/save-upload! {:session-id sid
                                      :name "notes.md"
                                      :media-type "text/markdown"
-                                     :text "# notes"})]
-    (db/add-message! sid :user "hello" :local-doc-ids [(:id doc)])
-    (db/add-message! sid :assistant "hi there" :local-doc-ids [(:id doc)])
+                                     :text "# notes"})
+        report (artifact/create-artifact! {:session-id sid
+                                           :name "report.json"
+                                           :title "Summary Report"
+                                           :kind :json
+                                           :data {"topic" "notes"}})]
+    (db/add-message! sid :user "hello"
+                     :local-doc-ids [(:id doc)]
+                     :artifact-ids [(:id report)])
+    (db/add-message! sid :assistant "hi there"
+                     :local-doc-ids [(:id doc)]
+                     :artifact-ids [(:id report)])
     (db/add-message! sid :tool "internal")
     (let [response (#'http/router {:uri            (str "/sessions/" sid "/messages")
                                    :request-method :get
@@ -500,9 +511,11 @@
       (is (= "user" (get (first messages) "role")))
       (is (= "hello" (get (first messages) "content")))
       (is (= "notes.md" (get-in (first messages) ["local_docs" 0 "name"])))
+      (is (= "Summary Report" (get-in (first messages) ["artifacts" 0 "title"])))
       (is (= "assistant" (get (second messages) "role")))
       (is (= "hi there" (get (second messages) "content")))
-      (is (= (str (:id doc)) (get-in (second messages) ["local_docs" 0 "id"]))))))
+      (is (= (str (:id doc)) (get-in (second messages) ["local_docs" 0 "id"])))
+      (is (= (str (:id report)) (get-in (second messages) ["artifacts" 0 "id"]))))))
 
 (deftest session-messages-route-blocks-non-local-origins
   (let [response (#'http/router {:uri            (str "/sessions/" (random-uuid) "/messages")
@@ -840,12 +853,104 @@
     (is (= "failed" (get-in body ["documents" 1 "status"])))
     (is (= "bad.bin" (get-in body ["errors" 0 "name"])))))
 
-(deftest chat-route-forwards-explicit-local-document-refs
+(deftest artifact-routes-round-trip
+  (let [sid           (str (db/create-session! :http))
+        create-res    (#'http/router {:uri            (str "/sessions/" sid "/artifacts")
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"name" "report.json"
+                                                                     "kind" "json"
+                                                                     "data" {"topic" "cars"
+                                                                             "count" 2}})})
+        create-body   (response-json create-res)
+        artifact-id   (get-in create-body ["artifact" "id"])
+        list-res      (#'http/router {:uri            (str "/sessions/" sid "/artifacts")
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        list-body     (response-json list-res)
+        get-res       (#'http/router {:uri            (str "/sessions/" sid "/artifacts/" artifact-id)
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        get-body      (response-json get-res)
+        note-res      (#'http/router {:uri            (str "/sessions/" sid "/artifacts/" artifact-id "/scratch-pads")
+                                      :request-method :post
+                                      :headers        (ui-headers)})
+        note-body     (response-json note-res)
+        download-res  (#'http/router {:uri            (str "/sessions/" sid "/artifacts/" artifact-id "/download")
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        delete-res    (#'http/router {:uri            (str "/sessions/" sid "/artifacts/" artifact-id)
+                                      :request-method :delete
+                                      :headers        (ui-headers)})
+        delete-body   (response-json delete-res)
+        empty-list    (#'http/router {:uri            (str "/sessions/" sid "/artifacts")
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        empty-body    (response-json empty-list)]
+    (is (= 201 (:status create-res)))
+    (is (= "report.json" (get-in create-body ["artifact" "name"])))
+    (is (= "json" (get-in create-body ["artifact" "kind"])))
+    (is (= "application/json" (get-in create-body ["artifact" "media_type"])))
+    (is (= 200 (:status list-res)))
+    (is (= 1 (count (get list-body "artifacts"))))
+    (is (= artifact-id (get-in list-body ["artifacts" 0 "id"])))
+    (is (= 200 (:status get-res)))
+    (is (.contains ^String (get-in get-body ["artifact" "text"]) "\"topic\": \"cars\""))
+    (is (= 201 (:status note-res)))
+    (is (= "report" (get-in note-body ["pad" "title"])))
+    (is (.contains ^String (get-in note-body ["pad" "content"]) "\"topic\": \"cars\""))
+    (is (= 200 (:status download-res)))
+    (is (= "application/json; charset=utf-8" (get-in download-res [:headers "Content-Type"])))
+    (is (re-find #"attachment; filename=\"report\.json\"" (get-in download-res [:headers "Content-Disposition"])))
+    (is (.contains ^String (String. ^bytes (:body download-res) StandardCharsets/UTF_8) "\"count\": 2"))
+    (is (= 200 (:status delete-res)))
+    (is (= "deleted" (get delete-body "status")))
+    (is (= [] (get empty-body "artifacts")))))
+
+(deftest binary-artifact-routes-round-trip
+  (let [sid          (str (db/create-session! :http))
+        payload      (.getBytes "%PDF-1.7\nbinary-http\n" StandardCharsets/UTF_8)
+        encoded      (.encodeToString (Base64/getEncoder) payload)
+        create-res   (#'http/router {:uri            (str "/sessions/" sid "/artifacts")
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"name" "report.pdf"
+                                                                    "kind" "pdf"
+                                                                    "bytes_base64" encoded})})
+        create-body  (response-json create-res)
+        artifact-id  (get-in create-body ["artifact" "id"])
+        get-res      (#'http/router {:uri            (str "/sessions/" sid "/artifacts/" artifact-id)
+                                     :request-method :get
+                                     :headers        (ui-headers)})
+        get-body     (response-json get-res)
+        download-res (#'http/router {:uri            (str "/sessions/" sid "/artifacts/" artifact-id "/download")
+                                     :request-method :get
+                                     :headers        (ui-headers)})]
+    (is (= 201 (:status create-res)))
+    (is (= "report.pdf" (get-in create-body ["artifact" "name"])))
+    (is (= "pdf" (get-in create-body ["artifact" "kind"])))
+    (is (= true (get-in create-body ["artifact" "has_blob"])))
+    (is (= false (get-in create-body ["artifact" "text_available"])))
+    (is (number? (get-in create-body ["artifact" "compressed_size_bytes"])))
+    (is (= 200 (:status get-res)))
+    (is (nil? (get-in get-body ["artifact" "text"])))
+    (is (= true (get-in get-body ["artifact" "has_blob"])))
+    (is (= false (get-in get-body ["artifact" "text_available"])))
+    (is (= 200 (:status download-res)))
+    (is (= "application/pdf" (get-in download-res [:headers "Content-Type"])))
+    (is (Arrays/equals ^bytes payload ^bytes (:body download-res)))))
+
+(deftest chat-route-forwards-explicit-local-document-and-artifact-refs
   (let [sid      (db/create-session! :http)
         doc      (local-doc/save-upload! {:session-id sid
                                           :name "paper.md"
                                           :media-type "text/markdown"
                                           :text "content"})
+        report   (artifact/create-artifact! {:session-id sid
+                                             :name "report.json"
+                                             :title "Research Report"
+                                             :kind :json
+                                             :data {"topic" "cars"}})
         seen-opts (atom nil)]
     (with-redefs [xia.agent/process-message (fn [_session-id _user-message & {:as opts}]
                                               (reset! seen-opts opts)
@@ -855,12 +960,14 @@
                                      :headers        (ui-headers)
                                      :body           (request-body {"message" "summarize this"
                                                                     "session_id" (str sid)
-                                                                    "local_doc_ids" [(str (:id doc))]})})
+                                                                    "local_doc_ids" [(str (:id doc))]
+                                                                    "artifact_ids" [(str (:id report))]})})
             body     (response-json response)]
         (is (= 200 (:status response)))
         (is (= "ok" (get body "content")))
         (is (= :http (:channel @seen-opts)))
-        (is (= [(str (:id doc))] (mapv str (:local-doc-ids @seen-opts))))))))
+        (is (= [(str (:id doc))] (mapv str (:local-doc-ids @seen-opts))))
+        (is (= [(str (:id report))] (mapv str (:artifact-ids @seen-opts))))))))
 
 (deftest approval-route-allows-round-trip
   (let [sid    (str (db/create-session! :http))

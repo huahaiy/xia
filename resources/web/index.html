@@ -125,6 +125,28 @@
                 <button type="button" class="secondary" id="local-doc-delete" disabled>Delete</button>
               </div>
             </section>
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2 class="panel-title">Artifacts</h2>
+                  <p class="panel-note">Generated outputs stay inside Xia until you inspect or download them yourself.</p>
+                </div>
+              </div>
+              <div class="local-doc-list" id="artifact-list">
+                <div class="scratch-empty">Artifacts created by Xia will appear here for this session.</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="artifact-preview">Preview</label>
+                <textarea id="artifact-preview" class="local-doc-preview" placeholder="Select an artifact to preview it here." readonly></textarea>
+              </div>
+              <div class="local-doc-status" id="artifact-status">No artifact selected.</div>
+              <div class="actions">
+                <button type="button" class="secondary" id="artifact-insert" disabled>Insert in Chat</button>
+                <button type="button" class="secondary" id="artifact-scratch" disabled>Create Note</button>
+                <button type="button" class="secondary" id="artifact-download" disabled>Download</button>
+                <button type="button" class="secondary" id="artifact-delete" disabled>Delete</button>
+              </div>
+            </section>
           </aside>
         </main>
       </div>

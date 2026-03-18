@@ -1,0 +1,14 @@
+;; List generated artifacts for the current session.
+;; Import with: /import-tool resources/tools/artifact-list.edn
+
+{:id             :artifact-list
+ :name           "artifact-list"
+ :description    "List artifacts already created for the current session so you can inspect ids, names, formats, and previews before reading or referencing them."
+ :tags           #{:artifact :output :list :retrieval}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {}
+                  "required"   []}
+ :handler        "(fn [_args]
+                    (mapv #(dissoc % :text :sha256 :meta)
+                          (xia.artifact/list-artifacts)))"}

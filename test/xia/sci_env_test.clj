@@ -1,6 +1,7 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer :all]
             [xia.agent :as agent]
+            [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.db]
             [xia.local-doc :as local-doc]
@@ -149,6 +150,27 @@
         (is (= (:id saved) (:id doc)))
         (is (= "The autom" (:text doc)))
         (is (true? (:truncated? doc)))))))
+
+(deftest artifact-functions-are-exposed-through-sci
+  (let [sid     (xia.db/create-session! :http)
+        created (artifact/create-artifact! {:session-id sid
+                                            :name "summary.json"
+                                            :kind :json
+                                            :data {"topic" "cars"}})]
+    (binding [xia.working-memory/*session-id* sid]
+      (let [listed (sci-env/eval-string "(xia.artifact/list-artifacts)")
+            found  (sci-env/eval-string "(xia.artifact/search-artifacts \"cars\")")
+            read   (sci-env/eval-string
+                     (str "(xia.artifact/read-artifact \"" (:id created) "\" :max-chars 12)"))
+            note   (sci-env/eval-string
+                     (str "(xia.artifact/create-scratch-pad-from-artifact! \"" (:id created) "\")"))]
+        (is (= "summary.json" (:name (first listed))))
+        (is (= "summary.json" (:name (first found))))
+        (is (= (:id created) (:id read)))
+        (is (string? (:text read)))
+        (is (true? (:truncated? read)))
+        (is (= "summary.json" (get-in note [:artifact :name])))
+        (is (= "summary" (get-in note [:pad :title])))))))
 
 (deftest branch-task-runner-is-exposed-through-sci
   (with-redefs [agent/run-branch-tasks (fn [tasks & opts]

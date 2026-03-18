@@ -1,0 +1,34 @@
+;; Create a session-scoped output artifact users can inspect or download.
+;; Import with: /import-tool resources/tools/artifact-create.edn
+
+{:id             :artifact-create
+ :name           "artifact-create"
+ :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, or plain text that the user can later inspect and download from Xia."
+ :tags           #{:artifact :output :file :export}
+ :parameters     {"type"       "object"
+                  "properties" {"name"       {"type"        "string"
+                                             "description" "Optional filename for the artifact, such as report.md or data.csv."}
+                                "title"      {"type"        "string"
+                                             "description" "Optional display title shown in the UI."}
+                                "kind"       {"type"        "string"
+                                             "enum"        ["txt" "markdown" "csv" "json" "html"]
+                                             "description" "Artifact format. Defaults to txt if omitted."}
+                                "content"    {"type"        "string"
+                                             "description" "Raw text content for txt, markdown, html, or pre-rendered csv/json."}
+                                "rows"       {"type"        "array"
+                                             "description" "Optional CSV rows as arrays or objects. Use this instead of content for structured CSV output."}
+                                "data"       {"description" "Optional structured JSON value. Use this instead of content for JSON artifacts."}
+                                "meta"       {"type"        "object"
+                                             "description" "Optional metadata to store alongside the artifact."}}
+                  "required"   []}
+ :handler        "(fn [args]
+                    (let [artifact (xia.artifact/create-artifact!
+                                     {:name    (get args \"name\")
+                                      :title   (get args \"title\")
+                                      :kind    (get args \"kind\")
+                                      :content (get args \"content\")
+                                      :rows    (get args \"rows\")
+                                      :data    (get args \"data\")
+                                      :meta    (get args \"meta\")
+                                      :source  :agent})]
+                      (dissoc artifact :text :sha256 :meta)))"}

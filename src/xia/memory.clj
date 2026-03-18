@@ -477,7 +477,8 @@
    :facts    :memory/search-fact-candidate-pool-size
    :episodes :memory/search-episode-candidate-pool-size
    :edges    :memory/search-edge-candidate-pool-size
-   :local-docs :memory/search-local-doc-candidate-pool-size})
+   :local-docs :memory/search-local-doc-candidate-pool-size
+   :artifacts :memory/search-artifact-candidate-pool-size})
 
 (defn- candidate-pool-size
   [kind top]
@@ -704,6 +705,95 @@
      :size-bytes (:local.doc/size-bytes e)
      :preview    (:local.doc/preview e)}))
 
+(defn- artifact-fulltext-hits
+  [session-id query & {:keys [top] :or {top 10}}]
+  (if (or (nil? session-id) (str/blank? query))
+    []
+    (let [opts {:domains [db/artifact-domain]
+                :top top
+                :display :refs+scores}]
+      (try
+        (->> (db/q '[:find ?e ?a ?v ?score
+                     :in $ ?sid ?query ?opts
+                     :where
+                     [?session :session/id ?sid]
+                     [?e :artifact/session ?session]
+                     [?e :artifact/status :ready]
+                     [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
+                   session-id query opts)
+             (sort-by #(double (nth % 3)) >)
+             (map-indexed
+               (fn [idx [eid attr value score]]
+                 {:eid       eid
+                  :attr      attr
+                  :value     value
+                  :lex-score (double score)
+                  :lex-rank  (inc idx)}))
+             vec)
+        (catch Exception _
+          [])))))
+
+(defn- artifact-embedding-hits
+  [session-id query & {:keys [top] :or {top 10}}]
+  (if (or (nil? session-id) (str/blank? query))
+    []
+    (let [opts {:domains [db/artifact-domain]
+                :top top
+                :display :refs+dists}]
+      (try
+        (->> (db/q '[:find ?e ?a ?v ?dist
+                     :in $ ?sid ?query ?opts
+                     :where
+                     [?session :session/id ?sid]
+                     [?e :artifact/session ?session]
+                     [?e :artifact/status :ready]
+                     [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
+                   session-id query opts)
+             (sort-by #(double (nth % 3)))
+             (map-indexed
+               (fn [idx [eid attr value distance]]
+                 {:eid          eid
+                  :attr         attr
+                  :value        value
+                  :sem-distance (double distance)
+                  :sem-rank     (inc idx)}))
+             vec)
+        (catch Exception _
+          [])))))
+
+(defn- artifact-result
+  [eid]
+  (let [e (db/entity eid)]
+    {:eid          eid
+     :id           (:artifact/id e)
+     :name         (:artifact/name e)
+     :title        (:artifact/title e)
+     :kind         (:artifact/kind e)
+     :media-type   (:artifact/media-type e)
+     :status       (:artifact/status e)
+     :size-bytes   (:artifact/size-bytes e)
+     :preview      (:artifact/preview e)
+     :has-blob?    (some? (:artifact/blob-id e))
+     :text-available? (some? (:artifact/text e))}))
+
+(defn- rank-artifact-candidates
+  [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
+  (let [pool-size     (or pool-size
+                          (max minimum-candidate-pool-size
+                               (* default-candidate-pool-multiplier top)))
+        lexical-hits  (artifact-fulltext-hits session-id (or fts-query query) :top pool-size)
+        semantic-hits (artifact-embedding-hits session-id query :top pool-size)
+        merged-hits   (vals (reduce merge-domain-hit {} (concat lexical-hits semantic-hits)))]
+    (->> merged-hits
+         (map #(assoc % :rrf-score (hybrid-rrf-score %)))
+         (sort-by (fn [{:keys [rrf-score lex-score sem-distance eid]}]
+                    [(- rrf-score)
+                     (- (double (or lex-score 0.0)))
+                     (double (or sem-distance Double/POSITIVE_INFINITY))
+                     eid]))
+         (take top)
+         vec)))
+
 (defn- rank-local-doc-candidates
   [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
   (let [pool-size     (or pool-size
@@ -773,6 +863,17 @@
                                   :fts-query fts-query
                                   :pool-size (candidate-pool-size :local-docs top))
        (mapv (comp local-doc-result :eid))))
+
+(defn search-artifacts
+  "Search session-scoped artifacts by name/title/text using hybrid retrieval.
+   Returns [{:id :name :title :kind :media-type :status :size-bytes :preview}]."
+  [session-id query & {:keys [top fts-query] :or {top 5}}]
+  (->> (rank-artifact-candidates session-id
+                                 query
+                                 :top top
+                                 :fts-query fts-query
+                                 :pool-size (candidate-pool-size :artifacts top))
+       (mapv (comp artifact-result :eid))))
 
 (defn node-facts-with-eids
   "Get all facts about a node, including fact eids (for dedup)."

@@ -1,0 +1,13 @@
+;; Delete a generated artifact from the current session.
+;; Import with: /import-tool resources/tools/artifact-delete.edn
+
+{:id             :artifact-delete
+ :name           "artifact-delete"
+ :description    "Delete a generated artifact from the current session when it is no longer needed."
+ :tags           #{:artifact :output :delete :cleanup}
+ :parameters     {"type"       "object"
+                  "properties" {"artifact_id" {"type"        "string"
+                                               "description" "Artifact id returned by artifact-list or artifact-search."}}
+                  "required"   ["artifact_id"]}
+ :handler        "(fn [args]
+                    (xia.artifact/delete-artifact! (get args \"artifact_id\")))"}

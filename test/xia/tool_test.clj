@@ -1,5 +1,6 @@
 (ns xia.tool-test
   (:require [clojure.test :refer :all]
+            [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
@@ -338,6 +339,11 @@
   (let [count (tool/ensure-bundled-tools!)]
     (is (pos? count))
     (is (= :branch-tasks (:tool/id (db/get-tool :branch-tasks))))
+    (is (= :artifact-create (:tool/id (db/get-tool :artifact-create))))
+    (is (= :artifact-list (:tool/id (db/get-tool :artifact-list))))
+    (is (= :artifact-search (:tool/id (db/get-tool :artifact-search))))
+    (is (= :artifact-read (:tool/id (db/get-tool :artifact-read))))
+    (is (= :artifact-delete (:tool/id (db/get-tool :artifact-delete))))
     (is (= :web-search (:tool/id (db/get-tool :web-search))))
     (is (= :browser-runtime-status (:tool/id (db/get-tool :browser-runtime-status))))
     (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
@@ -356,6 +362,9 @@
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-runtime-status))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-screenshot))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-query-elements))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :artifact-list))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :artifact-search))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :artifact-read))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-read))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-list-sessions))))
@@ -469,6 +478,47 @@
       (is (= 12 (:end-offset read)))
       (is (= "The car stay" (:text read)))
       (is (true? (:truncated? read))))))
+
+(deftest artifact-tools-execute-through-sci
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :artifact-create)
+  (tool/load-tool! :artifact-list)
+  (tool/load-tool! :artifact-search)
+  (tool/load-tool! :artifact-read)
+  (tool/load-tool! :artifact-delete)
+  (let [sid     (db/create-session! :http)
+        created (tool/execute-tool :artifact-create {"name" "report.json"
+                                                     "kind" "json"
+                                                     "data" {"status" "ok"}}
+                                   {:channel :terminal
+                                    :session-id sid})]
+    (is (= "report.json" (:name created)))
+    (is (= :json (:kind created)))
+    (is (= "application/json" (:media-type created)))
+    (let [listed (tool/execute-tool :artifact-list {}
+                                    {:channel :terminal
+                                     :session-id sid})]
+      (is (= "report.json" (:name (first listed))))
+      (is (nil? (:text (first listed)))))
+    (let [search (tool/execute-tool :artifact-search {"query" "status"}
+                                    {:channel :terminal
+                                     :session-id sid})]
+      (is (= "report.json" (:name (first search)))))
+    (let [read (tool/execute-tool :artifact-read {"artifact_id" (str (:id created))
+                                                  "max_chars" 8}
+                                  {:channel :terminal
+                                   :session-id sid})]
+      (is (= (:id created) (:id read)))
+      (is (= 8 (:end-offset read)))
+      (is (string? (:text read)))
+      (is (true? (:truncated? read))))
+    (let [deleted (tool/execute-tool :artifact-delete {"artifact_id" (str (:id created))}
+                                     {:channel :terminal
+                                      :session-id sid})]
+      (is (= "deleted" (:status deleted)))
+      (is (= [] (tool/execute-tool :artifact-list {}
+                                   {:channel :terminal
+                                    :session-id sid}))))))
 
 (deftest browser-open-tool-accepts-playwright-backend
   (tool/ensure-bundled-tools!)

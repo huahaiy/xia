@@ -12,6 +12,7 @@
    introspection vars, and direct long-term memory mutation so SCI default
    namespace changes do not widen access."
   (:require [sci.core :as sci]
+            [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.config :as cfg]
             [xia.cron :as cron]
@@ -81,6 +82,15 @@
   {'list-docs   local-doc/list-docs
    'search-docs local-doc/search-docs
    'read-doc    local-doc/read-doc})
+
+(def ^:private xia-artifact-ns
+  {'list-artifacts                 artifact/list-artifacts
+   'search-artifacts               artifact/search-artifacts
+   'get-artifact                   artifact/get-artifact
+   'read-artifact                  artifact/read-artifact
+   'create-artifact!               artifact/create-artifact!
+   'create-scratch-pad-from-artifact! artifact/create-scratch-pad-from-artifact!
+   'delete-artifact!               artifact/delete-artifact!})
 
 (def ^:private xia-service-ns
   {'request       service/request
@@ -193,6 +203,7 @@
                   'xia.schedule       xia-schedule-ns
                   'xia.scratch        xia-scratch-ns
                   'xia.local-doc      xia-local-doc-ns
+                  'xia.artifact       xia-artifact-ns
                   'xia.cron           xia-cron-ns
                   'xia.service        xia-service-ns
                   'xia.web            xia-web-ns

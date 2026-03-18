@@ -1,0 +1,17 @@
+;; Search generated artifacts for the current session.
+;; Import with: /import-tool resources/tools/artifact-search.edn
+
+{:id             :artifact-search
+ :name           "artifact-search"
+ :description    "Search generated artifacts for the current session by name, title, or text content. Returns matching artifact ids, kinds, previews, and metadata so you can inspect the right output before reading it."
+ :tags           #{:artifact :output :search :retrieval}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"query" {"type"        "string"
+                                         "description" "What to search for in the current session's generated artifacts."}
+                                "top"   {"type"        "integer"
+                                         "description" "Maximum number of matching artifacts to return (default 5)."}}
+                  "required"   ["query"]}
+ :handler        "(fn [args]
+                    (xia.artifact/search-artifacts (get args \"query\")
+                                                  :top (or (get args \"top\") 5)))"}

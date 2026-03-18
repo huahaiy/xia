@@ -24,6 +24,7 @@
 (def kg-fact-domain "kg-fact")
 (def kg-edge-domain "kg-edge")
 (def local-doc-domain "local-doc")
+(def artifact-domain "artifact")
 (def skill-content-domain "skill-content")
 
 (def schema
@@ -131,6 +132,9 @@
    :message.local-doc-ref/id      {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :message.local-doc-ref/message {:db/valueType :db.type/ref}
    :message.local-doc-ref/doc     {:db/valueType :db.type/ref}
+   :message.artifact-ref/id       {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :message.artifact-ref/message  {:db/valueType :db.type/ref}
+   :message.artifact-ref/artifact {:db/valueType :db.type/ref}
 
    ;; --- Local Documents (user-selected local file content) ---
    :local.doc/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
@@ -152,6 +156,38 @@
                           :db/embedding true
                           :db.embedding/domains [local-doc-domain]}
    :local.doc/preview    {:db/valueType :db.type/string}
+
+   ;; --- Generated Artifacts (session-scoped outputs users can download) ---
+   :artifact/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :artifact/session    {:db/valueType :db.type/ref}
+   :artifact/name       {:db/valueType :db.type/string
+                         :db/fulltext true
+                         :db.fulltext/domains [artifact-domain]
+                         :db/embedding true
+                         :db.embedding/domains [artifact-domain]}
+   :artifact/title      {:db/valueType :db.type/string
+                         :db/fulltext true
+                         :db.fulltext/domains [artifact-domain]
+                         :db/embedding true
+                         :db.embedding/domains [artifact-domain]}
+   :artifact/kind       {:db/valueType :db.type/keyword}
+   :artifact/media-type {:db/valueType :db.type/string}
+   :artifact/extension  {:db/valueType :db.type/string}
+   :artifact/source     {:db/valueType :db.type/keyword}
+   :artifact/status     {:db/valueType :db.type/keyword}
+   :artifact/size-bytes {:db/valueType :db.type/long}
+   :artifact/sha256     {:db/valueType :db.type/string}
+   :artifact/blob-id    {:db/valueType :db.type/uuid}
+   :artifact/blob-codec {:db/valueType :db.type/keyword}
+   :artifact/compressed-size-bytes {:db/valueType :db.type/long}
+   :artifact/error      {:db/valueType :db.type/string}
+   :artifact/meta       {:db/valueType :db.type/idoc    :db/domain "artifact-meta"}
+   :artifact/text       {:db/valueType :db.type/string
+                         :db/fulltext true
+                         :db.fulltext/domains [artifact-domain]
+                         :db/embedding true
+                         :db.embedding/domains [artifact-domain]}
+   :artifact/preview    {:db/valueType :db.type/string}
 
    ;; --- Skill (markdown/text instructions the LLM follows) ---
    :skill/id           {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
@@ -1085,6 +1121,26 @@
                            set)]
         (filterv valid-ids doc-ids)))))
 
+(defn- valid-session-artifact-ids
+  [session-id artifact-ids]
+  (let [artifact-ids* (->> artifact-ids
+                           (keep normalize-message-local-doc-id)
+                           distinct
+                           vec)]
+    (if-not (seq artifact-ids*)
+      []
+      (let [valid-ids (->> (q '[:find ?artifact-id
+                                :in $ ?sid [?artifact-id ...]
+                                :where
+                                [?session :session/id ?sid]
+                                [?artifact :artifact/session ?session]
+                                [?artifact :artifact/id ?artifact-id]]
+                              session-id
+                              artifact-ids*)
+                           (map first)
+                           set)]
+        (filterv valid-ids artifact-ids*)))))
+
 (defn- message-local-docs
   [message-eid]
   (->> (q '[:find ?doc-id ?name ?status
@@ -1101,12 +1157,32 @@
                 :name   (empty->nil name)
                 :status status}))))
 
-(defn add-message! [session-id role content & {:keys [tool-calls tool-id tool-result local-doc-ids]}]
+(defn- message-artifacts
+  [message-eid]
+  (->> (q '[:find ?artifact-id ?name ?title ?status
+            :in $ ?message
+            :where
+            [?ref :message.artifact-ref/message ?message]
+            [?ref :message.artifact-ref/artifact ?artifact]
+            [?artifact :artifact/id ?artifact-id]
+            [(get-else $ ?artifact :artifact/name "") ?name]
+            [(get-else $ ?artifact :artifact/title "") ?title]
+            [(get-else $ ?artifact :artifact/status :ready) ?status]]
+          message-eid)
+       (mapv (fn [[artifact-id name title status]]
+               {:id     artifact-id
+                :name   (empty->nil name)
+                :title  (empty->nil title)
+                :status status}))))
+
+(defn add-message!
+  [session-id role content & {:keys [tool-calls tool-id tool-result local-doc-ids artifact-ids]}]
   (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                  :where [?e :session/id ?sid]]
                                session-id))
         message-id   (random-uuid)
-        doc-ids      (valid-session-local-doc-ids session-id local-doc-ids)]
+        doc-ids      (valid-session-local-doc-ids session-id local-doc-ids)
+        artifact-ids* (valid-session-artifact-ids session-id artifact-ids)]
     (transact!
       (into
         [(cond-> {:message/id         message-id
@@ -1116,11 +1192,17 @@
            tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
            (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
            tool-id    (assoc :message/tool-id tool-id))]
-        (map (fn [doc-id]
-               {:message.local-doc-ref/id      (random-uuid)
-                :message.local-doc-ref/message [:message/id message-id]
-                :message.local-doc-ref/doc     [:local.doc/id doc-id]})
-             doc-ids)))))
+        (concat
+          (map (fn [doc-id]
+                 {:message.local-doc-ref/id      (random-uuid)
+                  :message.local-doc-ref/message [:message/id message-id]
+                  :message.local-doc-ref/doc     [:local.doc/id doc-id]})
+               doc-ids)
+          (map (fn [artifact-id]
+                 {:message.artifact-ref/id       (random-uuid)
+                  :message.artifact-ref/message  [:message/id message-id]
+                  :message.artifact-ref/artifact [:artifact/id artifact-id]})
+               artifact-ids*))))))
 
 (defn- empty->nil [s] (when-not (= "" s) s))
 
@@ -1136,6 +1218,7 @@
                                     (decrypt-secret-attr :message/content content))
                      :created-at  (entity-created-at (raw-entity eid))
                      :local-docs  (not-empty (message-local-docs eid))
+                     :artifacts   (not-empty (message-artifacts eid))
                      :tool-calls  (read-tool-calls-doc tool-calls)
                      :tool-result tool-result*
                      :tool-id     (empty->nil tool-id)}))

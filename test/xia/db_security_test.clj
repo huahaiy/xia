@@ -108,6 +108,7 @@
                :content "pasted local secret"
                :created-at (:created-at (first messages))
                :local-docs nil
+               :artifacts nil
                :tool-calls nil
                :tool-result nil
                :tool-id nil}
@@ -116,6 +117,7 @@
                :content "checking service"
                :created-at (:created-at (second messages))
                :local-docs nil
+               :artifacts nil
                :tool-calls tool-calls
                :tool-result nil
                :tool-id nil}
@@ -124,6 +126,7 @@
                :content nil
                :created-at (:created-at (nth messages 2))
                :local-docs nil
+               :artifacts nil
                :tool-calls nil
                :tool-result {"token" "top-secret"}
                :tool-id "call_1"}]

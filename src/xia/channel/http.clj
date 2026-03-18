@@ -6,6 +6,7 @@
             [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
+            [xia.artifact :as artifact]
             [xia.scratch :as scratch]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
@@ -332,6 +333,32 @@
   {:status  status
    :headers {"Content-Type" "application/json"}
    :body    (json/write-json-str body)})
+
+(defn- utf8-download-media-type
+  [media-type]
+  (let [base (some-> media-type str str/trim not-empty)]
+    (cond
+      (nil? base) "application/octet-stream"
+      (re-find #";\s*charset=" base) base
+      (or (str/starts-with? base "text/")
+          (= base "application/json")
+          (= base "application/edn")
+          (= base "application/xml"))
+      (str base "; charset=utf-8")
+      :else
+      base)))
+
+(defn- quoted-filename
+  [filename]
+  (-> (or (some-> filename str str/trim not-empty) "download")
+      (str/replace #"[\\\"\r\n]+" "_")))
+
+(defn- download-response
+  [filename media-type body]
+  {:status  200
+   :headers {"Content-Type"        (utf8-download-media-type media-type)
+             "Content-Disposition" (str "attachment; filename=\"" (quoted-filename filename) "\"")}
+   :body    body})
 
 (defn- exception-response
   [e]
@@ -683,11 +710,45 @@
   [doc]
   (dissoc (local-doc->body doc) :text :sha256))
 
+(defn- artifact->body
+  [artifact]
+  {:id         (some-> (:id artifact) str)
+   :session_id (:session-id artifact)
+   :name       (:name artifact)
+   :title      (:title artifact)
+   :kind       (some-> (:kind artifact) name)
+   :media_type (:media-type artifact)
+   :extension  (:extension artifact)
+   :source     (some-> (:source artifact) name)
+   :status     (some-> (:status artifact) name)
+   :size_bytes (:size-bytes artifact)
+   :compressed_size_bytes (:compressed-size-bytes artifact)
+   :has_blob   (boolean (:has-blob? artifact))
+   :text_available (boolean (:text-available? artifact))
+   :sha256     (:sha256 artifact)
+   :error      (:error artifact)
+   :meta       (:meta artifact)
+   :text       (:text artifact)
+   :preview    (:preview artifact)
+   :created_at (instant->str (:created-at artifact))
+   :updated_at (instant->str (:updated-at artifact))})
+
+(defn- artifact-metadata->body
+  [artifact]
+  (dissoc (artifact->body artifact) :text :sha256 :meta))
+
 (defn- local-doc-ref->body
   [doc]
   {:id     (some-> (:id doc) str)
    :name   (:name doc)
    :status (some-> (:status doc) name)})
+
+(defn- artifact-ref->body
+  [artifact]
+  {:id     (some-> (:id artifact) str)
+   :name   (:name artifact)
+   :title  (:title artifact)
+   :status (some-> (:status artifact) name)})
 
 (defn- nonblank-str
   [value]
@@ -927,6 +988,10 @@
   [session-id doc-id]
   (local-doc/get-session-doc session-id doc-id))
 
+(defn- session-artifact
+  [session-id artifact-id]
+  (artifact/get-session-artifact session-id artifact-id))
+
 (defn- handle-create-session []
   (let [sid (db/create-session! :http)]
     (wm/ensure-wm! sid)
@@ -944,7 +1009,10 @@
         session-id (get data "session_id")
         local-doc-ids (when (sequential? (get data "local_doc_ids"))
                         (vec (keep #(when (some? %) (str %))
-                                   (get data "local_doc_ids"))))]
+                                   (get data "local_doc_ids"))))
+        artifact-ids (when (sequential? (get data "artifact_ids"))
+                       (vec (keep #(when (some? %) (str %))
+                                  (get data "artifact_ids"))))]
     (cond
       (not message)
       {:response (json-response 400 {:error "missing 'message' field"})}
@@ -964,15 +1032,17 @@
         (clear-session-status! sid)
         {:session-id sid
          :message    message
-         :local-doc-ids local-doc-ids}))))
+         :local-doc-ids local-doc-ids
+         :artifact-ids artifact-ids}))))
 
 (defn- process-chat!
-  [{:keys [session-id message local-doc-ids]}]
+  [{:keys [session-id message local-doc-ids artifact-ids]}]
   (try
     (let [response (agent/process-message session-id
                                           message
                                           :channel :http
-                                          :local-doc-ids local-doc-ids)]
+                                          :local-doc-ids local-doc-ids
+                                          :artifact-ids artifact-ids)]
       (json-response 200 {:session_id (str session-id)
                           :role       "assistant"
                           :content    response}))
@@ -1068,11 +1138,12 @@
     (let [sid      (java.util.UUID/fromString session-id)
           messages (->> (db/session-messages sid)
                         (filter #(#{:user :assistant} (:role %)))
-                        (mapv (fn [{:keys [role content created-at local-docs]}]
+                        (mapv (fn [{:keys [role content created-at local-docs artifacts]}]
                                 {:role       (name role)
                                  :content    content
                                  :created_at (some-> created-at .toInstant str)
-                                 :local_docs (mapv local-doc-ref->body (or local-docs []))})))]
+                                 :local_docs (mapv local-doc-ref->body (or local-docs []))
+                                 :artifacts  (mapv artifact-ref->body (or artifacts []))})))]
       (touch-rest-session! session-id)
       (json-response 200 {:session_id session-id
                           :messages   messages}))
@@ -1480,6 +1551,148 @@
       (touch-rest-session! session-id)
       (json-response 201 {:session_id session-id
                           :pad        (scratch-pad->body pad)}))))
+
+(defn- handle-create-artifact-scratch-pad [session-id artifact-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    (nil? (session-artifact session-id artifact-id))
+    (json-response 404 {:error "artifact not found"})
+
+    :else
+    (let [{:keys [pad]} (artifact/create-scratch-pad-from-artifact! session-id artifact-id)]
+      (touch-rest-session! session-id)
+      (json-response 201 {:session_id session-id
+                          :pad        (scratch-pad->body pad)}))))
+
+(defn- artifact-create-spec
+  [data]
+  (let [payload (if (map? (get data "artifact"))
+                  (get data "artifact")
+                  data)]
+    (cond-> {:source (or (some-> (get payload "source") nonblank-str keyword)
+                         :manual)}
+      (contains? payload "name")
+      (assoc :name (get payload "name"))
+
+      (contains? payload "title")
+      (assoc :title (get payload "title"))
+
+      (or (contains? payload "kind")
+          (contains? payload "format"))
+      (assoc :kind (or (get payload "kind")
+                       (get payload "format")))
+
+      (contains? payload "media_type")
+      (assoc :media-type (get payload "media_type"))
+
+      (contains? payload "content")
+      (assoc :content (get payload "content"))
+
+      (contains? payload "bytes_base64")
+      (assoc :bytes-base64 (get payload "bytes_base64"))
+
+      (contains? payload "preview")
+      (assoc :preview (get payload "preview"))
+
+      (contains? payload "rows")
+      (assoc :rows (get payload "rows"))
+
+      (contains? payload "data")
+      (assoc :data (get payload "data"))
+
+      (contains? payload "meta")
+      (assoc :meta (get payload "meta")))))
+
+(defn- handle-list-artifacts [session-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (do
+      (touch-rest-session! session-id)
+      (json-response 200
+                     {:session_id session-id
+                      :artifacts  (mapv artifact-metadata->body
+                                        (artifact/list-artifacts session-id))}))))
+
+(defn- handle-create-artifact [session-id req]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (try
+      (let [data    (or (read-body req) {})
+            created (artifact/create-artifact! (assoc (artifact-create-spec data)
+                                                      :session-id session-id))]
+        (touch-rest-session! session-id)
+        (json-response 201 {:session_id session-id
+                            :artifact   (artifact->body created)}))
+      (catch clojure.lang.ExceptionInfo e
+        (json-response (or (:status (ex-data e)) 400)
+                       {:error (.getMessage e)})))))
+
+(defn- handle-get-artifact [session-id artifact-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (if-let [artifact (session-artifact session-id artifact-id)]
+      (do
+        (touch-rest-session! session-id)
+        (json-response 200 {:session_id session-id
+                            :artifact   (artifact->body artifact)}))
+      (json-response 404 {:error "artifact not found"}))))
+
+(defn- handle-download-artifact [session-id artifact-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    :else
+    (if-let [{:keys [name media-type bytes]} (artifact/artifact-download-data session-id artifact-id)]
+      (do
+        (touch-rest-session! session-id)
+        (download-response name media-type (or bytes (byte-array 0))))
+      (json-response 404 {:error "artifact not found"}))))
+
+(defn- handle-delete-artifact [session-id artifact-id]
+  (cond
+    (nil? (parse-session-id session-id))
+    (json-response 400 {:error "invalid session id"})
+
+    (not (session-exists? session-id))
+    (json-response 404 {:error "session not found"})
+
+    (nil? (session-artifact session-id artifact-id))
+    (json-response 404 {:error "artifact not found"})
+
+    :else
+    (do
+      (artifact/delete-artifact! session-id artifact-id)
+      (touch-rest-session! session-id)
+      (json-response 200 {:status "deleted"
+                          :session_id session-id
+                          :artifact_id artifact-id}))))
 
 (defn- handle-admin-config [_req]
   (json-response
@@ -1933,6 +2146,10 @@
           local-doc-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/local-documents" uri)
           local-doc-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/local-documents/([^/]+)" uri)
           local-doc-scratch-match (re-matches #"/sessions/([0-9a-fA-F-]+)/local-documents/([^/]+)/scratch-pads" uri)
+          artifact-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts" uri)
+          artifact-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)" uri)
+          artifact-scratch-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/scratch-pads" uri)
+          artifact-download-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/download" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
           admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
@@ -2023,6 +2240,28 @@
         (and (= method :post) local-doc-scratch-match)
         (protected-route-response req #(handle-create-local-doc-scratch-pad (second local-doc-scratch-match)
                                                                             (nth local-doc-scratch-match 2)))
+
+        (and (= method :get) artifact-list-match)
+        (protected-route-response req #(handle-list-artifacts (second artifact-list-match)))
+
+        (and (= method :post) artifact-list-match)
+        (protected-route-response req #(handle-create-artifact (second artifact-list-match) req))
+
+        (and (= method :get) artifact-match)
+        (protected-route-response req #(handle-get-artifact (second artifact-match)
+                                                            (nth artifact-match 2)))
+
+        (and (= method :get) artifact-download-match)
+        (protected-route-response req #(handle-download-artifact (second artifact-download-match)
+                                                                 (nth artifact-download-match 2)))
+
+        (and (= method :post) artifact-scratch-match)
+        (protected-route-response req #(handle-create-artifact-scratch-pad (second artifact-scratch-match)
+                                                                           (nth artifact-scratch-match 2)))
+
+        (and (= method :delete) artifact-match)
+        (protected-route-response req #(handle-delete-artifact (second artifact-match)
+                                                               (nth artifact-match 2)))
 
         (and (= method :get) (= uri "/admin/config"))
         (protected-route-response req #(handle-admin-config req))
