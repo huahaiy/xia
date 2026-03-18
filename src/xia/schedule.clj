@@ -12,7 +12,9 @@
    This namespace handles data operations only. The background executor
   lives in xia.scheduler (separate to avoid circular deps with agent)."
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.config :as cfg]
             [xia.cron :as cron]
             [xia.db :as db]))
 
@@ -22,6 +24,24 @@
 
 (def ^:private max-schedules 50)
 (def ^:private min-interval-minutes 5)
+(def ^:private default-failure-backoff-minutes 15)
+(def ^:private default-max-failure-backoff-minutes (* 12 60))
+(def ^:private default-pause-after-repeated-failures 3)
+
+(defn- failure-backoff-minutes
+  []
+  (cfg/positive-long :schedule/failure-backoff-minutes
+                     default-failure-backoff-minutes))
+
+(defn- max-failure-backoff-minutes
+  []
+  (cfg/positive-long :schedule/max-failure-backoff-minutes
+                     default-max-failure-backoff-minutes))
+
+(defn- pause-after-repeated-failures
+  []
+  (cfg/positive-long :schedule/pause-after-repeated-failures
+                     default-pause-after-repeated-failures))
 
 (defn- actions-doc
   [actions]
@@ -33,6 +53,237 @@
     (map? value)    (vec (or (:events value) []))
     (sequential? value) (vec value)
     :else           value))
+
+(defn- truncate-string
+  [value max-len]
+  (let [s (some-> value str)]
+    (when (seq s)
+      (if (> (count s) max-len)
+        (subs s 0 max-len)
+        s))))
+
+(defn- checkpoint-doc
+  [checkpoint]
+  (when (map? checkpoint)
+    (cond-> (reduce-kv (fn [acc k v]
+                         (assoc acc k
+                                (cond
+                                  (string? v) (truncate-string v 500)
+                                  (and (sequential? v) (not (map? v)))
+                                  (vec (map #(if (string? %) (truncate-string % 120) %) (take 10 v)))
+                                  :else v)))
+                       {}
+                       checkpoint)
+      (:summary checkpoint)
+      (update :summary truncate-string 500))))
+
+(defn- read-checkpoint-doc
+  [value]
+  (when (map? value)
+    value))
+
+(defn- normalize-failure-signature
+  [error]
+  (some-> error
+          str
+          str/lower-case
+          str/trim
+          (str/replace #"\d+" "#")
+          (str/replace #"[0-9a-f]{8}-[0-9a-f-]{27}" "<uuid>")
+          (str/replace #"\s+" " ")
+          (truncate-string 240)))
+
+(defn- recovery-hint
+  [error]
+  (let [message (some-> error str str/lower-case)]
+    (cond
+      (or (str/includes? message "no element matches selector")
+          (str/includes? message "selector")
+          (str/includes? message "no form found")
+          (str/includes? message "element not found")
+          (str/includes? message "click failed"))
+      "The previous attempt likely relied on a stale DOM path. Re-inspect the page with browser-query-elements before retrying selectors or clicks."
+
+      (or (str/includes? message "timed out")
+          (str/includes? message "timeout"))
+      "Treat the previous failure as a timing issue first. Re-open or re-read the page, wait explicitly, then verify the target elements before continuing."
+
+      (or (str/includes? message "403")
+          (str/includes? message "401")
+          (str/includes? message "unauthorized")
+          (str/includes? message "forbidden")
+          (str/includes? message "login"))
+      "The previous attempt may have lost authentication. Check login/session state before repeating the same path."
+
+      :else
+      "Do not repeat the previous failing path blindly. Inspect the current page state and choose the next step from live evidence.")))
+
+(defn- schedule-state-eid
+  [schedule-id]
+  (ffirst (db/q '[:find ?e :in $ ?sid
+                  :where [?e :schedule.state/schedule-id ?sid]]
+                schedule-id)))
+
+(defn- normalize-session-id
+  [value]
+  (cond
+    (instance? java.util.UUID value) value
+    (string? value)                  (try
+                                       (java.util.UUID/fromString (str/trim value))
+                                       (catch Exception _
+                                         nil))
+    :else                            nil))
+
+(defn task-state
+  "Return durable execution state for a schedule, if any."
+  [schedule-id]
+  (when-let [eid (schedule-state-eid schedule-id)]
+    (let [e (db/entity eid)]
+      {:schedule-id           (:schedule.state/schedule-id e)
+       :status                (:schedule.state/status e)
+       :phase                 (:schedule.state/phase e)
+       :checkpoint            (read-checkpoint-doc (:schedule.state/checkpoint e))
+       :checkpoint-at         (:schedule.state/checkpoint-at e)
+       :last-success-at       (:schedule.state/last-success-at e)
+       :last-success-summary  (:schedule.state/last-success-summary e)
+       :last-failure-at       (:schedule.state/last-failure-at e)
+       :last-error            (:schedule.state/last-error e)
+       :last-failure-signature (:schedule.state/last-failure-signature e)
+       :last-recovery-hint    (:schedule.state/last-recovery-hint e)
+       :consecutive-failures  (or (:schedule.state/consecutive-failures e) 0)
+       :backoff-until         (:schedule.state/backoff-until e)})))
+
+(defn resumable-session-id
+  "Return the session id that should be reused for a recovering scheduled prompt,
+   or nil if the task should start fresh."
+  [schedule-id]
+  (let [{:keys [status checkpoint]} (task-state schedule-id)
+        session-id (normalize-session-id (:session-id checkpoint))]
+    (when (and (#{:running :backoff :paused} status)
+               session-id
+               (ffirst (db/q '[:find ?e :in $ ?sid
+                               :where [?e :session/id ?sid]]
+                             session-id)))
+      session-id)))
+
+(defn save-task-checkpoint!
+  "Persist a lightweight checkpoint for a scheduled task run."
+  [schedule-id checkpoint]
+  (let [now            (java.util.Date.)
+        state-eid      (schedule-state-eid schedule-id)
+        checkpoint-doc (checkpoint-doc checkpoint)]
+    (db/transact!
+      (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
+                        :schedule.state/status      :running
+                        :schedule.state/checkpoint-at now}
+                 (:phase checkpoint) (assoc :schedule.state/phase (:phase checkpoint))
+                 checkpoint-doc (assoc :schedule.state/checkpoint checkpoint-doc))]
+        state-eid
+        (conj [:db/retract state-eid :schedule.state/backoff-until])))
+    (task-state schedule-id)))
+
+(defn- failure-backoff-ms
+  [consecutive-failures]
+  (* 60 1000
+     (min (max-failure-backoff-minutes)
+          (* (failure-backoff-minutes)
+             (long (Math/pow 2.0 (double (max 0 (dec consecutive-failures)))))))))
+
+(defn record-task-success!
+  "Mark a schedule task run as successful and clear failure state."
+  [schedule-id result-summary]
+  (let [now      (java.util.Date.)
+        state-eid (schedule-state-eid schedule-id)]
+    (db/transact!
+      (cond-> [{:schedule.state/schedule-id schedule-id
+                :schedule.state/status :success
+                :schedule.state/phase :complete
+                :schedule.state/last-success-at now
+                :schedule.state/last-success-summary (truncate-string result-summary 1000)
+                :schedule.state/consecutive-failures 0
+                :schedule.state/last-error ""
+                :schedule.state/last-failure-signature ""
+                :schedule.state/last-recovery-hint ""}]
+        state-eid
+        (conj [:db/retract state-eid :schedule.state/backoff-until])))
+    (task-state schedule-id)))
+
+(defn record-task-failure!
+  "Persist failure state for a schedule task and apply backoff or pause policy."
+  [schedule-id error-message]
+  (let [now                 (java.util.Date.)
+        state-eid           (schedule-state-eid schedule-id)
+        state               (task-state schedule-id)
+        error-message       (or (truncate-string error-message 2000)
+                                "Unknown scheduled task failure")
+        signature           (normalize-failure-signature error-message)
+        same-failure?       (= signature (:last-failure-signature state))
+        consecutive-failures (if same-failure?
+                               (inc (or (:consecutive-failures state) 0))
+                               1)
+        hint                (recovery-hint error-message)
+        pause-threshold     (pause-after-repeated-failures)
+        paused?             (and same-failure?
+                                 (>= consecutive-failures pause-threshold))
+        backoff-until       (when-not paused?
+                              (java.util.Date.
+                                (+ (.getTime now)
+                                   (failure-backoff-ms consecutive-failures))))]
+    (db/transact!
+      (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
+                        :schedule.state/status (if paused? :paused :backoff)
+                        :schedule.state/phase :error
+                        :schedule.state/last-failure-at now
+                        :schedule.state/last-error error-message
+                        :schedule.state/last-failure-signature signature
+                        :schedule.state/last-recovery-hint hint
+                        :schedule.state/consecutive-failures consecutive-failures}
+                 backoff-until (assoc :schedule.state/backoff-until backoff-until))
+               (cond-> {:schedule/id schedule-id}
+                 paused? (assoc :schedule/enabled? false)
+                 backoff-until (assoc :schedule/next-run backoff-until))]
+        (and paused? state-eid)
+        (conj [:db/retract state-eid :schedule.state/backoff-until])))
+    (task-state schedule-id)))
+
+(defn recovery-brief
+  "Return a compact recovery summary for the next scheduled prompt attempt."
+  [schedule-id]
+  (when-let [{:keys [consecutive-failures last-failure-at last-error
+                     last-recovery-hint checkpoint]} (task-state schedule-id)]
+    (when (pos? (or consecutive-failures 0))
+      (str/join
+        "\n"
+        (cond-> ["Recovery context from previous scheduled attempts:"
+                 (str "- Consecutive failures: " consecutive-failures)]
+          last-failure-at
+          (conj (str "- Last failure at: " last-failure-at))
+
+          (seq last-error)
+          (conj (str "- Last error: " last-error))
+
+          (seq last-recovery-hint)
+          (conj (str "- Recovery hint: " last-recovery-hint))
+
+          (seq (:summary checkpoint))
+          (conj (str "- Last checkpoint"
+                     (when-let [phase (:phase checkpoint)]
+                       (str " (" (name phase)
+                            (when-let [round (:round checkpoint)]
+                              (str ", round " round))
+                            ")"))
+                     ": "
+                     (:summary checkpoint)))
+
+          (normalize-session-id (:session-id checkpoint))
+          (conj "- Resume the existing scheduled session instead of starting over from the beginning."))))))
+
+(defn augment-prompt-with-recovery-context
+  "Inject prior failure/checkpoint context into a scheduled prompt."
+  [schedule-id prompt]
+  (if-let [brief (recovery-brief schedule-id)]
+    (str prompt "\n\n" brief)
+    prompt))
 
 ;; ---------------------------------------------------------------------------
 ;; Spec coercion (from tool JSON params to internal data)
@@ -205,6 +456,9 @@
                         schedule-id)]
     (when (seq run-eids)
       (db/transact! (mapv (fn [[eid]] [:db/retractEntity eid]) run-eids))))
+  ;; Remove task state
+  (when-let [state-eid (schedule-state-eid schedule-id)]
+    (db/transact! [[:db/retractEntity state-eid]]))
   ;; Remove schedule
   (when-let [eid (ffirst (db/q '[:find ?e :in $ ?id
                                   :where [?e :schedule/id ?id]]

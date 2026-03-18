@@ -109,6 +109,29 @@
        "</script>"
        "</body></html>"))
 
+(defn- dense-dashboard-html
+  []
+  (str "<!doctype html>"
+       "<html><head><meta charset='utf-8'><title>Dense Dashboard</title></head>"
+       "<body>"
+       "<main>"
+       "<h1>Dense Dashboard</h1>"
+       "<nav>"
+       (apply str
+              (for [i (range 1 41)]
+                (str "<a class='dash-link' href='/item/" i "'>Item " i "</a>")))
+       "</nav>"
+       "<button id='run-report' type='button'>Run report</button>"
+       "<button id='hidden-action' type='button' style='display:none'>Hidden action</button>"
+       "<section>"
+       "<form id='filter-form'>"
+       "<label for='q'>Filter</label>"
+       "<input id='q' name='q' type='search' value='' />"
+       "</form>"
+       "</section>"
+       "</main>"
+       "</body></html>"))
+
 (defn- with-spa-server
   [f]
   (let [port (ephemeral-port)
@@ -130,6 +153,39 @@
                       :headers {"content-type" "text/plain"}
                       :body ""}
 
+                     {:status 404
+                      :headers {"content-type" "text/plain"}
+                      :body "not found"}))
+                 {:ip "127.0.0.1"
+                  :port port})
+        base-url (str "http://127.0.0.1:" port)]
+    (try
+      (f base-url)
+      (finally
+        (server)))))
+
+(defn- with-dense-dashboard-server
+  [f]
+  (let [port (ephemeral-port)
+        server (http-server/run-server
+                 (fn [{:keys [uri]}]
+                   (cond
+                     (= "/" uri)
+                     {:status 200
+                      :headers {"content-type" "text/html; charset=utf-8"}
+                      :body (dense-dashboard-html)}
+
+                     (re-matches #"/item/\d+" uri)
+                     {:status 200
+                      :headers {"content-type" "text/html; charset=utf-8"}
+                      :body (str "<html><body><h1>" uri "</h1></body></html>")}
+
+                     (= "/favicon.ico" uri)
+                     {:status 404
+                      :headers {"content-type" "text/plain"}
+                      :body ""}
+
+                     :else
                      {:status 404
                       :headers {"content-type" "text/plain"}
                       :body "not found"}))
@@ -319,6 +375,35 @@
     (is (string? (:content page)))
     (browser/close-session sid)))
 
+(deftest ^:integration query-elements-paginates-beyond-default-link-preview
+  (let [{:keys [client page]} (mock-html-page (dense-dashboard-html))
+        sid "dense-query-htmlunit"
+        sessions* (var-get (ns-resolve 'xia.browser 'sessions))
+        opened ((var-get (ns-resolve 'xia.browser 'page->map)) page)]
+    (.put sessions* sid (atom {:client client
+                               :backend :htmlunit
+                               :last-access (System/currentTimeMillis)
+                               :created-at-ms (System/currentTimeMillis)
+                               :js-enabled true}))
+    (try
+      (is (= 20 (count (:links opened))))
+      (is (= 40 (:link_count opened)))
+      (is (true? (:links_truncated? opened)))
+      (let [queried (browser/query-elements sid
+                                            :kind :links
+                                            :offset 20
+                                            :limit 10)]
+        (is (= :htmlunit (:backend queried)))
+        (is (= :links (:kind queried)))
+        (is (= 40 (:total_count queried)))
+        (is (= 10 (:returned_count queried)))
+        (is (true? (:truncated? queried)))
+        (is (= "Item 21" (get-in queried [:elements 0 :text])))
+        (is (= "/item/21" (get-in queried [:elements 0 :href])))
+        (is (string? (get-in queried [:elements 0 :selector]))))
+      (finally
+        (browser/close-session sid)))))
+
 (deftest ^:integration wait-for-page-matches-text
   (let [result  (browser/open-session "https://example.com")
         sid     (:session-id result)
@@ -466,6 +551,7 @@
           (click* [_ _session-id _selector] nil)
           (fill-form* [_ _session-id _fields _opts] nil)
           (read-page* [_ _session-id] nil)
+          (query-elements* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
           (close-session* [_ _session-id] nil)
           (close-all-sessions!* [_] nil)
@@ -493,6 +579,7 @@
           (click* [_ _session-id _selector] nil)
           (fill-form* [_ _session-id _fields _opts] nil)
           (read-page* [_ _session-id] nil)
+          (query-elements* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
           (close-session* [_ _session-id] nil)
           (close-all-sessions!* [_] nil)
@@ -764,6 +851,35 @@
                                                                 :interval-ms 100})]
               (is (= true (:matched after-submit)))
               (is (re-find #"Result for widgets" (:content after-submit)))))
+          (finally
+            (browser.backend/close-all-sessions!* backend)))))))
+
+(deftest ^:integration playwright-query-elements-supports-kinds-and-visibility
+  (db/set-config! :browser/playwright-enabled? "true")
+  (with-dense-dashboard-server
+    (fn [base-url]
+      (let [{:keys [backend]} (test-playwright-backend)]
+        (try
+          (let [opened (browser.backend/open-session* backend (str base-url "/") {:js true})
+                sid    (:session-id opened)
+                visible-buttons (browser.backend/query-elements* backend sid
+                                                                {:kind :buttons
+                                                                 :visible-only true})
+                all-buttons (browser.backend/query-elements* backend sid
+                                                             {:kind :buttons
+                                                              :visible-only false})
+                filtered-links (browser.backend/query-elements* backend sid
+                                                                {:kind :links
+                                                                 :text-contains "Item 3"
+                                                                 :limit 5})]
+            (is (= :playwright (:backend visible-buttons)))
+            (is (= 1 (:total_count visible-buttons)))
+            (is (= "Run report" (get-in visible-buttons [:elements 0 :text])))
+            (is (= 2 (:total_count all-buttons)))
+            (is (= "Hidden action" (get-in all-buttons [:elements 1 :text])))
+            (is (= 5 (:returned_count filtered-links)))
+            (is (= 11 (:total_count filtered-links)))
+            (is (= "Item 3" (get-in filtered-links [:elements 0 :text]))))
           (finally
             (browser.backend/close-all-sessions!* backend)))))))
 

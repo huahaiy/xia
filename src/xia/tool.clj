@@ -36,6 +36,7 @@
    "tools/browser-open.edn"
    "tools/browser-navigate.edn"
    "tools/browser-read-page.edn"
+   "tools/browser-query-elements.edn"
    "tools/browser-screenshot.edn"
    "tools/browser-wait.edn"
    "tools/browser-click.edn"

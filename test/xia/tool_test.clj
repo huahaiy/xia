@@ -346,6 +346,7 @@
     (is (= :browser-screenshot (:tool/id (db/get-tool :browser-screenshot))))
     (is (= :browser-navigate (:tool/id (db/get-tool :browser-navigate))))
     (is (= :browser-read-page (:tool/id (db/get-tool :browser-read-page))))
+    (is (= :browser-query-elements (:tool/id (db/get-tool :browser-query-elements))))
     (is (= :browser-wait (:tool/id (db/get-tool :browser-wait))))
     (is (= :local-doc-search (:tool/id (db/get-tool :local-doc-search))))
     (is (= :local-doc-read (:tool/id (db/get-tool :local-doc-read))))
@@ -354,6 +355,7 @@
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :web-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-runtime-status))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-screenshot))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-query-elements))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :local-doc-read))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-list-sessions))))
@@ -422,6 +424,25 @@
         (is (= true (:full_page result)))
         (is (= "high" (:detail result)))
         (is (string? (:image_data_url result))))
+      (finally
+        (browser/close-session session-id)))))
+
+(deftest browser-query-elements-tool-executes-through-sci
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :browser-query-elements)
+  (let [opened (browser/open-session "https://example.com" :backend :htmlunit)
+        session-id (:session-id opened)]
+    (try
+      (let [result (tool/execute-tool :browser-query-elements {"session_id" session-id
+                                                               "kind" "links"
+                                                               "limit" 1}
+                                      {:channel :scheduler})]
+        (is (= session-id (:session-id result)))
+        (is (= :htmlunit (:backend result)))
+        (is (= :links (:kind result)))
+        (is (= 1 (:returned_count result)))
+        (is (pos? (:total_count result)))
+        (is (string? (get-in result [:elements 0 :selector]))))
       (finally
         (browser/close-session session-id)))))
 

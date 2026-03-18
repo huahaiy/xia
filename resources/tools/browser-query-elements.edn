@@ -1,0 +1,33 @@
+;; Query interactive elements from the current browser page with pagination.
+;; Import with: /import-tool resources/tools/browser-query-elements.edn
+
+{:id             :browser-query-elements
+ :name           "browser-query-elements"
+ :description    "Inspect the current browser page and return paginated elements. Use this on large or complex pages when the default browser-open/browser-read-page snapshot does not show the link, button, form, or field you need."
+ :tags           #{:browser :web :inspect :dom :query}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"session_id" {"type"        "string"
+                                              "description" "The browser session ID to inspect."}
+                                "kind" {"type"        "string"
+                                        "enum"        ["interactive" "links" "buttons" "forms" "fields" "images" "headings" "tables" "all"]
+                                        "description" "Optional element preset. Defaults to interactive."}
+                                "selector" {"type"        "string"
+                                            "description" "Optional CSS selector override. Use this when you want a very specific DOM query."}
+                                "text_contains" {"type"        "string"
+                                                 "description" "Optional case-insensitive substring filter applied to text and key attributes."}
+                                "visible_only" {"type"        "boolean"
+                                                "description" "When true, only return visible elements."}
+                                "offset" {"type"        "integer"
+                                          "description" "Zero-based pagination offset. Defaults to 0."}
+                                "limit" {"type"        "integer"
+                                         "description" "Maximum number of elements to return. Defaults to 25 and is capped internally."}}
+                  "required"   ["session_id"]}
+ :handler        "(fn [args]
+                    (xia.browser/query-elements (get args \"session_id\")
+                                                :kind (get args \"kind\")
+                                                :selector (get args \"selector\")
+                                                :text-contains (get args \"text_contains\")
+                                                :visible-only (boolean (get args \"visible_only\"))
+                                                :offset (or (get args \"offset\") 0)
+                                                :limit (or (get args \"limit\") 25)))"}

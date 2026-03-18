@@ -17,6 +17,7 @@
             [xia.browser.backend :as browser.backend]
             [xia.browser.htmlunit :as htmlunit]
             [xia.browser.playwright :as playwright]
+            [xia.browser.query :as browser.query]
             [xia.autonomous :as autonomous]
             [xia.config :as cfg]
             [xia.crypto :as crypto]
@@ -369,6 +370,33 @@
 
 (def ^:private max-content-chars 8000) ; ~2000 tokens
 
+(defn- present-attr
+  [^DomElement el attr]
+  (let [value (.getAttribute el attr)]
+    (when (and (string? value)
+               (not (str/blank? value))
+               (not= value DomElement/ATTRIBUTE_NOT_DEFINED))
+      value)))
+
+(defn- anchor->map
+  [^HtmlAnchor a]
+  (let [text (some-> (.asNormalizedText a) str/trim not-empty)
+        href (present-attr a "href")]
+    (when (and text
+               href
+               (not (str/starts-with? href "javascript:")))
+      {:text text
+       :url href})))
+
+(defn- preview-form-field?
+  [^HtmlElement el]
+  (let [tag (some-> (.getTagName ^DomElement el) str/lower-case)
+        type-attr (present-attr el "type")]
+    (or (#{"textarea" "select"} tag)
+        (and (= "input" tag)
+             (contains? #{"text" "email" "password" "search" "number" "tel" "url"}
+                        type-attr)))))
+
 (defn- page->map
   "Convert an HtmlPage to a tool-friendly result map."
   [^HtmlPage page]
@@ -377,37 +405,34 @@
                   (str (subs text 0 max-content-chars) "\n\n[content truncated]")
                   text)
         forms   (.getForms page)
-        anchors (.getAnchors page)]
+        links   (->> (.getAnchors page)
+                     (keep anchor->map)
+                     vec)]
     {:url        (.toString (.getUrl page))
      :title      (.getTitleText page)
      :content    content
+     :form_count (count forms)
      :forms      (mapv (fn [^HtmlForm f]
                          {:id     (let [id (.getId f)] (when (seq id) id))
                           :name   (let [n (.getNameAttribute f)] (when (seq n) n))
                           :action (.getActionAttribute f)
                           :method (.getMethodAttribute f)
                           :fields (vec
-                                    (for [^HtmlElement el (concat
-                                                            (.getInputsByType f "text")
-                                                            (.getInputsByType f "email")
-                                                            (.getInputsByType f "password")
-                                                            (.getInputsByType f "search")
-                                                            (.getInputsByType f "number")
-                                                            (.getInputsByType f "tel")
-                                                            (.getInputsByType f "url"))]
+                                    (for [^HtmlElement el (.getFormElements f)
+                                          :when (preview-form-field? el)]
                                       {:name  (.getAttribute el "name")
-                                       :type  (.getAttribute el "type")
+                                       :type  (let [tag (some-> (.getTagName ^DomElement el) str/lower-case)
+                                                    type-attr (present-attr el "type")]
+                                                (cond
+                                                  (= "textarea" tag) "textarea"
+                                                  (= "select" tag) "select"
+                                                  type-attr type-attr
+                                                  :else tag))
                                        :value (.getAttribute el "value")}))})
                        forms)
-     :links      (vec
-                   (take 20
-                     (for [^HtmlAnchor a anchors
-                           :let [text (str/trim (.asNormalizedText a))
-                                 href (.getHrefAttribute a)]
-                           :when (and (seq text)
-                                      (seq href)
-                                      (not (str/starts-with? href "javascript:")))]
-                       {:text text :url href})))
+     :link_count (count links)
+     :links_truncated? (> (count links) browser.query/default-link-preview-limit)
+     :links      (vec (take browser.query/default-link-preview-limit links))
      :truncated? (> (count text) max-content-chars)}))
 
 (defn- current-page
@@ -425,6 +450,165 @@
   [session-id result]
   (assoc result :session-id session-id
                 :backend htmlunit-backend-id))
+
+(defn- htmlunit-tag-name
+  [^DomElement el]
+  (some-> (.getTagName el) str/lower-case))
+
+(defn- htmlunit-parent-element
+  [^DomElement el]
+  (let [parent (.getParentNode el)]
+    (when (instance? DomElement parent)
+      parent)))
+
+(defn- htmlunit-nth-of-type
+  [^DomElement el]
+  (when-let [parent (htmlunit-parent-element el)]
+    (let [tag (htmlunit-tag-name el)]
+      (loop [siblings (seq (.getChildElements parent))
+             idx 0]
+        (when-let [sibling (first siblings)]
+          (let [idx* (if (= tag (htmlunit-tag-name sibling))
+                       (inc idx)
+                       idx)]
+            (if (identical? sibling el)
+              idx*
+              (recur (next siblings) idx*))))))))
+
+(defn- htmlunit-css-path
+  [^HtmlElement el]
+  (loop [node el
+         segments '()]
+    (if-not (instance? DomElement node)
+      (or (not-empty (str/join " > " segments))
+          "*")
+      (let [id (present-attr node "id")
+            tag (or (htmlunit-tag-name node) "*")
+            segment (if id
+                      (browser.query/attr-selector "id" id)
+                      (if-let [n (htmlunit-nth-of-type node)]
+                        (str tag ":nth-of-type(" n ")")
+                        tag))
+            segments* (cons segment segments)]
+        (if id
+          (str/join " > " segments*)
+          (if-let [parent (htmlunit-parent-element node)]
+            (recur parent segments*)
+            (str/join " > " segments*)))))))
+
+(defn- htmlunit-element-visible?
+  [^HtmlElement el]
+  (if (= "hidden" (present-attr el "type"))
+    false
+    (try
+      (.isDisplayed el)
+      (catch Throwable _
+        true))))
+
+(defn- htmlunit-field-type
+  [^HtmlElement el]
+  (let [tag (htmlunit-tag-name el)
+        type-attr (present-attr el "type")]
+    (cond
+      (= "textarea" tag) "textarea"
+      (= "select" tag) "select"
+      type-attr type-attr
+      :else tag)))
+
+(defn- htmlunit-element-text
+  [^HtmlElement el]
+  (or (some-> (.asNormalizedText el) str/trim not-empty)
+      (present-attr el "value")
+      (present-attr el "aria-label")
+      (present-attr el "placeholder")
+      (present-attr el "title")
+      (present-attr el "alt")))
+
+(defn- htmlunit-closest-form
+  [^DomElement el]
+  (loop [node el]
+    (when (instance? DomElement node)
+      (if (= "form" (htmlunit-tag-name node))
+        node
+        (recur (htmlunit-parent-element node))))))
+
+(defn- htmlunit-element->map
+  [index ^HtmlElement el]
+  (let [tag (htmlunit-tag-name el)
+        id (present-attr el "id")
+        name (present-attr el "name")
+        href (present-attr el "href")
+        role (present-attr el "role")
+        value (present-attr el "value")
+        placeholder (present-attr el "placeholder")
+        aria-label (present-attr el "aria-label")
+        title (present-attr el "title")
+        action (when (= "form" tag) (present-attr el "action"))
+        method (when (= "form" tag) (present-attr el "method"))
+        form-selector (some-> (htmlunit-closest-form el)
+                              (htmlunit-css-path))
+        item {:index index
+              :tag tag
+              :selector (htmlunit-css-path el)
+              :visible (htmlunit-element-visible? el)
+              :disabled (boolean (present-attr el "disabled"))
+              :text (htmlunit-element-text el)}]
+    (cond-> item
+      id (assoc :id id)
+      name (assoc :name name)
+      (seq (htmlunit-field-type el)) (assoc :type (htmlunit-field-type el))
+      role (assoc :role role)
+      href (assoc :href href)
+      value (assoc :value value)
+      placeholder (assoc :placeholder placeholder)
+      aria-label (assoc :aria-label aria-label)
+      title (assoc :title title)
+      action (assoc :action action)
+      method (assoc :method method)
+      form-selector (assoc :form_selector form-selector)
+      (= "form" tag) (assoc :field_count (count (.getFormElements ^HtmlForm el)))
+      (present-attr el "src") (assoc :src (present-attr el "src"))
+      (present-attr el "alt") (assoc :alt (present-attr el "alt")))))
+
+(defn- element-query-result
+  [session-id page opts items]
+  (let [{:keys [kind selector text-contains visible-only offset limit]} opts
+        total-count (count items)
+        elements (->> items
+                      (drop offset)
+                      (take limit)
+                      vec)]
+    (page-result session-id
+                 {:url (.toString (.getUrl ^HtmlPage page))
+                  :title (.getTitleText ^HtmlPage page)
+                  :kind kind
+                  :selector selector
+                  :text_contains text-contains
+                  :visible_only visible-only
+                  :offset offset
+                  :limit limit
+                  :total_count total-count
+                  :returned_count (count elements)
+                  :truncated? (< (+ offset (count elements)) total-count)
+                  :elements elements})))
+
+(defn- htmlunit-query-match?
+  [{:keys [text-contains visible-only]} item]
+  (and (or (not visible-only)
+           (:visible item))
+       (browser.query/text-matches? text-contains
+                                    (:text item)
+                                    (:id item)
+                                    (:name item)
+                                    (:role item)
+                                    (:href item)
+                                    (:value item)
+                                    (:placeholder item)
+                                    (:aria-label item)
+                                    (:title item)
+                                    (:action item)
+                                    (:method item)
+                                    (:selector item))))
 
 (defn- selector-match?
   [^HtmlPage page selector]
@@ -656,6 +840,30 @@
       (page-result session-id (page->map page))
       (page-result session-id {:content "No page loaded." :forms [] :links []}))))
 
+(defn- htmlunit-query-elements
+  "Query and paginate DOM elements from the current HtmlUnit page."
+  [session-id opts]
+  (let [{:keys [client]} (get-session session-id)
+        page (current-page client)]
+    (when-not page
+      (throw (ex-info "No page loaded in session" {:session-id session-id})))
+    (let [{:keys [selector] :as opts*} (browser.query/normalize-opts opts)
+          nodes (try
+                  (.querySelectorAll page selector)
+                  (catch Exception e
+                    (throw (ex-info "Invalid browser query selector"
+                                    {:selector selector}
+                                    e))))
+          items (->> nodes
+                     (keep (fn [node]
+                             (when (instance? HtmlElement node)
+                               node)))
+                     (map-indexed htmlunit-element->map)
+                     (filter (partial htmlunit-query-match? opts*))
+                     vec)]
+      (persist-session! session-id)
+      (element-query-result session-id page opts* items))))
+
 (defn- htmlunit-wait-for-page
   "Wait for JS/rendering in a browser session, optionally until a selector,
    text snippet, or URL substring appears. Returns the current page along with
@@ -859,6 +1067,7 @@
                                       :form-selector (:form-selector opts)
                                       :submit (:submit opts)))
      :read-page htmlunit-read-page
+     :query-elements htmlunit-query-elements
      :screenshot htmlunit-screenshot
      :wait-for-page (fn [session-id opts]
                       (htmlunit-wait-for-page session-id
@@ -956,6 +1165,26 @@
   [session-id]
   (browser.backend/read-page* (backend-by-id (session-backend-id session-id))
                               session-id))
+
+(defn query-elements
+  "Inspect the current page in a browser session and return paginated elements.
+
+   Options:
+     :kind          — query preset such as :interactive, :links, :buttons, :forms, or :fields
+     :selector      — optional CSS selector override
+     :text-contains — optional case-insensitive text/attribute substring filter
+     :visible-only  — when true, only return visible elements
+     :offset        — zero-based pagination offset (default 0)
+     :limit         — page size (default 25, max 200)"
+  [session-id & {:keys [kind selector text-contains visible-only offset limit]}]
+  (browser.backend/query-elements* (backend-by-id (session-backend-id session-id))
+                                   session-id
+                                   {:kind kind
+                                    :selector selector
+                                    :text-contains text-contains
+                                    :visible-only visible-only
+                                    :offset offset
+                                    :limit limit}))
 
 (defn screenshot
   "Capture a screenshot in a browser session.

@@ -20,6 +20,8 @@
     "Fill and optionally submit a form in an existing session.")
   (read-page* [this session-id]
     "Read the current page in an existing session.")
+  (query-elements* [this session-id opts]
+    "Inspect the current page in an existing session and return paginated DOM elements.")
   (screenshot* [this session-id opts]
     "Capture a screenshot in an existing session.")
   (wait-for-page* [this session-id opts]

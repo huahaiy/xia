@@ -1,9 +1,11 @@
 (ns xia.browser.playwright
   "Playwright browser backend."
-  (:require [clojure.java.io :as io]
+  (:require [charred.api :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.browser.backend :as backend]
+            [xia.browser.query :as browser.query]
             [xia.config :as cfg])
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
@@ -432,10 +434,20 @@
         text (page-text doc)
         [content truncated?] (truncate-content text)
         forms (.select doc "form")
-        anchors (.select doc "a[href]")]
+        links (->> (.select doc "a[href]")
+                   (keep (fn [^Element a]
+                           (let [text* (str/trim (.text a))
+                                 href (.attr a "href")]
+                             (when (and (seq text*)
+                                        (seq href)
+                                        (not (str/starts-with? href "javascript:")))
+                               {:text text*
+                                :url href}))))
+                   vec)]
     {:url url
      :title (or title (.title doc))
      :content content
+     :form_count (count forms)
      :forms (mapv (fn [^Element f]
                     {:id (not-empty (.id f))
                      :name (not-empty (.attr f "name"))
@@ -447,17 +459,163 @@
                                       :value (element-value el)})
                                    (.select f "input[type=text], input[type=email], input[type=password], input[type=search], input[type=number], input[type=tel], input[type=url], textarea, select"))})
                   forms)
-     :links (vec
-             (take 20
-                   (keep (fn [^Element a]
-                           (let [text* (str/trim (.text a))
-                                 href (.attr a "href")]
-                             (when (and (seq text*)
-                                        (seq href)
-                                        (not (str/starts-with? href "javascript:")))
-                               {:text text* :url href})))
-                         anchors)))
+     :link_count (count links)
+     :links_truncated? (> (count links) browser.query/default-link-preview-limit)
+     :links (vec (take browser.query/default-link-preview-limit links))
      :truncated? truncated?}))
+
+(def ^:private query-elements-script
+  (str
+   "payloadJson => {"
+   " const payload = JSON.parse(payloadJson);"
+   " const selector = payload.selector || '*';"
+   " const offset = Math.max(0, payload.offset || 0);"
+   " const limit = Math.max(1, Math.min(payload.limit || 25, 200));"
+   " const visibleOnly = !!payload.visibleOnly;"
+   " const textContains = payload.textContains ? String(payload.textContains).toLowerCase() : null;"
+   " const escapeAttr = (value) => {"
+   "   const raw = String(value ?? '');"
+   "   if (globalThis.CSS && typeof CSS.escape === 'function') {"
+   "     return CSS.escape(raw);"
+   "   }"
+   "   return raw.replace(/\\\\/g, '\\\\\\\\').replace(/\"/g, '\\\\\"');"
+   " };"
+   " const selectorFor = (el) => {"
+   "   if (el.id) {"
+   "     return `[id=\"${escapeAttr(el.id)}\"]`;"
+   "   }"
+   "   const parts = [];"
+   "   let node = el;"
+   "   while (node && node.nodeType === 1) {"
+   "     if (node.id) {"
+   "       parts.unshift(`[id=\"${escapeAttr(node.id)}\"]`);"
+   "       break;"
+   "     }"
+   "     const tag = node.tagName.toLowerCase();"
+   "     let index = 1;"
+   "     let prev = node.previousElementSibling;"
+   "     while (prev) {"
+   "       if (prev.tagName === node.tagName) {"
+   "         index += 1;"
+   "       }"
+   "       prev = prev.previousElementSibling;"
+   "     }"
+   "     parts.unshift(`${tag}:nth-of-type(${index})`);"
+   "     node = node.parentElement;"
+   "   }"
+   "   return parts.join(' > ') || '*';"
+   " };"
+   " const visible = (el) => {"
+   "   if (el.matches('input[type=\"hidden\"]')) {"
+   "     return false;"
+   "   }"
+   "   const style = window.getComputedStyle ? window.getComputedStyle(el) : null;"
+   "   const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 1, height: 1 };"
+   "   return !(el.hidden"
+   "            || el.getAttribute('aria-hidden') === 'true'"
+   "            || (style && (style.display === 'none'"
+   "                         || style.visibility === 'hidden'"
+   "                         || style.visibility === 'collapse'))"
+   "            || (rect.width === 0 && rect.height === 0));"
+   " };"
+   " const textFor = (el) => {"
+   "   const text = (el.innerText || el.textContent || '').trim();"
+   "   if (text) return text;"
+   "   const value = (el.value || '').trim();"
+   "   if (value) return value;"
+   "   return (el.getAttribute('aria-label')"
+   "           || el.getAttribute('placeholder')"
+   "           || el.getAttribute('title')"
+   "           || el.getAttribute('alt')"
+   "           || '').trim();"
+   " };"
+   " const fieldType = (el) => {"
+   "   const tag = el.tagName.toLowerCase();"
+   "   const typeAttr = (el.getAttribute('type') || '').trim();"
+   "   if (tag === 'textarea') return 'textarea';"
+   "   if (tag === 'select') return 'select';"
+   "   if (typeAttr) return typeAttr;"
+   "   return tag;"
+   " };"
+   " const closestFormSelector = (el) => {"
+   "   const form = el.closest('form');"
+   "   return form ? selectorFor(form) : null;"
+   " };"
+   " const summarize = (el, index) => {"
+   "   const tag = el.tagName.toLowerCase();"
+   "   return {"
+   "     index,"
+   "     tag,"
+   "     selector: selectorFor(el),"
+   "     visible: visible(el),"
+   "     disabled: !!el.disabled,"
+   "     text: textFor(el),"
+   "     id: el.id || null,"
+   "     name: el.getAttribute('name'),"
+   "     type: fieldType(el),"
+   "     role: el.getAttribute('role'),"
+   "     href: tag === 'a' ? el.getAttribute('href') : null,"
+   "     value: tag === 'input' || tag === 'textarea' || tag === 'select' ? (el.value || null) : null,"
+   "     placeholder: el.getAttribute('placeholder'),"
+   "     'aria-label': el.getAttribute('aria-label'),"
+   "     title: el.getAttribute('title'),"
+   "     action: tag === 'form' ? el.getAttribute('action') : null,"
+   "     method: tag === 'form' ? el.getAttribute('method') : null,"
+   "     field_count: tag === 'form' ? el.querySelectorAll('input, textarea, select, button').length : null,"
+   "     form_selector: closestFormSelector(el),"
+   "     src: tag === 'img' ? el.getAttribute('src') : null,"
+   "     alt: tag === 'img' ? el.getAttribute('alt') : null"
+   "   };"
+   " };"
+   " const matchesText = (item) => {"
+   "   if (!textContains) return true;"
+   "   return [item.text, item.id, item.name, item.role, item.href, item.value,"
+   "           item.placeholder, item['aria-label'], item.title, item.action,"
+   "           item.method, item.selector]"
+   "     .filter((value) => value !== null && value !== undefined && String(value).trim() !== '')"
+   "     .some((value) => String(value).toLowerCase().includes(textContains));"
+   " };"
+   " const all = Array.from(document.querySelectorAll(selector));"
+   " const filtered = all"
+   "   .map((el, index) => summarize(el, index))"
+   "   .filter((item) => (!visibleOnly || item.visible) && matchesText(item));"
+   " const pageItems = filtered.slice(offset, offset + limit);"
+   " return JSON.stringify({"
+   "   total_count: filtered.length,"
+   "   returned_count: pageItems.length,"
+   "   truncated: offset + pageItems.length < filtered.length,"
+   "   elements: pageItems"
+   " });"
+   "}"))
+
+(defn- compact-map
+  [m]
+  (into {}
+        (keep (fn [[k v]]
+                (when-not (or (nil? v)
+                              (and (string? v) (str/blank? v)))
+                  [(if (keyword? k) k (keyword k)) v])))
+        m))
+
+(defn- query-elements-result
+  [session-id ^Page page opts raw-json]
+  (let [payload (json/read-json raw-json)
+        elements (->> (get payload "elements")
+                      (mapv compact-map))]
+    (page-result
+     session-id
+     {:url (.url page)
+      :title (.title page)
+      :kind (:kind opts)
+      :selector (:selector opts)
+      :text_contains (:text-contains opts)
+      :visible_only (:visible-only opts)
+      :offset (:offset opts)
+      :limit (:limit opts)
+      :total_count (long (or (get payload "total_count") 0))
+      :returned_count (long (or (get payload "returned_count") 0))
+      :truncated? (boolean (get payload "truncated"))
+      :elements elements})))
 
 (defn- current-page*
   [session-atom]
@@ -838,6 +996,24 @@
           page (current-page-or-throw session-id session-atom)]
       (persist-session! ops session-id)
       (session-page-result session-id page)))
+  (query-elements* [_ session-id opts]
+    (let [_sess (get-session ops session-id)
+          session-atom (.get sessions session-id)
+          page (current-page-or-throw session-id session-atom)
+          opts* (browser.query/normalize-opts opts)
+          payload-json (json/write-json-str {:selector (:selector opts*)
+                                             :textContains (:text-contains opts*)
+                                             :visibleOnly (:visible-only opts*)
+                                             :offset (:offset opts*)
+                                             :limit (:limit opts*)})
+          raw-json (try
+                     (.evaluate page query-elements-script payload-json)
+                     (catch Exception e
+                       (throw (ex-info "Invalid browser query selector"
+                                       {:selector (:selector opts*)}
+                                       e))))]
+      (persist-session! ops session-id)
+      (query-elements-result session-id page opts* raw-json)))
   (screenshot* [_ session-id {:keys [full-page detail]
                               :or {full-page false
                                    detail "auto"}}]

@@ -14,6 +14,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.schedule :as schedule]
             [xia.ssrf :as ssrf]
             [xia.tool :as tool]
             [xia.working-memory :as wm]))
@@ -258,6 +259,29 @@
                (not (str/blank? summary)))
       summary)))
 
+(defn- truncate-summary
+  [value max-len]
+  (let [s (some-> value str)]
+    (when (seq s)
+      (if (> (count s) max-len)
+        (subs s 0 max-len)
+        s))))
+
+(defn- tool-call-names
+  [tool-calls]
+  (->> tool-calls
+       (mapv #(get-in % ["function" "name"]))
+       (remove str/blank?)
+       vec))
+
+(defn- save-schedule-checkpoint!
+  [execution-context checkpoint]
+  (when-let [schedule-id (:schedule-id execution-context)]
+    (try
+      (schedule/save-task-checkpoint! schedule-id checkpoint)
+      (catch Exception e
+        (log/warn e "Failed to persist schedule checkpoint" schedule-id)))))
+
 (defn- sanitized-tool-result
   [result]
   (if (map? result)
@@ -424,6 +448,13 @@
                                              {:provider            assistant-provider
                                               :provider-id         assistant-provider-id
                                               :compaction-workload :history-compaction})]
+            (save-schedule-checkpoint!
+              execution-context
+              {:phase :planning
+               :round 0
+               :summary "Working memory updated and context prepared."
+               :message-count (count messages)
+               :session-id session-id})
             (loop [messages messages
                    round    0]
               (when (>= round (or max-tool-rounds (configured-max-tool-rounds)))
@@ -467,6 +498,18 @@
                                          nil
                                          :tool-result (:result tr)
                                          :tool-id (:tool_call_id tr)))
+                      (save-schedule-checkpoint!
+                        execution-context
+                        {:phase :tool
+                         :round round
+                         :tool-count tool-count
+                         :tool-ids (tool-call-names tool-calls)
+                         :summary (or (truncate-summary (get response "content" "") 240)
+                                      (str "Completed tool round with "
+                                           tool-count
+                                           " tool call"
+                                           (when (not= 1 tool-count) "s")
+                                           "."))})
                       ;; Continue with updated messages
                       (recur (-> messages
                                  (conj assistant-msg)

@@ -1,0 +1,31 @@
+;; Run independent branch-worker tasks in parallel and return structured results
+;; to the parent agent.
+;;
+;; Import with: /import-tool resources/tools/branch-tasks.edn
+
+{:id             :branch-tasks
+ :name           "branch-tasks"
+ :description    "Run several independent subtasks in parallel using temporary branch workers. Use this when a problem cleanly decomposes into separate research or inspection tasks that can be done independently and then merged."
+ :tags           #{:planning :parallel :research :branch}
+ :execution-mode :sequential
+ :parameters     {"type"       "object"
+                  "properties" {"objective"    {"type"        "string"
+                                                "description" "Optional parent objective to give all branch workers as shared context."}
+                                "tasks"        {"type"        "array"
+                                                "description" "Independent branch tasks to run. Each item can have task/title and prompt/message."
+                                                "items"       {"type"       "object"
+                                                               "properties" {"task"    {"type" "string"}
+                                                                             "title"   {"type" "string"}
+                                                                             "prompt"  {"type" "string"}
+                                                                             "message" {"type" "string"}}}}
+                                "max_parallel" {"type"        "integer"
+                                                "description" "Maximum number of branch workers to run concurrently."}
+                                "max_rounds"   {"type"        "integer"
+                                                "description" "Maximum tool-calling rounds per branch worker."}}
+                  "required"   ["tasks"]}
+ :handler        "(fn [args]
+                    (xia.agent/run-branch-tasks
+                      (or (get args \"tasks\") [])
+                      :objective (get args \"objective\")
+                      :max-parallel (get args \"max_parallel\")
+                      :max-tool-rounds (get args \"max_rounds\")))"}

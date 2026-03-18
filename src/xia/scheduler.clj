@@ -48,6 +48,11 @@
   (let [started   (java.util.Date.)
         audit-log (atom [])
         context   (schedule-tool-context id trusted? audit-log)]
+    (schedule/save-task-checkpoint!
+      id
+      {:phase :tool
+       :summary (str "Running scheduled tool " (name tool-id) ".")
+       :tool-id tool-id})
     (try
       (let [result (tool/execute-tool tool-id (or tool-args {}) context)]
         (schedule/record-run! id
@@ -56,14 +61,20 @@
            :status      (if (:error result) :error :success)
            :result      (str result)
            :actions     @audit-log
-           :error       (:error result)}))
+           :error       (:error result)})
+        (if-let [error-message (:error result)]
+          (schedule/record-task-failure! id error-message)
+          (schedule/record-task-success! id
+                                         (or (:summary result)
+                                             (str result)))))
       (catch Exception e
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      :error
            :actions     @audit-log
-           :error       (.getMessage e)})))))
+           :error       (.getMessage e)})
+        (schedule/record-task-failure! id (.getMessage e))))))
 
 (defn- finalize-prompt-schedule-session!
   [session-id]
@@ -82,12 +93,25 @@
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
   [{:keys [id prompt trusted?]}]
-  (let [started    (java.util.Date.)
-        session-id (db/create-session! :scheduler)
-        audit-log  (atom [])]
+  (let [started            (java.util.Date.)
+        resumed-session-id (schedule/resumable-session-id id)
+        session-id         (or resumed-session-id
+                               (db/create-session! :scheduler))
+        audit-log  (atom [])
+        prompt*    (schedule/augment-prompt-with-recovery-context id prompt)]
     (try
+      (when resumed-session-id
+        (db/set-session-active! session-id true))
       (wm/ensure-wm! session-id)
-      (let [result (agent/process-message session-id prompt
+      (schedule/save-task-checkpoint!
+        id
+        {:phase :planning
+         :summary (if resumed-session-id
+                    "Resumed a scheduled prompt run from the last checkpoint."
+                    "Started a scheduled prompt run.")
+         :resumed? (boolean resumed-session-id)
+         :session-id session-id})
+      (let [result (agent/process-message session-id prompt*
                                           :channel :scheduler
                                           :tool-context (schedule-tool-context id
                                                                               trusted?
@@ -97,14 +121,16 @@
            :finished-at (java.util.Date.)
            :status      :success
            :actions     @audit-log
-           :result      (str result)}))
+           :result      (str result)})
+        (schedule/record-task-success! id result))
       (catch Exception e
         (schedule/record-run! id
           {:started-at  started
            :finished-at (java.util.Date.)
            :status      :error
            :actions     @audit-log
-           :error       (.getMessage e)}))
+           :error       (.getMessage e)})
+        (schedule/record-task-failure! id (.getMessage e)))
       (finally
         (finalize-prompt-schedule-session! session-id)))))
 

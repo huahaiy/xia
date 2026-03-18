@@ -19,6 +19,11 @@
                                            sid)
                   xia.working-memory/ensure-wm! (fn [session-id]
                                                   (swap! lifecycle conj [:ensure session-id]))
+                  xia.schedule/augment-prompt-with-recovery-context (fn [_schedule-id prompt] prompt)
+                  xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
+                                                      (swap! lifecycle conj [:checkpoint schedule-id (:phase checkpoint)]))
+                  xia.schedule/record-task-success! (fn [schedule-id result]
+                                                     (swap! lifecycle conj [:task-success schedule-id result]))
                   xia.agent/process-message (fn [session-id prompt & {:keys [channel tool-context]}]
                                               (swap! lifecycle conj [:process session-id channel prompt
                                                                      (:schedule-id tool-context)
@@ -45,7 +50,9 @@
                   :result "done"}}
            (update @run* :run select-keys [:status :actions :result])))
     (is (= [[:ensure sid]
+            [:checkpoint :nightly-review :planning]
             [:process sid :scheduler "summarize the week" :nightly-review true]
+            [:task-success :nightly-review "done"]
             [:get-wm sid]
             [:snapshot sid]
             [:record sid :scheduler "nightly summary"]
@@ -59,6 +66,11 @@
     (with-redefs [xia.db/create-session! (fn [_channel] sid)
                   xia.working-memory/ensure-wm! (fn [session-id]
                                                   (swap! lifecycle conj [:ensure session-id]))
+                  xia.schedule/augment-prompt-with-recovery-context (fn [_schedule-id prompt] prompt)
+                  xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
+                                                      (swap! lifecycle conj [:checkpoint schedule-id (:phase checkpoint)]))
+                  xia.schedule/record-task-failure! (fn [schedule-id error]
+                                                     (swap! lifecycle conj [:task-failure schedule-id error]))
                   xia.agent/process-message (fn [session-id _prompt & _]
                                               (swap! lifecycle conj [:process session-id])
                                               (throw (ex-info "boom" {:type :test})))
@@ -83,9 +95,70 @@
                   :error "boom"}}
            (update @run* :run select-keys [:status :actions :error])))
     (is (= [[:ensure sid]
+            [:checkpoint :nightly-review :planning]
             [:process sid]
+            [:task-failure :nightly-review "boom"]
             [:get-wm sid]
             [:snapshot sid]
             [:record sid :scheduler "failed run"]
             [:clear sid]]
            @lifecycle))))
+
+(deftest execute-prompt-schedule-injects-recovery-context
+  (let [sid         (random-uuid)
+        seen-prompt (atom nil)]
+    (with-redefs [xia.db/create-session! (fn [_channel] sid)
+                  xia.working-memory/ensure-wm! (fn [_session-id] nil)
+                  xia.schedule/augment-prompt-with-recovery-context
+                  (fn [schedule-id prompt]
+                    (is (= :nightly-review schedule-id))
+                    (str prompt "\n\nRecovery context"))
+                  xia.schedule/save-task-checkpoint! (fn [& _] nil)
+                  xia.schedule/record-task-success! (fn [& _] nil)
+                  xia.agent/process-message
+                  (fn [_session-id prompt & _]
+                    (reset! seen-prompt prompt)
+                    "done")
+                  xia.schedule/record-run! (fn [& _] nil)
+                  xia.working-memory/get-wm (fn [_session-id] {:topics "summary"})
+                  xia.working-memory/snapshot! (fn [_session-id] nil)
+                  xia.hippocampus/record-conversation! (fn [& _] nil)
+                  xia.working-memory/clear-wm! (fn [_session-id] nil)]
+      (#'scheduler/execute-prompt-schedule {:id :nightly-review
+                                            :prompt "summarize the week"
+                                            :trusted? true}))
+    (is (= "summarize the week\n\nRecovery context" @seen-prompt))))
+
+(deftest execute-prompt-schedule-reuses-resumable-session
+  (let [sid        (random-uuid)
+        created?   (atom false)
+        activated? (atom [])
+        seen       (atom nil)]
+    (with-redefs [xia.schedule/resumable-session-id (fn [schedule-id]
+                                                      (is (= :nightly-review schedule-id))
+                                                      sid)
+                  xia.db/create-session! (fn [_channel]
+                                           (reset! created? true)
+                                           (random-uuid))
+                  xia.db/set-session-active! (fn [session-id active?]
+                                              (swap! activated? conj [session-id active?]))
+                  xia.working-memory/ensure-wm! (fn [_session-id] nil)
+                  xia.schedule/augment-prompt-with-recovery-context (fn [_schedule-id prompt] prompt)
+                  xia.schedule/save-task-checkpoint! (fn [_schedule-id checkpoint]
+                                                      (reset! seen checkpoint))
+                  xia.schedule/record-task-success! (fn [& _] nil)
+                  xia.agent/process-message (fn [session-id _prompt & _]
+                                              (is (= sid session-id))
+                                              "done")
+                  xia.schedule/record-run! (fn [& _] nil)
+                  xia.working-memory/get-wm (fn [_session-id] {:topics "summary"})
+                  xia.working-memory/snapshot! (fn [_session-id] nil)
+                  xia.hippocampus/record-conversation! (fn [& _] nil)
+                  xia.working-memory/clear-wm! (fn [_session-id] nil)]
+      (#'scheduler/execute-prompt-schedule {:id :nightly-review
+                                            :prompt "summarize the week"
+                                            :trusted? true}))
+    (is (false? @created?))
+    (is (= [[sid true]] @activated?))
+    (is (= true (:resumed? @seen)))
+    (is (= sid (:session-id @seen)))))

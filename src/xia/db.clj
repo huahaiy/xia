@@ -248,6 +248,21 @@
    :schedule/next-run    {:db/valueType :db.type/instant}
    :schedule/created-at  {:db/valueType :db.type/instant}
 
+   ;; --- Schedule State (durable recovery/checkpoint state) ---
+   :schedule.state/schedule-id {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :schedule.state/status {:db/valueType :db.type/keyword}
+   :schedule.state/phase {:db/valueType :db.type/keyword}
+   :schedule.state/checkpoint {:db/valueType :db.type/idoc :db/domain "schedule-state-checkpoint"}
+   :schedule.state/checkpoint-at {:db/valueType :db.type/instant}
+   :schedule.state/last-success-at {:db/valueType :db.type/instant}
+   :schedule.state/last-success-summary {:db/valueType :db.type/string}
+   :schedule.state/last-failure-at {:db/valueType :db.type/instant}
+   :schedule.state/last-error {:db/valueType :db.type/string}
+   :schedule.state/last-failure-signature {:db/valueType :db.type/string}
+   :schedule.state/last-recovery-hint {:db/valueType :db.type/string}
+   :schedule.state/consecutive-failures {:db/valueType :db.type/long}
+   :schedule.state/backoff-until {:db/valueType :db.type/instant}
+
    ;; --- Schedule Run (execution log) ---
    :schedule-run/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :schedule-run/schedule-id {:db/valueType :db.type/keyword}

@@ -267,6 +267,66 @@
   (is (= 2 (count (schedule/schedule-history :trim-test 100)))))
 
 ;; ---------------------------------------------------------------------------
+;; Durable task state / recovery
+;; ---------------------------------------------------------------------------
+
+(deftest task-state-builds-recovery-context
+  (schedule/create-schedule!
+    {:id :recoverable :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Check the dashboard"})
+  (schedule/save-task-checkpoint!
+    :recoverable
+    {:phase :tool
+     :round 1
+     :summary "Opened the dashboard and attempted the primary action."
+     :tool-ids ["browser-open" "browser-click"]})
+  (let [state (schedule/record-task-failure! :recoverable "No element matches selector #submit")
+        prompt (schedule/augment-prompt-with-recovery-context :recoverable "Check the dashboard")]
+    (is (= :backoff (:status state)))
+    (is (= :error (:phase state)))
+    (is (= 1 (:consecutive-failures state)))
+    (is (= "No element matches selector #submit" (:last-error state)))
+    (is (re-find #"Recovery context from previous scheduled attempts" prompt))
+    (is (re-find #"browser-query-elements" prompt))
+    (is (re-find #"Opened the dashboard and attempted the primary action" prompt))))
+
+(deftest repeated-identical-failures-pause-schedule
+  (db/set-config! :schedule/pause-after-repeated-failures 2)
+  (schedule/create-schedule!
+    {:id :fragile-site :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Inspect the site"})
+  (schedule/record-task-failure! :fragile-site "No element matches selector #main")
+  (let [state (schedule/record-task-failure! :fragile-site "No element matches selector #main")
+        sched (schedule/get-schedule :fragile-site)]
+    (is (= :paused (:status state)))
+    (is (= 2 (:consecutive-failures state)))
+    (is (false? (:enabled? sched)))))
+
+(deftest failed-prompt-schedule-exposes-resumable-session
+  (let [session-id (db/create-session! :scheduler)]
+    (schedule/create-schedule!
+      {:id :resume-me :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Continue the workflow"})
+    (schedule/save-task-checkpoint!
+      :resume-me
+      {:phase :tool
+       :summary "Reached the target site and opened the work queue."
+       :session-id session-id})
+    (schedule/record-task-failure! :resume-me "Timed out waiting for dashboard")
+    (is (= session-id
+           (schedule/resumable-session-id :resume-me)))
+    (schedule/record-task-success! :resume-me "Finished successfully.")
+    (is (nil? (schedule/resumable-session-id :resume-me)))))
+
+(deftest task-success-clears-backoff-state
+  (schedule/create-schedule!
+    {:id :stabilized :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Do the thing"})
+  (schedule/record-task-failure! :stabilized "Timed out waiting for page")
+  (let [state (schedule/record-task-success! :stabilized "Recovered after reloading the page.")]
+    (is (= :success (:status state)))
+    (is (= :complete (:phase state)))
+    (is (= 0 (:consecutive-failures state)))
+    (is (= "Recovered after reloading the page." (:last-success-summary state)))
+    (is (nil? (:backoff-until state)))))
+
+;; ---------------------------------------------------------------------------
 ;; Due schedules
 ;; ---------------------------------------------------------------------------
 

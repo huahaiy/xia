@@ -97,6 +97,7 @@
    'click             browser/click
    'fill-form         browser/fill-form
    'read-page         browser/read-page
+   'query-elements    browser/query-elements
    'screenshot        browser/screenshot
    'wait-for-page     browser/wait-for-page
    'close-session     browser/close-session

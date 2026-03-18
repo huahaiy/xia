@@ -99,6 +99,42 @@
                         [:session-id :channel :user-message :schedule-id
                          :autonomous-run? :approval-bypass?])))))
 
+(deftest process-message-persists-schedule-checkpoints-around-tool-rounds
+  (let [session-id   (db/create-session! :scheduler)
+        checkpoints  (atom [])
+        llm-calls    (atom 0)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                       {:summary "Found the page."})
+                  xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
+                                                       (swap! checkpoints conj [schedule-id checkpoint]))
+                  xia.llm/chat-with-tools            (fn [_messages _tools & _opts]
+                                                       (if (= 1 (swap! llm-calls inc))
+                                                         {"content" ""
+                                                          "tool_calls" [{"id" "call-1"
+                                                                         "function" {"name" "web-search"
+                                                                                     "arguments" "{}"}}]}
+                                                         {"content" "done"}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "done"
+             (agent/process-message session-id
+                                    "research this"
+                                    :channel :scheduler
+                                    :tool-context {:schedule-id :nightly-review}))))
+    (is (= :nightly-review (ffirst @checkpoints)))
+    (is (= :planning (get-in @checkpoints [0 1 :phase])))
+    (is (= :tool (get-in @checkpoints [1 1 :phase])))
+    (is (= ["web-search"] (get-in @checkpoints [1 1 :tool-ids])))))
+
 (deftest process-message-schedules-fact-utility-review
   (let [session-id (db/create-session! :terminal)
         reviewed   (atom nil)]

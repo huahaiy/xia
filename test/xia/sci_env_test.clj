@@ -1,6 +1,7 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer :all]
             [xia.agent :as agent]
+            [xia.browser :as browser]
             [xia.db]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
@@ -119,6 +120,20 @@
     (is (= :running (:status bootstrap)))
     (is (= :htmlunit (:backend deps)))
     (is (= :unsupported-backend (:status deps)))))
+
+(deftest browser-query-elements-is-exposed-through-sci
+  (let [opened (browser/open-session "https://example.com" :backend :htmlunit)
+        sid    (:session-id opened)]
+    (try
+      (let [result (sci-env/eval-string
+                     (str "(xia.browser/query-elements \"" sid "\" :kind :links :limit 1)"))]
+        (is (= sid (:session-id result)))
+        (is (= :htmlunit (:backend result)))
+        (is (= :links (:kind result)))
+        (is (= 1 (:returned_count result)))
+        (is (pos? (:total_count result))))
+      (finally
+        (browser/close-session sid)))))
 
 (deftest local-doc-functions-are-exposed-through-sci
   (let [sid   (xia.db/create-session! :http)
