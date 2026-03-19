@@ -25,6 +25,7 @@
    "eval/"
    "log4j2.component.properties"
    "log4j2.simplelog.properties"
+   "org/openpdf/"
    "tools/"
    "web/"])
 

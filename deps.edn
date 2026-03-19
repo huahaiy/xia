@@ -17,8 +17,13 @@
   ;; HTML parsing (GraalVM native-image compatible)
   org.jsoup/jsoup              {:mvn/version "1.22.1"}
 
-  ;; PDF text extraction for local documents
-  org.apache.pdfbox/pdfbox    {:mvn/version "3.0.6"}
+  ;; PDF text extraction for local documents.
+  ;; Keep the classpath lean: we only use text extraction, not crypto/XML extras.
+  com.github.librepdf/openpdf {:mvn/version "3.0.0"
+                               :exclusions [com.ibm.icu/icu4j
+                                            org.bouncycastle/bcprov-jdk18on
+                                            org.bouncycastle/bcpkix-jdk18on
+                                            org.apache.xmlgraphics/fop]}
 
   ;; Real browser backend for modern web apps
   com.microsoft.playwright/playwright {:mvn/version "1.52.0"}

@@ -13,8 +13,8 @@
            [java.util.zip ZipEntry ZipInputStream]
            [javax.xml XMLConstants]
            [javax.xml.parsers DocumentBuilderFactory]
-           [org.apache.pdfbox Loader]
-           [org.apache.pdfbox.text PDFTextStripper]
+           [org.openpdf.text.pdf PdfReader]
+           [org.openpdf.text.pdf.parser PdfTextExtractor]
            [org.w3c.dom Document Node]))
 
 (def ^:private default-name "Untitled upload")
@@ -24,7 +24,6 @@
 (def ^:private docx-media-type "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 (def ^:private xlsx-media-type "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 (def ^:private pptx-media-type "application/vnd.openxmlformats-officedocument.presentationml.presentation")
-
 (def ^:private extension->media-type
   {"c" "text/x-c"
    "cc" "text/x-c++"
@@ -241,12 +240,13 @@
 (defn- extract-pdf-text
   [name media-type ^bytes pdf-bytes]
   (try
-    (with-open [doc (Loader/loadPDF pdf-bytes)]
-      (let [stripper (doto (PDFTextStripper.)
-                       (.setSortByPosition true)
-                       (.setAddMoreFormatting true))]
-        (normalize-text (.getText stripper doc))))
-    (catch IOException e
+    (with-open [reader (PdfReader. pdf-bytes)]
+      (let [extractor (PdfTextExtractor. reader)
+            page-texts (->> (range 1 (inc (.getNumberOfPages reader)))
+                            (map #(.getTextFromPage extractor %))
+                            (remove str/blank?))]
+        (normalize-text (str/join "\n\n" page-texts))))
+    (catch Exception e
       (throw (ex-info (.getMessage e)
                       {:type :local-doc/pdf-extraction-failed
                        :name name
