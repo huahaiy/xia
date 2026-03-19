@@ -638,7 +638,7 @@
      :type     (:kg.edge/type e)
      :label    (:kg.edge/label e)}))
 
-(defn- local-doc-fulltext-hits
+(defn- local-doc-doc-fulltext-hits
   [session-id query & {:keys [top] :or {top 10}}]
   (if (or (nil? session-id) (str/blank? query))
     []
@@ -666,7 +666,7 @@
         (catch Exception _
           [])))))
 
-(defn- local-doc-embedding-hits
+(defn- local-doc-doc-embedding-hits
   [session-id query & {:keys [top] :or {top 10}}]
   (if (or (nil? session-id) (str/blank? query))
     []
@@ -694,16 +694,193 @@
         (catch Exception _
           [])))))
 
-(defn- local-doc-result
+(defn- local-doc-chunk-fulltext-hits
+  [session-id query & {:keys [top] :or {top 10}}]
+  (if (or (nil? session-id) (str/blank? query))
+    []
+    (let [opts {:domains [db/local-doc-chunk-domain]
+                :top top
+                :display :refs+scores}]
+      (try
+        (->> (db/q '[:find ?chunk ?a ?v ?score
+                     :in $ ?sid ?query ?opts
+                     :where
+                     [?session :session/id ?sid]
+                     [?chunk :local.doc.chunk/session ?session]
+                     [?chunk :local.doc.chunk/doc ?doc]
+                     [?doc :local.doc/status :ready]
+                     [(fulltext $ ?query ?opts) [[?chunk ?a ?v ?score]]]]
+                   session-id query opts)
+             (sort-by #(double (nth % 3)) >)
+             (map-indexed
+               (fn [idx [eid attr value score]]
+                 {:eid       eid
+                  :attr      attr
+                  :value     value
+                  :lex-score (double score)
+                  :lex-rank  (inc idx)}))
+             vec)
+        (catch Exception _
+          [])))))
+
+(defn- local-doc-chunk-embedding-hits
+  [session-id query & {:keys [top] :or {top 10}}]
+  (if (or (nil? session-id) (str/blank? query))
+    []
+    (let [opts {:domains [db/local-doc-chunk-domain]
+                :top top
+                :display :refs+dists}]
+      (try
+        (->> (db/q '[:find ?chunk ?a ?v ?dist
+                     :in $ ?sid ?query ?opts
+                     :where
+                     [?session :session/id ?sid]
+                     [?chunk :local.doc.chunk/session ?session]
+                     [?chunk :local.doc.chunk/doc ?doc]
+                     [?doc :local.doc/status :ready]
+                     [(embedding-neighbors $ ?query ?opts) [[?chunk ?a ?v ?dist]]]]
+                   session-id query opts)
+             (sort-by #(double (nth % 3)))
+             (map-indexed
+               (fn [idx [eid attr value distance]]
+                 {:eid          eid
+                  :attr         attr
+                  :value        value
+                  :sem-distance (double distance)
+                  :sem-rank     (inc idx)}))
+             vec)
+        (catch Exception _
+          [])))))
+
+(defn- local-doc-doc-result
   [eid]
   (let [e (db/entity eid)]
-    {:eid        eid
-     :id         (:local.doc/id e)
-     :name       (:local.doc/name e)
-     :media-type (:local.doc/media-type e)
-     :status     (:local.doc/status e)
-     :size-bytes (:local.doc/size-bytes e)
-     :preview    (:local.doc/preview e)}))
+    {:doc-eid     eid
+     :id          (:local.doc/id e)
+     :name        (:local.doc/name e)
+     :media-type  (:local.doc/media-type e)
+     :status      (:local.doc/status e)
+     :size-bytes  (:local.doc/size-bytes e)
+     :summary     (:local.doc/summary e)
+     :preview     (:local.doc/preview e)
+     :chunk-count (:local.doc/chunk-count e)}))
+
+(defn- local-doc-chunk-result
+  [eid]
+  (let [e       (db/entity eid)
+        doc-eid (ref-eid (:local.doc.chunk/doc e))]
+    (assoc (local-doc-doc-result doc-eid)
+           :chunk-id      (:local.doc.chunk/id e)
+           :chunk-index   (:local.doc.chunk/index e)
+           :chunk-summary (:local.doc.chunk/summary e)
+           :chunk-preview (:local.doc.chunk/preview e))))
+
+(defn- local-doc-chunk-sort-key
+  [{:keys [rrf-score lex-score sem-distance index]}]
+  [(- (double (or rrf-score 0.0)))
+   (- (double (or lex-score 0.0)))
+   (double (or sem-distance Double/POSITIVE_INFINITY))
+   (long (or index Long/MAX_VALUE))])
+
+(defn- merge-local-doc-doc-hit
+  [acc doc-hit]
+  (let [doc (local-doc-doc-result (:eid doc-hit))]
+    (update acc (:doc-eid doc)
+            (fn [candidate]
+              (let [current (or candidate doc)]
+                (-> current
+                    (merge doc)
+                    (assoc :doc-rrf-score (max (double (or (:doc-rrf-score current) 0.0))
+                                               (double (:rrf-score doc-hit)))
+                           :doc-lex-score (update-best-score (:doc-lex-score current)
+                                                             (:lex-score doc-hit))
+                           :doc-sem-distance (update-best-distance (:doc-sem-distance current)
+                                                                   (:sem-distance doc-hit))
+                           :direct-doc-hit? true)))))))
+
+(defn- merge-local-doc-chunk-hit
+  [acc chunk-hit]
+  (let [{:keys [doc-eid] :as chunk} (local-doc-chunk-result (:eid chunk-hit))
+        chunk-evidence {:id           (:chunk-id chunk)
+                        :index        (:chunk-index chunk)
+                        :summary      (:chunk-summary chunk)
+                        :preview      (:chunk-preview chunk)
+                        :rrf-score    (:rrf-score chunk-hit)
+                        :lex-score    (:lex-score chunk-hit)
+                        :sem-distance (:sem-distance chunk-hit)}]
+    (update acc doc-eid
+            (fn [candidate]
+              (let [current    (or candidate (local-doc-doc-result doc-eid))
+                    chunk-hits (->> (conj (vec (or (:chunk-hits current) []))
+                                          chunk-evidence)
+                                    (sort-by local-doc-chunk-sort-key)
+                                    (take 3)
+                                    vec)]
+                (-> current
+                    (merge (select-keys chunk [:id :name :media-type :status :size-bytes :summary :preview :chunk-count]))
+                    (assoc :chunk-hits chunk-hits
+                           :chunk-rrf-score (reduce + 0.0 (map #(double (or (:rrf-score %) 0.0))
+                                                               chunk-hits))
+                           :chunk-lex-score (reduce (fn [best hit]
+                                                      (update-best-score best (:lex-score hit)))
+                                                    nil
+                                                    chunk-hits)
+                           :chunk-sem-distance (reduce (fn [best hit]
+                                                         (update-best-distance best (:sem-distance hit)))
+                                                       nil
+                                                       chunk-hits))))))))
+
+(defn- finalize-local-doc-candidate
+  [{:keys [chunk-hits doc-rrf-score chunk-rrf-score summary preview] :as candidate}]
+  (let [matched-chunks (mapv #(select-keys % [:id :index :summary :preview]) (or chunk-hits []))
+        total-score    (+ (* 0.8 (double (or doc-rrf-score 0.0)))
+                          (* 1.2 (double (or chunk-rrf-score 0.0))))]
+    (-> candidate
+        (assoc :matched-chunks matched-chunks
+               :summary (or summary preview)
+               :total-score total-score
+               :has-chunk-hit? (seq matched-chunks)))))
+
+(defn- rank-local-doc-candidates
+  [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
+  (let [pool-size        (or pool-size
+                             (max minimum-candidate-pool-size
+                                  (* default-candidate-pool-multiplier top)))
+        doc-lexical      (local-doc-doc-fulltext-hits session-id (or fts-query query) :top pool-size)
+        doc-semantic     (local-doc-doc-embedding-hits session-id query :top pool-size)
+        doc-hits         (->> (vals (reduce merge-domain-hit {} (concat doc-lexical doc-semantic)))
+                              (map #(assoc % :rrf-score (hybrid-rrf-score %))))
+        chunk-lexical    (local-doc-chunk-fulltext-hits session-id (or fts-query query) :top pool-size)
+        chunk-semantic   (local-doc-chunk-embedding-hits session-id query :top pool-size)
+        chunk-hits       (->> (vals (reduce merge-domain-hit {} (concat chunk-lexical chunk-semantic)))
+                              (map #(assoc % :rrf-score (hybrid-rrf-score %))))
+        merged-candidates (reduce merge-local-doc-chunk-hit
+                                  (reduce merge-local-doc-doc-hit {} doc-hits)
+                                  chunk-hits)]
+    (->> merged-candidates
+         vals
+         (map finalize-local-doc-candidate)
+         (sort-by (fn [{:keys [has-chunk-hit? total-score chunk-lex-score doc-lex-score chunk-sem-distance doc-sem-distance doc-eid]}]
+                    [(if has-chunk-hit? 0 1)
+                     (- (double total-score))
+                     (- (double (or chunk-lex-score doc-lex-score 0.0)))
+                     (double (or chunk-sem-distance doc-sem-distance Double/POSITIVE_INFINITY))
+                     doc-eid]))
+         (take top)
+         vec)))
+
+(defn- local-doc-result
+  [{:keys [doc-eid id name media-type status size-bytes summary preview chunk-count matched-chunks]}]
+  {:eid            doc-eid
+   :id             id
+   :name           name
+   :media-type     media-type
+   :status         status
+   :size-bytes     size-bytes
+   :summary        summary
+   :preview        preview
+   :chunk-count    chunk-count
+   :matched-chunks matched-chunks})
 
 (defn- artifact-fulltext-hits
   [session-id query & {:keys [top] :or {top 10}}]
@@ -794,24 +971,6 @@
          (take top)
          vec)))
 
-(defn- rank-local-doc-candidates
-  [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
-  (let [pool-size     (or pool-size
-                          (max minimum-candidate-pool-size
-                               (* default-candidate-pool-multiplier top)))
-        lexical-hits  (local-doc-fulltext-hits session-id (or fts-query query) :top pool-size)
-        semantic-hits (local-doc-embedding-hits session-id query :top pool-size)
-        merged-hits   (vals (reduce merge-domain-hit {} (concat lexical-hits semantic-hits)))]
-    (->> merged-hits
-         (map #(assoc % :rrf-score (hybrid-rrf-score %)))
-         (sort-by (fn [{:keys [rrf-score lex-score sem-distance eid]}]
-                    [(- rrf-score)
-                     (- (double (or lex-score 0.0)))
-                     (double (or sem-distance Double/POSITIVE_INFINITY))
-                     eid]))
-         (take top)
-         vec)))
-
 (defn search-nodes
   "Search KG nodes by name using lexical FTS plus semantic recall.
    Returns [{:eid :name :type}]."
@@ -854,15 +1013,15 @@
        (mapv (comp edge-result :eid))))
 
 (defn search-local-docs
-  "Search session-scoped local documents by name/text using hybrid retrieval.
-   Returns [{:id :name :media-type :status :size-bytes :preview}]."
+  "Search session-scoped local documents by chunk-preferred hybrid retrieval.
+   Returns [{:id :name :media-type :status :size-bytes :summary :preview :chunk-count :matched-chunks}]."
   [session-id query & {:keys [top fts-query] :or {top 5}}]
   (->> (rank-local-doc-candidates session-id
                                   query
                                   :top top
                                   :fts-query fts-query
                                   :pool-size (candidate-pool-size :local-docs top))
-       (mapv (comp local-doc-result :eid))))
+       (mapv local-doc-result)))
 
 (defn search-artifacts
   "Search session-scoped artifacts by name/title/text using hybrid retrieval.

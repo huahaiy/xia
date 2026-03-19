@@ -231,15 +231,17 @@
 
 (deftest test-render-local-docs
   (let [rd #'xia.context/render-local-docs]
-    (testing "renders local documents with preview"
+    (testing "renders local documents with summary and matched chunks"
       (let [docs [{:name "paper.pdf"
                    :media-type "application/pdf"
-                   :preview "This paper studies retrieval in scientific corpora."
+                   :summary "This paper studies retrieval in scientific corpora."
+                   :matched-chunks [{:summary "The relevant chunk covers scientific corpora and evaluation."}]
                    :relevance 0.8}]
             result (rd docs 500)]
         (is (str/includes? result "### Local Documents"))
         (is (str/includes? result "paper.pdf"))
-        (is (str/includes? result "scientific corpora"))))
+        (is (str/includes? result "scientific corpora"))
+        (is (str/includes? result "matches:"))))
 
     (testing "budget-aware truncation"
       (let [docs (mapv (fn [i]
@@ -310,7 +312,9 @@
                       [{:doc-id (random-uuid)
                         :name "notes.md"
                         :media-type "text/markdown"
+                        :summary "Important local grounding material."
                         :preview "Important local grounding material."
+                        :matched-chunks [{:summary "Grounding details for the current task."}]
                         :relevance 0.8}])
         prompt (ctx/assemble-system-prompt sid)]
     (testing "includes identity"

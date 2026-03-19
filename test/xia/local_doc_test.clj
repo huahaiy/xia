@@ -1,5 +1,6 @@
 (ns xia.local-doc-test
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
             [datalevin.core :as d]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
@@ -24,7 +25,21 @@
         raw    (into {} (d/entity (d/db (db/conn)) eid))]
     (is (= "notes.md" (:local.doc/name raw)))
     (is (= "# secret" (:local.doc/text raw)))
+    (is (= "# secret" (:local.doc/summary raw)))
     (is (= "# secret" (:local.doc/preview raw)))
+    (is (= 1 (:local.doc/chunk-count raw)))
+    (let [chunk-eids (->> (db/q '[:find ?chunk
+                                  :in $ ?doc
+                                  :where [?doc :local.doc/chunks ?chunk]]
+                                eid)
+                          (map first)
+                          vec)]
+      (is (= 1 (count chunk-eids)))
+      (is (= #{[eid]}
+             (db/q '[:find ?doc
+                     :in $ ?chunk
+                     :where [?chunk :local.doc.chunk/doc ?doc]]
+                   (first chunk-eids)))))
     (is (= [(:id saved)]
            (mapv :id (local-doc/list-docs sid-a))))
     (is (= [] (local-doc/list-docs sid-b)))
@@ -36,6 +51,7 @@
       (is (= :event (:type upload)))
       (is (= "Uploaded local document notes.md" (:summary upload)))
       (is (.contains ^String (:context upload) "Media type: text/markdown"))
+      (is (.contains ^String (:context upload) "Summary: # secret"))
       (is (.contains ^String (:context upload) "Preview: # secret")))))
 
 (deftest local-document-reupload-dedupes-by-session-and-content
@@ -106,6 +122,38 @@
     (is (.contains ^String (:text saved) "vehicle testing"))
     (binding [wm/*session-id* sid]
       (is (= "deck.pptx" (:name (first (local-doc/search-docs "roadmap"))))))))
+
+(deftest large-local-docs-are-chunked-and-return-matched-chunks
+  (let [sid   (db/create-session! :http)
+        para1 (str "Section One\n\n" (apply str (repeat 260 "alpha retrieval ")))
+        para2 (str "Section Two\n\n" (apply str (repeat 260 "beta grounding ")))
+        para3 (str "Section Three\n\n" (apply str (repeat 260 "hyperdrive evidence ")))
+        text  (str para1 "\n\n" para2 "\n\n" para3)
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "long-notes.txt"
+                                       :media-type "text/plain"
+                                       :text text})
+        eid   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
+                             (:id saved)))
+        chunk-eids (->> (db/q '[:find ?chunk
+                                :in $ ?doc
+                                :where [?doc :local.doc/chunks ?chunk]]
+                              eid)
+                        (map first)
+                        vec)
+        chunk-texts (map (fn [chunk-eid]
+                           (:local.doc.chunk/text (into {} (d/entity (d/db (db/conn)) chunk-eid))))
+                         chunk-eids)]
+    (is (> (:chunk-count saved) 1))
+    (is (= (:chunk-count saved) (count chunk-eids)))
+    (is (some #(str/starts-with? % "Section One") chunk-texts))
+    (is (some #(str/starts-with? % "Section Three") chunk-texts))
+    (binding [wm/*session-id* sid]
+      (let [result (first (local-doc/search-docs "hyperdrive"))]
+        (is (= (:id saved) (:id result)))
+        (is (seq (:matched-chunks result)))
+        (is (some #(re-find #"hyperdrive" (or (:summary %) (:preview % "")))
+                  (:matched-chunks result)))))))
 
 (deftest invalid-pdf-uploads-fail-clearly
   (let [sid (db/create-session! :http)]

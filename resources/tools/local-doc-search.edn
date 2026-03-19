@@ -3,7 +3,7 @@
 
 {:id             :local-doc-search
  :name           "local-doc-search"
- :description    "Search the uploaded local documents for the current session. Returns matching document ids, names, media types, and previews so you can inspect the right local file before reading it."
+ :description    "Search the uploaded local documents for the current session. Returns matching document ids, names, media types, document summaries, and chunk-level match snippets so you can inspect the right local file before reading it."
  :tags           #{:local :document :search :retrieval}
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"

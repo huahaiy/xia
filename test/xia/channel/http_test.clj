@@ -726,7 +726,9 @@
     (is (= 201 (:status create-res)))
     (is (= "notes.md" (get-in create-body ["documents" 0 "name"])))
     (is (= "text/markdown" (get-in create-body ["documents" 0 "media_type"])))
+    (is (string? (get-in create-body ["documents" 0 "summary"])))
     (is (string? (get-in create-body ["documents" 0 "preview"])))
+    (is (= 1 (get-in create-body ["documents" 0 "chunk_count"])))
     (let [list-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents")
                                     :request-method :get
                                     :headers        (ui-headers)})
@@ -739,6 +741,8 @@
                                    :headers        (ui-headers)})
           get-body (response-json get-res)]
       (is (= 200 (:status get-res)))
+      (is (string? (get-in get-body ["document" "summary"])))
+      (is (= 1 (get-in get-body ["document" "chunk_count"])))
       (is (= "# Local\n\ncontent" (get-in get-body ["document" "text"]))))
     (let [note-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id "/scratch-pads")
                                     :request-method :post
@@ -792,11 +796,13 @@
     (is (= 201 (:status create-res)))
     (is (= "notes.md" (get-in create-body ["documents" 0 "name"])))
     (is (= "text/markdown" (get-in create-body ["documents" 0 "media_type"])))
+    (is (string? (get-in create-body ["documents" 0 "summary"])))
     (let [get-res  (#'http/router {:uri            (str "/sessions/" sid "/local-documents/" doc-id)
                                    :request-method :get
                                    :headers        (ui-headers)})
           get-body (response-json get-res)]
       (is (= 200 (:status get-res)))
+      (is (= 1 (get-in get-body ["document" "chunk_count"])))
       (is (= "# Local\n\ncontent" (get-in get-body ["document" "text"]))))))
 
 (deftest local-document-multipart-route-extracts-pdf

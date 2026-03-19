@@ -20,6 +20,12 @@
 (def ^:private default-name "Untitled upload")
 (def ^:private default-source :upload)
 (def ^:private preview-char-limit 1200)
+(def ^:private chunk-target-chars 1800)
+(def ^:private chunk-max-chars 2400)
+(def ^:private chunk-preview-char-limit 240)
+(def ^:private chunk-summary-char-limit 320)
+(def ^:private doc-summary-char-limit 900)
+(def ^:private doc-summary-max-chunks 4)
 (def ^:private pdf-media-type "application/pdf")
 (def ^:private docx-media-type "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 (def ^:private xlsx-media-type "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -236,6 +242,170 @@
     (if (> (count trimmed) preview-char-limit)
       (str (subs trimmed 0 (max 0 (dec preview-char-limit))) "…")
       trimmed)))
+
+(defn- compact-text
+  [text]
+  (some-> text
+          normalize-text
+          str/trim
+          (str/replace #"\s+" " ")
+          not-empty))
+
+(defn- truncate-text
+  [text max-chars]
+  (when-let [compact (compact-text text)]
+    (if (> (count compact) max-chars)
+      (str (subs compact 0 (max 0 (dec max-chars))) "…")
+      compact)))
+
+(defn- sentence-fragments
+  [text]
+  (->> (str/split (or (compact-text text) "") #"(?<=[.!?])\s+")
+       (map str/trim)
+       (remove str/blank?)))
+
+(defn- pack-fragments
+  [fragments max-chars]
+  (loop [remaining fragments
+         current []
+         current-length 0
+         packed []]
+    (if-let [fragment (first remaining)]
+      (let [separator (if (seq current) 1 0)
+            proposed  (+ current-length separator (count fragment))]
+        (if (and (seq current) (> proposed max-chars))
+          (recur remaining
+                 []
+                 0
+                 (conj packed (str/join " " current)))
+          (recur (rest remaining)
+                 (conj current fragment)
+                 proposed
+                 packed)))
+      (cond-> packed
+        (seq current) (conj (str/join " " current))))))
+
+(defn- hard-wrap-text
+  [text max-chars]
+  (let [value (or (compact-text text) "")]
+    (loop [start 0
+           pieces []]
+      (if (>= start (count value))
+        pieces
+        (let [raw-end    (min (count value) (+ start max-chars))
+              space-end  (.lastIndexOf ^String value " " raw-end)
+              split-end  (if (and (< raw-end (count value))
+                                  (> space-end start))
+                           space-end
+                           raw-end)
+              piece      (some-> (subs value start split-end) str/trim not-empty)
+              next-start (if (= split-end raw-end)
+                           split-end
+                           (inc split-end))]
+          (recur next-start
+                 (cond-> pieces piece (conj piece))))))))
+
+(defn- split-long-block
+  [block]
+  (let [compact (compact-text block)]
+    (cond
+      (nil? compact)
+      []
+
+      (<= (count compact) chunk-max-chars)
+      [compact]
+
+      :else
+      (let [sentences (sentence-fragments compact)]
+        (if (> (count sentences) 1)
+          (pack-fragments sentences chunk-max-chars)
+          (hard-wrap-text compact chunk-max-chars))))))
+
+(defn- heading-block?
+  [block]
+  (let [lines   (->> (str/split-lines (or block ""))
+                     (map str/trim)
+                     (remove str/blank?)
+                     vec)
+        compact (compact-text block)]
+    (and compact
+         (<= (count lines) 3)
+         (every? #(<= (count %) 80) lines)
+         (not-any? #(re-find #"[.!?]\)?$" %) lines))))
+
+(defn- merge-heading-blocks
+  [blocks]
+  (loop [remaining (seq blocks)
+         merged    []]
+    (if-let [block (first remaining)]
+      (let [next-block (second remaining)]
+        (if (and next-block (heading-block? block))
+          (recur (nnext remaining)
+                 (conj merged (str block "\n\n" next-block)))
+          (recur (next remaining)
+                 (conj merged block))))
+      merged)))
+
+(defn- natural-text-blocks
+  [text]
+  (let [normalized (-> text normalize-text (str/replace #"\r\n?" "\n"))]
+    (->> (str/split normalized #"\n\s*\n+")
+         (remove str/blank?)
+         merge-heading-blocks
+         (mapcat split-long-block)
+         (remove str/blank?))))
+
+(defn- summarize-text
+  [text max-chars]
+  (let [sentences (sentence-fragments text)]
+    (or (some-> (pack-fragments (take 3 sentences) max-chars)
+                first
+                (truncate-text max-chars))
+        (truncate-text text max-chars))))
+
+(defn- assemble-natural-chunks
+  [blocks]
+  (loop [remaining blocks
+         current []
+         current-length 0
+         chunks []]
+    (if-let [block (first remaining)]
+      (let [separator (if (seq current) 2 0)
+            proposed  (+ current-length separator (count block))]
+        (if (and (seq current) (> proposed chunk-target-chars))
+          (recur remaining
+                 []
+                 0
+                 (conj chunks (str/join "\n\n" current)))
+          (recur (rest remaining)
+                 (conj current block)
+                 proposed
+                 chunks)))
+      (cond-> chunks
+        (seq current) (conj (str/join "\n\n" current))))))
+
+(defn- chunk-document-text
+  [text]
+  (let [chunks (-> text natural-text-blocks assemble-natural-chunks)]
+    (mapv (fn [idx chunk-text]
+            (let [summary (summarize-text chunk-text chunk-summary-char-limit)]
+              {:index   idx
+               :text    chunk-text
+               :summary summary
+               :preview (or (truncate-text chunk-text chunk-preview-char-limit)
+                            summary)}))
+          (range)
+          chunks)))
+
+(defn- document-summary
+  [chunks full-text]
+  (or (some-> (->> chunks
+                  (map :summary)
+                  (remove str/blank?)
+                  (take doc-summary-max-chunks)
+                  (str/join " "))
+            (truncate-text doc-summary-char-limit))
+      (truncate-text full-text doc-summary-char-limit)))
 
 (defn- extract-pdf-text
   [name media-type ^bytes pdf-bytes]
@@ -673,6 +843,78 @@
   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
                  doc-id)))
 
+(defn- chunk-eid
+  [chunk-id]
+  (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc.chunk/id ?id]]
+                chunk-id)))
+
+(defn- doc-chunk-eids
+  [doc-eid]
+  (let [doc-ref-eids (->> (db/q '[:find ?chunk
+                                  :in $ ?doc
+                                  :where [?doc :local.doc/chunks ?chunk]]
+                                doc-eid)
+                          (map first)
+                          vec)]
+    (if (seq doc-ref-eids)
+      doc-ref-eids
+      (->> (db/q '[:find ?chunk
+                   :in $ ?doc
+                   :where [?chunk :local.doc.chunk/doc ?doc]]
+                 doc-eid)
+           (map first)
+           vec))))
+
+(defn- chunk-from-eid
+  [eid]
+  (when eid
+    (let [entity (db/entity eid)]
+      {:id      (:local.doc.chunk/id entity)
+       :index   (:local.doc.chunk/index entity)
+       :summary (:local.doc.chunk/summary entity)
+       :preview (:local.doc.chunk/preview entity)
+       :text    (:local.doc.chunk/text entity)})))
+
+(defn- document-chunks-from-eid
+  [doc-eid]
+  (->> (doc-chunk-eids doc-eid)
+       (map chunk-from-eid)
+       (sort-by :index)
+       vec))
+
+(defn- store-doc-chunks!
+  [doc-eid session-eid chunks]
+  (when (seq chunks)
+    (let [chunk-ids (mapv (fn [_] (random-uuid)) chunks)]
+      (db/transact!
+        (mapv (fn [chunk-id {:keys [index text summary preview]}]
+                {:local.doc.chunk/id      chunk-id
+                 :local.doc.chunk/doc     doc-eid
+                 :local.doc.chunk/session session-eid
+                 :local.doc.chunk/index   index
+                 :local.doc.chunk/summary summary
+                 :local.doc.chunk/text    text
+                 :local.doc.chunk/preview preview})
+              chunk-ids
+              chunks))
+      (let [chunk-eids (->> chunk-ids
+                            (keep chunk-eid)
+                            vec)]
+        (when (seq chunk-eids)
+          (db/transact!
+            (mapv (fn [chunk-eid*]
+                    [:db/add doc-eid :local.doc/chunks chunk-eid*])
+                  chunk-eids)))
+        chunk-eids))))
+
+(defn- replace-doc-chunks!
+  [doc-eid session-eid chunks]
+  (let [existing-chunk-eids (doc-chunk-eids doc-eid)]
+    (when (seq existing-chunk-eids)
+      (db/transact! (mapv (fn [chunk-eid*] [:db/retractEntity chunk-eid*])
+                          existing-chunk-eids)))
+    (store-doc-chunks! doc-eid session-eid chunks)))
+
 (defn- doc-session-id
   [eid]
   (ffirst (db/q '[:find ?sid
@@ -695,12 +937,16 @@
             :doc-id (str doc-id)}))
 
 (defn- upload-episode-context
-  [{:keys [media-type size-bytes sha256 preview existing? doc-id]}]
+  [{:keys [media-type size-bytes sha256 summary preview chunk-count existing? doc-id]}]
   (let [lines (cond-> [(str "Media type: " media-type)
                        (str "Size bytes: " size-bytes)
                        (str "SHA256: " sha256)
                        (str "Stored document id: " doc-id)
                        (str "Reused existing stored document: " (if existing? "yes" "no"))]
+                (some? chunk-count)
+                (conj (str "Chunk count: " chunk-count))
+                (seq summary)
+                (conj (str "Summary: " summary))
                 (seq preview)
                 (conj (str "Preview: " preview)))]
     (str/join "\n" lines)))
@@ -718,14 +964,16 @@
     (assoc :episode/channel (clojure.core/name session-channel))))
 
 (defn- upload-episode
-  [{:keys [session-id session-channel name media-type size-bytes sha256 preview existing? doc-id]}]
+  [{:keys [session-id session-channel name media-type size-bytes sha256 summary preview chunk-count existing? doc-id]}]
   (event-episode {:session-id session-id
                   :session-channel session-channel
                   :summary (str "Uploaded local document " name)
                   :context (upload-episode-context {:media-type media-type
                                                     :size-bytes size-bytes
                                                     :sha256 sha256
+                                                    :summary summary
                                                     :preview preview
+                                                    :chunk-count chunk-count
                                                     :existing? existing?
                                                     :doc-id doc-id})}))
 
@@ -809,8 +1057,10 @@
        :sha256     (:local.doc/sha256 entity)
        :status     (:local.doc/status entity)
        :error      (:local.doc/error entity)
+       :summary    (:local.doc/summary entity)
        :text       (:local.doc/text entity)
        :preview    (:local.doc/preview entity)
+       :chunk-count (:local.doc/chunk-count entity)
        :created-at (entity-created-at entity)
        :updated-at (entity-updated-at entity)})))
 
@@ -858,7 +1108,9 @@
          :media-type  (:media-type doc)
          :status      (:status doc)
          :size-bytes  (:size-bytes doc)
+         :summary     (:summary doc)
          :preview     (:preview doc)
+         :chunk-count (:chunk-count doc)
          :text        (subs text start end)
          :offset      start
          :end-offset  end
@@ -897,6 +1149,9 @@
                           :bytes bytes
                           :bytes-base64 bytes-base64})
           text*       text
+          chunks      (chunk-document-text text*)
+          summary     (document-summary chunks text*)
+          chunk-count (long (count chunks))
           sha256      (sha256-hex source-bytes)
           size-bytes* (normalize-size-bytes size-bytes (byte-array-length source-bytes))
           existing    (existing-doc-eid session-eid* sha256)
@@ -912,18 +1167,27 @@
           :local.doc/size-bytes size-bytes*
           :local.doc/sha256     sha256
           :local.doc/status     :ready
+          :local.doc/summary    summary
           :local.doc/text       text*
-          :local.doc/preview    preview}
+          :local.doc/preview    preview
+          :local.doc/chunk-count chunk-count}
          (upload-episode {:session-id session-id*
-                         :session-channel channel
-                         :name name*
-                         :media-type media-type
-                         :size-bytes size-bytes*
-                         :sha256 sha256
-                         :preview preview
+                          :session-channel channel
+                          :name name*
+                          :media-type media-type
+                          :size-bytes size-bytes*
+                          :sha256 sha256
+                          :summary summary
+                          :preview preview
+                          :chunk-count chunk-count
                           :existing? (boolean existing)
                           :doc-id doc-id})])
-      (document-from-eid (doc-eid doc-id)))))
+      (let [doc-eid*             (doc-eid doc-id)
+            existing-chunk-count (count (doc-chunk-eids doc-eid*))]
+        (when (or (not existing)
+                  (not= existing-chunk-count chunk-count))
+          (replace-doc-chunks! doc-eid* session-eid* chunks))
+        (document-from-eid doc-eid*)))))
 
 (defn save-failed-upload!
   [{:keys [session-id name media-type size-bytes source text bytes bytes-base64]} error]
@@ -977,10 +1241,13 @@
 (defn delete-doc!
   ([doc-id]
    (let [doc-id* (normalize-doc-id doc-id)
-         eid     (doc-eid doc-id*)]
+         eid     (doc-eid doc-id*)
+         chunk-eids (doc-chunk-eids eid)]
      (when-not eid
        (throw (doc-not-found-ex doc-id*)))
-     (db/transact! [[:db/retractEntity eid]])
+     (db/transact! (into (mapv (fn [chunk-eid*] [:db/retractEntity chunk-eid*])
+                               chunk-eids)
+                         [[:db/retractEntity eid]]))
      {:status "deleted" :id (str doc-id*)}))
   ([session-id doc-id]
    (let [session-id*  (normalize-session-id session-id)
@@ -988,20 +1255,23 @@
          doc-id*      (normalize-doc-id doc-id)
          doc          (get-session-doc session-id* doc-id*)
          eid          (doc-eid doc-id*)
+         chunk-eids   (doc-chunk-eids eid)
          channel      (session-channel session-eid*)]
      (when-not session-eid*
        (throw (session-not-found-ex session-id*)))
      (when-not (and doc eid)
        (throw (doc-not-found-ex doc-id*)))
-     (db/transact! [(delete-episode {:session-id session-id*
-                                     :session-channel channel
-                                     :name (:name doc)
-                                     :media-type (:media-type doc)
-                                     :size-bytes (:size-bytes doc)
-                                     :sha256 (:sha256 doc)
-                                     :preview (:preview doc)
-                                     :doc-id doc-id*})
-                    [:db/retractEntity eid]])
+     (db/transact! (into [(delete-episode {:session-id session-id*
+                                           :session-channel channel
+                                           :name (:name doc)
+                                           :media-type (:media-type doc)
+                                           :size-bytes (:size-bytes doc)
+                                           :sha256 (:sha256 doc)
+                                           :preview (:preview doc)
+                                           :doc-id doc-id*})]
+                         (concat (map (fn [chunk-eid*] [:db/retractEntity chunk-eid*])
+                                      chunk-eids)
+                                 [[:db/retractEntity eid]])))
      {:status "deleted" :id (str doc-id*)})))
 
 (defn create-scratch-pad-from-doc!

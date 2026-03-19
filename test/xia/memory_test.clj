@@ -473,20 +473,32 @@
 
 (deftest test-search-local-docs-candidate-pool-size-uses-config
   (let [sid (db/create-session! :http)
-        fts-top (atom nil)
-        sem-top (atom nil)]
+        doc-fts-top   (atom nil)
+        doc-sem-top   (atom nil)
+        chunk-fts-top (atom nil)
+        chunk-sem-top (atom nil)]
     (db/set-config! :memory/search-local-doc-candidate-pool-size 19)
-    (with-redefs [xia.memory/local-doc-fulltext-hits
+    (with-redefs [xia.memory/local-doc-doc-fulltext-hits
                   (fn [_session-id _query & {:keys [top]}]
-                    (reset! fts-top top)
+                    (reset! doc-fts-top top)
                     [])
-                  xia.memory/local-doc-embedding-hits
+                  xia.memory/local-doc-doc-embedding-hits
                   (fn [_session-id _query & {:keys [top]}]
-                    (reset! sem-top top)
+                    (reset! doc-sem-top top)
+                    [])
+                  xia.memory/local-doc-chunk-fulltext-hits
+                  (fn [_session-id _query & {:keys [top]}]
+                    (reset! chunk-fts-top top)
+                    [])
+                  xia.memory/local-doc-chunk-embedding-hits
+                  (fn [_session-id _query & {:keys [top]}]
+                    (reset! chunk-sem-top top)
                     [])]
       (is (= [] (memory/search-local-docs sid "car" :top 5)))
-      (is (= 19 @fts-top))
-      (is (= 19 @sem-top)))))
+      (is (= 19 @doc-fts-top))
+      (is (= 19 @doc-sem-top))
+      (is (= 19 @chunk-fts-top))
+      (is (= 19 @chunk-sem-top)))))
 
 ;; ---------------------------------------------------------------------------
 ;; recall-knowledge

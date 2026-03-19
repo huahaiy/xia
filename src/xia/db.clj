@@ -24,6 +24,7 @@
 (def kg-fact-domain "kg-fact")
 (def kg-edge-domain "kg-edge")
 (def local-doc-domain "local-doc")
+(def local-doc-chunk-domain "local-doc-chunk")
 (def artifact-domain "artifact")
 (def skill-content-domain "skill-content")
 
@@ -150,12 +151,36 @@
    :local.doc/sha256     {:db/valueType :db.type/string}
    :local.doc/status     {:db/valueType :db.type/keyword}
    :local.doc/error      {:db/valueType :db.type/string}
+   :local.doc/summary    {:db/valueType :db.type/string
+                          :db/fulltext true
+                          :db.fulltext/domains [local-doc-domain]
+                          :db/embedding true
+                          :db.embedding/domains [local-doc-domain]}
    :local.doc/text       {:db/valueType :db.type/string
                           :db/fulltext true
                           :db.fulltext/domains [local-doc-domain]
                           :db/embedding true
                           :db.embedding/domains [local-doc-domain]}
    :local.doc/preview    {:db/valueType :db.type/string}
+   :local.doc/chunk-count {:db/valueType :db.type/long}
+   :local.doc/chunks     {:db/valueType :db.type/ref
+                          :db/cardinality :db.cardinality/many}
+
+   :local.doc.chunk/id      {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :local.doc.chunk/doc     {:db/valueType :db.type/ref}
+   :local.doc.chunk/session {:db/valueType :db.type/ref}
+   :local.doc.chunk/index   {:db/valueType :db.type/long}
+   :local.doc.chunk/summary {:db/valueType :db.type/string
+                             :db/fulltext true
+                             :db.fulltext/domains [local-doc-chunk-domain]
+                             :db/embedding true
+                             :db.embedding/domains [local-doc-chunk-domain]}
+   :local.doc.chunk/text    {:db/valueType :db.type/string
+                             :db/fulltext true
+                             :db.fulltext/domains [local-doc-chunk-domain]
+                             :db/embedding true
+                             :db.embedding/domains [local-doc-chunk-domain]}
+   :local.doc.chunk/preview {:db/valueType :db.type/string}
 
    ;; --- Generated Artifacts (session-scoped outputs users can download) ---
    :artifact/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}

@@ -341,12 +341,14 @@ Rules:
             max-doc-refs (get-in wm [:config :max-local-doc-refs])
             new-doc-refs (->> (:local-docs search-results)
                               (map-indexed
-                                (fn [idx {:keys [id name media-type preview]}]
-                                  {:doc-id     id
-                                   :name       name
-                                   :media-type media-type
-                                   :preview    preview
-                                   :relevance  (max 0.45 (- 0.8 (* idx 0.1)))}))
+                                (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
+                                  {:doc-id         id
+                                   :name           name
+                                   :media-type     media-type
+                                   :summary        summary
+                                   :preview        preview
+                                   :matched-chunks matched-chunks
+                                   :relevance      (max 0.45 (- 0.8 (* idx 0.1)))}))
                               vec)
             merged-doc-refs (->> (concat (:local-doc-refs wm) new-doc-refs)
                                  (group-by :doc-id)
@@ -730,11 +732,13 @@ Rules:
                                  :relevance relevance})))
      :local-docs   (->> (:local-doc-refs wm)
                         (sort-by :relevance >)
-                        (mapv (fn [{:keys [doc-id name media-type preview relevance]}]
+                        (mapv (fn [{:keys [doc-id name media-type summary preview matched-chunks relevance]}]
                                 {:id         doc-id
                                  :name       name
                                  :media-type media-type
+                                 :summary    summary
                                  :preview    preview
+                                 :matched-chunks matched-chunks
                                  :relevance  relevance})))
      :turn-count   (:turn-count wm)})))
 

@@ -376,21 +376,32 @@
                    (+ tokens line-tokens))))))))
 
 (defn- local-doc-line
-  [{:keys [name media-type preview]}]
-  (let [preview* (some-> preview
+  [{:keys [name media-type summary preview matched-chunks]}]
+  (let [summary* (some-> (or summary preview)
                          str
                          str/trim
                          (str/replace #"\s+" " ")
                          not-empty)
-        preview* (when preview*
-                   (if (> (count preview*) 220)
-                     (str (subs preview* 0 219) "…")
-                     preview*))]
+        summary* (when summary*
+                   (if (> (count summary*) 220)
+                     (str (subs summary* 0 219) "…")
+                     summary*))
+        chunk*   (some->> matched-chunks
+                          (map :summary)
+                          (remove str/blank?)
+                          (str/join " | ")
+                          not-empty)
+        chunk*   (when chunk*
+                   (if (> (count chunk*) 180)
+                     (str (subs chunk* 0 179) "…")
+                     chunk*))]
     (str "- " (or name "Untitled document")
          (when media-type
            (str " (" media-type ")"))
-         (when preview*
-           (str ": " preview*)))))
+         (when summary*
+           (str ": " summary*))
+         (when chunk*
+           (str " [matches: " chunk* "]")))))
 
 (defn render-local-docs
   "Render relevant local documents into compact format, within token budget."

@@ -714,8 +714,10 @@
    :sha256     (:sha256 doc)
    :status     (some-> (:status doc) name)
    :error      (:error doc)
+   :summary    (:summary doc)
    :text       (:text doc)
    :preview    (:preview doc)
+   :chunk_count (:chunk-count doc)
    :created_at (instant->str (:created-at doc))
    :updated_at (instant->str (:updated-at doc))})
 
