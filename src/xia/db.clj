@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [datalevin.core :as d]
             [datalevin.embedding :as emb]
+            [datalevin.llm :as llm]
             [xia.crypto :as crypto]
             [xia.sensitive :as sensitive])
   (:import [java.io InputStream]
@@ -151,6 +152,8 @@
    :local.doc/sha256     {:db/valueType :db.type/string}
    :local.doc/status     {:db/valueType :db.type/keyword}
    :local.doc/error      {:db/valueType :db.type/string}
+   :local.doc/summary-source {:db/valueType :db.type/keyword}
+   :local.doc/summarized-at {:db/valueType :db.type/instant}
    :local.doc/summary    {:db/valueType :db.type/string
                           :db/fulltext true
                           :db.fulltext/domains [local-doc-domain]
@@ -170,6 +173,8 @@
    :local.doc.chunk/doc     {:db/valueType :db.type/ref}
    :local.doc.chunk/session {:db/valueType :db.type/ref}
    :local.doc.chunk/index   {:db/valueType :db.type/long}
+   :local.doc.chunk/summary-source {:db/valueType :db.type/keyword}
+   :local.doc.chunk/summarized-at {:db/valueType :db.type/instant}
    :local.doc.chunk/summary {:db/valueType :db.type/string
                              :db/fulltext true
                              :db.fulltext/domains [local-doc-chunk-domain]
@@ -352,6 +357,7 @@
 
 (defonce ^:private conn-atom (atom nil))
 (defonce ^:private embedding-provider-atom (atom nil))
+(defonce ^:private llm-provider-atom (atom nil))
 (declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
@@ -367,6 +373,17 @@
        "?download=true"))
 
 (def ^:private embedding-model-lock
+  (Object.))
+
+(def ^:private default-llm-model-file
+  "gemma-3-4b-it.Q4_K_M.gguf")
+
+(def ^:private default-llm-model-url
+  (str "https://huggingface.co/MaziyarPanahi/gemma-3-4b-it-GGUF/resolve/main/"
+       default-llm-model-file
+       "?download=true"))
+
+(def ^:private llm-model-lock
   (Object.))
 
 (def ^:private default-embedding-provider-spec
@@ -388,6 +405,17 @@
     {:format :gguf
      :file default-embedding-model-file
      :quantization :q8_0}}})
+
+(def ^:private default-llm-provider-spec
+  ;; Keep local summarization inside the Xia binary by using Datalevin's
+  ;; in-process llama.cpp runtime plus a managed GGUF support file. This is
+  ;; opt-in at the summarizer layer, so the default managed model should be
+  ;; capable enough to matter when users enable it.
+  {:provider :llama.cpp
+   :model-id "google/gemma-3-4b-it"
+   :model-filename default-llm-model-file
+   :model-url default-llm-model-url
+   :ctx-size 4096})
 
 (def ^:private default-datalevin-opts-map
   {:embedding-opts      {:provider default-embedding-provider-id
@@ -491,7 +519,7 @@
       (let [resp   (.send client req (HttpResponse$BodyHandlers/ofInputStream))
             status (.statusCode resp)]
         (when-not (= 200 status)
-          (throw (ex-info "Failed to download embedding model"
+          (throw (ex-info "Failed to download managed model"
                           {:url url :status status :target target-path})))
         (with-open [^InputStream in (.body resp)]
           (Files/copy in ^Path tmp copy-opts))
@@ -503,8 +531,8 @@
             (Files/deleteIfExists tmp)
             (catch Exception _)))))))
 
-(defn- ensure-managed-embedding-model!
-  [provider-spec]
+(defn- ensure-managed-model!
+  [provider-spec lock]
   (let [model-path (or (:model provider-spec) (:model-path provider-spec))]
     (cond
       (not (map? provider-spec))
@@ -516,10 +544,14 @@
       provider-spec
 
       :else
-      (locking embedding-model-lock
+      (locking lock
         (when-not (.exists (io/file model-path))
           (download-file! (:model-url provider-spec) model-path))
         provider-spec))))
+
+(defn- ensure-managed-embedding-model!
+  [provider-spec]
+  (ensure-managed-model! provider-spec embedding-model-lock))
 
 (defn- close-embedding-provider! []
   (when-let [provider @embedding-provider-atom]
@@ -527,6 +559,84 @@
       (d/close-embedding-provider provider)
       (catch Exception _))
     (reset! embedding-provider-atom nil)))
+
+(defn- resolve-llm-provider-spec
+  [db-path options]
+  (let [runtime-entry (if (contains? options :local-llm-provider)
+                        (:local-llm-provider options)
+                        default-llm-provider-spec)]
+    (cond
+      (or (false? runtime-entry) (= :disabled runtime-entry))
+      nil
+
+      (satisfies? llm/ILLMProvider runtime-entry)
+      runtime-entry
+
+      (map? runtime-entry)
+      (let [provider-spec (merge {:provider :llama.cpp
+                                  :dir      db-path}
+                                 runtime-entry)]
+        (cond-> provider-spec
+          (and (nil? (:model provider-spec))
+               (nil? (:model-path provider-spec))
+               (string? (:model-filename provider-spec)))
+          (assoc :model-path
+                 (str db-path java.io.File/separator
+                      "llm"
+                      java.io.File/separator
+                      (:model-filename provider-spec)))))
+
+      (keyword? runtime-entry)
+      {:provider runtime-entry
+       :dir      db-path}
+
+      (nil? runtime-entry)
+      nil
+
+      :else
+      runtime-entry)))
+
+(defn- lazy-managed-llm-provider
+  [provider-spec]
+  (let [provider* (atom nil)
+        closed?   (atom false)
+        ensure!   (fn []
+                    (when @closed?
+                      (throw (ex-info "Local LLM provider is closed"
+                                      {:provider-spec provider-spec})))
+                    (or @provider*
+                        (locking provider*
+                          (or @provider*
+                              (let [managed-spec (ensure-managed-model! provider-spec
+                                                                       llm-model-lock)
+                                    provider (d/new-llm-provider managed-spec)]
+                                (reset! provider* provider)
+                                provider)))))]
+    (reify
+      llm/ILLMProvider
+      (generate-text* [_ prompt max-tokens opts]
+        (llm/generate-text* (ensure!) prompt max-tokens opts))
+      (summarize-text* [_ text max-tokens opts]
+        (llm/summarize-text* (ensure!) text max-tokens opts))
+      (llm-metadata [_]
+        (llm/llm-metadata (ensure!)))
+      (llm-context-size [_]
+        (llm/llm-context-size (ensure!)))
+      (close-llm-provider [_]
+        (when (compare-and-set! closed? false true)
+          (when-let [provider @provider*]
+            (llm/close-llm-provider provider))))
+
+      java.lang.AutoCloseable
+      (close [this]
+        (llm/close-llm-provider this)))))
+
+(defn- close-llm-provider! []
+  (when-let [provider @llm-provider-atom]
+    (try
+      (d/close-llm-provider provider)
+      (catch Exception _))
+    (reset! llm-provider-atom nil)))
 
 (defn- init-embedding-provider!
   [db-path datalevin-opts]
@@ -547,6 +657,16 @@
               (catch Exception _)))
           (throw t))))))
 
+(defn- init-llm-provider!
+  [db-path options]
+  (close-llm-provider!)
+  (when-let [provider-spec (resolve-llm-provider-spec db-path options)]
+    (let [provider (if (satisfies? llm/ILLMProvider provider-spec)
+                     provider-spec
+                     (lazy-managed-llm-provider provider-spec))]
+      (reset! llm-provider-atom provider)
+      provider)))
+
 (defn connect!
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
@@ -557,9 +677,11 @@
        (reset! conn-atom c)
        (crypto/configure! db-path crypto-opts)
        (init-embedding-provider! db-path datalevin-opts)
+       (init-llm-provider! db-path crypto-opts)
        (migrate-secrets!)
        c
        (catch Throwable t
+         (close-llm-provider!)
          (close-embedding-provider!)
          (reset! conn-atom nil)
          (try
@@ -577,7 +699,12 @@
   []
   @embedding-provider-atom)
 
+(defn current-llm-provider
+  []
+  @llm-provider-atom)
+
 (defn close! []
+  (close-llm-provider!)
   (close-embedding-provider!)
   (when-let [c @conn-atom]
     (d/close c)

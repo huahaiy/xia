@@ -4,6 +4,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [datalevin.embedding :as emb]
+            [datalevin.llm :as llm]
             [xia.db :as db]
             [xia.working-memory :as wm])
   (:import [java.io File]
@@ -171,11 +172,49 @@
     (close [_]
       nil)))
 
+(def ^:private test-llm-metadata
+  {:llm/provider {:kind :test
+                  :id :xia-test-llm}
+   :llm/runtime  {:context-size 4096}
+   :llm/artifact {:format :memory
+                  :file "xia-test-llm"}})
+
+(defn- summarize-provider-text
+  [text]
+  (let [summary (->> (tokenize text)
+                     (take 14)
+                     (str/join " ")
+                     str/trim)]
+    (if (seq summary)
+      (str "model-summary: " summary)
+      "model-summary: empty")))
+
+(defn test-llm-provider
+  []
+  (reify
+    llm/ILLMProvider
+    (generate-text* [_ prompt _max-tokens _opts]
+      (summarize-provider-text prompt))
+    (summarize-text* [_ text _max-tokens _opts]
+      (summarize-provider-text text))
+    (llm-metadata [_]
+      test-llm-metadata)
+    (llm-context-size [_]
+      4096)
+    (close-llm-provider [_]
+      nil)
+
+    java.lang.AutoCloseable
+    (close [_]
+      nil)))
+
 (defn test-connect-options
   ([]
    (test-connect-options nil))
   ([options]
-   (let [provider-id (get-in (db/default-datalevin-opts) [:embedding-opts :provider])]
+   (let [provider-id (get-in (db/default-datalevin-opts) [:embedding-opts :provider])
+         options     (merge {:local-llm-provider false}
+                            options)]
      (update (merge options
                     {:datalevin-opts
                      {:embedding-providers {provider-id (test-embedding-provider)}}})

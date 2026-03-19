@@ -2,7 +2,9 @@
   "Session-scoped local documents uploaded explicitly by the user."
   (:require [clojure.string :as str]
             [xia.db :as db]
+            [xia.extractive-summary :as extractive-summary]
             [xia.memory :as memory]
+            [xia.summarizer :as summarizer]
             [xia.working-memory :as wm]
             [xia.scratch :as scratch])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream IOException]
@@ -355,13 +357,9 @@
          (mapcat split-long-block)
          (remove str/blank?))))
 
-(defn- summarize-text
+(defn- extractive-summary-text
   [text max-chars]
-  (let [sentences (sentence-fragments text)]
-    (or (some-> (pack-fragments (take 3 sentences) max-chars)
-                first
-                (truncate-text max-chars))
-        (truncate-text text max-chars))))
+  (extractive-summary/summarize-text text max-chars))
 
 (defn- assemble-natural-chunks
   [blocks]
@@ -388,24 +386,36 @@
   [text]
   (let [chunks (-> text natural-text-blocks assemble-natural-chunks)]
     (mapv (fn [idx chunk-text]
-            (let [summary (summarize-text chunk-text chunk-summary-char-limit)]
+            (let [extractive-summary (extractive-summary-text chunk-text
+                                                             chunk-summary-char-limit)
+                  model-summary      (summarizer/summarize-chunk chunk-text
+                                                                 chunk-summary-char-limit)
+                  summary            (or model-summary extractive-summary)]
               {:index   idx
                :text    chunk-text
                :summary summary
+               :summary-source (if model-summary :model :extractive)
+               :summarized-at (Date.)
                :preview (or (truncate-text chunk-text chunk-preview-char-limit)
                             summary)}))
           (range)
           chunks)))
 
+(defn- extractive-document-summary
+  [chunks full-text]
+  (extractive-summary/summarize-document (map :summary chunks)
+                                         full-text
+                                         doc-summary-char-limit))
+
 (defn- document-summary
   [chunks full-text]
-  (or (some-> (->> chunks
-                  (map :summary)
-                  (remove str/blank?)
-                  (take doc-summary-max-chunks)
-                  (str/join " "))
-            (truncate-text doc-summary-char-limit))
-      (truncate-text full-text doc-summary-char-limit)))
+  (let [extractive-summary (extractive-document-summary chunks full-text)
+        model-summary      (summarizer/summarize-document chunks
+                                                          full-text
+                                                          doc-summary-char-limit)]
+    {:summary        (or model-summary extractive-summary)
+     :summary-source (if model-summary :model :extractive)
+     :summarized-at  (Date.)}))
 
 (defn- extract-pdf-text
   [name media-type ^bytes pdf-bytes]
@@ -871,6 +881,7 @@
     (let [entity (db/entity eid)]
       {:id      (:local.doc.chunk/id entity)
        :index   (:local.doc.chunk/index entity)
+       :summary-source (:local.doc.chunk/summary-source entity)
        :summary (:local.doc.chunk/summary entity)
        :preview (:local.doc.chunk/preview entity)
        :text    (:local.doc.chunk/text entity)})))
@@ -887,11 +898,13 @@
   (when (seq chunks)
     (let [chunk-ids (mapv (fn [_] (random-uuid)) chunks)]
       (db/transact!
-        (mapv (fn [chunk-id {:keys [index text summary preview]}]
+        (mapv (fn [chunk-id {:keys [index text summary summary-source summarized-at preview]}]
                 {:local.doc.chunk/id      chunk-id
                  :local.doc.chunk/doc     doc-eid
                  :local.doc.chunk/session session-eid
                  :local.doc.chunk/index   index
+                 :local.doc.chunk/summary-source summary-source
+                 :local.doc.chunk/summarized-at summarized-at
                  :local.doc.chunk/summary summary
                  :local.doc.chunk/text    text
                  :local.doc.chunk/preview preview})
@@ -1057,6 +1070,7 @@
        :sha256     (:local.doc/sha256 entity)
        :status     (:local.doc/status entity)
        :error      (:local.doc/error entity)
+       :summary-source (:local.doc/summary-source entity)
        :summary    (:local.doc/summary entity)
        :text       (:local.doc/text entity)
        :preview    (:local.doc/preview entity)
@@ -1150,7 +1164,8 @@
                           :bytes-base64 bytes-base64})
           text*       text
           chunks      (chunk-document-text text*)
-          summary     (document-summary chunks text*)
+          {:keys [summary summary-source summarized-at]}
+          (document-summary chunks text*)
           chunk-count (long (count chunks))
           sha256      (sha256-hex source-bytes)
           size-bytes* (normalize-size-bytes size-bytes (byte-array-length source-bytes))
@@ -1167,6 +1182,8 @@
           :local.doc/size-bytes size-bytes*
           :local.doc/sha256     sha256
           :local.doc/status     :ready
+          :local.doc/summary-source summary-source
+          :local.doc/summarized-at summarized-at
           :local.doc/summary    summary
           :local.doc/text       text*
           :local.doc/preview    preview

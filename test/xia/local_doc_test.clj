@@ -5,7 +5,7 @@
             [xia.db :as db]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
-            [xia.test-helpers :refer [minimal-pdf-base64 office-fixture-base64 with-test-db]]
+            [xia.test-helpers :refer [minimal-pdf-base64 office-fixture-base64 test-llm-provider with-test-db]]
             [xia.working-memory :as wm])
   (:import [java.nio.charset StandardCharsets]
            [java.util Base64]))
@@ -154,6 +154,38 @@
         (is (seq (:matched-chunks result)))
         (is (some #(re-find #"hyperdrive" (or (:summary %) (:preview % "")))
                   (:matched-chunks result)))))))
+
+(deftest local-documents-default-to-extractive-summaries-even-with-a-local-llm
+  (let [sid (db/create-session! :http)]
+    (with-redefs [db/current-llm-provider (constantly (test-llm-provider))]
+      (let [saved (local-doc/save-upload! {:session-id sid
+                                           :name "brief.txt"
+                                           :media-type "text/plain"
+                                           :text "Alpha systems provide detailed evidence about the vehicle launch plan and milestone checkpoints."})]
+        (is (= :extractive (:summary-source saved)))
+        (is (not (str/starts-with? (:summary saved) "model-summary:")))))))
+
+(deftest local-documents-use-model-summaries-only-when-enabled
+  (let [sid (db/create-session! :http)]
+    (db/set-config! :local-doc/model-summaries-enabled? true)
+    (with-redefs [db/current-llm-provider (constantly (test-llm-provider))]
+      (let [saved (local-doc/save-upload! {:session-id sid
+                                           :name "brief.txt"
+                                           :media-type "text/plain"
+                                           :text "Alpha systems provide detailed evidence about the vehicle launch plan and milestone checkpoints."})
+            eid   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
+                                 (:id saved)))
+            raw   (into {} (d/entity (d/db (db/conn)) eid))
+            chunk-eid (ffirst (db/q '[:find ?chunk
+                                      :in $ ?doc
+                                      :where [?doc :local.doc/chunks ?chunk]]
+                                    eid))
+            chunk (into {} (d/entity (d/db (db/conn)) chunk-eid))]
+        (is (= :model (:summary-source saved)))
+        (is (= :model (:local.doc/summary-source raw)))
+        (is (= :model (:local.doc.chunk/summary-source chunk)))
+        (is (str/starts-with? (:summary saved) "model-summary:"))
+        (is (str/starts-with? (:local.doc.chunk/summary chunk) "model-summary:"))))))
 
 (deftest invalid-pdf-uploads-fail-clearly
   (let [sid (db/create-session! :http)]

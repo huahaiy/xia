@@ -2,7 +2,7 @@
 
  :deps
  {org.clojure/clojure       {:mvn/version "1.12.4"}
-  org.datalevin/datalevin-embedded {:mvn/version "0.10.11"}
+  org.datalevin/datalevin-embedded {:mvn/version "0.10.12"}
   org.clojure/tools.cli      {:mvn/version "1.4.256"}
 
   ;; HTTP client for LLM API calls
@@ -53,6 +53,11 @@
   {:extra-paths ["dev" "dev-resources"]
    :main-opts ["-i" "dev/compiler_warnings.clj"
                "-m" "xia.embedding-eval"]}
+
+  :summarization-eval
+  {:extra-paths ["dev" "dev-resources"]
+   :main-opts ["-i" "dev/compiler_warnings.clj"
+               "-m" "xia.summarization-eval"]}
 
   :native
   {:extra-deps {org.graalvm.nativeimage/svm {:mvn/version "25.0.2"}}
