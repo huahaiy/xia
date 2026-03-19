@@ -637,6 +637,9 @@ textarea:focus {
   overflow: auto;
   padding-right: 4px;
 }
+.capability-import-field {
+  margin-top: 14px;
+}
 .capability-item {
   border: 1px solid rgba(23, 33, 25, 0.12);
   border-radius: 16px;
@@ -657,6 +660,11 @@ textarea:focus {
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.5;
+}
+.capability-import-result {
+  min-height: 0;
+  max-height: 220px;
+  margin: 0;
 }
 .badge {
   display: inline-flex;

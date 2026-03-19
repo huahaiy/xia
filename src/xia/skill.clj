@@ -49,7 +49,10 @@
   "Import a skill from an EDN definition map.
    Stores content as raw string (always) and idoc (best-effort)."
   [skill-def]
-  (let [{:keys [id name description content version tags]} skill-def
+  (let [{:keys [id name description content version tags
+                source-format source-path source-url source-name
+                import-warnings
+                imported-from-openclaw?]} skill-def
         skill-name (or name (clojure.core/name id))]
     (when-not id
       (throw (ex-info "Skill definition must have an :id" {:def skill-def})))
@@ -61,7 +64,13 @@
                       :description (or description "")
                       :content     content
                       :version     (or version "0.1.0")
-                      :tags        (or tags #{})}]
+                      :tags        (or tags #{})
+                      :source-format source-format
+                      :source-path source-path
+                      :source-url source-url
+                      :source-name source-name
+                      :import-warnings import-warnings
+                      :imported-from-openclaw? imported-from-openclaw?}]
       ;; Try with idoc doc; fall back to without if markdown doesn't comply
       (try
         (db/install-skill! (assoc base-skill :doc md-content))

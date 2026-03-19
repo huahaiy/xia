@@ -5,6 +5,7 @@
             [xia.db :as db]
             [xia.agent :as agent]
             [xia.skill :as skill]
+            [xia.skill.openclaw :as openclaw-skill]
             [xia.tool :as tool]
             [xia.memory :as memory]
             [xia.identity :as identity]
@@ -109,6 +110,7 @@
                 (println "  /context           — show current working memory context")
                 (println "  /compact           — summarize older messages to save tokens")
                 (println "  /import-skill <f>  — import a skill (.md or .edn)")
+                (println "  /import-openclaw-skill <src> — import an OpenClaw skill bundle (dir, .zip, or zip URL)")
                 (println "  /import-tool <f>   — import a tool (.edn)")
                 (println)
                 (recur))
@@ -208,6 +210,20 @@
                                       (:name result)))))
                     (catch Exception e
                       (println (str "  error: " (.getMessage e))))))
+                (println)
+                (recur))
+
+            (str/starts-with? trimmed "/import-openclaw-skill ")
+            (do (let [source (subs trimmed 24)]
+                  (try
+                    (let [result (openclaw-skill/import-openclaw-source! source)]
+                      (println (str "  imported OpenClaw skill: " (name (:skill-id result))))
+                      (doseq [warning (:warnings result)]
+                        (println (str "  warning: " warning))))
+                    (catch Exception e
+                      (println (str "  error: " (.getMessage e)))
+                      (doseq [error (:errors (ex-data e))]
+                        (println (str "  detail: " error))))))
                 (println)
                 (recur))
 

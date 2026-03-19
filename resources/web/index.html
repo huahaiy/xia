@@ -569,6 +569,23 @@
                 <div class="field">
                   <label class="field-label">Skills</label>
                   <div class="capability-list" id="skill-list"></div>
+                  <div class="field capability-import-field">
+                    <label class="field-label" for="openclaw-import-source">Import OpenClaw Skill</label>
+                    <input
+                      type="text"
+                      id="openclaw-import-source"
+                      class="text-input"
+                      placeholder="https://clawhub.ai/...zip or /path/to/skill.zip">
+                    <div class="check-row">
+                      <input type="checkbox" id="openclaw-import-strict" checked>
+                      <label class="check-label" for="openclaw-import-strict">Reject unsupported metadata instead of ignoring it</label>
+                    </div>
+                    <div class="actions">
+                      <button type="button" class="primary" id="openclaw-import-button">Import skill</button>
+                    </div>
+                    <div class="admin-status" id="openclaw-import-status">Import a ClawHub zip URL or a local OpenClaw skill path.</div>
+                    <pre class="history-code capability-import-result" id="openclaw-import-result" hidden></pre>
+                  </div>
                 </div>
               </div>
             </div>

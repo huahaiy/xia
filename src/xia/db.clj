@@ -231,6 +231,12 @@
    :skill/tags         {:db/valueType :db.type/keyword :db/cardinality :db.cardinality/many}
    :skill/enabled?     {:db/valueType :db.type/boolean}
    :skill/installed-at {:db/valueType :db.type/instant}
+   :skill/source-format {:db/valueType :db.type/keyword}
+   :skill/source-path   {:db/valueType :db.type/string}
+   :skill/source-url    {:db/valueType :db.type/string}
+   :skill/source-name   {:db/valueType :db.type/string}
+   :skill/import-warnings {:db/valueType :db.type/string :db/cardinality :db.cardinality/many}
+   :skill/imported-from-openclaw? {:db/valueType :db.type/boolean}
 
    ;; --- Working Memory (crash-recovery snapshots) ---
    :wm/id               {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
@@ -1395,7 +1401,11 @@
 ;; Skills (markdown instructions)
 ;; ---------------------------------------------------------------------------
 
-(defn install-skill! [{:keys [id name description content doc version tags]}]
+(defn install-skill!
+  [{:keys [id name description content doc version tags
+           source-format source-path source-url source-name
+           import-warnings
+           imported-from-openclaw?]}]
   (transact! [(cond-> {:skill/id           id
                         :skill/name         (or name (clojure.core/name id))
                         :skill/description  (or description "")
@@ -1404,6 +1414,12 @@
                         :skill/tags         (or tags #{})
                         :skill/enabled?     true
                         :skill/installed-at (java.util.Date.)}
+                source-format (assoc :skill/source-format source-format)
+                source-path (assoc :skill/source-path source-path)
+                source-url (assoc :skill/source-url source-url)
+                source-name (assoc :skill/source-name source-name)
+                (seq import-warnings) (assoc :skill/import-warnings import-warnings)
+                (some? imported-from-openclaw?) (assoc :skill/imported-from-openclaw? imported-from-openclaw?)
                 doc (assoc :skill/doc doc))]))
 
 (defn get-skill [skill-id]

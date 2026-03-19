@@ -20,6 +20,7 @@
             [xia.schedule :as schedule]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
+            [xia.skill.openclaw :as openclaw-skill]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
     [java.nio.charset StandardCharsets]
@@ -983,13 +984,29 @@
    :approval    (some-> (:tool/approval tool) name)
    :enabled     (boolean (:tool/enabled? tool))})
 
-(defn- skill->admin-body
+(defn- skill->body
   [skill]
   {:id          (some-> (:skill/id skill) name)
    :name        (:skill/name skill)
    :description (:skill/description skill)
    :version     (:skill/version skill)
-   :enabled     (boolean (:skill/enabled? skill))})
+   :tags        (->> (or (:skill/tags skill) [])
+                     (map name)
+                     sort
+                     vec)
+   :enabled     (boolean (:skill/enabled? skill))
+   :source_format (some-> (:skill/source-format skill) name)
+   :source_path   (:skill/source-path skill)
+   :source_url    (:skill/source-url skill)
+   :source_name   (:skill/source-name skill)
+   :import_warnings (->> (or (:skill/import-warnings skill) [])
+                         sort
+                         vec)
+   :imported_from_openclaw (boolean (:skill/imported-from-openclaw? skill))})
+
+(defn- skill->admin-body
+  [skill]
+  (skill->body skill))
 
 (defn- session-scratch-pad
   [session-id pad-id]
@@ -1738,7 +1755,7 @@
                      (map tool->admin-body)
                      sort-by-name)
      :skills    (->> (db/list-skills)
-                     (map skill->admin-body)
+                     (map skill->body)
                      sort-by-name)}))
 
 (defn- handle-save-provider [req]
@@ -2123,14 +2140,42 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
+(defn- handle-import-openclaw-skill [req]
+  (try
+    (let [data    (or (read-body req) {})
+          source  (nonblank-str (get data "source"))
+          strict? (if (contains? data "strict")
+                    (true? (get data "strict"))
+                    true)]
+      (when-not source
+        (throw (ex-info "missing 'source' field" {:field "source"})))
+      (let [report (openclaw-skill/import-openclaw-source! source :strict? strict?)
+            skill  (db/get-skill (:skill-id report))]
+        (json-response 200
+                       {:import {:status         (some-> (:status report) name)
+                                 :skill_id       (some-> (:skill-id report) name)
+                                 :name           (:name report)
+                                 :warnings       (vec (:warnings report))
+                                 :ignored_fields (vec (:ignored-fields report))
+                                 :resources      (mapv (fn [{:keys [path size-bytes]}]
+                                                         {:path path
+                                                          :size_bytes size-bytes})
+                                                       (:resources report))
+                                 :tool_aliases   (mapv (fn [{:keys [id from to]}]
+                                                         {:id   (some-> id name)
+                                                          :from from
+                                                          :to   to})
+                                                       (:tool-aliases report))
+                                 :source         {:format (some-> (get-in report [:source :format]) name)
+                                                  :path   (get-in report [:source :path])
+                                                  :url    (get-in report [:source :url])
+                                                  :name   (get-in report [:source :name])}}
+                        :skill  (skill->body skill)})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
 (defn- handle-skills [_req]
-  (json-response 200 {:skills (mapv (fn [s]
-                                      {:id          (name (:skill/id s))
-                                       :name        (:skill/name s)
-                                       :description (:skill/description s)
-                                       :tags        (mapv name (or (:skill/tags s) []))
-                                       :enabled     (:skill/enabled? s)})
-                                    (db/list-skills))}))
+  (json-response 200 {:skills (mapv skill->body (db/list-skills))}))
 
 (defn- handle-health [_req]
   (json-response 200 {:status "ok" :version "0.1.0"}))
@@ -2305,11 +2350,14 @@
         (and (= method :post) (= uri "/admin/services"))
         (protected-route-response req #(handle-save-service req))
 
-        (and (= method :post) (= uri "/admin/sites"))
-        (protected-route-response req #(handle-save-site req))
+	        (and (= method :post) (= uri "/admin/sites"))
+	        (protected-route-response req #(handle-save-site req))
 
-        (and (= method :delete) admin-site-match)
-        (protected-route-response req #(handle-delete-site (second admin-site-match)))
+	        (and (= method :post) (= uri "/admin/skills/import-openclaw"))
+	        (protected-route-response req #(handle-import-openclaw-skill req))
+
+	        (and (= method :delete) admin-site-match)
+	        (protected-route-response req #(handle-delete-site (second admin-site-match)))
 
         (and (= method :get) (= uri "/skills"))
         (protected-route-response req #(handle-skills req))

@@ -1,5 +1,6 @@
 (ns xia.channel.http-test
   (:require [charred.api :as json]
+            [clojure.java.io :as io]
             [clojure.test :refer :all]
             [clojure.string :as str]
             [xia.agent]
@@ -10,8 +11,10 @@
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
             [xia.test-helpers :refer [minimal-pdf-bytes with-test-db]])
-  (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
+  (:import [java.io ByteArrayInputStream ByteArrayOutputStream File]
            [java.nio.charset StandardCharsets]
+           [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]
            [java.util Arrays Base64 UUID]))
 
 (use-fixtures :each with-test-db)
@@ -823,12 +826,10 @@
     (is (= 201 (:status create-res)))
     (is (= "application/pdf" (get-in create-body ["documents" 0 "media_type"])))
     (is (= 200 (:status get-res)))
-    (if (runtime/native-image?)
-      (do
-        (is (= "failed" (get-in create-body ["documents" 0 "status"])))
-        (is (= 1 (count (get create-body "errors"))))
-        (is (= "failed" (get-in get-body ["document" "status"]))))
-      (is (.contains ^String (get-in get-body ["document" "text"]) "Hello multipart PDF")))))
+    (is (= "ready" (get-in create-body ["documents" 0 "status"])))
+    (is (= [] (get create-body "errors")))
+    (is (= "ready" (get-in get-body ["document" "status"])))
+    (is (.contains ^String (get-in get-body ["document" "text"]) "Hello multipart PDF"))))
 
 (deftest local-document-multipart-route-reports-partial-upload-errors
   (let [sid      (str (db/create-session! :http))
@@ -1043,7 +1044,12 @@
   (db/install-skill! {:id          :demo-skill
                       :name        "Demo skill"
                       :description "skill desc"
-                      :content     "content"})
+                      :content     "content"
+                      :source-format :openclaw-zip-url
+                      :source-url "https://clawhub.ai/downloads/demo-skill.zip"
+                      :source-name "demo-skill.zip"
+                      :import-warnings ["Ignored unsupported frontmatter field `homepage`."]
+                      :imported-from-openclaw? true})
   (let [response (#'http/router {:uri            "/admin/config"
                                  :request-method :get
                                  :headers        (ui-headers)})
@@ -1101,7 +1107,49 @@
     (is (not (contains? site "password")))
     (is (= "session" (get tool "approval")))
     (is (= true (get tool "enabled")))
-    (is (= true (get skill "enabled")))))
+    (is (= true (get skill "enabled")))
+    (is (= "openclaw-zip-url" (get skill "source_format")))
+    (is (= "https://clawhub.ai/downloads/demo-skill.zip" (get skill "source_url")))
+    (is (= "demo-skill.zip" (get skill "source_name")))
+    (is (= true (get skill "imported_from_openclaw")))
+    (is (= ["Ignored unsupported frontmatter field `homepage`."] (get skill "import_warnings")))))
+
+(deftest admin-openclaw-import-route-imports-skill-bundle
+  (let [^File root (.toFile (Files/createTempDirectory "xia-http-openclaw" (into-array FileAttribute [])))]
+    (try
+      (spit (io/file root "SKILL.md")
+            (str "---\n"
+                 "name: HTTP Imported Skill\n"
+                 "description: Imported through admin route.\n"
+                 "tags: [browser]\n"
+                 "---\n\n"
+                 "Use the `browser` tool to inspect the page.\n"))
+      (spit (io/file root "notes.txt")
+            "Capture the title and the key facts.\n")
+      (let [response (#'http/router {:uri            "/admin/skills/import-openclaw"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"source" (.getAbsolutePath root)})})
+            body     (response-json response)
+            imported (get body "import")
+            skill    (get body "skill")
+            stored   (db/get-skill :http-imported-skill)]
+        (is (= 200 (:status response)))
+        (is (= "imported" (get imported "status")))
+        (is (= "http-imported-skill" (get imported "skill_id")))
+        (is (= "openclaw-dir" (get-in imported ["source" "format"])))
+        (is (= (.getAbsolutePath root) (get-in imported ["source" "path"])))
+        (is (= "HTTP Imported Skill" (get skill "name")))
+        (is (= ["browser"] (get skill "tags")))
+        (is (= true (get skill "imported_from_openclaw")))
+        (is (= "openclaw-dir" (get skill "source_format")))
+        (is (empty? (get skill "import_warnings")))
+        (is (= "HTTP Imported Skill" (:skill/name stored)))
+        (is (str/includes? (:skill/content stored) "## Xia Compatibility"))
+        (is (str/includes? (:skill/content stored) "## Bundled Resources")))
+      (finally
+        (doseq [file (reverse (file-seq root))]
+          (Files/deleteIfExists (.toPath ^File file)))))))
 
 (deftest admin-memory-retention-route-saves-and-clears-settings
   (let [save-response (#'http/router {:uri            "/admin/memory-retention"

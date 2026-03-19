@@ -51,6 +51,9 @@ const state = {
   oauthSaving: false,
   serviceSaving: false,
   siteSaving: false,
+  openclawImporting: false,
+  openclawImportStatus: 'Import a ClawHub zip URL or a local OpenClaw skill path.',
+  openclawImportReport: null,
   baseStatus: 'Ready',
   liveStatus: null
 };
@@ -165,6 +168,11 @@ const saveSiteEl = document.getElementById('save-site');
 const deleteSiteEl = document.getElementById('delete-site');
 const toolListEl = document.getElementById('tool-list');
 const skillListEl = document.getElementById('skill-list');
+const openclawImportSourceEl = document.getElementById('openclaw-import-source');
+const openclawImportStrictEl = document.getElementById('openclaw-import-strict');
+const openclawImportButtonEl = document.getElementById('openclaw-import-button');
+const openclawImportStatusEl = document.getElementById('openclaw-import-status');
+const openclawImportResultEl = document.getElementById('openclaw-import-result');
 const fileInputEl = document.getElementById('file-input');
 const uploadBtnEl = document.getElementById('upload-btn');
 const localUploadBtnEl = document.getElementById('local-upload-btn');
@@ -357,6 +365,78 @@ function renderCapabilityList(target, items, emptyText, detailFn) {
     card.appendChild(meta);
     target.appendChild(card);
   });
+}
+
+function pluralize(count, singular, plural) {
+  return count === 1 ? singular : (plural || (singular + 's'));
+}
+
+function skillMeta(skill) {
+  const bits = [];
+  if (skill.version) bits.push('version ' + skill.version);
+  if (skill.imported_from_openclaw) bits.push('OpenClaw');
+  if (skill.source_format) bits.push(skill.source_format);
+  if (skill.source_name) bits.push(skill.source_name);
+  else if (skill.source_url) bits.push(skill.source_url);
+  else if (skill.source_path) bits.push(skill.source_path);
+  if (Array.isArray(skill.import_warnings) && skill.import_warnings.length) {
+    bits.push(skill.import_warnings.length + ' ' + pluralize(skill.import_warnings.length, 'warning'));
+  }
+  if (skill.description) bits.push(skill.description);
+  return bits.join(' • ');
+}
+
+function formatOpenClawImportReport(report) {
+  if (!report || !report.import) return '';
+  const importReport = report.import;
+  const skill = report.skill || {};
+  const lines = [
+    'Skill: ' + firstNonEmpty(skill.name, importReport.name || skill.id || importReport.skill_id || 'Unknown'),
+    'ID: ' + firstNonEmpty(skill.id, importReport.skill_id || 'Unknown'),
+    'Status: ' + firstNonEmpty(importReport.status, 'unknown'),
+    'Source: ' + [importReport.source && importReport.source.format,
+                  importReport.source && importReport.source.name,
+                  importReport.source && (importReport.source.url || importReport.source.path)]
+      .filter(Boolean)
+      .join(' • ')
+  ];
+
+  if (Array.isArray(importReport.warnings) && importReport.warnings.length) {
+    lines.push('');
+    lines.push('Warnings:');
+    importReport.warnings.forEach((warning) => lines.push('- ' + warning));
+  }
+
+  if (Array.isArray(importReport.tool_aliases) && importReport.tool_aliases.length) {
+    lines.push('');
+    lines.push('Tool aliases:');
+    importReport.tool_aliases.forEach((alias) => {
+      lines.push('- ' + firstNonEmpty(alias.from, alias.id || 'alias') + ' -> ' + firstNonEmpty(alias.to, 'unmapped'));
+    });
+  }
+
+  if (Array.isArray(importReport.resources) && importReport.resources.length) {
+    lines.push('');
+    lines.push('Attached resources:');
+    importReport.resources.forEach((resource) => {
+      const size = typeof resource.size_bytes === 'number' ? (' (' + formatBytes(resource.size_bytes) + ')') : '';
+      lines.push('- ' + firstNonEmpty(resource.path, 'resource') + size);
+    });
+  }
+
+  return lines.filter((line, index, source) => line || (source[index - 1] && source[index - 1] !== '')).join('\n');
+}
+
+function renderOpenClawImport() {
+  openclawImportStatusEl.textContent = state.openclawImportStatus;
+  if (state.openclawImportReport) {
+    openclawImportResultEl.hidden = false;
+    openclawImportResultEl.textContent = formatOpenClawImportReport(state.openclawImportReport);
+  } else {
+    openclawImportResultEl.hidden = true;
+    openclawImportResultEl.textContent = '';
+  }
+  updateAdminButtons();
 }
 
 function providerMeta(provider) {
@@ -616,6 +696,9 @@ function updateAdminButtons() {
   saveSiteEl.disabled = state.siteSaving;
   newSiteEl.disabled = state.siteSaving;
   deleteSiteEl.disabled = state.siteSaving || !state.activeSiteId;
+  openclawImportSourceEl.disabled = state.openclawImporting;
+  openclawImportStrictEl.disabled = state.openclawImporting;
+  openclawImportButtonEl.disabled = state.openclawImporting || !openclawImportSourceEl.value.trim();
 }
 
 function renderProviderList() {
@@ -721,10 +804,9 @@ function renderCapabilities() {
     skillListEl,
     state.admin.skills,
     'No skills installed.',
-    (skill) => [skill.id, skill.version ? ('version ' + skill.version) : '', skill.description || '']
-      .filter(Boolean)
-      .join(' • ')
+    skillMeta
   );
+  renderOpenClawImport();
 }
 
 function resetProviderForm(statusText) {
@@ -1101,6 +1183,43 @@ async function loadAdminConfig() {
     renderCapabilities();
   } catch (err) {
     console.error(err);
+  }
+}
+
+async function importOpenClawSkill() {
+  const source = openclawImportSourceEl.value.trim();
+  if (!source || state.openclawImporting) return;
+  state.openclawImporting = true;
+  state.openclawImportStatus = 'Importing skill...';
+  renderOpenClawImport();
+  try {
+    const data = await fetchJson('/admin/skills/import-openclaw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: source,
+        strict: openclawImportStrictEl.checked
+      })
+    });
+    state.openclawImportReport = {
+      import: data.import || null,
+      skill: data.skill || null
+    };
+    await loadAdminConfig();
+    const importedName = firstNonEmpty(data.skill && data.skill.name, data.import && data.import.name, 'skill');
+    const warningCount = Array.isArray(data.import && data.import.warnings) ? data.import.warnings.length : 0;
+    state.openclawImportStatus = warningCount
+      ? ('Imported ' + importedName + ' with ' + warningCount + ' ' + pluralize(warningCount, 'warning') + '.')
+      : ('Imported ' + importedName + '.');
+    openclawImportSourceEl.value = '';
+    setStatus('Imported OpenClaw skill');
+  } catch (err) {
+    state.openclawImportReport = null;
+    state.openclawImportStatus = err.message || 'Failed to import skill.';
+    setStatus('Failed to import OpenClaw skill');
+  } finally {
+    state.openclawImporting = false;
+    renderOpenClawImport();
   }
 }
 
@@ -2546,6 +2665,14 @@ newSiteEl.addEventListener('click', () => {
 
 saveSiteEl.addEventListener('click', () => saveSite());
 deleteSiteEl.addEventListener('click', () => deleteSite());
+openclawImportButtonEl.addEventListener('click', () => importOpenClawSkill());
+openclawImportSourceEl.addEventListener('input', () => updateAdminButtons());
+openclawImportSourceEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    importOpenClawSkill();
+  }
+});
 
 newChatEl.addEventListener('click', () => {
   if (!discardScratchChanges()) return;
