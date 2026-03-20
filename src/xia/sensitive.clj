@@ -13,6 +13,7 @@
     :site-cred/username
     :site-cred/password
     :session/history-recap
+    :session/tool-recap
     :message/content
     :schedule-run/result
     :schedule-run/error})

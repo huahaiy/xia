@@ -547,3 +547,62 @@
       (is (not (str/includes? (get-in (last @llm-calls) [1 :content])
                               "message 0"))
           "Incremental recap updates should only archive the newly evicted message"))))
+
+(deftest test-build-messages-data-preserves-archived-tool-recap
+  (let [sid        (db/create-session! :terminal)
+        llm-calls  (atom 0)
+        tool-calls [{"id" "call_1"
+                     "function" {"name" "web-search"
+                                 "arguments" "{\"q\":\"weather in sf\"}"}}]]
+    (db/set-config! :context/recent-history-message-limit "4")
+    (db/add-message! sid :user "Check the weather in San Francisco.")
+    (db/add-message! sid :assistant "I will look that up." :tool-calls tool-calls)
+    (db/add-message! sid :tool nil
+                     :tool-result {"success?" true
+                                   "results" [{"title" "Forecast"
+                                               "summary" "Rain later today"}]}
+                     :tool-id "call_1")
+    (db/add-message! sid :assistant "It will rain later today.")
+    (db/add-message! sid :user (str "Anything else? " (token-rich-text "else" 60)))
+    (db/add-message! sid :assistant (str "No. " (token-rich-text "no" 60)))
+    (db/add-message! sid :user (str "Thanks. " (token-rich-text "thanks" 60)))
+    (db/add-message! sid :assistant (str "You're welcome. " (token-rich-text "welcome" 60)))
+    (with-redefs [xia.context/assemble-system-prompt-data
+                  (fn [_sid _opts]
+                    {:prompt "system"
+                     :used-fact-eids []})
+                  xia.llm/chat-simple
+                  (fn [_messages & _]
+                    (swap! llm-calls inc)
+                    "Earlier conversation recap.")]
+      (let [result        (#'xia.context/build-messages-data
+                           sid
+                           {:provider {:llm.provider/id :default}})
+            message-texts (map :content (:messages result))]
+        (is (= 1 @llm-calls))
+        (is (some #(str/includes? % "Archived tool execution recap") message-texts))
+        (is (some #(str/includes? % "web-search[call_1]") message-texts))
+        (is (some #(str/includes? % "\"title\":\"Forecast\"") message-texts)))
+      (with-redefs [xia.llm/chat-simple
+                    (fn [& _]
+                      (throw (ex-info "should not be called" {})))]
+        (let [result        (#'xia.context/build-messages-data
+                             sid
+                             {:provider {:llm.provider/id :default}})
+              message-texts (map :content (:messages result))]
+          (is (some #(str/includes? % "Archived tool execution recap") message-texts))
+          (is (some #(str/includes? % "web-search[call_1]") message-texts)))))))
+
+(deftest test-compact-history-preserves-existing-recap-messages
+  (let [tool-recap {:role "system"
+                    :content "[Archived tool execution recap:\n- web-search[call_1] args={\"q\":\"weather\"} => {\"success?\":true}\nUse this to avoid repeating tool calls unless the task has changed or fresher data is required.]"}
+        convo-recap {:role "system"
+                     :content "[Conversation recap: Earlier messages were summarized.]"}
+        history     (into [tool-recap convo-recap]
+                          (for [i (range 8)]
+                            {:role (if (even? i) "user" "assistant")
+                             :content (str "message " i " " (token-rich-text (str "m" i) 120))}))]
+    (with-redefs [xia.llm/chat-simple (fn [& _] "fresh recap")]
+      (let [result (ctx/compact-history history 400)]
+        (is (= tool-recap (first result)))
+        (is (= convo-recap (second result)))))))

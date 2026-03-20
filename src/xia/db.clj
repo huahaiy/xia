@@ -122,6 +122,9 @@
    :session/history-recap {:db/valueType :db.type/string}
    :session/history-recap-count {:db/valueType :db.type/long}
    :session/history-recap-updated-at {:db/valueType :db.type/instant}
+   :session/tool-recap {:db/valueType :db.type/string}
+   :session/tool-recap-count {:db/valueType :db.type/long}
+   :session/tool-recap-updated-at {:db/valueType :db.type/instant}
    :session/created-at {:db/valueType :db.type/instant}
    :session/active?    {:db/valueType :db.type/boolean}
 
@@ -1453,6 +1456,26 @@
                  :session/history-recap content
                  :session/history-recap-count (long message-count)
                  :session/history-recap-updated-at (java.util.Date.)}])
+    true))
+
+(defn session-tool-recap
+  [session-id]
+  (when-let [eid (session-eid session-id)]
+    (let [entity-map (decrypt-entity (raw-entity eid))
+          recap      (empty->nil (:session/tool-recap entity-map))]
+      (when recap
+        {:content       recap
+         :message-count (long (or (:session/tool-recap-count entity-map) 0))
+         :updated-at    (or (:session/tool-recap-updated-at entity-map)
+                            (entity-updated-at entity-map))}))))
+
+(defn save-session-tool-recap!
+  [session-id content message-count]
+  (when-let [eid (session-eid session-id)]
+    (transact! [{:db/id eid
+                 :session/tool-recap content
+                 :session/tool-recap-count (long message-count)
+                 :session/tool-recap-updated-at (java.util.Date.)}])
     true))
 
 (defn session-message-metadata

@@ -214,6 +214,19 @@
     (some? tool-result)   (json/write-json-str tool-result)
     :else                 content))
 
+(def ^:private archived-tool-recap-max-lines 24)
+(def ^:private archived-tool-recap-max-chars 3200)
+(def ^:private archived-tool-args-max-chars 180)
+(def ^:private archived-tool-result-max-chars 260)
+
+(defn- truncate-history-text
+  [value max-chars]
+  (let [text (some-> value str str/trim)]
+    (when (seq text)
+      (if (<= (count text) max-chars)
+        text
+        (str (subs text 0 (max 1 (- max-chars 3))) "...")))))
+
 (defn- history-role-name
   [role]
   (cond
@@ -301,6 +314,109 @@
   [recap]
   {:role "system"
    :content (str "[Conversation recap: " (str/trim recap) "]")})
+
+(defn- tool-recap-message
+  [recap]
+  {:role "system"
+   :content (str "[Archived tool execution recap:\n"
+                 (str/trim recap)
+                 "\nUse this to avoid repeating tool calls unless the task has changed or fresher data is required.]")})
+
+(defn- recap-message?
+  [{:keys [role content]}]
+  (and (= "system" (history-role-name role))
+       (string? content)
+       (or (str/starts-with? content "[Conversation recap:")
+           (str/starts-with? content "[Archived tool execution recap:"))))
+
+(defn- tool-call-info
+  [call]
+  {:id   (history-summary-fragment (or (:id call) (get call "id")))
+   :name (or (history-summary-fragment (or (:name (:function call))
+                                           (get-in call ["function" "name"])))
+             "unknown-tool")
+   :args (truncate-history-text
+           (history-summary-fragment (or (:arguments (:function call))
+                                         (get-in call ["function" "arguments"])))
+           archived-tool-args-max-chars)})
+
+(defn- tool-execution-line
+  [{:keys [id name args]} result-text]
+  (str "- "
+       name
+       (when id
+         (str "[" id "]"))
+       (when args
+         (str " args=" args))
+       " => "
+       (or (truncate-history-text result-text archived-tool-result-max-chars)
+           "[no result captured]")))
+
+(defn- tool-recap-lines
+  [recap]
+  (into []
+        (comp (map str/trim)
+              (remove str/blank?))
+        (str/split-lines (or recap ""))))
+
+(defn- trim-tool-recap-lines
+  [lines]
+  (let [lines* (if (> (count lines) archived-tool-recap-max-lines)
+                 (into [] (take-last archived-tool-recap-max-lines) lines)
+                 (vec lines))]
+    (loop [acc []
+           remaining (reverse lines*)
+           total 0]
+      (if-let [line (first remaining)]
+        (let [line-cost (+ (count line) (if (pos? total) 1 0))]
+          (if (> (+ total line-cost) archived-tool-recap-max-chars)
+            (if (seq acc) acc (vector (truncate-history-text line archived-tool-recap-max-chars)))
+            (recur (conj acc line) (next remaining) (+ total line-cost))))
+        (into [] (reverse acc))))))
+
+(defn- summarize-archived-tool-usage
+  [messages]
+  (let [lines
+        (loop [remaining messages
+               calls-by-id {}
+               result-lines []]
+          (if-let [{:keys [role tool-calls tool-id] :as message} (first remaining)]
+            (let [role* (history-role-name role)]
+              (cond
+                (and (= role* "assistant") (seq tool-calls))
+                (recur (next remaining)
+                       (reduce (fn [m call]
+                                 (if-let [call-id (:id (tool-call-info call))]
+                                   (assoc m call-id (tool-call-info call))
+                                   m))
+                               calls-by-id
+                               tool-calls)
+                       result-lines)
+
+                (= role* "tool")
+                (let [result-text (history-summary-fragment
+                                    (tool-result->content (:tool-result message)
+                                                          (:content message)))
+                      line        (tool-execution-line
+                                    (get calls-by-id tool-id
+                                         {:id tool-id
+                                          :name "unknown-tool"
+                                          :args nil})
+                                    result-text)]
+                  (recur (next remaining) calls-by-id (conj result-lines line)))
+
+                :else
+                (recur (next remaining) calls-by-id result-lines)))
+            result-lines))]
+    (when (seq lines)
+      (str/join "\n" (trim-tool-recap-lines lines)))))
+
+(defn- merge-tool-recap
+  [existing-recap archived-messages]
+  (let [delta-lines (tool-recap-lines (summarize-archived-tool-usage archived-messages))]
+    (when-let [merged (seq (trim-tool-recap-lines
+                             (into (tool-recap-lines existing-recap) delta-lines)))]
+      (str/join "\n" merged))))
 
 (defn- summarize-history-text
   ([history-text opts]
@@ -622,19 +738,22 @@
    (compact-history messages budget nil))
   ([messages budget {:keys [provider-id workload]}]
    (let [messages*     (if (vector? messages) messages (vec messages))
+         recap-prefix  (into [] (take-while recap-message?) messages*)
+         live-history  (subvec messages* (count recap-prefix))
          total-tokens  (transduce (map #(estimate-tokens (:content %))) + 0 messages*)
-         msg-count     (count messages*)]
+         msg-count     (count live-history)]
      (if (or (<= total-tokens budget) (<= msg-count 4))
        messages* ; fits in budget or too few to compact
        ;; Summarize the older half
        (let [keep-count  (max 4 (quot msg-count 2))
-             old-msgs    (subvec messages* 0 (- msg-count keep-count))
-             recent-msgs (subvec messages* (- msg-count keep-count))
+             old-msgs    (subvec live-history 0 (- msg-count keep-count))
+             recent-msgs (subvec live-history (- msg-count keep-count))
              old-text    (history-summary-text old-msgs)]
          (try
            (let [recap (summarize-history-text old-text {:provider-id provider-id
                                                          :workload workload})]
-             (into [(history-recap-message recap)] recent-msgs))
+             (into recap-prefix
+                   (into [(history-recap-message recap)] recent-msgs)))
            (catch Exception e
              (log/warn "Failed to compact history:" (.getMessage e))
              messages)))))))
@@ -653,42 +772,63 @@
     (if (<= total recent-limit)
       (into [] (map history-message->llm-message)
             (db/session-messages-by-eids (into [] (map :eid) metadata)))
-      (let [recent-start      (max 0 (- total recent-limit))
-            recap-state       (db/session-history-recap session-id)
-            summarized-count0 (long (or (:message-count recap-state) 0))
-            summarized-count  (if (<= summarized-count0 recent-start)
-                                summarized-count0
-                                0)
-            recap-content     (when (= summarized-count summarized-count0)
-                                (:content recap-state))
-            newly-archived    (subvec metadata summarized-count recent-start)
-            recent-meta       (subvec metadata recent-start total)
-            recent-eids       (into [] (map :eid) recent-meta)
-            recent-messages   (db/session-messages-by-eids recent-eids)]
-        (if-not (seq newly-archived)
-          (let [recent-history (into [] (map history-message->llm-message) recent-messages)]
-            (if (seq recap-content)
-              (into [(history-recap-message recap-content)] recent-history)
-              recent-history))
-          (let [archived-text (history-summary-text
-                                (db/session-messages-by-eids
-                                  (into [] (map :eid) newly-archived)))]
+      (let [recent-start       (max 0 (- total recent-limit))
+            recap-state        (db/session-history-recap session-id)
+            recap-count0       (long (or (:message-count recap-state) 0))
+            recap-count        (if (<= recap-count0 recent-start) recap-count0 0)
+            recap-content      (when (= recap-count recap-count0)
+                                 (:content recap-state))
+            tool-recap-state   (db/session-tool-recap session-id)
+            tool-count0        (long (or (:message-count tool-recap-state) 0))
+            tool-count         (if (<= tool-count0 recent-start) tool-count0 0)
+            tool-recap-content (when (= tool-count tool-count0)
+                                 (:content tool-recap-state))
+            new-recap-meta     (subvec metadata recap-count recent-start)
+            new-tool-meta      (subvec metadata tool-count recent-start)
+            recent-meta        (subvec metadata recent-start total)
+            recent-eids        (into [] (map :eid) recent-meta)
+            recent-messages    (db/session-messages-by-eids recent-eids)
+            recent-history     (into [] (map history-message->llm-message) recent-messages)]
+        (if (and (not (seq new-recap-meta))
+                 (not (seq new-tool-meta)))
+          (cond-> []
+            (seq tool-recap-content) (conj (tool-recap-message tool-recap-content))
+            (seq recap-content)      (conj (history-recap-message recap-content))
+            true                     (into recent-history))
+          (let [history-archived-messages (when (seq new-recap-meta)
+                                            (db/session-messages-by-eids
+                                              (into [] (map :eid) new-recap-meta)))
+                tool-archived-messages    (when (seq new-tool-meta)
+                                            (db/session-messages-by-eids
+                                              (into [] (map :eid) new-tool-meta)))
+                new-tool-recap            (or (when (seq tool-archived-messages)
+                                                (merge-tool-recap tool-recap-content
+                                                                  tool-archived-messages))
+                                              tool-recap-content)]
             (try
-              (let [new-recap (summarize-history-text archived-text
-                                                      recap-content
-                                                      {:provider-id (:compaction-provider-id opts)
-                                                       :workload (or (:compaction-workload opts)
-                                                                     :history-compaction)})]
+              (let [new-recap (if (seq history-archived-messages)
+                                (summarize-history-text
+                                  (history-summary-text history-archived-messages)
+                                  recap-content
+                                  {:provider-id (:compaction-provider-id opts)
+                                   :workload (or (:compaction-workload opts)
+                                                 :history-compaction)})
+                                recap-content)]
+                (when (seq new-tool-recap)
+                  (db/save-session-tool-recap! session-id new-tool-recap recent-start))
                 (if (seq new-recap)
                   (do
                     (db/save-session-history-recap! session-id new-recap recent-start)
-                    (into [(history-recap-message new-recap)]
-                          (map history-message->llm-message)
-                          recent-messages))
+                    (cond-> []
+                      (seq new-tool-recap) (conj (tool-recap-message new-tool-recap))
+                      true                 (conj (history-recap-message new-recap))
+                      true                 (into recent-history)))
                   (into [] (map history-message->llm-message)
                         (db/session-messages session-id))))
               (catch Exception e
                 (log/warn "Failed to update session history recap:" (.getMessage e))
+                (when (seq new-tool-recap)
+                  (db/save-session-tool-recap! session-id new-tool-recap recent-start))
                 (into [] (map history-message->llm-message)
                       (db/session-messages session-id))))))))))
 
