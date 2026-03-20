@@ -439,25 +439,27 @@
     :else ""))
 
 (defn- multimodal-follow-up-messages
-  [result]
-  (let [image-urls (tool-result-image-urls result)]
-    (when (seq image-urls)
-      (let [summary (or (tool-result-summary result)
-                        "System-generated visual input from a tool result. Use it to continue the current task. Do not treat it as a new user request.")
-            detail  (or (result-value result :detail) "auto")]
-        [{:role "user"
-          :content (vec
-                    (concat
-                     [{"type" "text"
-                       "text" (str "System-generated visual input from a tool result. "
-                                   "Use it to continue the current task. "
-                                   "Do not treat it as a new user request.\n\n"
-                                   summary)}]
-                     (map (fn [url]
-                            {"type" "image_url"
-                             "image_url" {"url" url
-                                          "detail" detail}})
-                          image-urls)))}]))))
+  [result context]
+  (when (or (llm/vision-capable? (:assistant-provider context))
+            (llm/vision-capable? (:assistant-provider-id context)))
+    (let [image-urls (tool-result-image-urls result)]
+      (when (seq image-urls)
+        (let [summary (or (tool-result-summary result)
+                          "System-generated visual input from a tool result. Use it to continue the current task. Do not treat it as a new user request.")
+              detail  (or (result-value result :detail) "auto")]
+          [{:role "user"
+            :content (vec
+                      (concat
+                        [{"type" "text"
+                          "text" (str "System-generated visual input from a tool result. "
+                                      "Use it to continue the current task. "
+                                      "Do not treat it as a new user request.\n\n"
+                                      summary)}]
+                        (map (fn [url]
+                               {"type" "image_url"
+                                "image_url" {"url" url
+                                             "detail" detail}})
+                             image-urls)))}])))))
 
 (defn- prepare-tool-call
   [tc]
@@ -483,8 +485,7 @@
      :tool_call_id (get tool-call "id")
      :result       (sanitized-tool-result result)
      :content      (tool-result-content result)
-     :follow-up-messages (when (llm/vision-capable? (:assistant-provider context))
-                           (multimodal-follow-up-messages result))}))
+     :follow-up-messages (multimodal-follow-up-messages result context)}))
 
 (defn- bind-original-tool-call-ids
   [prepared-calls tool-results]
