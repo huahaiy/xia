@@ -151,7 +151,21 @@
   {'slurp       (blocked-sci-fn 'clojure.core/slurp)
    'spit        (blocked-sci-fn 'clojure.core/spit)
    'load-file   (blocked-sci-fn 'clojure.core/load-file)
-   'load-reader (blocked-sci-fn 'clojure.core/load-reader)})
+   'load-reader (blocked-sci-fn 'clojure.core/load-reader)
+   ;; Dynamic resolution is unnecessary for tool handlers and can hand back
+   ;; vars/classes we intentionally do not expose in the sandbox.
+   'resolve     (blocked-sci-fn 'clojure.core/resolve)
+   'ns-resolve  (blocked-sci-fn 'clojure.core/ns-resolve)
+   'find-var    (blocked-sci-fn 'clojure.core/find-var)
+   'requiring-resolve (blocked-sci-fn 'clojure.core/requiring-resolve)
+   'find-ns     (blocked-sci-fn 'clojure.core/find-ns)
+   'the-ns      (blocked-sci-fn 'clojure.core/the-ns)
+   'all-ns      (blocked-sci-fn 'clojure.core/all-ns)
+   'ns-publics  (blocked-sci-fn 'clojure.core/ns-publics)
+   'ns-interns  (blocked-sci-fn 'clojure.core/ns-interns)
+   'ns-map      (blocked-sci-fn 'clojure.core/ns-map)
+   'ns-refers   (blocked-sci-fn 'clojure.core/ns-refers)
+   'ns-aliases  (blocked-sci-fn 'clojure.core/ns-aliases)})
 
 (def ^:private sci-io-overrides
   {'delete-file   (blocked-sci-fn 'clojure.java.io/delete-file)
@@ -176,6 +190,18 @@
     spit
     load-file
     load-reader
+    resolve
+    ns-resolve
+    find-var
+    requiring-resolve
+    find-ns
+    the-ns
+    all-ns
+    ns-publics
+    ns-interns
+    ns-map
+    ns-refers
+    ns-aliases
     clojure.java.io/delete-file
     clojure.java.io/file
     clojure.java.io/input-stream

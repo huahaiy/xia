@@ -12,9 +12,43 @@
 
 (use-fixtures :each with-test-db)
 
-(deftest system-class-is-not-exposed-to-sci
-  (is (thrown? Exception
-               (sci-env/eval-string "(System/getenv \"PATH\")"))))
+(defn- sci-blocked?
+  [code]
+  (try
+    (sci-env/eval-string code)
+    false
+    (catch Throwable _
+      true)))
+
+(deftest environment-and-reflection-access-are-blocked-in-sci
+  (doseq [code ["(System/getenv \"PATH\")"
+                "(System/getProperty \"user.home\")"
+                "(java.lang.System/getenv \"PATH\")"
+                "(java.lang.System/getProperty \"user.home\")"
+                "(Class/forName \"java.lang.System\")"
+                "(java.lang.Class/forName \"java.lang.System\")"]]
+    (is (sci-blocked? code) code)))
+
+(deftest dynamic-var-and-namespace-resolution-are-blocked-in-sci
+  (doseq [code ["(resolve 'slurp)"
+                "((resolve 'slurp) \"/etc/hosts\")"
+                "(ns-resolve 'clojure.core 'slurp)"
+                "((ns-resolve 'clojure.core 'slurp) \"/etc/hosts\")"
+                "(find-var 'clojure.core/slurp)"
+                "((find-var 'clojure.core/slurp) \"/etc/hosts\")"
+                "(var clojure.core/slurp)"
+                "(#'clojure.core/slurp \"/etc/hosts\")"
+                "(requiring-resolve 'xia.crypto/env)"
+                "((requiring-resolve 'xia.crypto/env) \"PATH\")"
+                "(find-ns 'clojure.core)"
+                "(the-ns 'clojure.core)"
+                "(all-ns)"
+                "(ns-publics 'clojure.core)"
+                "(ns-interns 'clojure.core)"
+                "(ns-map 'clojure.core)"
+                "(ns-refers 'clojure.core)"
+                "(ns-aliases 'clojure.core)"]]
+    (is (sci-blocked? code) code)))
 
 (deftest sci-eval-times-out
   (xia.db/set-config! :tool/sci-eval-timeout-ms 100)

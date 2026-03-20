@@ -107,8 +107,7 @@ intentionally want to expose it beyond the local machine.
 - Keep an assistant that remembers your projects, contacts, preferences, and
   prior conversations.
 - Let Xia research websites, follow links, fill forms, and return structured
-  results through Playwright browser automation. On first use, Xia can detect
-  missing Playwright browser binaries and install them automatically. On Linux,
+  results through browser automation.
 - Connect services such as Google or Github through static credentials or OAuth,
   then let Xia use them without exposing secrets to tools.
 - Upload PDFs, DOCX/XLSX/PPTX files, Markdown, and other text-like documents so
