@@ -158,6 +158,48 @@
             :assistant-response "All set."}
            @reviewed))))
 
+(deftest process-message-continues-when-working-memory-update-fails
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _]
+                                                       (throw (ex-info "embedding unavailable"
+                                                                       {:type :embedding-service-failure})))
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-simple                (fn [_messages & _opts] "All set.")
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (is (= [[:user "hello"]
+            [:assistant "All set."]]
+           (->> (db/session-messages session-id)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
+
+(deftest process-message-continues-when-fact-utility-review-scheduling-fails
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids [11]})
+                  xia.llm/chat-simple                (fn [_messages & _opts] "All set.")
+                  xia.agent/schedule-fact-utility-review!
+                  (fn [& _]
+                    (throw (ex-info "fact review queue unavailable" {:type :fact-review-failure})))]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (is (= [[:user "hello"]
+            [:assistant "All set."]]
+           (->> (db/session-messages session-id)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
+
 (deftest process-message-injects-visual-tool-results-as-follow-up-user-input
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom [])]

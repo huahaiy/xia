@@ -223,15 +223,28 @@ Rules:
   ([session-id terms semantic-query resource-session-id]
    (let [fts-query      (str/join " " terms)
          semantic-query (or semantic-query fts-query)
-         local-doc-session-id (or resource-session-id session-id)]
+         local-doc-session-id (or resource-session-id session-id)
+         safe-search    (fn [step f]
+                          (try
+                            (f)
+                            (catch Exception e
+                              (log/warn e "Working-memory search step failed; continuing with empty results"
+                                        {:step step
+                                         :session-id session-id})
+                              [])))]
     (when (or (not (str/blank? fts-query))
               (not (str/blank? semantic-query)))
-      {:nodes    (memory/search-nodes semantic-query :fts-query fts-query :top 10)
-       :facts    (memory/search-facts semantic-query :fts-query fts-query :top 15)
-       :episodes (memory/search-episodes semantic-query :fts-query fts-query :top 5)
-       :local-docs (memory/search-local-docs local-doc-session-id semantic-query
-                                             :fts-query fts-query
-                                             :top 4)}))))
+      {:nodes      (safe-search :nodes
+                                #(memory/search-nodes semantic-query :fts-query fts-query :top 10))
+       :facts      (safe-search :facts
+                                #(memory/search-facts semantic-query :fts-query fts-query :top 15))
+       :episodes   (safe-search :episodes
+                                #(memory/search-episodes semantic-query :fts-query fts-query :top 5))
+       :local-docs (safe-search :local-docs
+                                #(memory/search-local-docs local-doc-session-id
+                                                           semantic-query
+                                                           :fts-query fts-query
+                                                           :top 4))}))))
 
 ;; ============================================================================
 ;; Stage 3: Graph Expansion (spreading activation)
@@ -494,6 +507,18 @@ Rules:
              (catch Exception e
                (log/warn "Failed to update topic summary:" (.getMessage e))))))))))
 
+(defn- schedule-topic-update!
+  [session-id]
+  (try
+    (future
+      (try
+        (update-topics! session-id)
+        (catch Exception e
+          (log/warn e "Background topic update failed" {:session-id session-id}))))
+    (catch Exception e
+      (log/warn e "Failed to schedule background topic update" {:session-id session-id})
+      nil)))
+
 (defn- parse-fact-utility
   [value]
   (cond
@@ -658,7 +683,7 @@ Rules:
                (let [interval    (get-in wm [:config :topic-update-interval])
                      turns-since (- (:turn-count wm) (:topic-turn wm))]
                  (when (and interval (>= turns-since interval))
-                   (future (update-topics! sid)))))))
+                   (schedule-topic-update! sid))))))
          (get-wm sid))))))
 
 ;; ============================================================================

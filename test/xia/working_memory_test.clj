@@ -121,6 +121,20 @@
         (is (some #(= "garage.txt" (:name %))
                   (:local-docs results)))))))
 
+(deftest search-knowledge-degrades-when-search-step-fails
+  (with-redefs [xia.memory/search-nodes      (fn [& _]
+                                               (throw (ex-info "embedding unavailable"
+                                                               {:type :embedding-service-failure})))
+                xia.memory/search-facts      (constantly [])
+                xia.memory/search-episodes   (constantly [])
+                xia.memory/search-local-docs (constantly [])]
+    (let [results (wm/search-knowledge (random-uuid) ["atlas"] "atlas")]
+      (is (= {:nodes []
+              :facts []
+              :episodes []
+              :local-docs []}
+             results)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Slot merge with properties
 ;; ---------------------------------------------------------------------------
@@ -399,6 +413,22 @@
         (when clojure-slot
           (is (= "functional" (:paradigm (:properties clojure-slot)))))))
 
+    (wm/clear-wm! sid)))
+
+(deftest update-wm-continues-when-search-step-fails
+  (let [sid (random-uuid)]
+    (db/transact! [{:session/id sid :session/channel :terminal :session/active? true}])
+    (wm/create-wm! sid)
+    (with-redefs [xia.memory/search-nodes      (fn [& _]
+                                                 (throw (ex-info "embedding unavailable"
+                                                                 {:type :embedding-service-failure})))
+                  xia.memory/search-facts      (constantly [])
+                  xia.memory/search-episodes   (constantly [])
+                  xia.memory/search-local-docs (constantly [])]
+      (let [state (wm/update-wm! "Tell me about Atlas" sid :terminal)]
+        (is (= 1 (:turn-count state)))
+        (is (= {} (:slots state)))
+        (is (= [] (:local-doc-refs state)))))
     (wm/clear-wm! sid)))
 
 ;; ---------------------------------------------------------------------------

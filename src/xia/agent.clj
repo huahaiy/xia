@@ -176,6 +176,25 @@
         (catch Exception e
           (log/warn "Failed to review fact utility:" (.getMessage e)))))))
 
+(defn- best-effort-update-working-memory!
+  [session-id user-message channel opts]
+  (try
+    (wm/update-wm! user-message session-id channel opts)
+    (catch Exception e
+      (log/warn e "Working memory update failed; continuing without refreshed WM"
+                {:session-id session-id
+                 :channel channel})
+      nil)))
+
+(defn- launch-fact-utility-review!
+  [fact-eids user-message assistant-response]
+  (try
+    (schedule-fact-utility-review! fact-eids user-message assistant-response)
+    (catch Exception e
+      (log/warn e "Failed to schedule fact utility review; continuing without it"
+                {:fact-count (count fact-eids)})
+      nil)))
+
 (defn- normalize-branch-task
   [task]
   (cond
@@ -474,8 +493,10 @@
                            :artifact-ids artifact-ids)
           (report-status! "Updating working memory"
                           :phase :working-memory)
-          (wm/update-wm! user-message session-id channel
-                         {:resource-session-id resource-session-id})
+          (best-effort-update-working-memory! session-id
+                                             user-message
+                                             channel
+                                             {:resource-session-id resource-session-id})
           (let [{assistant-provider    :provider
                  assistant-provider-id :provider-id}
                 (llm/resolve-provider-selection
@@ -571,7 +592,7 @@
                     (db/add-message! session-id :assistant text
                                      :local-doc-ids local-doc-ids
                                      :artifact-ids artifact-ids)
-                    (schedule-fact-utility-review! used-fact-eids user-message text)
+                    (launch-fact-utility-review! used-fact-eids user-message text)
                     (prompt/status! {:state :done
                                      :phase :complete
                                      :message "Ready"})
