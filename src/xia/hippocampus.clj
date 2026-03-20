@@ -56,6 +56,10 @@ Rules:
 
 (def ^:private importance-batch-size 20)
 (def ^:private default-episode-importance 0.5)
+(defonce ^:private fact-merge-lock
+  ;; Fact dedup depends on a current view of node facts. Keep the read/build/write
+  ;; window serialized so concurrent consolidations do not fan out duplicates.
+  (Object.))
 
 (def ^:private importance-prompt
   "You are rating which episodic memories deserve longer retention.
@@ -235,20 +239,21 @@ Rules:
    update it instead of creating a duplicate. If the new fact contradicts
    an existing one, lower the old fact's confidence and add the new one."
   [node-eid content source-eid]
-  (let [existing (memory/node-facts-with-eids node-eid)
-        similar  (first (filter #(fact-similar? (:content %) content) existing))
-        now      (java.util.Date.)]
-    (if similar
-      ;; Update existing fact (refresh timestamp, keep higher confidence)
-      (let [bottomed-at (:kg.fact/bottomed-at (db/entity (:eid similar)))]
-        (db/transact! (cond-> [[:db/add (:eid similar) :kg.fact/updated-at now]
-                               [:db/add (:eid similar) :kg.fact/decayed-at now]]
-                        bottomed-at
-                        (conj [:db/retract (:eid similar) :kg.fact/bottomed-at bottomed-at]))))
-      ;; No similar fact — add new
-      (memory/add-fact! {:node-eid   node-eid
-                         :content    content
-                         :source-eid source-eid}))))
+  (locking fact-merge-lock
+    (let [existing (memory/node-facts-with-eids node-eid)
+          similar  (first (filter #(fact-similar? (:content %) content) existing))
+          now      (java.util.Date.)]
+      (if similar
+        ;; Update existing fact (refresh timestamp, keep higher confidence)
+        (let [bottomed-at (:kg.fact/bottomed-at (db/entity (:eid similar)))]
+          (db/transact! (cond-> [[:db/add (:eid similar) :kg.fact/updated-at now]
+                                 [:db/add (:eid similar) :kg.fact/decayed-at now]]
+                          bottomed-at
+                          (conj [:db/retract (:eid similar) :kg.fact/bottomed-at bottomed-at]))))
+        ;; No similar fact — add new
+        (memory/add-fact! {:node-eid   node-eid
+                           :content    content
+                           :source-eid source-eid})))))
 
 (defn- node-facts-for-dedup
   [node-eid episode-eid]
@@ -441,8 +446,9 @@ Rules:
   "Merge extracted knowledge into the knowledge graph.
    Includes fact deduplication: similar facts are updated instead of duplicated."
   [extraction episode-eid]
-  (when-let [tx-data (seq (build-merge-tx extraction episode-eid))]
-    (db/transact! tx-data)))
+  (locking fact-merge-lock
+    (when-let [tx-data (seq (build-merge-tx extraction episode-eid))]
+      (db/transact! tx-data))))
 
 ;; ---------------------------------------------------------------------------
 ;; Consolidation
@@ -462,11 +468,12 @@ Rules:
          :summary     summary
          :error       error-message})
       (do
-        (db/transact! (build-merge-tx extraction
-                                      eid
-                                      :mark-processed? true
-                                      :importance (or importance
-                                                      default-episode-importance)))
+        (locking fact-merge-lock
+          (db/transact! (build-merge-tx extraction
+                                        eid
+                                        :mark-processed? true
+                                        :importance (or importance
+                                                        default-episode-importance))))
         (memory/prune-processed-episodes!)
         (log/info "Consolidated episode, extracted"
                   (count (get extraction "entities" []))

@@ -22,6 +22,19 @@
   ^java.util.Date [millis]
   (java.util.Date. (long millis)))
 
+(defn- run-concurrently!
+  [n f]
+  (let [start   (promise)
+        futures (mapv (fn [idx]
+                        (future
+                          @start
+                          (f idx)))
+                      (range n))]
+    (deliver start true)
+    (doseq [fut futures]
+      (is (not= ::timeout (deref fut 5000 ::timeout))
+          "Concurrent helper work should finish without hanging"))))
+
 ;; ---------------------------------------------------------------------------
 ;; keywordize-props (private, test via merge-extraction! behavior)
 ;; ---------------------------------------------------------------------------
@@ -113,6 +126,25 @@
       (is (= #{"She prefers Python for data science work"
                "She prefers Ruby for data science work"}
              contents)))))
+
+(deftest test-dedup-fact-serializes-concurrent-identical-writes
+  (let [node-eid   (th/seed-node! "ConcurrentHong" "person")
+        episode-id (th/seed-episode! "concurrent direct dedup")
+        original   xia.memory/node-facts-with-eids]
+    (with-redefs [xia.memory/node-facts-with-eids
+                  (fn [eid]
+                    (let [facts (original eid)]
+                      (Thread/sleep 40)
+                      facts))]
+      (run-concurrently! 8
+                         (fn [_]
+                           (#'xia.hippocampus/dedup-fact!
+                             node-eid
+                             "likes Clojure"
+                             episode-id))))
+    (let [facts (memory/node-facts node-eid)]
+      (is (= 1 (count facts)))
+      (is (= ["likes Clojure"] (mapv :content facts))))))
 
 ;; ---------------------------------------------------------------------------
 ;; find-or-create-node!
@@ -243,6 +275,29 @@
       (is (= 1 (count (:outgoing edges))))
       (is (= "Acme" (:target (first (:outgoing edges)))))
       (is (= "new retry edge" (:label (first (:outgoing edges))))))))
+
+(deftest test-merge-extraction-serializes-concurrent-fact-dedup
+  (let [node-eid    (th/seed-node! "ConcurrentMergeNode" "concept")
+        extraction  {"entities"  [{"name" "ConcurrentMergeNode"
+                                   "type" "concept"
+                                   "facts" ["prefers Clojure"]}]
+                     "relations" []}
+        episode-eids (mapv #(th/seed-episode! (str "concurrent merge " %))
+                           (range 8))
+        original    xia.memory/node-facts-with-eids]
+    (with-redefs [xia.memory/node-facts-with-eids
+                  (fn [eid]
+                    (let [facts (original eid)]
+                      (Thread/sleep 40)
+                      facts))]
+      (run-concurrently! (count episode-eids)
+                         (fn [idx]
+                           (#'xia.hippocampus/merge-extraction!
+                             extraction
+                             (nth episode-eids idx)))))
+    (let [facts (memory/node-facts node-eid)]
+      (is (= 1 (count facts)))
+      (is (= ["prefers Clojure"] (mapv :content facts))))))
 
 ;; ---------------------------------------------------------------------------
 ;; consolidate-episode! (requires LLM mock)
