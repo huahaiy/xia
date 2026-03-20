@@ -43,6 +43,45 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest process-message-propagates-request-trace-to-status-and-checkpoints
+  (let [session-id   (db/create-session! :scheduler)
+        statuses     (atom [])
+        checkpoints  (atom [])]
+    (prompt/register-status! :scheduler
+                             (fn [status]
+                               (swap! statuses conj (select-keys status
+                                                                 [:state :phase :message
+                                                                  :request-id :correlation-id
+                                                                  :parent-request-id :schedule-id
+                                                                  :session-id]))))
+    (try
+      (binding [prompt/*interaction-context* {:channel :scheduler
+                                              :schedule-id :nightly-review
+                                              :request-id "req-parent"
+                                              :correlation-id "corr-root"}]
+        (with-redefs [xia.tool/tool-definitions          (constantly [])
+                      xia.working-memory/update-wm!      (fn [& _] nil)
+                      xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                      :provider-id :default})
+                      xia.llm/chat-simple                (fn [_messages & _opts] "All set.")
+                      xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
+                                                           (swap! checkpoints conj [schedule-id checkpoint]))]
+          (is (= "All set."
+                 (agent/process-message session-id "hello" :channel :scheduler)))))
+      (is (every? #(= "corr-root" (:correlation-id %)) @statuses))
+      (is (every? #(= "req-parent" (:parent-request-id %)) @statuses))
+      (is (every? #(= :nightly-review (:schedule-id %)) @statuses))
+      (is (every? #(= session-id (:session-id %)) @statuses))
+      (is (every? string? (keep :request-id @statuses)))
+      (is (every? #(not= "req-parent" %) (keep :request-id @statuses)))
+      (is (= 1 (count (distinct (keep :request-id @statuses)))))
+      (is (= :nightly-review (ffirst @checkpoints)))
+      (is (every? #(= "corr-root" (get-in % [1 :correlation-id])) @checkpoints))
+      (is (every? #(= "req-parent" (get-in % [1 :parent-request-id])) @checkpoints))
+      (is (every? string? (map #(get-in % [1 :request-id]) @checkpoints)))
+      (finally
+        (prompt/register-status! :scheduler nil)))))
+
 (deftest process-message-resolves-assistant-provider-once
   (let [session-id        (db/create-session! :terminal)
         selection-calls   (atom 0)
@@ -371,40 +410,78 @@
 (deftest run-branch-tasks-creates-worker-sessions-with_isolated_context
   (let [parent-session-id (db/create-session! :terminal)
         seen              (atom [])]
-    (with-redefs [xia.agent/process-message
-                  (fn [session-id message & {:keys [channel provider-id resource-session-id
-                                                   max-tool-rounds tool-context]}]
-                    (swap! seen conj {:session-id session-id
-                                      :message message
-                                      :channel channel
-                                      :provider-id provider-id
-                                      :resource-session-id resource-session-id
-                                      :tool-context tool-context})
-                    (str "branch result for " session-id))]
-      (let [result (agent/run-branch-tasks
-                     [{:task "site a" :prompt "inspect site a"}
-                      {:task "site b" :prompt "inspect site b"}]
-                     :session-id parent-session-id
-                     :provider-id :default
-                     :objective "compare two sites"
-                     :max-parallel 2
-                     :max-tool-rounds 1)]
-        (is (= 2 (:branch_count result)))
-        (is (= 2 (:completed_count result)))
-        (is (= 0 (:failed_count result)))
-        (is (= 2 (count (:results result))))
-        (is (every? #(= "completed" (:status %)) (:results result)))
-        (is (every? #(not= parent-session-id (:session-id %)) @seen))
-        (is (every? #(= :branch (:channel %)) @seen))
-        (is (every? #(= :default (:provider-id %)) @seen))
-        (is (every? #(= parent-session-id (:resource-session-id %)) @seen))
-        (is (every? true? (map #(get-in % [:tool-context :branch-worker?]) @seen)))
-        (is (every? #(= parent-session-id (get-in % [:tool-context :parent-session-id])) @seen))
-        (let [worker-sessions (db/list-sessions {:include-workers? true})]
-          (is (= 1 (count (db/list-sessions))))
-          (is (= 3 (count worker-sessions)))
-          (is (= 2 (count (filter :worker? worker-sessions))))
-          (is (every? false? (map :active? (filter :worker? worker-sessions)))))))))
+    (binding [prompt/*interaction-context* {:channel :terminal
+                                            :request-id "req-parent"
+                                            :correlation-id "corr-root"}]
+      (with-redefs [xia.agent/process-message
+                    (fn [session-id message & {:keys [channel provider-id resource-session-id
+                                                     max-tool-rounds tool-context]}]
+                      (swap! seen conj {:session-id session-id
+                                        :message message
+                                        :channel channel
+                                        :provider-id provider-id
+                                        :resource-session-id resource-session-id
+                                        :tool-context tool-context})
+                      (str "branch result for " session-id))]
+        (let [result (agent/run-branch-tasks
+                       [{:task "site a" :prompt "inspect site a"}
+                        {:task "site b" :prompt "inspect site b"}]
+                       :session-id parent-session-id
+                       :provider-id :default
+                       :objective "compare two sites"
+                       :max-parallel 2
+                       :max-tool-rounds 1)]
+          (is (= 2 (:branch_count result)))
+          (is (= 2 (:completed_count result)))
+          (is (= 0 (:failed_count result)))
+          (is (= "req-parent" (:request_id result)))
+          (is (= "corr-root" (:correlation_id result)))
+          (is (= 2 (count (:results result))))
+          (is (every? #(= "completed" (:status %)) (:results result)))
+          (is (every? #(not= parent-session-id (:session-id %)) @seen))
+          (is (every? #(= :branch (:channel %)) @seen))
+          (is (every? #(= :default (:provider-id %)) @seen))
+          (is (every? #(= parent-session-id (:resource-session-id %)) @seen))
+          (is (every? true? (map #(get-in % [:tool-context :branch-worker?]) @seen)))
+          (is (every? #(= parent-session-id (get-in % [:tool-context :parent-session-id])) @seen))
+          (is (every? #(= "corr-root" (get-in % [:tool-context :correlation-id])) @seen))
+          (is (every? #(= "req-parent" (get-in % [:tool-context :parent-request-id])) @seen))
+          (is (every? string? (map #(get-in % [:tool-context :request-id]) @seen)))
+          (is (every? #(not= "req-parent" %) (map #(get-in % [:tool-context :request-id]) @seen)))
+          (let [worker-sessions (db/list-sessions {:include-workers? true})]
+            (is (= 1 (count (db/list-sessions))))
+            (is (= 3 (count worker-sessions)))
+            (is (= 2 (count (filter :worker? worker-sessions))))
+            (is (every? false? (map :active? (filter :worker? worker-sessions))))))))))
+
+(deftest run-branch-tasks-captures-throwable-detail-and-trace
+  (let [parent-session-id (db/create-session! :terminal)]
+    (binding [prompt/*interaction-context* {:channel :terminal
+                                            :request-id "req-parent"
+                                            :correlation-id "corr-root"}]
+      (with-redefs [xia.agent/process-message
+                    (fn [_session-id _message & _]
+                      (throw (ex-info "branch exploded"
+                                      {:kind :boom}
+                                      (IllegalStateException. "disk full"))))]
+        (let [result  (agent/run-branch-tasks
+                        [{:task "site a" :prompt "inspect site a"}]
+                        :session-id parent-session-id
+                        :provider-id :default
+                        :max-parallel 1)
+              branch  (first (:results result))
+              detail  (:error-detail branch)]
+          (is (= 1 (:failed_count result)))
+          (is (= "failed" (:status branch)))
+          (is (= "req-parent" (:parent-request-id branch)))
+          (is (= "corr-root" (:correlation-id branch)))
+          (is (string? (:request-id branch)))
+          (is (= "branch exploded" (:error branch)))
+          (is (= "branch exploded" (:message detail)))
+          (is (= "clojure.lang.ExceptionInfo" (:class detail)))
+          (is (= "disk full" (get-in detail [:root-cause :message])))
+          (is (= :boom (get-in detail [:causes 0 :data :kind])))
+          (is (seq (:stack-trace detail))))))))
 
 (deftest run-branch-tasks-times-out-hung-batches
   (let [parent-session-id (db/create-session! :terminal)
