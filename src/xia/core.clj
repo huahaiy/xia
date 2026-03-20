@@ -109,12 +109,16 @@
     (println (if new?
                "Create a master passphrase to protect Xia secrets."
                "Enter the master passphrase to unlock Xia secrets."))
-    (let [passphrase (read-startup-secret "Master passphrase" mode)]
-      (when (and new? (some? passphrase))
-        (let [confirm (read-startup-secret "Confirm master passphrase" mode)]
-          (when-not (= passphrase confirm)
-            (throw (ex-info "Master passphrases did not match" {})))))
-      passphrase)))
+    (loop []
+      (let [passphrase (read-startup-secret "Master passphrase" mode)]
+        (if (and new? (some? passphrase))
+          (let [confirm (read-startup-secret "Confirm master passphrase" mode)]
+            (if (= passphrase confirm)
+              passphrase
+              (do
+                (println "Master passphrases did not match. Please try again.")
+                (recur))))
+          passphrase)))))
 
 (defn- start! [{:keys [db bind port mode crypto-opts]}]
   (ensure-db-dir! db)

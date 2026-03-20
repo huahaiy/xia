@@ -61,3 +61,32 @@
     (is (.endsWith ^String (:key-file (:crypto-opts @started))
                    "/db/.xia/master.key"))
     (is (true? (:allow-insecure-key-file? (:crypto-opts @started))))))
+
+(deftest startup-passphrase-provider-retries-after-mismatch
+  (let [responses (atom ["alpha" "beta" "gamma" "gamma"])
+        prompts    (atom [])
+        provider   (#'xia.core/startup-passphrase-provider "terminal")
+        output     (with-out-str
+                     (with-redefs [xia.core/read-startup-secret
+                                   (fn [label _mode]
+                                     (swap! prompts conj label)
+                                     (let [value (first @responses)]
+                                       (swap! responses subvec 1)
+                                       value))]
+                       (is (= "gamma" (provider {:new? true})))))]
+    (is (= ["Master passphrase"
+            "Confirm master passphrase"
+            "Master passphrase"
+            "Confirm master passphrase"]
+           @prompts))
+    (is (.contains ^String output "Master passphrases did not match. Please try again."))))
+
+(deftest startup-passphrase-provider-skips-confirmation-for-existing-db
+  (let [prompts   (atom [])
+        provider  (#'xia.core/startup-passphrase-provider "terminal")]
+    (with-redefs [xia.core/read-startup-secret
+                  (fn [label _mode]
+                    (swap! prompts conj label)
+                    "unlock-passphrase")]
+      (is (= "unlock-passphrase" (provider {:new? false}))))
+    (is (= ["Master passphrase"] @prompts))))
