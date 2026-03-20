@@ -458,20 +458,25 @@
          (mapv (fn [entity]
                  {:schedule-id (:schedule.state/schedule-id entity)
                   :schedule-name (schedule-name (:schedule.state/schedule-id entity))
-                  :phase (:schedule.state/phase entity)
-                  :checkpoint-at (:schedule.state/checkpoint-at entity)})))))
+                 :phase (:schedule.state/phase entity)
+                 :checkpoint-at (:schedule.state/checkpoint-at entity)})))))
+
+(defn- recent-runs-query
+  [limit]
+  (conj '[:find ?e ?started
+          :in $ ?status
+          :where
+          [?e :schedule-run/status ?status]
+          [?e :schedule-run/started-at ?started]
+          :order-by [?started :desc]]
+        :limit
+        limit))
 
 (defn- recent-runs-by-status
   [status limit]
-  (let [runs (db/q '[:find ?e ?started
-                     :in $ ?status
-                     :where
-                     [?e :schedule-run/status ?status]
-                     [?e :schedule-run/started-at ?started]]
+  (let [runs (db/q (recent-runs-query limit)
                    status)]
     (->> runs
-         (sort-by second #(compare %2 %1))
-         (take limit)
          (map first)
          (map db/entity)
          (mapv (fn [entity]

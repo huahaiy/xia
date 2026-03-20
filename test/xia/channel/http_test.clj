@@ -1081,6 +1081,7 @@
                                  :headers        (ui-headers)})
         body     (response-json response)
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        conversation-context (get body "conversation_context")
         memory-retention (get body "memory_retention")
         knowledge-decay (get body "knowledge_decay")
         local-doc-summarization (get body "local_doc_summarization")
@@ -1103,6 +1104,7 @@
     (is (= ["assistant" "history-compaction"] (get provider "workloads")))
     (is (= 16000 (get provider "system_prompt_budget")))
     (is (= 32000 (get provider "history_budget")))
+    (is (= 24 (get conversation-context "recent_history_message_limit")))
     (is (= 182 (get memory-retention "full_resolution_days")))
     (is (= 365 (get memory-retention "decay_half_life_days")))
     (is (= 8 (get memory-retention "retained_count")))
@@ -1166,6 +1168,24 @@
     (is (= [] remote-events))
     (is (= [] (get remote-snapshot "attention")))
     (is (= "disabled" (get-in remote-snapshot ["connectivity" "connection_state"])))))
+
+(deftest admin-context-route-saves-and-clears-settings
+  (let [save-response (#'http/router {:uri            "/admin/context"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"recent_history_message_limit" "40"})})
+        save-body     (response-json save-response)]
+    (is (= 200 (:status save-response)))
+    (is (= 40 (get-in save-body ["conversation_context" "recent_history_message_limit"])))
+    (is (= "40" (db/get-config :context/recent-history-message-limit))))
+  (let [clear-response (#'http/router {:uri            "/admin/context"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"recent_history_message_limit" ""})})
+        clear-body     (response-json clear-response)]
+    (is (= 200 (:status clear-response)))
+    (is (= 24 (get-in clear-body ["conversation_context" "recent_history_message_limit"])))
+    (is (nil? (db/get-config :context/recent-history-message-limit)))))
 
 (deftest admin-remote-bridge-route-saves-config
   (let [response (#'http/router {:uri            "/admin/remote-bridge"

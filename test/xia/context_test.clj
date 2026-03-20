@@ -297,6 +297,20 @@
     (is (= 2000 (:episodes budget)))
     (is (= 6000 (:skills budget)))))
 
+(deftest test-configured-recent-history-message-limit
+  (is (= 24 (#'xia.context/recent-history-message-limit {})))
+
+  (db/set-config! :context/recent-history-message-limit "12")
+  (is (= 12 (#'xia.context/recent-history-message-limit {})))
+
+  (db/set-config! :context/recent-history-message-limit "2")
+  (is (= 4 (#'xia.context/recent-history-message-limit {}))
+      "Configured values below the floor should clamp to 4")
+
+  (db/set-config! :context/recent-history-message-limit "not-edn")
+  (is (= 24 (#'xia.context/recent-history-message-limit {}))
+      "Invalid config should fall back to the default"))
+
 (deftest test-assemble-system-prompt
   ;; Set up identity
   (db/set-identity! :name "TestXia")
@@ -488,3 +502,48 @@
                     messages)]
       (ctx/build-messages sid))
     (is (= 12345 @captured-budget))))
+
+(deftest test-build-messages-data-reuses-session-history-recap
+  (let [sid       (db/create-session! :terminal)
+        llm-calls (atom [])]
+    (db/set-config! :context/recent-history-message-limit "4")
+    (doseq [i (range 6)]
+      (db/add-message! sid
+                       (if (even? i) :user :assistant)
+                       (str "message " i " " (token-rich-text (str "m" i) 60))))
+    (with-redefs [xia.context/assemble-system-prompt-data
+                  (fn [_sid _opts]
+                    {:prompt "system"
+                     :used-fact-eids []})
+                  xia.llm/chat-simple
+                  (fn [messages & _]
+                    (swap! llm-calls conj messages)
+                    (str "recap-" (count @llm-calls)))]
+      (let [result (#'xia.context/build-messages-data
+                    sid
+                    {:provider {:llm.provider/id :default}})
+            recap  (db/session-history-recap sid)]
+        (is (= 1 (count @llm-calls)))
+        (is (= 2 (:message-count recap)))
+        (is (= "system" (get-in result [:messages 0 :role])))
+        (is (str/includes? (get-in result [:messages 1 :content]) "recap-1")))
+
+      (#'xia.context/build-messages-data
+       sid
+       {:provider {:llm.provider/id :default}})
+      (is (= 1 (count @llm-calls))
+          "Stored recap should be reused while the recent window is unchanged")
+
+      (db/add-message! sid :user (str "message 6 " (token-rich-text "m6" 60)))
+      (#'xia.context/build-messages-data
+       sid
+       {:provider {:llm.provider/id :default}})
+      (is (= 2 (count @llm-calls)))
+      (is (= 3 (:message-count (db/session-history-recap sid))))
+      (is (str/includes? (get-in (last @llm-calls) [1 :content])
+                         "Newly archived messages:"))
+      (is (str/includes? (get-in (last @llm-calls) [1 :content])
+                         "message 2"))
+      (is (not (str/includes? (get-in (last @llm-calls) [1 :content])
+                              "message 0"))
+          "Incremental recap updates should only archive the newly evicted message"))))

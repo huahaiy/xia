@@ -156,6 +156,31 @@
         (is (some #(re-find #"hyperdrive" (or (:summary %) (:preview % "")))
                   (:matched-chunks result)))))))
 
+(deftest chunking-merges-heading-blocks-in-a-single-pass
+  (let [sid   (db/create-session! :http)
+        text  (str "Launch Plan\r\n\r\n"
+                   "Priya owns the launch checklist and the June 12 milestone review.\r\n\r\n"
+                   "Evidence\r\n\r\n"
+                   (apply str (repeat 160 "Atlas telemetry confirms the readiness gate. ")))
+        saved (local-doc/save-upload! {:session-id sid
+                                       :name "headings.txt"
+                                       :media-type "text/plain"
+                                       :text text})
+        eid   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
+                             (:id saved)))
+        chunk-texts (->> (db/q '[:find ?chunk
+                                 :in $ ?doc
+                                 :where [?doc :local.doc/chunks ?chunk]]
+                               eid)
+                         (map first)
+                         (map #(into {} (d/entity (d/db (db/conn)) %)))
+                         (map :local.doc.chunk/text)
+                         vec)]
+    (is (some #(str/starts-with? % "Launch Plan Priya owns the launch checklist")
+              chunk-texts))
+    (is (some #(str/starts-with? % "Evidence Atlas telemetry confirms the readiness gate")
+              chunk-texts))))
+
 (deftest local-documents-default-to-extractive-summaries-even-with-a-local-llm
   (let [sid (db/create-session! :http)]
     (with-redefs [db/current-llm-provider (constantly (test-llm-provider))]

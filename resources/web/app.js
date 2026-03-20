@@ -23,6 +23,7 @@ const state = {
   scratchSaving: false,
   admin: {
     providers: [],
+    conversationContext: null,
     memoryRetention: null,
     knowledgeDecay: null,
     localDocSummarization: null,
@@ -52,6 +53,7 @@ const state = {
   activeServiceId: '',
   activeSiteId: '',
   providerSaving: false,
+  contextSaving: false,
   retentionSaving: false,
   knowledgeDecaySaving: false,
   localDocSummarizationSaving: false,
@@ -62,6 +64,7 @@ const state = {
   remoteBridgeSaving: false,
   remotePairing: false,
   localDocSummarizationStatus: 'Loading local document summarization settings...',
+  contextStatus: 'Loading conversation context settings...',
   databaseBackupStatus: 'Loading database backup settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
   remotePairStatus: 'Paste a pairing token from the mobile app to authorize a phone.',
@@ -122,6 +125,9 @@ const retentionDecayHalfLifeDaysEl = document.getElementById('retention-decay-ha
 const retentionRetainedCountEl = document.getElementById('retention-retained-count');
 const retentionStatusEl = document.getElementById('retention-status');
 const saveRetentionEl = document.getElementById('save-retention');
+const contextRecentHistoryMessageLimitEl = document.getElementById('context-recent-history-message-limit');
+const contextStatusEl = document.getElementById('context-status');
+const saveContextEl = document.getElementById('save-context');
 const knowledgeGracePeriodDaysEl = document.getElementById('knowledge-grace-period-days');
 const knowledgeHalfLifeDaysEl = document.getElementById('knowledge-half-life-days');
 const knowledgeMinConfidenceEl = document.getElementById('knowledge-min-confidence');
@@ -949,6 +955,8 @@ function updateAdminButtons() {
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   saveProviderEl.disabled = state.providerSaving;
   newProviderEl.disabled = state.providerSaving;
+  contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;
+  saveContextEl.disabled = state.contextSaving;
   saveRetentionEl.disabled = state.retentionSaving;
   saveKnowledgeDecayEl.disabled = state.knowledgeDecaySaving;
   localDocModelSummariesEnabledEl.disabled = state.localDocSummarizationSaving;
@@ -1131,6 +1139,24 @@ function resetMemoryRetentionForm(statusText) {
   retentionDecayHalfLifeDaysEl.value = '';
   retentionRetainedCountEl.value = '';
   retentionStatusEl.textContent = statusText || 'Configure retention for consolidated episodes.';
+  updateAdminButtons();
+}
+
+function defaultConversationContextStatus() {
+  const settings = state.admin.conversationContext || {};
+  return 'Keep ' + firstNonEmpty(settings.recent_history_message_limit, 24) + ' recent messages verbatim before using recap history.';
+}
+
+function renderConversationContextSettings() {
+  const settings = state.admin.conversationContext || {};
+  contextRecentHistoryMessageLimitEl.value = settings.recent_history_message_limit || '';
+  contextStatusEl.textContent = state.contextStatus || defaultConversationContextStatus();
+  updateAdminButtons();
+}
+
+function resetConversationContextForm(statusText) {
+  contextRecentHistoryMessageLimitEl.value = '';
+  contextStatusEl.textContent = statusText || 'Configure how much recent chat stays verbatim in prompt context.';
   updateAdminButtons();
 }
 
@@ -1504,6 +1530,7 @@ async function loadAdminConfig() {
   try {
     const data = await fetchJson('/admin/config');
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
+    state.admin.conversationContext = data.conversation_context || null;
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.localDocSummarization = data.local_doc_summarization || null;
@@ -1519,6 +1546,7 @@ async function loadAdminConfig() {
     state.admin.remoteDevices = Array.isArray(data.remote_devices) ? data.remote_devices : [];
     state.admin.remoteEvents = Array.isArray(data.remote_events) ? data.remote_events : [];
     state.admin.remoteSnapshot = data.remote_snapshot || null;
+    state.contextStatus = defaultConversationContextStatus();
     state.localDocSummarizationStatus = defaultLocalDocSummarizationStatus();
     state.databaseBackupStatus = defaultDatabaseBackupStatus();
     state.remoteBridgeStatus = defaultRemoteBridgeStatus();
@@ -1530,6 +1558,7 @@ async function loadAdminConfig() {
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
     renderProviderWorkloadNote();
+    renderConversationContextSettings();
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
     renderLocalDocSummarizationSettings();
@@ -1790,6 +1819,33 @@ async function saveMemoryRetention() {
     retentionStatusEl.textContent = err.message || 'Failed to save.';
   } finally {
     state.retentionSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveConversationContext() {
+  if (state.contextSaving) return;
+  state.contextSaving = true;
+  state.contextStatus = 'Saving...';
+  renderConversationContextSettings();
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recent_history_message_limit: contextRecentHistoryMessageLimitEl.value
+      })
+    });
+    state.admin.conversationContext = data.conversation_context || state.admin.conversationContext;
+    state.contextStatus = 'Conversation context settings saved.';
+    renderConversationContextSettings();
+    setStatus('Conversation context settings saved');
+  } catch (err) {
+    state.contextStatus = err.message || 'Failed to save conversation context settings.';
+    renderConversationContextSettings();
+  } finally {
+    state.contextSaving = false;
     updateAdminButtons();
   }
 }
@@ -3152,6 +3208,7 @@ newProviderEl.addEventListener('click', () => {
 });
 
 saveProviderEl.addEventListener('click', () => saveProvider());
+saveContextEl.addEventListener('click', () => saveConversationContext());
 saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
@@ -3257,6 +3314,7 @@ syncLocalDocPanel('No local document selected.');
 syncArtifactPanel('No artifact selected.');
 syncScratchEditor('No note selected.');
 resetProviderForm('Loading...');
+resetConversationContextForm('Loading...');
 resetMemoryRetentionForm('Loading...');
 renderLocalDocSummarizationSettings();
 renderDatabaseBackupSettings();

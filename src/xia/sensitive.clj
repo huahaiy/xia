@@ -12,6 +12,7 @@
     :remote.device/push-token
     :site-cred/username
     :site-cred/password
+    :session/history-recap
     :message/content
     :schedule-run/result
     :schedule-run/error})

@@ -120,6 +120,7 @@
    :skills     1500})
 
 (def ^:private default-history-budget 8000)
+(def ^:private default-recent-history-message-limit 24)
 
 (defn- valid-budget
   [value]
@@ -144,6 +145,19 @@
       (catch Exception _
         default-history-budget))
     default-history-budget))
+
+(defn- configured-recent-history-message-limit []
+  (if-let [custom (db/get-config :context/recent-history-message-limit)]
+    (try
+      (let [parsed (long (edn/read-string custom))]
+        (max 4 parsed))
+      (catch Exception _
+        default-recent-history-message-limit))
+    default-recent-history-message-limit))
+
+(defn recent-history-message-limit-config
+  []
+  (configured-recent-history-message-limit))
 
 (defn- scale-budget
   [budget total]
@@ -259,6 +273,55 @@
 
       (seq tool-calls)
       (into (map render-tool-call-summary tool-calls)))))
+
+(defn- history-message->llm-message
+  [{:keys [role content tool-calls tool-id tool-result]}]
+  (cond-> {:role (name role)
+           :content (if (= role :tool)
+                      (tool-result->content tool-result content)
+                      content)}
+    tool-calls (assoc :tool_calls tool-calls)
+    tool-id    (assoc :tool_call_id tool-id)))
+
+(defn- history-recap-message
+  [recap]
+  {:role "system"
+   :content (str "[Conversation recap: " (str/trim recap) "]")})
+
+(defn- summarize-history-text
+  ([history-text opts]
+   (summarize-history-text history-text nil opts))
+  ([history-text existing-recap {:keys [provider-id workload]}]
+   (let [history-text* (some-> history-text str str/trim)
+         existing-recap* (some-> existing-recap str str/trim)]
+     (when (seq history-text*)
+       (let [summary-messages (if (seq existing-recap*)
+                                [{:role "system"
+                                  :content (str "Update the existing conversation recap to include the newly archived messages. "
+                                                "Keep the recap to 2-4 sentences. Capture key topics, decisions, any personal information shared, "
+                                                "and important tool usage, including which tools were called and the important results or errors "
+                                                "they returned. Be factual and concise.")}
+                                 {:role "user"
+                                  :content (str "Existing recap:\n"
+                                                existing-recap*
+                                                "\n\nNewly archived messages:\n"
+                                                history-text*)}]
+                                [{:role "system"
+                                  :content (str "Summarize this conversation excerpt in 2-4 sentences. "
+                                                "Capture key topics, decisions, any personal information shared, "
+                                                "and important tool usage, including which tools were called and "
+                                                "the important results or errors they returned. Be factual.")}
+                                 {:role "user" :content history-text*}])]
+         (str/trim
+          (cond
+            provider-id
+            (llm/chat-simple summary-messages :provider-id provider-id)
+
+            workload
+            (llm/chat-simple summary-messages :workload workload)
+
+            :else
+            (llm/chat-simple summary-messages))))))))
 
 ;; ============================================================================
 ;; Renderers
@@ -527,27 +590,64 @@
                               (mapcat history-message->summary-lines)
                               (str/join "\n"))]
          (try
-           (let [summary-messages [{:role "system"
-                                    :content (str "Summarize this conversation excerpt in 2-4 sentences. "
-                                                  "Capture key topics, decisions, any personal information shared, "
-                                                  "and important tool usage, including which tools were called and "
-                                                  "the important results or errors they returned. Be factual.")}
-                                   {:role "user" :content old-text}]
-                 recap            (cond
-                                    provider-id
-                                    (llm/chat-simple summary-messages :provider-id provider-id)
-
-                                    workload
-                                    (llm/chat-simple summary-messages :workload workload)
-
-                                    :else
-                                    (llm/chat-simple summary-messages))]
-             (into [{:role "system"
-                     :content (str "[Conversation recap: " (str/trim recap) "]")}]
-                   recent-msgs))
+           (let [recap (summarize-history-text old-text {:provider-id provider-id
+                                                         :workload workload})]
+             (into [(history-recap-message recap)] recent-msgs))
            (catch Exception e
              (log/warn "Failed to compact history:" (.getMessage e))
              messages)))))))
+
+(defn- recent-history-message-limit
+  [opts]
+  (let [limit (or (:recent-message-limit opts)
+                  (configured-recent-history-message-limit))]
+    (max 4 (long limit))))
+
+(defn- build-history-with-session-recap
+  [session-id opts]
+  (let [recent-limit (recent-history-message-limit opts)
+        metadata     (db/session-message-metadata session-id)
+        total        (count metadata)]
+    (if (<= total recent-limit)
+      (mapv history-message->llm-message
+            (db/session-messages-by-eids (mapv :eid metadata)))
+      (let [recent-start      (max 0 (- total recent-limit))
+            recap-state       (db/session-history-recap session-id)
+            summarized-count0 (long (or (:message-count recap-state) 0))
+            summarized-count  (if (<= summarized-count0 recent-start)
+                                summarized-count0
+                                0)
+            recap-content     (when (= summarized-count summarized-count0)
+                                (:content recap-state))
+            newly-archived    (subvec metadata summarized-count recent-start)
+            recent-meta       (subvec metadata recent-start total)
+            recent-eids       (mapv :eid recent-meta)
+            recent-messages   (db/session-messages-by-eids recent-eids)]
+        (if-not (seq newly-archived)
+          (let [recent-history (mapv history-message->llm-message recent-messages)]
+            (if (seq recap-content)
+              (into [(history-recap-message recap-content)] recent-history)
+              recent-history))
+          (let [archived-text (->> (db/session-messages-by-eids (mapv :eid newly-archived))
+                                   (mapcat history-message->summary-lines)
+                                   (str/join "\n"))]
+            (try
+              (let [new-recap (summarize-history-text archived-text
+                                                      recap-content
+                                                      {:provider-id (:compaction-provider-id opts)
+                                                       :workload (or (:compaction-workload opts)
+                                                                     :history-compaction)})]
+                (if (seq new-recap)
+                  (do
+                    (db/save-session-history-recap! session-id new-recap recent-start)
+                    (into [(history-recap-message new-recap)]
+                          (map history-message->llm-message recent-messages)))
+                  (mapv history-message->llm-message
+                        (db/session-messages session-id))))
+              (catch Exception e
+                (log/warn "Failed to update session history recap:" (.getMessage e))
+                (mapv history-message->llm-message
+                      (db/session-messages session-id))))))))))
 
 ;; ============================================================================
 ;; Build messages (moved from agent.clj)
@@ -563,19 +663,15 @@
          compaction-provider-id (:compaction-provider-id opts)
          compaction-workload    (or (:compaction-workload opts)
                                     :history-compaction)
-        {:keys [prompt used-fact-eids]}
-        (assemble-system-prompt-data session-id (assoc opts :provider provider))
-        history      (db/session-messages session-id)
-        history-msgs (mapv (fn [{:keys [role content tool-calls tool-id tool-result]}]
-                             (cond-> {:role (name role)
-                                      :content (if (= role :tool)
-                                                 (tool-result->content tool-result content)
-                                                 content)}
-                               tool-calls (assoc :tool_calls tool-calls)
-                               tool-id    (assoc :tool_call_id tool-id)))
-                           history)
-        budget       (resolve-history-budget provider)
-        compacted    (compact-history history-msgs
+         {:keys [prompt used-fact-eids]}
+         (assemble-system-prompt-data session-id (assoc opts :provider provider))
+         history-msgs (build-history-with-session-recap
+                       session-id
+                       {:recent-message-limit (:recent-message-limit opts)
+                        :compaction-provider-id compaction-provider-id
+                        :compaction-workload compaction-workload})
+         budget       (resolve-history-budget provider)
+         compacted    (compact-history history-msgs
                                       budget
                                       (cond-> {}
                                         compaction-provider-id
@@ -584,9 +680,9 @@
                                         (and (not compaction-provider-id)
                                              compaction-workload)
                                         (assoc :workload compaction-workload)))]
-    {:messages      (into [{:role "system" :content prompt}]
-                          compacted)
-     :used-fact-eids used-fact-eids})))
+     {:messages      (into [{:role "system" :content prompt}]
+                           compacted)
+      :used-fact-eids used-fact-eids})))
 
 (defn build-messages
   ([session-id]

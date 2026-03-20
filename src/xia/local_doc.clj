@@ -7,7 +7,7 @@
             [xia.summarizer :as summarizer]
             [xia.working-memory :as wm]
             [xia.scratch :as scratch])
-  (:import [java.io ByteArrayInputStream ByteArrayOutputStream IOException]
+  (:import [java.io BufferedReader ByteArrayInputStream ByteArrayOutputStream IOException StringReader]
            [java.math BigInteger]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
@@ -335,71 +335,108 @@
          (every? #(<= (count %) 80) lines)
          (not-any? #(re-find #"[.!?]\)?$" %) lines))))
 
-(defn- merge-heading-blocks
-  [blocks]
-  (loop [remaining (seq blocks)
-         merged    []]
-    (if-let [block (first remaining)]
-      (let [next-block (second remaining)]
-        (if (and next-block (heading-block? block))
-          (recur (nnext remaining)
-                 (conj merged (str block "\n\n" next-block)))
-          (recur (next remaining)
-                 (conj merged block))))
-      merged)))
-
-(defn- natural-text-blocks
-  [text]
-  (let [normalized (-> text normalize-text (str/replace #"\r\n?" "\n"))]
-    (->> (str/split normalized #"\n\s*\n+")
-         (remove str/blank?)
-         merge-heading-blocks
-         (mapcat split-long-block)
-         (remove str/blank?))))
-
 (defn- extractive-summary-text
   [text max-chars]
   (extractive-summary/summarize-text text max-chars))
 
-(defn- assemble-natural-chunks
-  [blocks]
-  (loop [remaining blocks
-         current []
-         current-length 0
-         chunks []]
-    (if-let [block (first remaining)]
-      (let [separator (if (seq current) 2 0)
-            proposed  (+ current-length separator (count block))]
-        (if (and (seq current) (> proposed chunk-target-chars))
-          (recur remaining
-                 []
-                 0
-                 (conj chunks (str/join "\n\n" current)))
-          (recur (rest remaining)
-                 (conj current block)
-                 proposed
-                 chunks)))
-      (cond-> chunks
-        (seq current) (conj (str/join "\n\n" current))))))
+(defn- chunk-entry
+  [index chunk-text]
+  (let [extractive-summary (extractive-summary-text chunk-text
+                                                   chunk-summary-char-limit)
+        model-summary      (summarizer/summarize-chunk chunk-text
+                                                       chunk-summary-char-limit)
+        summary            (or model-summary extractive-summary)]
+    {:index          index
+     :text           chunk-text
+     :summary        summary
+     :summary-source (if model-summary :model :extractive)
+     :summarized-at  (Date.)
+     :preview        (or (truncate-text chunk-text chunk-preview-char-limit)
+                         summary)}))
+
+(defn- finalize-chunk-state
+  [{:keys [current-blocks current-length chunks] :as state}]
+  (if (seq current-blocks)
+    (let [chunk-text (str/join "\n\n" current-blocks)
+          chunk      (chunk-entry (count chunks) chunk-text)]
+      (assoc state
+             :current-blocks []
+             :current-length 0
+             :chunks (conj chunks chunk)))
+    state))
+
+(defn- append-chunk-block
+  [{:keys [current-blocks current-length] :as state} block]
+  (let [separator (if (seq current-blocks) 2 0)
+        proposed  (+ current-length separator (count block))]
+    (if (and (seq current-blocks) (> proposed chunk-target-chars))
+      (recur (finalize-chunk-state state) block)
+      (assoc state
+             :current-blocks (conj current-blocks block)
+             :current-length proposed))))
+
+(defn- emit-block
+  [state block]
+  (reduce append-chunk-block state (split-long-block block)))
+
+(defn- consume-natural-block
+  [{:keys [pending-heading] :as state} block]
+  (let [block* (some-> block str/trim not-empty)]
+    (cond
+      (nil? block*)
+      state
+
+      pending-heading
+      (-> state
+          (assoc :pending-heading nil)
+          (emit-block (str pending-heading "\n\n" block*)))
+
+      (heading-block? block*)
+      (assoc state :pending-heading block*)
+
+      :else
+      (emit-block state block*))))
+
+(defn- flush-pending-heading
+  [{:keys [pending-heading] :as state}]
+  (if pending-heading
+    (-> state
+        (assoc :pending-heading nil)
+        (emit-block pending-heading))
+    state))
+
+(defn- builder-block
+  [^StringBuilder builder]
+  (when (and builder (pos? (.length builder)))
+    (.toString builder)))
+
+(defn- append-builder-line!
+  [^StringBuilder builder line]
+  (when (pos? (.length builder))
+    (.append builder "\n"))
+  (.append builder ^String line)
+  builder)
 
 (defn- chunk-document-text
   [text]
-  (let [chunks (-> text natural-text-blocks assemble-natural-chunks)]
-    (mapv (fn [idx chunk-text]
-            (let [extractive-summary (extractive-summary-text chunk-text
-                                                             chunk-summary-char-limit)
-                  model-summary      (summarizer/summarize-chunk chunk-text
-                                                                 chunk-summary-char-limit)
-                  summary            (or model-summary extractive-summary)]
-              {:index   idx
-               :text    chunk-text
-               :summary summary
-               :summary-source (if model-summary :model :extractive)
-               :summarized-at (Date.)
-               :preview (or (truncate-text chunk-text chunk-preview-char-limit)
-                            summary)}))
-          (range)
-          chunks)))
+  (with-open [reader (BufferedReader. (StringReader. (or text "")))]
+    (loop [state         {:pending-heading nil
+                          :current-blocks []
+                          :current-length 0
+                          :chunks         []}
+           block-builder nil]
+      (if-let [line (.readLine reader)]
+        (if (str/blank? line)
+          (recur (consume-natural-block state (builder-block block-builder))
+                 nil)
+          (let [builder (or block-builder (StringBuilder.))]
+            (append-builder-line! builder line)
+            (recur state builder)))
+        (let [final-state (-> state
+                              (consume-natural-block (builder-block block-builder))
+                              flush-pending-heading
+                              finalize-chunk-state)]
+          (vec (:chunks final-state)))))))
 
 (defn- extractive-document-summary
   [chunks full-text]

@@ -17,6 +17,7 @@
             [xia.memory :as memory]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
+            [xia.context :as context]
             [xia.remote-bridge :as remote-bridge]
             [xia.service :as service-proxy]
             [xia.schedule :as schedule]
@@ -905,6 +906,10 @@
      :min_confidence            min-confidence
      :maintenance_interval_days (long (/ maintenance-step-ms ms-per-day))
      :archive_after_bottom_days (long (/ archive-after-bottom-ms ms-per-day))}))
+
+(defn- conversation-context->admin-body
+  []
+  {:recent_history_message_limit (context/recent-history-message-limit-config)})
 
 (defn- local-doc-summarization->admin-body
   []
@@ -1842,6 +1847,7 @@
     {:providers (->> (db/list-providers)
                      (map provider->admin-body)
                      sort-by-name)
+     :conversation_context (conversation-context->admin-body)
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
      :local_doc_summarization (local-doc-summarization->admin-body)
@@ -1937,6 +1943,19 @@
         (save-config-override! :memory/episode-retained-decayed-count
                                retained-count))
       (json-response 200 {:memory_retention (memory-retention->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-save-conversation-context [req]
+  (try
+    (let [data                         (or (read-body req) {})
+          recent-history-message-limit (when (contains? data "recent_history_message_limit")
+                                         (parse-optional-positive-long (get data "recent_history_message_limit")
+                                                                       "recent_history_message_limit"))]
+      (when (contains? data "recent_history_message_limit")
+        (save-config-override! :context/recent-history-message-limit
+                               recent-history-message-limit))
+      (json-response 200 {:conversation_context (conversation-context->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -2570,6 +2589,9 @@
 
         (and (= method :post) (= uri "/admin/memory-retention"))
         (protected-route-response req #(handle-save-memory-retention req))
+
+        (and (= method :post) (= uri "/admin/context"))
+        (protected-route-response req #(handle-save-conversation-context req))
 
         (and (= method :post) (= uri "/admin/knowledge-decay"))
         (protected-route-response req #(handle-save-knowledge-decay req))

@@ -74,6 +74,25 @@
     (is (contains? event-types :schedule.failed))
     (is (contains? event-types :schedule.recovered))))
 
+(deftest recent-runs-by-status-uses-ordered-limited-query
+  (let [query-seen (atom nil)
+        now        (java.util.Date.)]
+    (with-redefs [db/q (fn [query & _]
+                         (reset! query-seen query)
+                         [[1 now] [2 now]])
+                  db/entity (fn [eid]
+                              {:schedule-run/id eid
+                               :schedule-run/schedule-id :daily-brief
+                               :schedule-run/status :error
+                               :schedule-run/started-at now
+                               :schedule-run/finished-at now
+                               :schedule-run/error "boom"})
+                  remote-bridge/schedule-name (constantly "Daily Brief")]
+      (let [runs (#'xia.remote-bridge/recent-runs-by-status :error 2)]
+        (is (= 2 (count runs)))
+        (is (= (#'xia.remote-bridge/recent-runs-query 2)
+               @query-seen))))))
+
 (deftest status-snapshot-includes-attention-items
   (remote-bridge/save-bridge-config! {:enabled? true
                                       :instance-label "Desk Xia"})

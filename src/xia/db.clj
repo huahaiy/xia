@@ -119,6 +119,9 @@
    :session/parent-id  {:db/valueType :db.type/uuid}
    :session/worker?    {:db/valueType :db.type/boolean}
    :session/label      {:db/valueType :db.type/string}
+   :session/history-recap {:db/valueType :db.type/string}
+   :session/history-recap-count {:db/valueType :db.type/long}
+   :session/history-recap-updated-at {:db/valueType :db.type/instant}
    :session/created-at {:db/valueType :db.type/instant}
    :session/active?    {:db/valueType :db.type/boolean}
 
@@ -127,6 +130,7 @@
    :message/session    {:db/valueType :db.type/ref}
    :message/role       {:db/valueType :db.type/keyword} ; :user :assistant :system :tool
    :message/content    {:db/valueType :db.type/string}
+   :message/token-estimate {:db/valueType :db.type/long}
    :message/created-at {:db/valueType :db.type/instant}
    :message/tool-calls {:db/valueType :db.type/idoc :db/domain "message-tool-calls"}
    :message/tool-result {:db/valueType :db.type/idoc :db/domain "message-tool-result"}
@@ -1269,6 +1273,12 @@
     (transact! [[:db/add session-eid :session/active? (boolean active?)]])
     true))
 
+(defn- session-eid
+  [session-id]
+  (ffirst (q '[:find ?e :in $ ?sid
+               :where [?e :session/id ?sid]]
+             session-id)))
+
 (defn- tool-calls-doc
   [tool-calls]
   {:calls (vec tool-calls)})
@@ -1378,20 +1388,36 @@
                 :title  (empty->nil title)
                 :status status}))))
 
+(defn- message-token-estimate
+  [{:keys [role content tool-result]}]
+  (let [payload (cond
+                  (string? tool-result) tool-result
+                  (some? tool-result)   (pr-str tool-result)
+                  :else                 (or content ""))
+        role-overhead (case role
+                        :tool 16
+                        :assistant 8
+                        :user 8
+                        :system 8
+                        8)]
+    (+ role-overhead
+       (max 1 (quot (count payload) 4)))))
+
 (defn add-message!
   [session-id role content & {:keys [tool-calls tool-id tool-result local-doc-ids artifact-ids]}]
-  (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
-                                 :where [?e :session/id ?sid]]
-                               session-id))
-        message-id   (random-uuid)
-        doc-ids      (valid-session-local-doc-ids session-id local-doc-ids)
+  (let [session-eid    (session-eid session-id)
+        message-id     (random-uuid)
+        doc-ids        (valid-session-local-doc-ids session-id local-doc-ids)
         artifact-ids* (valid-session-artifact-ids session-id artifact-ids)]
     (transact!
       (into
         [(cond-> {:message/id         message-id
                   :message/session    session-eid
                   :message/role       role
-                  :message/content    (or content "")}
+                  :message/content    (or content "")
+                  :message/token-estimate (message-token-estimate {:role role
+                                                                   :content content
+                                                                   :tool-result tool-result})}
            tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
            (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
            tool-id    (assoc :message/tool-id tool-id))]
@@ -1405,38 +1431,89 @@
                  {:message.artifact-ref/id       (random-uuid)
                   :message.artifact-ref/message  [:message/id message-id]
                   :message.artifact-ref/artifact [:artifact/id artifact-id]})
-               artifact-ids*))))))
+              artifact-ids*))))))
 
 (defn- empty->nil [s] (when-not (= "" s) s))
+
+(defn session-history-recap
+  [session-id]
+  (when-let [eid (session-eid session-id)]
+    (let [entity-map (decrypt-entity (raw-entity eid))
+          recap      (empty->nil (:session/history-recap entity-map))]
+      (when recap
+        {:content       recap
+         :message-count (long (or (:session/history-recap-count entity-map) 0))
+         :updated-at    (or (:session/history-recap-updated-at entity-map)
+                            (entity-updated-at entity-map))}))))
+
+(defn save-session-history-recap!
+  [session-id content message-count]
+  (when-let [eid (session-eid session-id)]
+    (transact! [{:db/id eid
+                 :session/history-recap content
+                 :session/history-recap-count (long message-count)
+                 :session/history-recap-updated-at (java.util.Date.)}])
+    true))
+
+(defn session-message-metadata
+  [session-id]
+  (->> (q '[:find ?m ?mid ?dca ?tokens
+            :in $ ?sid
+            :where
+            [?s :session/id ?sid]
+            [?m :message/session ?s]
+            [?m :message/id ?mid]
+            [(get-else $ ?m :db/created-at 0) ?dca]
+            [(get-else $ ?m :message/token-estimate 0) ?tokens]]
+          session-id)
+       (map (fn [[eid mid created-at token-estimate]]
+              {:eid eid
+               :id mid
+               :created-at (epoch-millis->date created-at)
+               :token-estimate (long token-estimate)}))
+       (sort-by (juxt :created-at :eid))
+       vec))
+
+(defn session-messages-by-eids
+  [message-eids]
+  (let [message-eids* (vec message-eids)]
+    (if-not (seq message-eids*)
+      []
+      (let [by-eid
+            (into {}
+                  (map (fn [[eid mid content role tool-calls tool-result tool-id]]
+                         [eid
+                          (let [tool-result* (read-tool-result-doc tool-result)]
+                            {:id          mid
+                             :role        role
+                             :content     (when-not (and (= role :tool) (some? tool-result*))
+                                            (decrypt-secret-attr :message/content content))
+                             :created-at  (entity-created-at (raw-entity eid))
+                             :local-docs  (not-empty (message-local-docs eid))
+                             :artifacts   (not-empty (message-artifacts eid))
+                             :tool-calls  (read-tool-calls-doc tool-calls)
+                             :tool-result tool-result*
+                             :tool-id     (empty->nil tool-id)})])
+                       (q '[:find ?m ?mid ?content ?role ?tc ?tr ?tid
+                            :in $ [?m ...]
+                            :where
+                            [?m :message/id ?mid]
+                            [?m :message/role ?role]
+                            [?m :message/content ?content]
+                            [(get-else $ ?m :message/tool-calls "") ?tc]
+                            [(get-else $ ?m :message/tool-result "") ?tr]
+                            [(get-else $ ?m :message/tool-id "") ?tid]]
+                          message-eids*)))]
+        (->> message-eids*
+             (keep by-eid)
+             vec)))))
 
 (defn session-messages
   "Get all messages for a session, ordered by creation time."
   [session-id]
-  (sort-by :created-at
-           (map (fn [[eid mid content role tool-calls tool-result tool-id]]
-                  (let [tool-result* (read-tool-result-doc tool-result)]
-                    {:id          mid
-                     :role        role
-                     :content     (when-not (and (= role :tool) (some? tool-result*))
-                                    (decrypt-secret-attr :message/content content))
-                     :created-at  (entity-created-at (raw-entity eid))
-                     :local-docs  (not-empty (message-local-docs eid))
-                     :artifacts   (not-empty (message-artifacts eid))
-                     :tool-calls  (read-tool-calls-doc tool-calls)
-                     :tool-result tool-result*
-                     :tool-id     (empty->nil tool-id)}))
-                (q '[:find ?m ?mid ?content ?role ?tc ?tr ?tid
-                     :in $ ?sid
-                     :where
-                     [?s :session/id ?sid]
-                     [?m :message/session ?s]
-                     [?m :message/id ?mid]
-                     [?m :message/role ?role]
-                     [?m :message/content ?content]
-                     [(get-else $ ?m :message/tool-calls "") ?tc]
-                     [(get-else $ ?m :message/tool-result "") ?tr]
-                     [(get-else $ ?m :message/tool-id "") ?tid]]
-                   session-id))))
+  (->> (session-message-metadata session-id)
+       (mapv :eid)
+       session-messages-by-eids))
 
 ;; ---------------------------------------------------------------------------
 ;; Skills (markdown instructions)
