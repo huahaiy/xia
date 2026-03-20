@@ -3,13 +3,21 @@
    chat completions API shape, so one client handles OpenAI, Anthropic
    (via proxy), Qwen, local Ollama, etc."
   (:require [charred.api :as json]
+            [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.config :as cfg]
             [xia.db :as db]
-            [xia.http-client :as http]))
+            [xia.http-client :as http])
+  (:import [java.time ZonedDateTime]
+           [java.time.format DateTimeFormatter]
+           [java.util.concurrent TimeoutException]))
 
 (def ^:private request-timeout-ms 120000)
 (def ^:private provider-health-base-cooldown-ms 30000)
 (def ^:private provider-health-max-cooldown-ms 300000)
+(def ^:private llm-retry-statuses #{408 409 425 429 500 502 503 504})
+(def ^:private default-max-provider-retry-rounds 4)
+(def ^:private default-max-provider-retry-wait-ms 300000)
 (def ^:private workload-options
   [{:id :assistant
     :label "Assistant"
@@ -85,6 +93,20 @@
 (defn- now-ms []
   (System/currentTimeMillis))
 
+(defn- sleep-ms!
+  [delay-ms]
+  (Thread/sleep (long delay-ms)))
+
+(defn- max-provider-retry-rounds
+  []
+  (cfg/positive-long :llm/max-provider-retry-rounds
+                     default-max-provider-retry-rounds))
+
+(defn- max-provider-retry-wait-ms
+  []
+  (cfg/positive-long :llm/max-provider-retry-wait-ms
+                     default-max-provider-retry-wait-ms))
+
 (defn- provider-cooldown-ms
   [consecutive-failures]
   (loop [cooldown provider-health-base-cooldown-ms
@@ -138,19 +160,83 @@
             :last-error          nil})))
 
 (defn- record-provider-failure!
-  [provider-id error-message]
+  [provider-id error-message & {:keys [cooldown-ms]}]
   (let [timestamp (now-ms)]
     (swap! provider-health
            (fn [state]
              (let [previous             (get state provider-id)
                    consecutive-failures (inc (long (or (:consecutive-failures previous) 0)))
-                   cooldown-ms          (provider-cooldown-ms consecutive-failures)]
+                   cooldown-ms          (max (long (or cooldown-ms 0))
+                                             (long (provider-cooldown-ms consecutive-failures)))]
                (assoc state provider-id
                       {:consecutive-failures consecutive-failures
                        :cooldown-until-ms   (+ timestamp cooldown-ms)
                        :last-success-ms     (:last-success-ms previous)
                        :last-failure-ms     timestamp
-                       :last-error          error-message}))))))
+                       :last-error          error-message}))))
+    (provider-health-summary provider-id)))
+
+(defn- header-value
+  [headers header-name]
+  (let [normalized-name (str/lower-case (name header-name))]
+    (or (get headers header-name)
+        (get headers normalized-name)
+        (some (fn [[k v]]
+                (when (= normalized-name
+                         (str/lower-case (name k)))
+                  v))
+              headers))))
+
+(defn- retry-after-ms
+  [headers]
+  (when-let [raw (some-> (header-value headers "retry-after") str)]
+    (let [value (str/trim raw)]
+      (or (try
+            (* 1000 (max 0 (Long/parseLong value)))
+            (catch Exception _
+              nil))
+          (try
+            (max 0
+                 (- (.toEpochMilli (.toInstant (ZonedDateTime/parse value DateTimeFormatter/RFC_1123_DATE_TIME)))
+                    (now-ms)))
+            (catch Exception _
+              nil))))))
+
+(defn- retryable-llm-error?
+  [^Throwable e]
+  (let [status (some-> e ex-data :status)]
+    (or (contains? llm-retry-statuses status)
+        (boolean
+          (some #(instance? Throwable %)
+                (filter (fn [cause]
+                          (or (instance? TimeoutException cause)
+                              (instance? java.net.http.HttpTimeoutException cause)
+                              (instance? java.net.http.HttpConnectTimeoutException cause)
+                              (instance? java.io.IOException cause)))
+                        (take-while some? (iterate ex-cause e))))))))
+
+(defn- attempts-cooldown-delay-ms
+  [attempts]
+  (let [health (mapv #(provider-health-summary (:provider-id %)) attempts)]
+    (when (and (seq health)
+               (every? (comp not :available?) health))
+      (some->> health
+               (keep :cooldown-remaining-ms)
+               (filter pos?)
+               seq
+               (apply min)))))
+
+(defn- remaining-retry-wait-ms
+  [started-at max-retry-wait-ms]
+  (- max-retry-wait-ms (- (now-ms) started-at)))
+
+(defn- retry-sleep-ms
+  [started-at round max-retry-rounds max-retry-wait-ms requested-delay-ms]
+  (let [remaining-ms (remaining-retry-wait-ms started-at max-retry-wait-ms)]
+    (when (and (< round max-retry-rounds)
+               (pos? remaining-ms)
+               (pos? (long (or requested-delay-ms 0))))
+      (min remaining-ms requested-delay-ms))))
 
 (defn- provider-group-key
   [{:keys [available? consecutive-failures cooldown-until-ms]}]
@@ -301,9 +387,10 @@
     (when (not= 200 status)
       (throw (ex-info (str "LLM request failed with status " status)
                       {:status      status
+                       :headers     (:headers resp)
                        :body        (:body resp)
                        :provider-id provider-id
-                       :workload    workload})))
+                        :workload    workload})))
     (try
       (json/read-json (:body resp))
       (catch Exception e
@@ -311,6 +398,66 @@
                         {:provider-id provider-id
                          :workload    workload}
                         e))))))
+
+(defn- attempt-provider-round
+  [messages opts attempts]
+  (loop [[attempt & remaining] attempts
+         last-failure nil]
+    (if-not attempt
+      (if last-failure
+        (if (:retryable? last-failure)
+          {:status :retry
+           :delay-ms (:delay-ms last-failure)
+           :error (:error last-failure)
+           :provider-id (:provider-id last-failure)
+           :workload (:workload last-failure)}
+          {:status :error
+           :error (:error last-failure)
+           :provider-id (:provider-id last-failure)
+           :workload (:workload last-failure)})
+        {:status :error
+         :error (ex-info "No LLM provider available for request" {})})
+      (let [result (try
+                     {:ok? true
+                      :response (attempt-chat messages opts attempt)}
+                     (catch Exception e
+                       {:ok? false
+                        :error e}))]
+        (if (:ok? result)
+          (let [response (:response result)]
+            (record-provider-success! (:provider-id attempt))
+            {:status :ok
+             :response response})
+          (let [e           (:error result)
+                attempt-id  (:provider-id attempt)
+                error-text  (provider-error-message attempt-id e)
+                cooldown-ms (retry-after-ms (some-> e ex-data :headers))
+                health      (record-provider-failure! attempt-id
+                                                     error-text
+                                                     :cooldown-ms cooldown-ms)
+                failure     {:error      e
+                             :retryable? (retryable-llm-error? e)
+                             :delay-ms   (:cooldown-remaining-ms health)
+                             :provider-id attempt-id
+                             :workload   (:workload attempt)}]
+            (if (seq remaining)
+              (do
+                (log/info "LLM provider failed; trying next routed provider"
+                          {:provider-id attempt-id
+                           :workload    (:workload attempt)
+                           :remaining   (mapv :provider-id remaining)
+                           :error       error-text})
+                (recur remaining failure))
+              (if (:retryable? failure)
+                {:status :retry
+                 :delay-ms (:delay-ms failure)
+                 :error e
+                 :provider-id attempt-id
+                 :workload (:workload attempt)}
+                {:status :error
+                 :error e
+                 :provider-id attempt-id
+                 :workload (:workload attempt)}))))))))
 
 (defn chat
   "Send a chat completion request.
@@ -324,40 +471,73 @@
 
    Returns the parsed response body as a Clojure map."
   [messages & {:keys [provider-id workload tools temperature max-tokens] :as opts}]
-  (let [attempts (provider-attempts {:provider-id provider-id
-                                     :workload workload})]
-    (loop [[attempt & remaining] attempts]
-      (when-not attempt
-        (throw (ex-info "No LLM provider available for request"
-                        {:provider-id provider-id
-                         :workload workload})))
-      (let [result (try
-                     {:ok? true
-                      :response (attempt-chat messages opts attempt)}
-                     (catch Exception e
-                       {:ok? false
-                        :error e}))]
-        (if (:ok? result)
-          (let [response (:response result)]
-            (record-provider-success! (:provider-id attempt))
-            response)
-          (let [e          (:error result)
-                provider-id (:provider-id attempt)
-                error-text  (provider-error-message provider-id e)]
-            (record-provider-failure! provider-id error-text)
-            (if (seq remaining)
-              (do
-                (log/info "LLM provider failed; trying next routed provider"
+  (let [started-at          (now-ms)
+        max-retry-rounds*   (max-provider-retry-rounds)
+        max-retry-wait-ms*  (max-provider-retry-wait-ms)]
+    (loop [round 1]
+      (let [attempts (provider-attempts {:provider-id provider-id
+                                         :workload workload})]
+        (when-not (seq attempts)
+          (throw (ex-info "No LLM provider available for request"
                           {:provider-id provider-id
-                           :workload    (:workload attempt)
-                           :remaining   (mapv :provider-id remaining)
-                           :error       error-text})
-                (recur remaining))
+                           :workload workload})))
+        (if-let [preflight-delay-ms (attempts-cooldown-delay-ms attempts)]
+          (if-let [delay-ms (retry-sleep-ms started-at
+                                            round
+                                            max-retry-rounds*
+                                            max-retry-wait-ms*
+                                            preflight-delay-ms)]
+            (do
+              (log/warn "All routed LLM providers are cooling down; waiting before retry"
+                        {:provider-id provider-id
+                         :workload workload
+                         :round round
+                         :delay-ms delay-ms
+                         :providers (mapv :provider-id attempts)})
+              (sleep-ms! delay-ms)
+              (recur (inc round)))
+            (throw (ex-info "LLM providers are still cooling down"
+                            {:provider-id provider-id
+                             :workload workload
+                             :round round
+                             :cooldown-ms preflight-delay-ms
+                             :max-retry-rounds max-retry-rounds*
+                             :max-retry-wait-ms max-retry-wait-ms*})))
+          (let [round-result (attempt-provider-round messages opts attempts)]
+            (case (:status round-result)
+              :ok
+              (:response round-result)
+
+              :retry
+              (if-let [delay-ms (retry-sleep-ms started-at
+                                                round
+                                                max-retry-rounds*
+                                                max-retry-wait-ms*
+                                                (:delay-ms round-result))]
+                (do
+                  (log/warn "LLM request exhausted routed providers; retrying after backoff"
+                            {:provider-id (:provider-id round-result)
+                             :workload (:workload round-result)
+                             :round round
+                             :delay-ms delay-ms
+                             :error (provider-error-message (:provider-id round-result)
+                                                            (:error round-result))})
+                  (sleep-ms! delay-ms)
+                  (recur (inc round)))
+                (do
+                  (log/error (:error round-result) "LLM request failed after retries"
+                             {:provider-id (:provider-id round-result)
+                              :workload (:workload round-result)
+                              :round round})
+                  (throw (:error round-result))))
+
+              :error
               (do
-                (log/error e "LLM request failed"
-                           {:provider-id provider-id
-                            :workload    (:workload attempt)})
-                (throw e)))))))))
+                (log/error (:error round-result) "LLM request failed"
+                           {:provider-id (:provider-id round-result)
+                            :workload (:workload round-result)
+                            :round round})
+                (throw (:error round-result))))))))))
 
 (defn chat-simple
   "Convenience: send messages, return the assistant's text content."

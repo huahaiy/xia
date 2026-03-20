@@ -8,7 +8,8 @@
             [xia.browser.playwright]
             [xia.db :as db]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.net InetAddress ServerSocket]))
+  (:import [java.net InetAddress ServerSocket]
+           [java.util.concurrent ConcurrentHashMap]))
 
 (use-fixtures :each
   with-test-db
@@ -343,7 +344,7 @@
 
 (deftest playwright-snapshot-persistence-serializes-per-session
   (let [persist-session! (var-get (playwright-var 'persist-session!))
-        sessions*        (var-get (playwright-var 'sessions))
+        ^ConcurrentHashMap sessions* (var-get (playwright-var 'sessions))
         session-id       (str (random-uuid))
         session-value    (atom {:last-access 1
                                 :created-at-ms 1

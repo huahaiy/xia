@@ -120,6 +120,10 @@
                 (atom {})
                 xia.llm/provider-health
                 (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
                 xia.http-client/request
                 (fn [req]
                   (is (= "https://api.example.com/v1/chat/completions" (:url req)))
@@ -148,6 +152,10 @@
                   (atom {})
                   xia.llm/provider-health
                   (atom {})
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
                   xia.http-client/request
                   (fn [req]
                     (swap! requests conj (:url req))
@@ -167,3 +175,134 @@
         (is (= :cooling-down (:status health-a)))
         (is (= 1 (:consecutive-failures health-a)))
         (is (= :healthy (:status health-b)))))))
+
+(deftest chat-retries-single-provider-after-rate-limit-backoff
+  (let [clock-ms (atom 1000)
+        sleeps   (atom [])
+        calls    (atom 0)]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/now-ms
+                  (fn [] @clock-ms)
+                  xia.llm/sleep-ms!
+                  (fn [delay-ms]
+                    (swap! sleeps conj delay-ms)
+                    (swap! clock-ms + delay-ms))
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request
+                  (fn [_req]
+                    (if (= 1 (swap! calls inc))
+                      {:status 429
+                       :headers {}
+                       :body "rate limited"}
+                      {:status 200
+                       :headers {}
+                       :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"}))]
+      (is (= "ok"
+             (llm/chat-simple [{"role" "user" "content" "hello"}])))
+      (is (= 2 @calls))
+      (is (= [30000] @sleeps))
+      (is (= :healthy
+             (:status (llm/provider-health-summary :default)))))))
+
+(deftest chat-honors-retry-after-header-when-backing-off
+  (let [clock-ms (atom 1000)
+        sleeps   (atom [])
+        calls    (atom 0)]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/now-ms
+                  (fn [] @clock-ms)
+                  xia.llm/sleep-ms!
+                  (fn [delay-ms]
+                    (swap! sleeps conj delay-ms)
+                    (swap! clock-ms + delay-ms))
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request
+                  (fn [_req]
+                    (if (= 1 (swap! calls inc))
+                      {:status 429
+                       :headers {"Retry-After" "120"}
+                       :body "rate limited"}
+                      {:status 200
+                       :headers {}
+                       :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"}))]
+      (is (= "ok"
+             (llm/chat-simple [{"role" "user" "content" "hello"}])))
+      (is (= [120000] @sleeps)))))
+
+(deftest chat-does-not-back-off-on-non-retryable-provider-error
+  (let [sleeps (atom [])]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/sleep-ms!
+                  (fn [delay-ms]
+                    (swap! sleeps conj delay-ms))
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request
+                  (fn [_req]
+                    {:status 401
+                     :headers {}
+                     :body "unauthorized"})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"status 401"
+                            (llm/chat-simple [{"role" "user" "content" "hello"}])))
+      (is (empty? @sleeps)))))
+
+(deftest chat-waits-for-cooling-provider-before-first-request
+  (let [clock-ms (atom 1000)
+        sleeps   (atom [])
+        calls    (atom 0)]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {:default {:consecutive-failures 1
+                                   :cooldown-until-ms 4000
+                                   :last-error "rate limited"}})
+                  xia.llm/now-ms
+                  (fn [] @clock-ms)
+                  xia.llm/sleep-ms!
+                  (fn [delay-ms]
+                    (swap! sleeps conj delay-ms)
+                    (swap! clock-ms + delay-ms))
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request
+                  (fn [_req]
+                    (swap! calls inc)
+                    {:status 200
+                     :headers {}
+                     :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})]
+      (is (= "ok"
+             (llm/chat-simple [{"role" "user" "content" "hello"}])))
+      (is (= [3000] @sleeps))
+      (is (= 1 @calls)))))
