@@ -21,6 +21,7 @@
             [xia.schedule :as schedule]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
+            [xia.summarizer :as summarizer]
             [xia.skill.openclaw :as openclaw-skill]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
@@ -903,6 +904,14 @@
      :min_confidence            min-confidence
      :maintenance_interval_days (long (/ maintenance-step-ms ms-per-day))
      :archive_after_bottom_days (long (/ archive-after-bottom-ms ms-per-day))}))
+
+(defn- local-doc-summarization->admin-body
+  []
+  {:model_summaries_enabled   (boolean (summarizer/enabled?))
+   :model_summary_backend     (some-> (summarizer/summary-backend) name)
+   :model_summary_provider_id (some-> (summarizer/external-provider-id) name)
+   :chunk_summary_max_tokens  (summarizer/chunk-summary-max-tokens)
+   :doc_summary_max_tokens    (summarizer/document-summary-max-tokens)})
 
 (defn- save-config-override!
   [config-key value]
@@ -1819,6 +1828,7 @@
                      sort-by-name)
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
+     :local_doc_summarization (local-doc-summarization->admin-body)
      :llm_workloads (mapv (fn [{:keys [id label description]}]
                             {:id          (name id)
                              :label       label
@@ -1963,6 +1973,62 @@
         (save-config-override! :memory/knowledge-decay-archive-after-bottom-ms
                                (some-> archive-after-bottom-days (* ms-per-day))))
       (json-response 200 {:knowledge_decay (knowledge-decay->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- parse-summary-backend
+  [value field-name]
+  (let [backend (some-> value nonblank-str keyword)]
+    (when backend
+      (when-not (contains? #{:local :external} backend)
+        (throw (ex-info (str "'" field-name "' must be one of: local, external")
+                        {:field field-name
+                         :value value})))
+      backend)))
+
+(defn- parse-optional-provider-id
+  [value field-name]
+  (when-let [provider-id-str (nonblank-str value)]
+    (let [provider-id (keyword provider-id-str)]
+      (when-not (db/get-provider provider-id)
+        (throw (ex-info (str "'" field-name "' must reference an existing provider")
+                        {:field field-name
+                         :value value})))
+      provider-id)))
+
+(defn- handle-save-local-doc-summarization [req]
+  (try
+    (let [data                     (or (read-body req) {})
+          enabled?                 (when (contains? data "model_summaries_enabled")
+                                     (true? (get data "model_summaries_enabled")))
+          backend                  (when (contains? data "model_summary_backend")
+                                     (parse-summary-backend (get data "model_summary_backend")
+                                                            "model_summary_backend"))
+          provider-id              (when (contains? data "model_summary_provider_id")
+                                     (parse-optional-provider-id (get data "model_summary_provider_id")
+                                                                 "model_summary_provider_id"))
+          chunk-summary-max-tokens (when (contains? data "chunk_summary_max_tokens")
+                                     (parse-optional-positive-long (get data "chunk_summary_max_tokens")
+                                                                   "chunk_summary_max_tokens"))
+          doc-summary-max-tokens   (when (contains? data "doc_summary_max_tokens")
+                                     (parse-optional-positive-long (get data "doc_summary_max_tokens")
+                                                                   "doc_summary_max_tokens"))
+          effective-provider-id    (when (= backend :external) provider-id)]
+      (when (contains? data "model_summaries_enabled")
+        (save-config-override! :local-doc/model-summaries-enabled? enabled?))
+      (when (contains? data "model_summary_backend")
+        (save-config-override! :local-doc/model-summary-backend
+                               (some-> backend name)))
+      (when (contains? data "model_summary_provider_id")
+        (save-config-override! :local-doc/model-summary-provider-id
+                               (some-> effective-provider-id name)))
+      (when (contains? data "chunk_summary_max_tokens")
+        (save-config-override! :local-doc/chunk-summary-max-tokens
+                               chunk-summary-max-tokens))
+      (when (contains? data "doc_summary_max_tokens")
+        (save-config-override! :local-doc/doc-summary-max-tokens
+                               doc-summary-max-tokens))
+      (json-response 200 {:local_doc_summarization (local-doc-summarization->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -2465,6 +2531,9 @@
 
         (and (= method :post) (= uri "/admin/knowledge-decay"))
         (protected-route-response req #(handle-save-knowledge-decay req))
+
+        (and (= method :post) (= uri "/admin/local-doc-summarization"))
+        (protected-route-response req #(handle-save-local-doc-summarization req))
 
         (and (= method :post) (= uri "/admin/remote-bridge"))
         (protected-route-response req #(handle-save-remote-bridge req))

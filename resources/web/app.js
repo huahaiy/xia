@@ -25,6 +25,7 @@ const state = {
     providers: [],
     memoryRetention: null,
     knowledgeDecay: null,
+    localDocSummarization: null,
     llmWorkloads: [],
     oauthProviderTemplates: [],
     oauthAccounts: [],
@@ -52,11 +53,13 @@ const state = {
   providerSaving: false,
   retentionSaving: false,
   knowledgeDecaySaving: false,
+  localDocSummarizationSaving: false,
   oauthSaving: false,
   serviceSaving: false,
   siteSaving: false,
   remoteBridgeSaving: false,
   remotePairing: false,
+  localDocSummarizationStatus: 'Loading local document summarization settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
   remotePairStatus: 'Paste a pairing token from the mobile app to authorize a phone.',
   openclawImporting: false,
@@ -123,6 +126,13 @@ const knowledgeMaintenanceIntervalDaysEl = document.getElementById('knowledge-ma
 const knowledgeArchiveAfterBottomDaysEl = document.getElementById('knowledge-archive-after-bottom-days');
 const knowledgeStatusEl = document.getElementById('knowledge-status');
 const saveKnowledgeDecayEl = document.getElementById('save-knowledge-decay');
+const localDocModelSummariesEnabledEl = document.getElementById('local-doc-model-summaries-enabled');
+const localDocModelSummaryBackendEl = document.getElementById('local-doc-model-summary-backend');
+const localDocModelSummaryProviderIdEl = document.getElementById('local-doc-model-summary-provider-id');
+const localDocChunkSummaryMaxTokensEl = document.getElementById('local-doc-chunk-summary-max-tokens');
+const localDocDocSummaryMaxTokensEl = document.getElementById('local-doc-doc-summary-max-tokens');
+const localDocSummarizationStatusEl = document.getElementById('local-doc-summarization-status');
+const saveLocalDocSummarizationEl = document.getElementById('save-local-doc-summarization');
 const oauthAccountListEl = document.getElementById('oauth-account-list');
 const oauthTemplateEl = document.getElementById('oauth-template');
 const oauthTemplateNoteEl = document.getElementById('oauth-template-note');
@@ -930,6 +940,13 @@ function updateAdminButtons() {
   newProviderEl.disabled = state.providerSaving;
   saveRetentionEl.disabled = state.retentionSaving;
   saveKnowledgeDecayEl.disabled = state.knowledgeDecaySaving;
+  localDocModelSummariesEnabledEl.disabled = state.localDocSummarizationSaving;
+  localDocModelSummaryBackendEl.disabled = state.localDocSummarizationSaving;
+  localDocModelSummaryProviderIdEl.disabled = state.localDocSummarizationSaving
+    || localDocModelSummaryBackendEl.value !== 'external';
+  localDocChunkSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
+  localDocDocSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
+  saveLocalDocSummarizationEl.disabled = state.localDocSummarizationSaving;
   oauthAccountIdEl.disabled = state.oauthSaving || !!state.activeOauthAccountId;
   saveOauthAccountEl.disabled = state.oauthSaving;
   newOauthAccountEl.disabled = state.oauthSaving;
@@ -1109,6 +1126,47 @@ function renderKnowledgeDecaySettings() {
   knowledgeMaintenanceIntervalDaysEl.value = settings.maintenance_interval_days || '';
   knowledgeArchiveAfterBottomDaysEl.value = settings.archive_after_bottom_days || '';
   knowledgeStatusEl.textContent = 'Tune how quickly stale fact confidence fades after the grace period.';
+  updateAdminButtons();
+}
+
+function defaultLocalDocSummarizationStatus() {
+  const settings = state.admin.localDocSummarization || {};
+  const bits = [];
+  bits.push(settings.model_summaries_enabled ? 'Model summaries enabled' : 'Using extractive summaries');
+  bits.push('Backend: ' + firstNonEmpty(settings.model_summary_backend, 'local'));
+  if (settings.model_summary_backend === 'external') {
+    bits.push('Provider: ' + firstNonEmpty(settings.model_summary_provider_id, 'default'));
+  }
+  return bits.join(' • ');
+}
+
+function renderLocalDocSummarizationProviderOptions() {
+  const selected = localDocModelSummaryProviderIdEl.value;
+  localDocModelSummaryProviderIdEl.innerHTML = '';
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = 'Default provider';
+  localDocModelSummaryProviderIdEl.appendChild(blank);
+  state.admin.providers.forEach((provider) => {
+    const option = document.createElement('option');
+    option.value = provider.id || '';
+    option.textContent = firstNonEmpty(provider.name, provider.id);
+    localDocModelSummaryProviderIdEl.appendChild(option);
+  });
+  localDocModelSummaryProviderIdEl.value = selected || '';
+}
+
+function renderLocalDocSummarizationSettings() {
+  const settings = state.admin.localDocSummarization || {};
+  localDocModelSummariesEnabledEl.checked = !!settings.model_summaries_enabled;
+  localDocModelSummaryBackendEl.value = firstNonEmpty(settings.model_summary_backend, 'local');
+  renderLocalDocSummarizationProviderOptions();
+  localDocModelSummaryProviderIdEl.value = settings.model_summary_provider_id || '';
+  localDocChunkSummaryMaxTokensEl.value = settings.chunk_summary_max_tokens || '';
+  localDocDocSummaryMaxTokensEl.value = settings.doc_summary_max_tokens || '';
+  localDocModelSummaryProviderIdEl.disabled = state.localDocSummarizationSaving
+    || localDocModelSummaryBackendEl.value !== 'external';
+  localDocSummarizationStatusEl.textContent = state.localDocSummarizationStatus || defaultLocalDocSummarizationStatus();
   updateAdminButtons();
 }
 
@@ -1401,6 +1459,7 @@ async function loadAdminConfig() {
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
+    state.admin.localDocSummarization = data.local_doc_summarization || null;
     state.admin.llmWorkloads = Array.isArray(data.llm_workloads) ? data.llm_workloads : [];
     state.admin.oauthProviderTemplates = Array.isArray(data.oauth_provider_templates) ? data.oauth_provider_templates : [];
     state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];
@@ -1412,6 +1471,7 @@ async function loadAdminConfig() {
     state.admin.remoteDevices = Array.isArray(data.remote_devices) ? data.remote_devices : [];
     state.admin.remoteEvents = Array.isArray(data.remote_events) ? data.remote_events : [];
     state.admin.remoteSnapshot = data.remote_snapshot || null;
+    state.localDocSummarizationStatus = defaultLocalDocSummarizationStatus();
     state.remoteBridgeStatus = defaultRemoteBridgeStatus();
     state.remotePairStatus = defaultRemotePairStatus();
     const provider = state.admin.providers.find((entry) => entry.id === state.activeProviderId);
@@ -1423,6 +1483,7 @@ async function loadAdminConfig() {
     renderProviderWorkloadNote();
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
+    renderLocalDocSummarizationSettings();
     if (provider) {
       selectProvider(provider);
     } else if (!state.activeProviderId) {
@@ -1708,6 +1769,37 @@ async function saveKnowledgeDecay() {
     knowledgeStatusEl.textContent = err.message || 'Failed to save.';
   } finally {
     state.knowledgeDecaySaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveLocalDocSummarization() {
+  if (state.localDocSummarizationSaving) return;
+  state.localDocSummarizationSaving = true;
+  state.localDocSummarizationStatus = 'Saving...';
+  renderLocalDocSummarizationSettings();
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/local-doc-summarization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model_summaries_enabled: localDocModelSummariesEnabledEl.checked,
+        model_summary_backend: localDocModelSummaryBackendEl.value,
+        model_summary_provider_id: localDocModelSummaryProviderIdEl.value,
+        chunk_summary_max_tokens: localDocChunkSummaryMaxTokensEl.value,
+        doc_summary_max_tokens: localDocDocSummaryMaxTokensEl.value
+      })
+    });
+    state.admin.localDocSummarization = data.local_doc_summarization || state.admin.localDocSummarization;
+    state.localDocSummarizationStatus = 'Local document summarization settings saved.';
+    renderLocalDocSummarizationSettings();
+    setStatus('Local document summarization settings saved');
+  } catch (err) {
+    state.localDocSummarizationStatus = err.message || 'Failed to save local document summarization settings.';
+    renderLocalDocSummarizationSettings();
+  } finally {
+    state.localDocSummarizationSaving = false;
     updateAdminButtons();
   }
 }
@@ -2982,6 +3074,8 @@ newProviderEl.addEventListener('click', () => {
 saveProviderEl.addEventListener('click', () => saveProvider());
 saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
+saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
+localDocModelSummaryBackendEl.addEventListener('change', () => updateAdminButtons());
 
 newOauthAccountEl.addEventListener('click', () => {
   resetOauthAccountForm('Create a connection.');
@@ -3083,6 +3177,7 @@ syncArtifactPanel('No artifact selected.');
 syncScratchEditor('No note selected.');
 resetProviderForm('Loading...');
 resetMemoryRetentionForm('Loading...');
+renderLocalDocSummarizationSettings();
 resetOauthAccountForm('Loading...');
 resetServiceForm('Loading...');
 resetSiteForm('Loading...');

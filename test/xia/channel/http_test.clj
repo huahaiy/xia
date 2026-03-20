@@ -1082,6 +1082,7 @@
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
         memory-retention (get body "memory_retention")
         knowledge-decay (get body "knowledge_decay")
+        local-doc-summarization (get body "local_doc_summarization")
         llm-workloads (get body "llm_workloads")
         templates (get body "oauth_provider_templates")
         oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
@@ -1108,6 +1109,11 @@
     (is (= 0.1 (get knowledge-decay "min_confidence")))
     (is (= 1 (get knowledge-decay "maintenance_interval_days")))
     (is (= 365 (get knowledge-decay "archive_after_bottom_days")))
+    (is (= false (get local-doc-summarization "model_summaries_enabled")))
+    (is (= "local" (get local-doc-summarization "model_summary_backend")))
+    (is (nil? (get local-doc-summarization "model_summary_provider_id")))
+    (is (= 96 (get local-doc-summarization "chunk_summary_max_tokens")))
+    (is (= 160 (get local-doc-summarization "doc_summary_max_tokens")))
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
@@ -1167,6 +1173,52 @@
     (is (= true (get-in body ["remote_snapshot" "connectivity" "enabled"])))
     (is (= "Desk Xia" (get-in body ["remote_snapshot" "instance" "label"])))
     (is (= true (:enabled? (remote-bridge/bridge-config))))))
+
+(deftest admin-local-doc-summarization-route-saves-and-clears-settings
+  (db/upsert-provider! {:id :openai
+                        :name "OpenAI"
+                        :base-url "https://api.openai.com/v1"
+                        :model "gpt-4o-mini"})
+  (let [save-response (#'http/router {:uri            "/admin/local-doc-summarization"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"model_summaries_enabled" true
+                                                                     "model_summary_backend" "external"
+                                                                     "model_summary_provider_id" "openai"
+                                                                     "chunk_summary_max_tokens" "128"
+                                                                     "doc_summary_max_tokens" "256"})})
+        save-body     (response-json save-response)]
+    (is (= 200 (:status save-response)))
+    (is (= true (get-in save-body ["local_doc_summarization" "model_summaries_enabled"])))
+    (is (= "external" (get-in save-body ["local_doc_summarization" "model_summary_backend"])))
+    (is (= "openai" (get-in save-body ["local_doc_summarization" "model_summary_provider_id"])))
+    (is (= 128 (get-in save-body ["local_doc_summarization" "chunk_summary_max_tokens"])))
+    (is (= 256 (get-in save-body ["local_doc_summarization" "doc_summary_max_tokens"])))
+    (is (= "true" (str (db/get-config :local-doc/model-summaries-enabled?))))
+    (is (= "external" (db/get-config :local-doc/model-summary-backend)))
+    (is (= "openai" (db/get-config :local-doc/model-summary-provider-id)))
+    (is (= "128" (db/get-config :local-doc/chunk-summary-max-tokens)))
+    (is (= "256" (db/get-config :local-doc/doc-summary-max-tokens))))
+  (let [clear-response (#'http/router {:uri            "/admin/local-doc-summarization"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"model_summaries_enabled" false
+                                                                      "model_summary_backend" ""
+                                                                      "model_summary_provider_id" ""
+                                                                      "chunk_summary_max_tokens" ""
+                                                                      "doc_summary_max_tokens" ""})})
+        clear-body     (response-json clear-response)]
+    (is (= 200 (:status clear-response)))
+    (is (= false (get-in clear-body ["local_doc_summarization" "model_summaries_enabled"])))
+    (is (= "local" (get-in clear-body ["local_doc_summarization" "model_summary_backend"])))
+    (is (nil? (get-in clear-body ["local_doc_summarization" "model_summary_provider_id"])))
+    (is (= 96 (get-in clear-body ["local_doc_summarization" "chunk_summary_max_tokens"])))
+    (is (= 160 (get-in clear-body ["local_doc_summarization" "doc_summary_max_tokens"])))
+    (is (= "false" (str (db/get-config :local-doc/model-summaries-enabled?))))
+    (is (nil? (db/get-config :local-doc/model-summary-backend)))
+    (is (nil? (db/get-config :local-doc/model-summary-provider-id)))
+    (is (nil? (db/get-config :local-doc/chunk-summary-max-tokens)))
+    (is (nil? (db/get-config :local-doc/doc-summary-max-tokens)))))
 
 (deftest admin-remote-bridge-device-routes-pair-and-revoke
   (let [device-id (random-uuid)

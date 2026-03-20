@@ -426,6 +426,50 @@
               </div>
             </div>
 
+            <div class="admin-card">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Local Document Summaries</h3>
+                  <p class="panel-note">Keep extractive summaries by default, or opt into local or external model-generated summaries for uploaded documents.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field full">
+                  <div class="check-row">
+                    <input type="checkbox" id="local-doc-model-summaries-enabled">
+                    <label class="check-label" for="local-doc-model-summaries-enabled">Use model-generated summaries instead of the extractive default</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="local-doc-model-summary-backend">Model Backend</label>
+                  <select id="local-doc-model-summary-backend" class="text-input">
+                    <option value="local">Local model</option>
+                    <option value="external">External LLM API</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="local-doc-model-summary-provider-id">External Provider</label>
+                  <select id="local-doc-model-summary-provider-id" class="text-input">
+                    <option value="">Default provider</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="local-doc-chunk-summary-max-tokens">Chunk Summary Max Tokens</label>
+                  <input type="number" min="1" step="1" id="local-doc-chunk-summary-max-tokens" class="text-input" placeholder="96">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="local-doc-doc-summary-max-tokens">Document Summary Max Tokens</label>
+                  <input type="number" min="1" step="1" id="local-doc-doc-summary-max-tokens" class="text-input" placeholder="160">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="local-doc-summarization-status">Loading local document summarization settings...</div>
+                <div class="actions">
+                  <button type="button" class="primary" id="save-local-doc-summarization">Save summarization settings</button>
+                </div>
+              </div>
+            </div>
+
             <div class="admin-card advanced-only">
               <div class="panel-header">
                 <div>
