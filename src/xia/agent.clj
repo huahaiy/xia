@@ -649,10 +649,10 @@
                  :summary "Working memory updated and context prepared."
                  :message-count (count messages)
                  :session-id session-id})
-              (loop [messages messages
-                     round    0]
-                (when (>= (long round) (long (or max-tool-rounds (configured-max-tool-rounds))))
-                  (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
+              (let [max-tool-rounds* (long (or max-tool-rounds
+                                               (configured-max-tool-rounds)))]
+                (loop [messages messages
+                       round    0]
                 (report-status! (if (zero? round)
                                   "Calling model"
                                   "Calling model with tool results")
@@ -661,7 +661,12 @@
                 (let [response   (call-model messages tools assistant-provider-id)
                       has-tools? (and (map? response) (seq (get response "tool_calls")))]
                   (if has-tools?
-                    (let [tool-calls    (get response "tool_calls")
+                    (do
+                      (when (>= (long round) max-tool-rounds*)
+                        (throw (ex-info "Too many tool-calling rounds"
+                                        {:rounds         round
+                                         :max-tool-rounds max-tool-rounds*})))
+                      (let [tool-calls    (get response "tool_calls")
                           assistant-msg {:role       "assistant"
                                          :content    (get response "content" "")
                                          :tool_calls tool-calls}
@@ -707,7 +712,7 @@
                                  (conj assistant-msg)
                                  (into tool-history)
                                  (into follow-up-messages))
-                             (inc round)))
+                             (inc round))))
                     (let [text (if (string? response) response (get response "content" ""))]
                       (report-status! "Preparing response"
                                       :phase :finalizing)
@@ -718,7 +723,7 @@
                       (prompt/status! {:state :done
                                        :phase :complete
                                        :message "Ready"})
-                      text)))))
+                      text))))))
             (catch Exception e
               (prompt/status! {:state :error
                                :phase :error
