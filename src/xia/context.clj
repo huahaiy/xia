@@ -24,7 +24,8 @@
             [xia.skill :as skill]
             [xia.llm :as llm]
             [xia.memory :as memory]
-            [xia.working-memory :as wm]))
+            [xia.working-memory :as wm])
+  (:import [java.util LinkedHashMap Map]))
 
 ;; ============================================================================
 ;; Token estimation
@@ -107,17 +108,63 @@
             code-discount  (long (codeish-discount text))]
         (long-max 1 (- (+ baseline cjk-adjustment) code-discount))))))
 
+(def ^:private token-estimate-cache-max-size 2048)
+(def ^:private token-estimate-cache-max-text-chars 8192)
+
+(defn- new-token-estimate-cache
+  ^Map []
+  (java.util.Collections/synchronizedMap
+    (proxy [LinkedHashMap] [256 0.75 true]
+      (removeEldestEntry [^java.util.Map$Entry _eldest]
+        (> (.size ^LinkedHashMap this)
+           (long token-estimate-cache-max-size))))))
+
+(defonce ^:private token-estimate-cache
+  (new-token-estimate-cache))
+
+(defn- clear-token-estimate-cache!
+  []
+  (locking token-estimate-cache
+    (.clear ^Map token-estimate-cache)))
+
+(defn- token-estimate-source-key
+  [provider]
+  (if provider
+    [:provider (.getName (class provider)) (System/identityHashCode provider)]
+    [:heuristic]))
+
+(defn- uncached-estimate-tokens
+  ^long [provider text]
+  (if provider
+    (try
+      (max 1 (long (emb/token-count provider text)))
+      (catch Throwable _
+        (heuristic-estimate-tokens text)))
+    (heuristic-estimate-tokens text)))
+
 (defn estimate-tokens
   [s]
   (let [text (str s)]
-    (if (str/blank? text)
+    (cond
+      (str/blank? text)
       0
-      (if-let [provider (db/current-embedding-provider)]
-        (try
-          (max 1 (long (emb/token-count provider text)))
-          (catch Throwable _
-            (heuristic-estimate-tokens text)))
-        (heuristic-estimate-tokens text)))))
+
+      :else
+      (let [provider  (db/current-embedding-provider)
+            text-size (long (count text))]
+        (if (> text-size (long token-estimate-cache-max-text-chars))
+          (uncached-estimate-tokens provider text)
+          (let [cache-key [(token-estimate-source-key provider) text]]
+            (if-some [cached (.get ^Map token-estimate-cache cache-key)]
+              (long cached)
+              (let [estimate (long (uncached-estimate-tokens provider text))]
+                (locking token-estimate-cache
+                  (if-some [cached (.get ^Map token-estimate-cache cache-key)]
+                    (long cached)
+                    (do
+                      (.put ^Map token-estimate-cache cache-key
+                            (Long/valueOf estimate))
+                      estimate)))))))))))
 
 ;; ============================================================================
 ;; Budget config
@@ -628,6 +675,7 @@
            used-fact-eids []] ; "### Known\n"
       (if (empty? ents)
         {:content        (str/join "\n" lines)
+         :tokens         tokens
          :used-fact-eids used-fact-eids}
         (let [{:keys [content]
                entity-used-fact-eids :used-fact-eids}
@@ -636,6 +684,7 @@
               line-tokens (long (estimate-tokens line))]
           (if (> (+ tokens line-tokens) budget*)
             {:content        (str/join "\n" lines)
+             :tokens         tokens
              :used-fact-eids used-fact-eids}
             (recur (rest ents)
                    (conj lines line)
@@ -655,25 +704,31 @@
                    (.get cal java.util.Calendar/MONTH))
               (.get cal java.util.Calendar/DAY_OF_MONTH)))))
 
-(defn render-episodes
+(defn- render-episodes-data
   "Render relevant episodes into compact format, within token budget."
   [episodes budget]
   (let [budget* (long budget)]
     (when (seq episodes)
-    (loop [eps episodes
-           lines ["### Recent"]
-           tokens 10]
-      (if (empty? eps)
-        (str/join "\n" lines)
-        (let [{:keys [summary timestamp]} (first eps)
-              date-str (format-date timestamp)
-              line (str "- [" (or date-str "?") "] " summary)
-              line-tokens (long (estimate-tokens line))]
-          (if (> (+ tokens line-tokens) budget*)
-            (str/join "\n" lines)
-            (recur (rest eps)
-                   (conj lines line)
-                   (+ tokens line-tokens)))))))))
+      (loop [eps episodes
+             lines ["### Recent"]
+             tokens 10]
+        (if (empty? eps)
+          {:content (str/join "\n" lines)
+           :tokens  tokens}
+          (let [{:keys [summary timestamp]} (first eps)
+                date-str (format-date timestamp)
+                line (str "- [" (or date-str "?") "] " summary)
+                line-tokens (long (estimate-tokens line))]
+            (if (> (+ tokens line-tokens) budget*)
+              {:content (str/join "\n" lines)
+               :tokens  tokens}
+              (recur (rest eps)
+                     (conj lines line)
+                     (+ tokens line-tokens)))))))))
+
+(defn render-episodes
+  [episodes budget]
+  (:content (render-episodes-data episodes budget)))
 
 (defn- local-doc-line
   [{:keys [name media-type summary preview matched-chunks]}]
@@ -703,42 +758,54 @@
          (when chunk*
            (str " [matches: " chunk* "]")))))
 
-(defn render-local-docs
+(defn- render-local-docs-data
   "Render relevant local documents into compact format, within token budget."
   [docs budget]
   (let [budget* (long budget)]
     (when (seq docs)
-    (loop [remaining docs
-           lines ["### Local Documents"]
-           tokens 12]
-      (if (empty? remaining)
-        (str/join "\n" lines)
-        (let [line (local-doc-line (first remaining))
-              line-tokens (long (estimate-tokens line))]
-          (if (> (+ tokens line-tokens) budget*)
-            (str/join "\n" lines)
-            (recur (rest remaining)
-                   (conj lines line)
-                   (+ tokens line-tokens)))))))))
+      (loop [remaining docs
+             lines ["### Local Documents"]
+             tokens 12]
+        (if (empty? remaining)
+          {:content (str/join "\n" lines)
+           :tokens  tokens}
+          (let [line (local-doc-line (first remaining))
+                line-tokens (long (estimate-tokens line))]
+            (if (> (+ tokens line-tokens) budget*)
+              {:content (str/join "\n" lines)
+               :tokens  tokens}
+              (recur (rest remaining)
+                     (conj lines line)
+                     (+ tokens line-tokens)))))))))
 
-(defn render-skills
+(defn render-local-docs
+  [docs budget]
+  (:content (render-local-docs-data docs budget)))
+
+(defn- render-skills-data
   "Render skills into prompt format, within token budget."
   [skills budget]
   (let [budget* (long budget)]
     (when (seq skills)
-    (loop [sks skills
-           parts ["## Skills\nFollow these instructions when relevant.\n"]
-           tokens 20]
-      (if (empty? sks)
-        (str/join "\n" parts)
-        (let [s (first sks)
-              section (str "### " (:skill/name s) "\n" (:skill/content s))
-              section-tokens (long (estimate-tokens section))]
-          (if (> (+ tokens section-tokens) budget*)
-            (str/join "\n" parts) ; budget exceeded
-            (recur (rest sks)
-                   (conj parts section)
-                   (+ tokens section-tokens)))))))))
+      (loop [sks skills
+             parts ["## Skills\nFollow these instructions when relevant.\n"]
+             tokens 20]
+        (if (empty? sks)
+          {:content (str/join "\n" parts)
+           :tokens  tokens}
+          (let [s (first sks)
+                section (str "### " (:skill/name s) "\n" (:skill/content s))
+                section-tokens (long (estimate-tokens section))]
+            (if (> (+ tokens section-tokens) budget*)
+              {:content (str/join "\n" parts)
+               :tokens  tokens}
+              (recur (rest sks)
+                     (conj parts section)
+                     (+ tokens section-tokens)))))))))
+
+(defn render-skills
+  [skills budget]
+  (:content (render-skills-data skills budget)))
 
 ;; ============================================================================
 ;; System prompt assembly
@@ -772,25 +839,28 @@
         ent-budget  (long-min (budget-value budget :entities) (long-max 0 remaining))
         ent-data    (render-entities-data (:entities wm-context) ent-budget)
         ent-section (:content ent-data)
-        ent-tokens  (long (estimate-tokens (or ent-section "")))
+        ent-tokens  (long (or (:tokens ent-data) 0))
         remaining   (- remaining ent-tokens)
 
         ;; P2: Local documents
         doc-budget  (long-min (budget-value budget :local-docs) (long-max 0 remaining))
-        doc-section (render-local-docs (:local-docs wm-context) doc-budget)
-        doc-tokens  (long (estimate-tokens (or doc-section "")))
+        doc-data    (render-local-docs-data (:local-docs wm-context) doc-budget)
+        doc-section (:content doc-data)
+        doc-tokens  (long (or (:tokens doc-data) 0))
         remaining   (- remaining doc-tokens)
 
         ;; P3: Episodes
         ep-budget  (long-min (budget-value budget :episodes) (long-max 0 remaining))
-        ep-section (render-episodes (:episodes wm-context) ep-budget)
-        ep-tokens  (long (estimate-tokens (or ep-section "")))
+        ep-data    (render-episodes-data (:episodes wm-context) ep-budget)
+        ep-section (:content ep-data)
+        ep-tokens  (long (or (:tokens ep-data) 0))
         remaining  (- remaining ep-tokens)
 
         ;; P4: Skills (lowest priority — cut first)
         skill-budget  (long-min (budget-value budget :skills) (long-max 0 remaining))
-        skill-section (render-skills skills skill-budget)
-        skill-tokens  (long (estimate-tokens (or skill-section "")))]
+        skill-data    (render-skills-data skills skill-budget)
+        skill-section (:content skill-data)
+        skill-tokens  (long (or (:tokens skill-data) 0))]
     {:prompt         (str id-section
                           (when topic-section (str "## Context\n" topic-section))
                           (when ent-section (str ent-section "\n\n"))

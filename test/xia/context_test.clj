@@ -31,6 +31,45 @@
       (with-redefs [db/current-embedding-provider (constantly provider)]
         (is (= 42 (ctx/estimate-tokens "hello world!"))))))
 
+  (testing "reuses cached token estimates for repeated text on the same provider"
+    (#'xia.context/clear-token-estimate-cache!)
+    (let [calls    (atom 0)
+          provider (reify emb/ITokenCounter
+                     (token-count* [_ _item _opts]
+                       (swap! calls inc)
+                       17)
+                     (truncate-item* [_ item _max-tokens _opts]
+                       item))]
+      (with-redefs [db/current-embedding-provider (constantly provider)]
+        (is (= 17 (ctx/estimate-tokens "repeat this")))
+        (is (= 17 (ctx/estimate-tokens "repeat this")))
+        (is (= 1 @calls)))))
+
+  (testing "keeps cached token estimates scoped to the active provider"
+    (#'xia.context/clear-token-estimate-cache!)
+    (let [calls-a   (atom 0)
+          calls-b   (atom 0)
+          provider-a (reify emb/ITokenCounter
+                       (token-count* [_ _item _opts]
+                         (swap! calls-a inc)
+                         11)
+                       (truncate-item* [_ item _max-tokens _opts]
+                         item))
+          provider-b (reify emb/ITokenCounter
+                       (token-count* [_ _item _opts]
+                         (swap! calls-b inc)
+                         23)
+                       (truncate-item* [_ item _max-tokens _opts]
+                         item))]
+      (with-redefs [db/current-embedding-provider (constantly provider-a)]
+        (is (= 11 (ctx/estimate-tokens "shared text")))
+        (is (= 11 (ctx/estimate-tokens "shared text"))))
+      (with-redefs [db/current-embedding-provider (constantly provider-b)]
+        (is (= 23 (ctx/estimate-tokens "shared text")))
+        (is (= 23 (ctx/estimate-tokens "shared text"))))
+      (is (= 1 @calls-a))
+      (is (= 1 @calls-b))))
+
   (testing "test provider counts lexical tokens instead of chars"
     (is (= 2 (ctx/estimate-tokens "hello world!")))
     (is (pos? (ctx/estimate-tokens "some text"))))
@@ -343,6 +382,46 @@
       (is (str/includes? prompt "notes.md")))
 
     (wm/clear-wm! sid)))
+
+(deftest test-assemble-system-prompt-data-reuses-renderer-token-totals
+  (let [sid            (db/create-session! :terminal)
+        estimated-texts (atom [])]
+    (with-redefs [xia.context/render-identity         (constantly "IDENTITY")
+                  xia.context/render-topic            (constantly "TOPIC")
+                  xia.context/render-entities-data    (fn [_ _]
+                                                        {:content "ENTITY-SECTION"
+                                                         :tokens  11
+                                                         :used-fact-eids [7]})
+                  xia.context/render-local-docs-data  (fn [_ _]
+                                                        {:content "DOC-SECTION"
+                                                         :tokens  13})
+                  xia.context/render-episodes-data    (fn [_ _]
+                                                        {:content "EPISODE-SECTION"
+                                                         :tokens  17})
+                  xia.context/render-skills-data      (fn [_ _]
+                                                        {:content "SKILL-SECTION"
+                                                         :tokens  19})
+                  xia.context/estimate-tokens         (fn [text]
+                                                        (swap! estimated-texts conj text)
+                                                        (case text
+                                                          "IDENTITY" 31
+                                                          "TOPIC"    7
+                                                          ""         0
+                                                          (throw (ex-info "unexpected estimate"
+                                                                          {:text text}))))
+                  xia.working-memory/wm->context      (constantly {:topics :present
+                                                                   :entities [:ignored]
+                                                                   :local-docs [:ignored]
+                                                                   :episodes [:ignored]
+                                                                   :turn-count 0})
+                  xia.skill/skills-for-context        (constantly [:ignored])]
+      (let [result (ctx/assemble-system-prompt-data sid)]
+        (is (= [7] (:used-fact-eids result)))
+        (is (str/includes? (:prompt result) "ENTITY-SECTION"))
+        (is (str/includes? (:prompt result) "DOC-SECTION"))
+        (is (str/includes? (:prompt result) "EPISODE-SECTION"))
+        (is (str/includes? (:prompt result) "SKILL-SECTION"))
+        (is (= ["IDENTITY" "TOPIC"] @estimated-texts))))))
 
 ;; ---------------------------------------------------------------------------
 ;; compact-history
