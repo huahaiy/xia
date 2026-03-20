@@ -65,6 +65,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^ConcurrentHashMap ^:private rate-limits (ConcurrentHashMap.))
+(defonce ^:private rate-limit-cleanup (atom 0))
 
 (def ^:private rate-limit-max 10)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute
@@ -74,6 +75,10 @@
   [url]
   (let [host (.getHost (URI. url))
         now  (System/currentTimeMillis)
+        _    (rate-limit/maybe-prune-states! rate-limits
+                                             rate-limit-cleanup
+                                             now
+                                             rate-limit-window-ms)
         state (.computeIfAbsent rate-limits host
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]

@@ -122,6 +122,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^ConcurrentHashMap ^:private service-rate-limits (ConcurrentHashMap.))
+(defonce ^:private service-rate-limit-cleanup (atom 0))
 (def ^:private rate-limit-window-ms 60000)
 
 (defn effective-rate-limit-per-minute
@@ -138,6 +139,10 @@
   [service-id service]
   (let [limit (effective-rate-limit-per-minute service)
         now   (current-time-ms)
+        _     (rate-limit/maybe-prune-states! service-rate-limits
+                                              service-rate-limit-cleanup
+                                              now
+                                              rate-limit-window-ms)
         state (.computeIfAbsent service-rate-limits service-id
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]

@@ -261,6 +261,21 @@
           (is (= 6 (count (filter #{:limited} outcomes))))
           (is (= 2 (count (:timestamps @state)))))))))
 
+(deftest stale-service-rate-limit-entries-are-evicted
+  (let [now         120000
+        stale-id    :stale
+        active-id   :active
+        stale-state (atom {:timestamps [1000 2000]
+                           :cleaned    1000})
+        limits      (doto (ConcurrentHashMap.)
+                      (.put stale-id stale-state))]
+    (with-redefs [xia.service/service-rate-limits limits
+                  xia.service/service-rate-limit-cleanup (atom 0)
+                  xia.service/current-time-ms (constantly now)]
+      (#'service/check-rate-limit! active-id {:rate-limit-per-minute 2})
+      (is (nil? (.get limits stale-id)))
+      (is (some? (.get limits active-id))))))
+
 (deftest request-query-param-auth-overrides-tool-param-by-normalized-name
   (db/register-service! {:id          :query-auth-svc
                          :base-url    "https://api.example.com"

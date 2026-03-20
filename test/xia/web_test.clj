@@ -92,6 +92,21 @@
           (is (= 6 (count (filter #{:limited} outcomes))))
           (is (= 2 (count (:timestamps @state)))))))))
 
+(deftest stale-rate-limit-hosts-are-evicted
+  (let [now         120000
+        stale-host  "stale.example.com"
+        active-host "active.example.com"
+        stale-state (atom {:timestamps [1000 2000]
+                           :cleaned    1000})
+        limits      (doto (ConcurrentHashMap.)
+                      (.put stale-host stale-state))]
+    (with-redefs [xia.web/rate-limits limits
+                  xia.web/rate-limit-cleanup (atom 0)
+                  xia.web/rate-limit-max 2]
+      (#'web/check-rate-limit! (str "https://" active-host "/path"))
+      (is (nil? (.get limits stale-host)))
+      (is (some? (.get limits active-host))))))
+
 (deftest read-body-bytes-enforces-byte-limit-before-decoding
   (let [max-body-bytes (long (var-get #'web/max-body-bytes))
         char-count (inc (quot max-body-bytes 3))
