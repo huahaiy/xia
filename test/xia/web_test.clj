@@ -93,7 +93,8 @@
           (is (= 2 (count (:timestamps @state)))))))))
 
 (deftest read-body-bytes-enforces-byte-limit-before-decoding
-  (let [char-count (inc (quot (var-get #'web/max-body-bytes) 3))
+  (let [max-body-bytes (long (var-get #'web/max-body-bytes))
+        char-count (inc (quot max-body-bytes 3))
         text       (apply str (repeat char-count "界"))
         payload    (.getBytes ^String text StandardCharsets/UTF_8)
         ex         (try
@@ -102,11 +103,11 @@
                      (catch clojure.lang.ExceptionInfo e
                        e))]
     (is (some? ex))
-    (is (< char-count (var-get #'web/max-body-bytes)))
-    (is (> (alength payload) (var-get #'web/max-body-bytes)))
-    (is (re-find #"Response too large" (.getMessage ex)))
+    (is (< char-count max-body-bytes))
+    (is (> (alength payload) max-body-bytes))
+    (is (re-find #"Response too large" (.getMessage ^Throwable ex)))
     (is (= {:url   "https://example.com/cjk"
-            :limit (var-get #'web/max-body-bytes)}
+            :limit max-body-bytes}
            (select-keys (ex-data ex) [:url :limit])))))
 
 ;; ---------------------------------------------------------------------------

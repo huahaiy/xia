@@ -97,11 +97,11 @@
 
 (defn- snapshot-expired?
   [snapshot]
-  (> (- (now-ms)
+  (> (- (long (now-ms))
         (long (or (get snapshot "last_access_ms")
                   (get snapshot "updated_at_ms")
                   0)))
-     resumable-session-ttl-ms))
+     (long resumable-session-ttl-ms)))
 
 (defn- snapshot-backend-id
   [snapshot]

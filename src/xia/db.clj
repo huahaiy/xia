@@ -993,7 +993,7 @@
                                    [?e ?attr ?v]]
                                  db attr)]
             (or (migrate-secret-attr! eid attr value) 0)))]
-    (+ config-count attr-count)))
+    (+ (long config-count) (long attr-count))))
 
 ;; ---------------------------------------------------------------------------
 ;; Config

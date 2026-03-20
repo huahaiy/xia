@@ -16,9 +16,7 @@
             [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.llm :as llm]
-            [xia.memory :as memory])
-  (:import [java.util.concurrent ConcurrentHashMap]
-           [java.util.function Function]))
+            [xia.memory :as memory]))
 
 ;; ============================================================================
 ;; State
@@ -32,7 +30,9 @@
 (def ^:dynamic *session-op-thread* nil)
 
 (defonce ^:private wm-atom (atom {}))
-(defonce ^ConcurrentHashMap ^:private session-op-agents (ConcurrentHashMap.))
+(def ^:private session-op-lock-count 512)
+(defonce ^:private session-op-locks
+  (vec (repeatedly session-op-lock-count #(Object.))))
 
 (declare get-wm warm-start!)
 
@@ -52,23 +52,12 @@
    (when-let [sid (resolve-session-id session-id)]
      (get @wm-atom sid))))
 
-(defn- session-op-agent
-  [session-id]
-  (.computeIfAbsent session-op-agents
-                    session-id
-                    (reify Function
-                      (apply [_ _] (agent nil)))))
-
-(defn- remove-session-op-agent!
+(defn- session-op-lock
   [session-id]
   (when session-id
-    (.remove session-op-agents session-id))
-  nil)
-
-(defn- clear-session-op-agents!
-  []
-  (.clear session-op-agents)
-  nil)
+    (nth session-op-locks
+         (mod (bit-and Integer/MAX_VALUE (int (hash session-id)))
+              session-op-lock-count))))
 
 (defn- in-session-op?
   [session-id]
@@ -81,21 +70,10 @@
   (if-let [sid (resolve-session-id session-id)]
     (if (in-session-op? sid)
       (f sid)
-      (let [result (promise)]
-        (send-off (session-op-agent sid)
-                  (fn [state]
-                    (deliver result
-                             (try
-                               {:ok (binding [*session-op-session-id* sid
-                                              *session-op-thread* (Thread/currentThread)]
-                                      (f sid))}
-                               (catch Throwable t
-                                 {:error t})))
-                    state))
-        (let [{:keys [ok error]} @result]
-          (when error
-            (throw error))
-          ok)))
+      (locking (session-op-lock sid)
+        (binding [*session-op-session-id* sid
+                  *session-op-thread* (Thread/currentThread)]
+          (f sid))))
     (f nil)))
 
 (defn- update-session-wm!
@@ -294,7 +272,9 @@ Rules:
   (if-let [existing (get slots node-eid)]
     ;; Refresh: boost relevance
     (assoc slots node-eid
-           (assoc existing :relevance (min 1.0 (+ (:relevance existing) relevance))))
+           (assoc existing :relevance (clojure.core/min 1.0
+                                                        (+ (double (:relevance existing))
+                                                           (double relevance)))))
     ;; New slot
     (assoc slots node-eid
            {:node-eid   node-eid
@@ -308,21 +288,22 @@ Rules:
             :added-turn turn-count})))
 
 (defn- ref-relevance
+  ^double
   [ref]
   (double (or (:relevance ref) 0.0)))
 
 (defn- better-ref?
   [candidate existing]
-  (> (ref-relevance candidate)
-     (ref-relevance existing)))
+  (> (double (ref-relevance candidate))
+     (double (ref-relevance existing))))
 
 (defn- lowest-ranked-ref-entry
   [selected]
   (reduce-kv
     (fn [lowest ref-id ref]
       (if (or (nil? lowest)
-              (< (ref-relevance ref)
-                 (ref-relevance (second lowest))))
+              (< (double (ref-relevance ref))
+                 (double (ref-relevance (second lowest)))))
         [ref-id ref]
         lowest))
     nil
@@ -337,7 +318,7 @@ Rules:
                            (if (better-ref? ref existing)
                              (assoc selected ref-id ref)
                              selected)
-                           (if (< (count selected) max-count)
+                           (if (< (long (count selected)) (long max-count))
                              (assoc selected ref-id ref)
                              (let [[lowest-id lowest-ref] (lowest-ranked-ref-entry selected)]
                                (if (better-ref? ref lowest-ref)
@@ -368,10 +349,10 @@ Rules:
             ;; Merge nodes found via fact search
             slots-with-fact-nodes
             (reduce (fn [slots {:keys [node-eid]}]
-                      (if (contains? slots node-eid)
-                        ;; Boost existing slot
-                        (update-in slots [node-eid :relevance]
-                                   #(min 1.0 (+ % 0.3)))
+	                      (if (contains? slots node-eid)
+	                        ;; Boost existing slot
+	                        (update-in slots [node-eid :relevance]
+	                                   #(clojure.core/min 1.0 (+ (double %) 0.3)))
                         ;; Add the node
                         (let [node (memory/get-node node-eid)]
                           (merge-node-into-slot
@@ -402,14 +383,15 @@ Rules:
                                             max-refs)
             max-doc-refs (get-in wm [:config :max-local-doc-refs])
             new-doc-refs (into [] (map-indexed
-                                    (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
-                                      {:doc-id         id
-                                       :name           name
-                                       :media-type     media-type
-                                       :summary        summary
-                                       :preview        preview
-                                       :matched-chunks matched-chunks
-                                       :relevance      (max 0.45 (- 0.8 (* idx 0.1)))}))
+	                                    (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
+	                                      {:doc-id         id
+	                                       :name           name
+	                                       :media-type     media-type
+	                                       :summary        summary
+	                                       :preview        preview
+	                                       :matched-chunks matched-chunks
+	                                       :relevance      (clojure.core/max 0.45
+	                                                                         (- 0.8 (* (double idx) 0.1)))}))
                                (:local-docs search-results))
             merged-doc-refs (merge-bounded-refs (:local-doc-refs wm)
                                                 new-doc-refs
@@ -424,19 +406,19 @@ Rules:
   [slots factor]
   (reduce-kv
     (fn [acc eid slot]
-      (assoc acc eid
-             (if (:pinned? slot)
-               slot
-               (update slot :relevance * factor))))
+	      (assoc acc eid
+	             (if (:pinned? slot)
+	               slot
+	               (update slot :relevance #(* (double %) (double factor))))))
     {}
     slots))
 
 (defn- prune-slot-map
   [slots threshold max-slots]
   (->> slots
-       (filter (fn [[_ slot]]
-                 (or (:pinned? slot)
-                     (>= (:relevance slot) threshold))))
+	       (filter (fn [[_ slot]]
+	                 (or (:pinned? slot)
+	                     (>= (double (:relevance slot)) (double threshold)))))
        (sort-by (fn [[_ slot]] (:relevance slot)) >)
        (take max-slots)
        (into {})))
@@ -674,16 +656,16 @@ Rules:
                          decayed   (decay-slot-map (:slots wm) factor)
                          filtered  (prune-slot-map decayed threshold max-slots)]
                      (assoc wm :slots filtered))))))
-           (let [wm (session-wm sid)]
-             (when (and wm
-                        (> (:turn-count wm) 3)
-                        (detect-topic-shift? sid terms))
-               (auto-segment! sid channel))
-             (when wm
-               (let [interval    (get-in wm [:config :topic-update-interval])
-                     turns-since (- (:turn-count wm) (:topic-turn wm))]
-                 (when (and interval (>= turns-since interval))
-                   (schedule-topic-update! sid))))))
+	           (let [wm (session-wm sid)]
+	             (when (and wm
+	                        (> (long (:turn-count wm)) 3)
+	                        (detect-topic-shift? sid terms))
+	               (auto-segment! sid channel))
+	             (when wm
+	               (let [interval    (get-in wm [:config :topic-update-interval])
+	                     turns-since (- (long (:turn-count wm)) (long (:topic-turn wm)))]
+	                 (when (and interval (>= turns-since (long interval)))
+	                   (schedule-topic-update! sid))))))
          (get-wm sid))))))
 
 ;; ============================================================================
@@ -751,14 +733,12 @@ Rules:
 (defn clear-wm!
   "Clear working memory (on session end)."
   ([]
-   (reset! wm-atom {})
-   (clear-session-op-agents!))
+   (reset! wm-atom {}))
   ([session-id]
    (run-session-op! session-id
      (fn [sid]
        (when sid
-         (swap! wm-atom dissoc sid)
-         (remove-session-op-agent! sid))))))
+         (swap! wm-atom dissoc sid))))))
 
 ;; ============================================================================
 ;; Pinning

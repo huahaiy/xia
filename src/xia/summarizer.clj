@@ -51,9 +51,10 @@
 (defn- truncate-text
   [text max-chars]
   (when-let [compact (compact-text text)]
-    (if (and max-chars (> (count compact) max-chars))
-      (str (subs compact 0 (max 0 (dec max-chars))) "…")
-      compact)))
+    (let [limit (some-> max-chars long)]
+      (if (and limit (> (long (count compact)) (long limit)))
+        (str (subs compact 0 (max 0 (dec (long limit)))) "…")
+        compact))))
 
 (defn enabled?
   []
@@ -141,7 +142,7 @@
                          (map :summary)
                          (remove str/blank?)
                          (map-indexed (fn [idx summary]
-                                        (str "Chunk " (inc idx) ": " summary)))
+                                        (str "Chunk " (inc (long idx)) ": " summary)))
                          (str/join "\n"))
         source-kind (if (seq chunk-input) :chunk-summaries :full-text)
         source-text (if (seq chunk-input) chunk-input full-text)]

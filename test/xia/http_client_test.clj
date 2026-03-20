@@ -8,7 +8,7 @@
   (let [attempts (atom 0)
         sleeps   (atom [])]
     (with-redefs [http-client/send-request! (fn [_]
-                                              (case (swap! attempts inc)
+                                              (case (int (swap! attempts inc))
                                                 1 {:status 503
                                                    :headers {}
                                                    :body   "{\"error\":\"busy\"}"}
@@ -56,7 +56,7 @@
   (let [attempts (atom 0)
         sleeps   (atom [])]
     (with-redefs [http-client/send-request! (fn [_]
-                                              (case (swap! attempts inc)
+                                              (case (int (swap! attempts inc))
                                                 1 {:status 503
                                                    :headers {}
                                                    :body   "{\"error\":\"busy\"}"}

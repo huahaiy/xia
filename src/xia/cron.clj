@@ -52,7 +52,7 @@
     ;; Interval mode
     (:interval-minutes spec)
     (let [m (:interval-minutes spec)]
-      (when-not (and (integer? m) (pos? m))
+      (when-not (and (integer? m) (pos? (long m)))
         (throw (ex-info "interval-minutes must be a positive integer" {:value m}))))
 
     ;; Calendar mode — validate any specified fields
@@ -108,7 +108,7 @@
   (if-let [interval (:interval-minutes spec)]
     ;; Interval mode: last-run + interval, or after + interval if no last-run
     (let [^java.util.Date base (or last-run after)]
-      (java.util.Date. (long (+ (.getTime base) (* interval 60 1000)))))
+      (java.util.Date. (long (+ (.getTime base) (* (long interval) 60 1000)))))
     ;; Calendar mode
     (let [norm  (normalize spec)
           zone  (ZoneId/systemDefault)
@@ -143,8 +143,8 @@
   [spec]
   (if-let [m (:interval-minutes spec)]
     (cond
-      (< m 60)          (str "every " m " minutes")
-      (zero? (mod m 60)) (str "every " (/ m 60) " hours")
+      (< (long m) 60)          (str "every " m " minutes")
+      (zero? (long (mod (long m) 60))) (str "every " (/ (long m) 60) " hours")
       :else             (str "every " m " minutes"))
     (let [norm (normalize spec)]
       (str "at minute " (sort (:minute norm))

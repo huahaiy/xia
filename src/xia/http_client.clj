@@ -18,6 +18,10 @@
 (def ^:private default-retry-statuses #{408 409 425 429 500 502 503 504})
 (def ^:private default-retry-methods #{:delete :get :head :options :put :trace})
 
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
 (defonce ^:private http-clients (atom {}))
 
 (defn- http-client
@@ -145,8 +149,9 @@
 
 (defn- backoff-ms
   [attempt initial-backoff-ms max-backoff-ms]
-  (min max-backoff-ms
-       (* initial-backoff-ms (bit-shift-left 1 (dec attempt)))))
+  (long-min (long max-backoff-ms)
+            (* (long initial-backoff-ms)
+               (bit-shift-left 1 (dec (long attempt))))))
 
 (defn- retry-enabled?
   [{:keys [method retry-enabled? retry-methods]}]
@@ -197,19 +202,19 @@
                            :delay-ms delay-ms
                            :url (request-url req)})
                 (sleep-ms! delay-ms)
-                (attempt-request (inc attempt))))
+                (attempt-request (inc (long attempt)))))
             (attempt-request [attempt]
               (let [resp (try
                            (send-request! req)
                            (catch Exception e
                              (if (and can-retry?
-                                      (< attempt max-attempts)
+                                      (< (long attempt) (long max-attempts))
                                       (transient-exception? e))
                                (retry! attempt (.getMessage e))
                                (throw e))))
                     status (:status resp)]
                 (if (and can-retry?
-                         (< attempt max-attempts)
+                         (< (long attempt) (long max-attempts))
                          (contains? retry-statuses status))
                   (retry! attempt (str label " returned transient status " status))
                   (assoc resp :attempt (or (:attempt resp) attempt)))))]

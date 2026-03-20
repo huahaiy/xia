@@ -42,8 +42,20 @@
 (def ^:private camel-segment-pattern
   #"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+")
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
+(defn- budget-value
+  ^long [budget k]
+  (long (or (get budget k) 0)))
+
 (defn- ceil-div
-  [n d]
+  ^long [^long n ^long d]
   (quot (+ n (dec d)) d))
 
 (defn- codeish-span?
@@ -56,9 +68,9 @@
 
 (defn- codeish-chunk-tokens
   [chunk]
-  (let [camel-segments (count (re-seq camel-segment-pattern chunk))
-        length-estimate (ceil-div (count chunk) 8)]
-    (max 1 camel-segments length-estimate)))
+  (let [camel-segments  (long (count (re-seq camel-segment-pattern chunk)))
+        length-estimate (ceil-div (long (count chunk)) 8)]
+    (long-max 1 (long-max camel-segments length-estimate))))
 
 (defn- codeish-span-tokens
   [span]
@@ -71,10 +83,11 @@
   [text]
   (->> (re-seq codeish-span-pattern text)
        (filter codeish-span?)
-       (reduce (fn [discount span]
-                 (let [baseline (quot (count span) 4)
-                       adjusted (min baseline (codeish-span-tokens span))]
-                   (+ discount (- baseline adjusted))))
+       (reduce (fn [^long discount span]
+                 (let [baseline (quot (long (count span)) 4)
+                       adjusted (long-min baseline
+                                          (long (codeish-span-tokens span)))]
+                    (+ discount (- baseline adjusted))))
                0)))
 
 (defn- heuristic-estimate-tokens
@@ -87,12 +100,12 @@
   (let [text (str s)]
     (if (str/blank? text)
       0
-      (let [baseline       (quot (count text) 4)
-            cjk-chars      (count (re-seq cjk-char-pattern text))
+      (let [baseline       (quot (long (count text)) 4)
+            cjk-chars      (long (count (re-seq cjk-char-pattern text)))
             cjk-adjustment (- (ceil-div cjk-chars 2)
                               (quot cjk-chars 4))
-            code-discount  (codeish-discount text)]
-        (max 1 (- (+ baseline cjk-adjustment) code-discount))))))
+            code-discount  (long (codeish-discount text))]
+        (long-max 1 (- (+ baseline cjk-adjustment) code-discount))))))
 
 (defn estimate-tokens
   [s]
@@ -221,11 +234,12 @@
 
 (defn- truncate-history-text
   [value max-chars]
-  (let [text (some-> value str str/trim)]
+  (let [text (some-> value str str/trim)
+        max* (long max-chars)]
     (when (seq text)
-      (if (<= (count text) max-chars)
+      (if (<= (long (count text)) max*)
         text
-        (str (subs text 0 (max 1 (- max-chars 3))) "...")))))
+        (str (subs text 0 (long-max 1 (- max* 3))) "...")))))
 
 (defn- history-role-name
   [role]
@@ -361,16 +375,18 @@
 
 (defn- trim-tool-recap-lines
   [lines]
-  (let [lines* (if (> (count lines) archived-tool-recap-max-lines)
+  (let [max-lines (long archived-tool-recap-max-lines)
+        max-chars (long archived-tool-recap-max-chars)
+        lines* (if (> (long (count lines)) max-lines)
                  (into [] (take-last archived-tool-recap-max-lines) lines)
                  (vec lines))]
     (loop [acc []
            remaining (reverse lines*)
            total 0]
       (if-let [line (first remaining)]
-        (let [line-cost (+ (count line) (if (pos? total) 1 0))]
-          (if (> (+ total line-cost) archived-tool-recap-max-chars)
-            (if (seq acc) acc (vector (truncate-history-text line archived-tool-recap-max-chars)))
+        (let [line-cost (+ (long (count line)) (if (pos? total) 1 0))]
+          (if (> (+ total line-cost) max-chars)
+            (if (seq acc) acc (vector (truncate-history-text line max-chars)))
             (recur (conj acc line) (next remaining) (+ total line-cost))))
         (into [] (reverse acc))))))
 
@@ -510,7 +526,7 @@
 (defn- select-facts-for-entity
   [facts]
   (->> facts
-       (filter #(>= (memory/normalize-fact-confidence (:confidence %)) 0.1))
+       (filter #(>= (double (memory/normalize-fact-confidence (:confidence %))) 0.1))
        (sort-by memory/fact-prompt-score >)
        (take 5)
        vec))
@@ -543,7 +559,8 @@
 (defn- render-entities-data
   "Render active entities + facts into compact format, within token budget."
   [entities budget]
-  (when (seq entities)
+  (let [budget* (long budget)]
+    (when (seq entities)
     (loop [ents (sort-by (fn [entity]
                            (double (or (:relevance entity) 0.0)))
                          >
@@ -558,14 +575,14 @@
                entity-used-fact-eids :used-fact-eids}
               (render-entity-data (first ents))
               line       content
-              line-tokens (estimate-tokens line)]
-          (if (> (+ tokens line-tokens) budget)
+              line-tokens (long (estimate-tokens line))]
+          (if (> (+ tokens line-tokens) budget*)
             {:content        (str/join "\n" lines)
              :used-fact-eids used-fact-eids}
             (recur (rest ents)
                    (conj lines line)
                    (+ tokens line-tokens)
-                   (into used-fact-eids entity-used-fact-eids))))))))
+                   (into used-fact-eids entity-used-fact-eids)))))))))
 
 (defn render-entities
   [entities budget]
@@ -583,7 +600,8 @@
 (defn render-episodes
   "Render relevant episodes into compact format, within token budget."
   [episodes budget]
-  (when (seq episodes)
+  (let [budget* (long budget)]
+    (when (seq episodes)
     (loop [eps episodes
            lines ["### Recent"]
            tokens 10]
@@ -592,12 +610,12 @@
         (let [{:keys [summary timestamp]} (first eps)
               date-str (format-date timestamp)
               line (str "- [" (or date-str "?") "] " summary)
-              line-tokens (estimate-tokens line)]
-          (if (> (+ tokens line-tokens) budget)
+              line-tokens (long (estimate-tokens line))]
+          (if (> (+ tokens line-tokens) budget*)
             (str/join "\n" lines)
             (recur (rest eps)
                    (conj lines line)
-                   (+ tokens line-tokens))))))))
+                   (+ tokens line-tokens)))))))))
 
 (defn- local-doc-line
   [{:keys [name media-type summary preview matched-chunks]}]
@@ -630,24 +648,26 @@
 (defn render-local-docs
   "Render relevant local documents into compact format, within token budget."
   [docs budget]
-  (when (seq docs)
+  (let [budget* (long budget)]
+    (when (seq docs)
     (loop [remaining docs
            lines ["### Local Documents"]
            tokens 12]
       (if (empty? remaining)
         (str/join "\n" lines)
         (let [line (local-doc-line (first remaining))
-              line-tokens (estimate-tokens line)]
-          (if (> (+ tokens line-tokens) budget)
+              line-tokens (long (estimate-tokens line))]
+          (if (> (+ tokens line-tokens) budget*)
             (str/join "\n" lines)
             (recur (rest remaining)
                    (conj lines line)
-                   (+ tokens line-tokens))))))))
+                   (+ tokens line-tokens)))))))))
 
 (defn render-skills
   "Render skills into prompt format, within token budget."
   [skills budget]
-  (when (seq skills)
+  (let [budget* (long budget)]
+    (when (seq skills)
     (loop [sks skills
            parts ["## Skills\nFollow these instructions when relevant.\n"]
            tokens 20]
@@ -655,12 +675,12 @@
         (str/join "\n" parts)
         (let [s (first sks)
               section (str "### " (:skill/name s) "\n" (:skill/content s))
-              section-tokens (estimate-tokens section)]
-          (if (> (+ tokens section-tokens) budget)
+              section-tokens (long (estimate-tokens section))]
+          (if (> (+ tokens section-tokens) budget*)
             (str/join "\n" parts) ; budget exceeded
             (recur (rest sks)
                    (conj parts section)
-                   (+ tokens section-tokens))))))))
+                   (+ tokens section-tokens)))))))))
 
 ;; ============================================================================
 ;; System prompt assembly
@@ -674,45 +694,45 @@
    (assemble-system-prompt-data session-id nil))
   ([session-id opts]
    (let [budget     (resolve-system-prompt-budget (resolve-context-provider opts))
-        wm-context (or (wm/wm->context session-id)
+         wm-context (or (wm/wm->context session-id)
                        {:topics nil :entities [] :local-docs [] :episodes [] :turn-count 0})
-        skills     (skill/skills-for-context wm-context)
+         skills     (skill/skills-for-context wm-context)
 
         ;; P0: Identity (always included)
         id-section (render-identity)
-        id-tokens  (estimate-tokens id-section)
+        id-tokens  (long (estimate-tokens id-section))
 
         ;; P0: Topic (always included)
         topic-section (render-topic wm-context)
-        topic-tokens  (estimate-tokens (or topic-section ""))
+        topic-tokens  (long (estimate-tokens (or topic-section "")))
 
         ;; Remaining budget for P1-P3
         ;; Allocate to highest priority first so lower priorities get cut first
-        remaining (- (:total budget) id-tokens topic-tokens)
+        remaining (- (budget-value budget :total) id-tokens topic-tokens)
 
         ;; P1: Entities (highest priority — cut last)
-        ent-budget  (min (:entities budget) (max 0 remaining))
+        ent-budget  (long-min (budget-value budget :entities) (long-max 0 remaining))
         ent-data    (render-entities-data (:entities wm-context) ent-budget)
         ent-section (:content ent-data)
-        ent-tokens  (estimate-tokens (or ent-section ""))
+        ent-tokens  (long (estimate-tokens (or ent-section "")))
         remaining   (- remaining ent-tokens)
 
         ;; P2: Local documents
-        doc-budget  (min (:local-docs budget) (max 0 remaining))
+        doc-budget  (long-min (budget-value budget :local-docs) (long-max 0 remaining))
         doc-section (render-local-docs (:local-docs wm-context) doc-budget)
-        doc-tokens  (estimate-tokens (or doc-section ""))
+        doc-tokens  (long (estimate-tokens (or doc-section "")))
         remaining   (- remaining doc-tokens)
 
         ;; P3: Episodes
-        ep-budget  (min (:episodes budget) (max 0 remaining))
+        ep-budget  (long-min (budget-value budget :episodes) (long-max 0 remaining))
         ep-section (render-episodes (:episodes wm-context) ep-budget)
-        ep-tokens  (estimate-tokens (or ep-section ""))
+        ep-tokens  (long (estimate-tokens (or ep-section "")))
         remaining  (- remaining ep-tokens)
 
         ;; P4: Skills (lowest priority — cut first)
-        skill-budget  (min (:skills budget) (max 0 remaining))
+        skill-budget  (long-min (budget-value budget :skills) (long-max 0 remaining))
         skill-section (render-skills skills skill-budget)
-        skill-tokens  (estimate-tokens (or skill-section ""))]
+        skill-tokens  (long (estimate-tokens (or skill-section "")))]
     {:prompt         (str id-section
                           (when topic-section (str "## Context\n" topic-section))
                           (when ent-section (str ent-section "\n\n"))
@@ -740,12 +760,13 @@
    (let [messages*     (if (vector? messages) messages (vec messages))
          recap-prefix  (into [] (take-while recap-message?) messages*)
          live-history  (subvec messages* (count recap-prefix))
-         total-tokens  (transduce (map #(estimate-tokens (:content %))) + 0 messages*)
-         msg-count     (count live-history)]
-     (if (or (<= total-tokens budget) (<= msg-count 4))
+         total-tokens  (long (transduce (map #(estimate-tokens (:content %))) + 0 messages*))
+         msg-count     (long (count live-history))
+         budget*       (long budget)]
+     (if (or (<= total-tokens budget*) (<= msg-count 4))
        messages* ; fits in budget or too few to compact
        ;; Summarize the older half
-       (let [keep-count  (max 4 (quot msg-count 2))
+       (let [keep-count  (long-max 4 (quot msg-count 2))
              old-msgs    (subvec live-history 0 (- msg-count keep-count))
              recent-msgs (subvec live-history (- msg-count keep-count))
              old-text    (history-summary-text old-msgs)]
@@ -764,15 +785,15 @@
                   (configured-recent-history-message-limit))]
     (max 4 (long limit))))
 
-(defn- build-history-with-session-recap
+  (defn- build-history-with-session-recap
   [session-id opts]
-  (let [recent-limit (recent-history-message-limit opts)
+  (let [recent-limit (long (recent-history-message-limit opts))
         metadata     (db/session-message-metadata session-id)
-        total        (count metadata)]
+        total        (long (count metadata))]
     (if (<= total recent-limit)
       (into [] (map history-message->llm-message)
             (db/session-messages-by-eids (into [] (map :eid) metadata)))
-      (let [recent-start       (max 0 (- total recent-limit))
+      (let [recent-start       (long-max 0 (- total recent-limit))
             recap-state        (db/session-history-recap session-id)
             recap-count0       (long (or (:message-count recap-state) 0))
             recap-count        (if (<= recap-count0 recent-start) recap-count0 0)

@@ -233,7 +233,7 @@
                       #(backup/run-scheduled-backup!)))
       (when (and (or (nil? @last-maintenance-at)
                      (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
-                         maintenance-interval-ms))
+                         (long maintenance-interval-ms)))
                  (compare-and-set! maintenance-running? false true))
         (submit-work! "background maintenance"
                       (fn []

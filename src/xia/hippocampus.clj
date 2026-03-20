@@ -101,6 +101,7 @@ Rules:
         nil))))
 
 (defn- parse-importance
+  ^double
   [value]
   (cond
     (number? value) (double value)
@@ -111,15 +112,22 @@ Rules:
 
 (defn- normalize-importance
   [value]
-  (-> value
-      parse-importance
-      (max 0.0)
-      (min 1.0)))
+  (let [importance (double (parse-importance value))]
+    (cond
+      (< importance 0.0) 0.0
+      (> importance 1.0) 1.0
+      :else importance)))
 
 (defn- abs-double
   ^double [x]
   (let [x* (double x)]
     (if (neg? x*) (- x*) x*)))
+
+(defn- long-max
+  ^long [a b]
+  (let [a* (long a)
+        b* (long b)]
+    (if (> a* b*) a* b*)))
 
 (defn- episode-importance-defaults
   [episodes]
@@ -638,10 +646,13 @@ Rules:
 
 (defn- decay-window-ms
   [^java.util.Date updated-at ^java.util.Date as-of decay-config]
-  (max 0
-       (- (.getTime as-of)
-          (.getTime updated-at)
-          (:grace-period-ms decay-config))))
+  (let [as-of-ms (.getTime as-of)
+        updated-ms (.getTime updated-at)
+        grace-period-ms (long (:grace-period-ms decay-config))]
+    (long-max 0
+              (- as-of-ms
+                 updated-ms
+                 grace-period-ms))))
 
 (defn- effective-decayed-at
   [^java.util.Date updated-at ^java.util.Date last-decayed]
@@ -666,15 +677,17 @@ Rules:
 
 (defn- archive-bottomed-fact?
   [confidence ^java.util.Date bottomed-at ^java.util.Date as-of decay-config]
-  (and bottomed-at
-       (bottomed-out-confidence? confidence decay-config)
-       (>= (- (.getTime as-of) (.getTime bottomed-at))
-           (:archive-after-bottom-ms decay-config))))
+  (let [archive-after-bottom-ms (long (:archive-after-bottom-ms decay-config))]
+    (and bottomed-at
+         (bottomed-out-confidence? confidence decay-config)
+         (>= (- (.getTime as-of) (.getTime bottomed-at))
+             archive-after-bottom-ms))))
 
 (defn- due-for-decay-facts
   [^java.util.Date as-of decay-config]
   (let [step-ms       (:maintenance-step-ms decay-config)
-        cutoff        (java.util.Date. (long (- (.getTime as-of) step-ms)))
+        step-ms*      (long step-ms)
+        cutoff        (java.util.Date. (long (- (.getTime as-of) step-ms*)))
         never-decayed (db/q '[:find ?f ?confidence ?utility ?updated ?updated
                               :in $ ?cutoff
                               :where
@@ -696,15 +709,15 @@ Rules:
                      [(compare ?decayed ?cutoff) ?cmp]
                      [(<= ?cmp 0)]]
                    cutoff)
-             (mapv (fn [[eid confidence utility updated decayed]]
-                     [eid
-                      confidence
-                      utility
-                      updated
-                      (effective-decayed-at updated decayed)]))
-             (filterv (fn [[_ _ _ _ last-decayed]]
-                        (>= (- (.getTime as-of) (.getTime ^java.util.Date last-decayed))
-                            step-ms))))]
+	             (mapv (fn [[eid confidence utility updated decayed]]
+	                     [eid
+	                      confidence
+	                      utility
+	                      updated
+	                      (effective-decayed-at updated decayed)]))
+	             (filterv (fn [[_ _ _ _ last-decayed]]
+	                        (>= (- (.getTime as-of) (.getTime ^java.util.Date last-decayed))
+	                            step-ms*))))]
     (into (vec never-decayed) previously-decayed)))
 
 (defn- fact-bottomed-at-map
@@ -720,8 +733,9 @@ Rules:
 
 (defn- due-for-archive-eids
   [^java.util.Date as-of decay-config]
-  (let [cutoff        (java.util.Date. (long (- (.getTime as-of)
-                                                (:archive-after-bottom-ms decay-config))))
+  (let [archive-after-bottom-ms (long (:archive-after-bottom-ms decay-config))
+        cutoff        (java.util.Date. (long (- (.getTime as-of)
+                                                archive-after-bottom-ms)))
         max-confidence (+ (double (:min-confidence decay-config)) 1.0e-9)]
     (->> (db/q '[:find ?f
                  :in $ ?cutoff ?max-confidence
@@ -739,15 +753,17 @@ Rules:
   [confidence utility ^java.util.Date updated-at ^java.util.Date last-decayed ^java.util.Date as-of decay-config]
   (let [previous-window (decay-window-ms updated-at last-decayed decay-config)
         current-window  (decay-window-ms updated-at as-of decay-config)
-        delta-window    (- current-window previous-window)
-        utility-factor  (memory/fact-utility-half-life-factor utility)]
+        delta-window    (- (long current-window) (long previous-window))
+        confidence*     (double confidence)
+        utility-factor  (double (memory/fact-utility-half-life-factor utility))
+        min-confidence  (double (:min-confidence decay-config))
+        half-life-ms    (double (:half-life-ms decay-config))]
     (when (pos? delta-window)
-      (max (:min-confidence decay-config)
-           (* confidence
-              (Math/pow 0.5
-                        (/ delta-window
-                           (double (* (:half-life-ms decay-config)
-                                      utility-factor)))))))))
+      (clojure.core/max min-confidence
+                        (* confidence*
+                           (Math/pow 0.5
+                                     (/ (double delta-window)
+                                        (* half-life-ms utility-factor))))))))
 
 (defn maintain-knowledge!
   "Periodic maintenance: apply time-based exponential decay to stale facts.
@@ -801,7 +817,8 @@ Rules:
 (defn consolidate-if-pending!
   "Idle consolidation: if pending episodes exceed threshold, consolidate."
   [& {:keys [threshold] :or {threshold 3}}]
-  (let [pending (memory/unprocessed-episodes)]
-    (when (>= (count pending) threshold)
+  (let [pending (memory/unprocessed-episodes)
+        threshold* (long threshold)]
+    (when (>= (count pending) threshold*)
       (log/info "Idle consolidation triggered:" (count pending) "pending episodes")
       (consolidate-pending!))))

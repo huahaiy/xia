@@ -44,6 +44,14 @@
 (defonce ^:private workload-counters (atom {}))
 (defonce ^:private provider-health (atom {}))
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
 ;; ---------------------------------------------------------------------------
 ;; Provider resolution
 ;; ---------------------------------------------------------------------------
@@ -108,13 +116,14 @@
                      default-max-provider-retry-wait-ms))
 
 (defn- provider-cooldown-ms
+  ^long
   [consecutive-failures]
-  (loop [cooldown provider-health-base-cooldown-ms
-         remaining (max 0 (dec (long consecutive-failures)))]
+  (loop [cooldown (long provider-health-base-cooldown-ms)
+         remaining (long-max 0 (dec (long consecutive-failures)))]
     (if (zero? remaining)
       cooldown
-      (recur (min provider-health-max-cooldown-ms
-                  (* 2 cooldown))
+      (recur (long-min (long provider-health-max-cooldown-ms)
+                       (* 2 cooldown))
              (dec remaining)))))
 
 (defn- provider-health-entry
@@ -131,9 +140,9 @@
   (let [provider-id          (or provider-id (default-provider-id))
         {:keys [consecutive-failures cooldown-until-ms last-success-ms last-failure-ms last-error]}
         (provider-health-entry provider-id)
-        current-ms           (now-ms)
+        current-ms           (long (now-ms))
         cooldown-remaining-ms (when cooldown-until-ms
-                                (max 0 (- cooldown-until-ms current-ms)))
+                                (long-max 0 (- (long cooldown-until-ms) current-ms)))
         status               (cond
                                (pos? (long (or cooldown-remaining-ms 0))) :cooling-down
                                (pos? (long (or consecutive-failures 0)))   :degraded
@@ -151,7 +160,7 @@
 
 (defn- record-provider-success!
   [provider-id]
-  (let [timestamp (now-ms)]
+  (let [timestamp (long (now-ms))]
     (swap! provider-health assoc provider-id
            {:consecutive-failures 0
             :cooldown-until-ms   nil
@@ -161,13 +170,13 @@
 
 (defn- record-provider-failure!
   [provider-id error-message & {:keys [cooldown-ms]}]
-  (let [timestamp (now-ms)]
+  (let [timestamp (long (now-ms))]
     (swap! provider-health
            (fn [state]
              (let [previous             (get state provider-id)
                    consecutive-failures (inc (long (or (:consecutive-failures previous) 0)))
-                   cooldown-ms          (max (long (or cooldown-ms 0))
-                                             (long (provider-cooldown-ms consecutive-failures)))]
+                   cooldown-ms          (long-max (long (or cooldown-ms 0))
+                                                  (provider-cooldown-ms consecutive-failures))]
                (assoc state provider-id
                       {:consecutive-failures consecutive-failures
                        :cooldown-until-ms   (+ timestamp cooldown-ms)
@@ -192,13 +201,13 @@
   (when-let [raw (some-> (header-value headers "retry-after") str)]
     (let [value (str/trim raw)]
       (or (try
-            (* 1000 (max 0 (Long/parseLong value)))
+            (* 1000 (long-max 0 (Long/parseLong value)))
             (catch Exception _
               nil))
           (try
-            (max 0
-                 (- (.toEpochMilli (.toInstant (ZonedDateTime/parse value DateTimeFormatter/RFC_1123_DATE_TIME)))
-                    (now-ms)))
+            (long-max 0
+                      (- (.toEpochMilli (.toInstant (ZonedDateTime/parse value DateTimeFormatter/RFC_1123_DATE_TIME)))
+                         (long (now-ms))))
             (catch Exception _
               nil))))))
 
@@ -227,16 +236,17 @@
                (apply min)))))
 
 (defn- remaining-retry-wait-ms
+  ^long
   [started-at max-retry-wait-ms]
-  (- max-retry-wait-ms (- (now-ms) started-at)))
+  (- (long max-retry-wait-ms) (- (long (now-ms)) (long started-at))))
 
 (defn- retry-sleep-ms
   [started-at round max-retry-rounds max-retry-wait-ms requested-delay-ms]
   (let [remaining-ms (remaining-retry-wait-ms started-at max-retry-wait-ms)]
-    (when (and (< round max-retry-rounds)
+    (when (and (< (long round) (long max-retry-rounds))
                (pos? remaining-ms)
                (pos? (long (or requested-delay-ms 0))))
-      (min remaining-ms requested-delay-ms))))
+      (long-min remaining-ms (long requested-delay-ms)))))
 
 (defn- provider-group-key
   [{:keys [available? consecutive-failures cooldown-until-ms]}]

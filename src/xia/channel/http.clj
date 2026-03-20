@@ -50,6 +50,19 @@
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private ms-per-day (* 24 60 60 1000))
 (def ^:private byte-array-class (class (byte-array 0)))
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
+(defn- days->ms
+  [days]
+  (when-some [days* (some-> days long)]
+    (* (long days*) (long ms-per-day))))
+
 (defonce ^:private local-session-secret
   (delay
     (let [bytes (byte-array 32)
@@ -219,13 +232,13 @@
 
     (string? body)
     (let [body-bytes (.getBytes ^String body StandardCharsets/UTF_8)]
-      (when (> (alength body-bytes) max-request-body-bytes)
+      (when (> (long (alength body-bytes)) (long max-request-body-bytes))
         (throw (request-body-too-large-ex)))
       body-bytes)
 
     (instance? byte-array-class body)
     (let [body-bytes ^bytes body]
-      (when (> (alength body-bytes) max-request-body-bytes)
+      (when (> (long (alength body-bytes)) (long max-request-body-bytes))
         (throw (request-body-too-large-ex)))
       body-bytes)
 
@@ -239,7 +252,7 @@
               (neg? read-count)
               (.toByteArray out)
 
-              (> (+ total read-count) max-request-body-bytes)
+              (> (+ (long total) read-count) (long max-request-body-bytes))
               (throw (request-body-too-large-ex))
 
               :else
@@ -529,7 +542,7 @@
   [session-id]
   (when-let [sid (session-id-str session-id)]
     (nth session-finalize-locks
-         (mod (bit-and Integer/MAX_VALUE (hash sid))
+         (mod (bit-and Integer/MAX_VALUE (int (hash sid)))
               session-finalize-lock-count))))
 
 (defn- with-session-finalize-lock
@@ -581,10 +594,11 @@
 
 (defn- truncate-text
   [value limit]
-  (let [text (some-> value str str/trim)]
+  (let [text  (some-> value str str/trim)
+        limit (long limit)]
     (when (seq text)
-      (if (> (count text) limit)
-        (str (subs text 0 (max 0 (- limit 1))) "…")
+      (if (> (long (count text)) limit)
+        (str (subs text 0 (long-max 0 (- limit 1))) "…")
         text))))
 
 (defn- history-run->body
@@ -893,19 +907,19 @@
   []
   (let [{:keys [full-resolution-ms decay-half-life-ms retained-decayed-count]}
         (memory/episode-retention-settings)]
-    {:full_resolution_days (long (/ full-resolution-ms ms-per-day))
-     :decay_half_life_days (long (/ decay-half-life-ms ms-per-day))
+    {:full_resolution_days (long (/ (long full-resolution-ms) (long ms-per-day)))
+     :decay_half_life_days (long (/ (long decay-half-life-ms) (long ms-per-day)))
      :retained_count       (long retained-decayed-count)}))
 
 (defn- knowledge-decay->admin-body
   []
   (let [{:keys [grace-period-ms half-life-ms min-confidence maintenance-step-ms archive-after-bottom-ms]}
         (hippo/knowledge-decay-settings)]
-    {:grace_period_days         (long (/ grace-period-ms ms-per-day))
-     :half_life_days            (long (/ half-life-ms ms-per-day))
+    {:grace_period_days         (long (/ (long grace-period-ms) (long ms-per-day)))
+     :half_life_days            (long (/ (long half-life-ms) (long ms-per-day)))
      :min_confidence            min-confidence
-     :maintenance_interval_days (long (/ maintenance-step-ms ms-per-day))
-     :archive_after_bottom_days (long (/ archive-after-bottom-ms ms-per-day))}))
+     :maintenance_interval_days (long (/ (long maintenance-step-ms) (long ms-per-day)))
+     :archive_after_bottom_days (long (/ (long archive-after-bottom-ms) (long ms-per-day)))}))
 
 (defn- conversation-context->admin-body
   []
@@ -1938,10 +1952,10 @@
                                                                "retained_count"))]
       (when (contains? data "full_resolution_days")
         (save-config-override! :memory/episode-full-resolution-ms
-                               (some-> full-resolution-days (* ms-per-day))))
+                               (days->ms full-resolution-days)))
       (when (contains? data "decay_half_life_days")
         (save-config-override! :memory/episode-decay-half-life-ms
-                               (some-> decay-half-life-days (* ms-per-day))))
+                               (days->ms decay-half-life-days)))
       (when (contains? data "retained_count")
         (save-config-override! :memory/episode-retained-decayed-count
                                retained-count))
@@ -1998,19 +2012,19 @@
                                                                     "archive_after_bottom_days"))]
       (when (contains? data "grace_period_days")
         (save-config-override! :memory/knowledge-decay-grace-period-ms
-                               (some-> grace-period-days (* ms-per-day))))
+                               (days->ms grace-period-days)))
       (when (contains? data "half_life_days")
         (save-config-override! :memory/knowledge-decay-half-life-ms
-                               (some-> half-life-days (* ms-per-day))))
+                               (days->ms half-life-days)))
       (when (contains? data "min_confidence")
         (save-config-override! :memory/knowledge-decay-min-confidence
                                min-confidence))
       (when (contains? data "maintenance_interval_days")
         (save-config-override! :memory/knowledge-decay-maintenance-step-ms
-                               (some-> maintenance-interval-days (* ms-per-day))))
+                               (days->ms maintenance-interval-days)))
       (when (contains? data "archive_after_bottom_days")
         (save-config-override! :memory/knowledge-decay-archive-after-bottom-ms
-                               (some-> archive-after-bottom-days (* ms-per-day))))
+                               (days->ms archive-after-bottom-days)))
       (json-response 200 {:knowledge_decay (knowledge-decay->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))

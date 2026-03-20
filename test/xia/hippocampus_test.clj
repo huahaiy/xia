@@ -518,19 +518,21 @@
         node-eid      (th/seed-node! "TestEntity" "concept")
         fact-eid      (th/seed-fact! node-eid "some fact" :confidence 1.0)
         now-ms        (System/currentTimeMillis)
-        elapsed-ms    (+ (:grace-period-ms settings)
-                         (* 2 (:half-life-ms settings)))
+        grace-period-ms (long (:grace-period-ms settings))
+        half-life-ms  (long (:half-life-ms settings))
+        elapsed-ms    (+ grace-period-ms
+                         (* 2 half-life-ms))
         now           (date-at now-ms)
         old-updated   (date-at (- now-ms elapsed-ms))
-        expected-conf (max (:min-confidence settings)
-                           (Math/pow 0.5 (/ (- elapsed-ms (:grace-period-ms settings))
-                                            (double (:half-life-ms settings)))))]
+        expected-conf (clojure.core/max (double (:min-confidence settings))
+                                        (Math/pow 0.5 (/ (- elapsed-ms grace-period-ms)
+                                                         (double half-life-ms))))]
     (db/transact! [[:db/add fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
     (let [updated-conf (:kg.fact/confidence (db/entity fact-eid))
           decayed-at   (:kg.fact/decayed-at (db/entity fact-eid))]
       (is (< updated-conf 1.0) "Confidence should have decayed")
-      (is (< (abs-double (- updated-conf expected-conf)) 1.0e-3)
+      (is (< (abs-double (- (double updated-conf) expected-conf)) 1.0e-3)
           "Confidence should follow the documented exponential half-life")
       (is (= now decayed-at) "Maintenance should record when decay was applied"))))
 
@@ -540,8 +542,9 @@
         fact-eid    (th/seed-fact! node-eid "stable fact" :confidence 1.0)
         now-ms      (System/currentTimeMillis)
         now         (date-at now-ms)
+        grace-period-ms (long (:grace-period-ms settings))
         old-updated (date-at (- now-ms
-                                 (+ (:grace-period-ms settings)
+                                 (+ grace-period-ms
                                     (* 30 24 60 60 1000))))]
     (db/transact! [[:db/add fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
@@ -558,9 +561,11 @@
         high-fact-eid (th/seed-fact! node-eid "high utility fact" :confidence 1.0 :utility 1.0)
         now-ms        (System/currentTimeMillis)
         now           (date-at now-ms)
+        grace-period-ms (long (:grace-period-ms settings))
+        half-life-ms  (long (:half-life-ms settings))
         old-updated   (date-at (- now-ms
-                                  (+ (:grace-period-ms settings)
-                                     (* 2 (:half-life-ms settings)))))]
+                                  (+ grace-period-ms
+                                     (* 2 half-life-ms))))]
     (db/transact! [[:db/add low-fact-eid :kg.fact/updated-at old-updated]
                    [:db/add high-fact-eid :kg.fact/updated-at old-updated]])
     (hippo/maintain-knowledge! now)
@@ -573,18 +578,19 @@
         node-eid        (th/seed-node! "DecayQueryEntity" "concept")
         now-ms          (System/currentTimeMillis)
         as-of           (date-at now-ms)
+        maintenance-step-ms (long (:maintenance-step-ms settings))
         stale-updated   (date-at (- now-ms
-                                     (:maintenance-step-ms settings)
+                                     maintenance-step-ms
                                      (* 2 24 60 60 1000)))
         old-maintained-updated (date-at (- now-ms
-                                           (:maintenance-step-ms settings)
+                                           maintenance-step-ms
                                            (* 6 24 60 60 1000)))
         fresh-updated   (date-at (- now-ms
-                                     (quot (:maintenance-step-ms settings) 2)))
+                                     (quot maintenance-step-ms 2)))
         recent-decayed  (date-at (- now-ms
-                                     (quot (:maintenance-step-ms settings) 2)))
+                                     (quot maintenance-step-ms 2)))
         old-decayed     (date-at (- now-ms
-                                     (:maintenance-step-ms settings)
+                                     maintenance-step-ms
                                      (* 3 24 60 60 1000)))
         stale-eid       (th/seed-fact! node-eid "stale fact" :confidence 1.0)
         fresh-eid       (th/seed-fact! node-eid "fresh fact" :confidence 1.0)
@@ -618,8 +624,9 @@
                                   :utility 0.5)
         now-ms     (System/currentTimeMillis)
         now        (date-at now-ms)
+        archive-after-bottom-ms (long (:archive-after-bottom-ms settings))
         bottomed   (date-at (- now-ms
-                                 (:archive-after-bottom-ms settings)
+                                 archive-after-bottom-ms
                                  (* 2 24 60 60 1000)))
         updated-at (date-at (- (.getTime bottomed)
                                  (* 30 24 60 60 1000)))]
@@ -635,11 +642,12 @@
         node-eid       (th/seed-node! "ArchiveQueryEntity" "concept")
         now-ms         (System/currentTimeMillis)
         as-of          (date-at now-ms)
+        archive-after-bottom-ms (long (:archive-after-bottom-ms settings))
         old-bottomed   (date-at (- now-ms
-                                   (:archive-after-bottom-ms settings)
+                                   archive-after-bottom-ms
                                    (* 2 24 60 60 1000)))
         recent-bottomed (date-at (- now-ms
-                                    (quot (:archive-after-bottom-ms settings) 2)))
+                                    (quot archive-after-bottom-ms 2)))
         stale-eid      (th/seed-fact! node-eid "stale archive fact"
                                       :confidence (:min-confidence settings)
                                       :utility 0.5)
@@ -661,8 +669,9 @@
         fact-eid   (th/seed-fact! node-eid "prefers tea"
                                   :confidence (:min-confidence settings)
                                   :utility 0.5)
+        archive-after-bottom-ms (long (:archive-after-bottom-ms settings))
         bottomed   (date-at (- (System/currentTimeMillis)
-                                 (:archive-after-bottom-ms settings)
+                                 archive-after-bottom-ms
                                  (* 2 24 60 60 1000)))]
     (db/transact! [[:db/add fact-eid :kg.fact/bottomed-at bottomed]])
     (#'xia.hippocampus/dedup-fact! node-eid "prefers tea" nil)

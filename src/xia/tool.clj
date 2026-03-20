@@ -357,7 +357,7 @@
                                   (assoc :tags tags)))
               (when (contains? @registry id)
                 (load-tool! id)))))
-        (+ installed-count (clojure.core/count missing))))
+        (+ (long installed-count) (long (clojure.core/count missing)))))
     0
     bundled-tool-resources))
 
@@ -415,9 +415,9 @@
                                              (map (fn [tool]
                                                     {:tool  tool
                                                      :score (tool-match-score tool terms)}))
-                                             (filter #(pos? (:score %)))
+                                             (filter #(pos? (long (:score %))))
                                              (sort-by (fn [{:keys [tool score]}]
-                                                        [(- score) (tool-sort-name tool)]))
+                                                        [(- (long score)) (tool-sort-name tool)]))
                                              (mapv :tool))]
                              (if (seq scored)
                                scored

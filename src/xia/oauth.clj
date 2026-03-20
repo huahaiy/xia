@@ -19,6 +19,10 @@
 (def ^:private refresh-skew-ms 60000)
 (def ^:private proactive-refresh-min-interval-ms 30000)
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
 (declare ensure-account-ready!)
 
 (defn- now-ms []
@@ -50,7 +54,7 @@
 
 (defn- cleanup-pending!
   []
-  (let [cutoff (- (now-ms) auth-state-ttl-ms)]
+  (let [cutoff (- (long (now-ms)) (long auth-state-ttl-ms))]
     (swap! pending-authorizations
            (fn [pending]
              (into {}
@@ -117,7 +121,7 @@
                               :request-label "OAuth token request"})
         body   (parse-token-response (:body resp))
         status (:status resp)]
-    (when (or (< status 200) (>= status 300))
+    (when (or (< (long status) 200) (>= (long status) 300))
       (throw (ex-info "OAuth token request failed"
                       {:status status
                        :body body})))
@@ -177,7 +181,7 @@
   [account]
   (if-let [expires-at (:oauth.account/expires-at account)]
     (<= (.getTime ^Date expires-at)
-        (+ (now-ms) refresh-skew-ms))
+        (+ (long (now-ms)) (long refresh-skew-ms)))
     false))
 
 (defn get-account
@@ -209,10 +213,10 @@
   ([{:keys [force?]
      :or   {force? false}}]
    (locking proactive-refresh-lock
-     (let [started-at (now-ms)]
+     (let [started-at (long (now-ms))]
        (if (and (not force?)
-                (< (- started-at @last-proactive-refresh-at-ms)
-                   proactive-refresh-min-interval-ms))
+                (< (- started-at (long @last-proactive-refresh-at-ms))
+                   (long proactive-refresh-min-interval-ms)))
          {:status    :skipped
           :reason    :recent
           :checked   0

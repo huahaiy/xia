@@ -146,8 +146,8 @@
   [filename]
   (let [name (some-> filename str str/trim)
         idx  (when (seq name) (.lastIndexOf ^String name "."))]
-    (when (and (some? idx) (pos? idx) (< idx (dec (count name))))
-      (-> (.substring ^String name (inc idx))
+    (when (and (some? idx) (pos? (long idx)) (< (long idx) (dec (long (count name)))))
+      (-> (.substring ^String name (inc (long idx)))
           str/lower-case
           str/trim
           not-empty))))
@@ -156,7 +156,7 @@
   [filename]
   (let [name (some-> filename str str/trim)
         idx  (when (seq name) (.lastIndexOf ^String name "."))]
-    (if (and (some? idx) (pos? idx))
+    (if (and (some? idx) (pos? (long idx)))
       (.substring ^String name 0 idx)
       name)))
 
@@ -389,9 +389,10 @@
 
 (defn- preview-text
   [text]
-  (let [trimmed (str/trim (or text ""))]
-    (if (> (count trimmed) preview-char-limit)
-      (str (subs trimmed 0 (max 0 (dec preview-char-limit))) "…")
+  (let [trimmed (str/trim (or text ""))
+        limit   (long preview-char-limit)]
+    (if (> (long (count trimmed)) limit)
+      (str (subs trimmed 0 (max 0 (dec limit))) "…")
       trimmed)))
 
 (defn- binary-preview

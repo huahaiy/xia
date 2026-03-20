@@ -194,7 +194,7 @@
                   :facts [] :edges {:outgoing [] :incoming []}}
           high   {:name "Top" :type :concept :relevance 0.9
                   :facts [] :edges {:outgoing [] :incoming []}}
-          budget (+ 8 (ctx/estimate-tokens (render-entity high)))
+          budget (+ 8 (long (ctx/estimate-tokens (render-entity high))))
           result (ctx/render-entities [low high] budget)]
       (is (str/includes? result "- Top"))
       (is (not (str/includes? result "- Low")))))
@@ -245,10 +245,11 @@
 
     (testing "budget-aware truncation"
       (let [docs (mapv (fn [i]
+                         (let [i* (long i)]
                          {:name (str "doc-" i ".txt")
                           :media-type "text/plain"
                           :preview (token-rich-text (str "preview" i) 40)
-                          :relevance (- 1.0 (* i 0.1))})
+                          :relevance (- 1.0 (* i* 0.1))}))
                        (range 10))
             result (rd docs 80)]
         (is (str/includes? result "### Local Documents"))

@@ -56,10 +56,10 @@
 (defn normalize-opts
   [{:keys [kind selector text-contains visible-only offset limit]}]
   (let [kind* (normalize-kind kind)
-        offset* (long (max 0 (or offset 0)))
-        limit* (long (-> (or limit default-limit)
-                         (max 1)
-                         (min max-limit)))
+        offset* (long (clojure.core/max 0 (long (or offset 0))))
+        limit* (long (-> (long (or limit default-limit))
+                         (clojure.core/max 1)
+                         (clojure.core/min (long max-limit))))
         text* (some-> text-contains str str/trim not-empty)]
     {:kind kind*
      :selector (or (some-> selector str str/trim not-empty)

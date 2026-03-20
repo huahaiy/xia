@@ -459,7 +459,12 @@
 
 (deftest session-ops-allow-different-sessions-in-parallel
   (let [sid-a      (random-uuid)
-        sid-b      (random-uuid)
+        session-op-lock #'xia.working-memory/session-op-lock
+        sid-b      (loop [candidate (random-uuid)]
+                     (if (identical? (@session-op-lock sid-a)
+                                     (@session-op-lock candidate))
+                       (recur (random-uuid))
+                       candidate))
         gate       (promise)
         active     (atom 0)
         max-active (atom 0)
@@ -482,18 +487,15 @@
     (wm/clear-wm! sid-a)
     (wm/clear-wm! sid-b)))
 
-(deftest clear-wm-cleans-up-session-op-agents
-  (let [sid-a   (random-uuid)
-        sid-b   (random-uuid)
-        ^java.util.Map agents @#'xia.working-memory/session-op-agents]
+(deftest session-op-locks-are-fixed-and-non-session-specific
+  (let [locks @#'xia.working-memory/session-op-locks
+        sid-a (random-uuid)
+        sid-b (random-uuid)]
+    (is (= 512 (count locks)))
+    (is (some? (@#'xia.working-memory/session-op-lock sid-a)))
+    (is (some? (@#'xia.working-memory/session-op-lock sid-b)))
     (wm/create-wm! sid-a)
     (wm/create-wm! sid-b)
-    (is (.containsKey agents sid-a))
-    (is (.containsKey agents sid-b))
-
     (wm/clear-wm! sid-a)
-    (is (not (.containsKey agents sid-a)))
-    (is (.containsKey agents sid-b))
-
-    (wm/clear-wm!)
-    (is (= 0 (.size agents)))))
+    (wm/clear-wm! sid-b)
+    (is (= 512 (count @#'xia.working-memory/session-op-locks)))))

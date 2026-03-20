@@ -269,7 +269,7 @@
         (throw (ex-info "Failed to download OpenClaw skill zip"
                         {:source-url source
                          :status status})))
-      (when (> (alength body) max-download-bytes)
+      (when (> (long (alength body)) (long max-download-bytes))
         (throw (ex-info "OpenClaw skill zip exceeds download limit"
                         {:source-url source
                          :size-bytes (alength body)
@@ -354,11 +354,11 @@
                        (filter supported-resource-file?)
                        (sort-by #(.getAbsolutePath ^File %))
                        (mapv #(read-resource! root %)))
-        oversized (filterv #(> (:size-bytes %) max-resource-bytes) resources)
-        total-bytes (reduce + 0 (map :size-bytes resources))
+        oversized (filterv #(> (long (:size-bytes %)) (long max-resource-bytes)) resources)
+        total-bytes (transduce (map #(long (:size-bytes %))) + 0 resources)
         errors (vec (concat
                       (map #(str "Bundled resource `" (:path %) "` exceeds the per-file size limit.") oversized)
-                      (when (> total-bytes max-total-resource-bytes)
+                      (when (> (long total-bytes) (long max-total-resource-bytes))
                         [(str "Bundled resources exceed the total size limit (" max-total-resource-bytes " bytes).")])))
         warnings (when-not strict?
                    (mapv (fn [resource]
@@ -367,7 +367,7 @@
         imported (if strict?
                    resources
                    (->> resources
-                        (remove #(> (:size-bytes %) max-resource-bytes))
+                        (remove #(> (long (:size-bytes %)) (long max-resource-bytes)))
                         vec))]
     {:resources imported
      :errors (if strict? errors [])

@@ -69,8 +69,8 @@
 
 (deftest test-prune-processed-episodes-does-timestamp-downsampling
   (let [config     (memory/episode-retention-settings)
-        window-ms  (:full-resolution-ms config)
-        day-ms     (* 24 60 60 1000)
+        window-ms  (long (:full-resolution-ms config))
+        day-ms     (long (* 24 60 60 1000))
         now        (date-at (* 5 window-ms))
         sid-a      (random-uuid)
         sid-b      (random-uuid)]
@@ -85,13 +85,14 @@
                       :channel :terminal
                       :timestamp (date-at (- (.getTime now) (* 180 day-ms))))
     (doseq [idx (range 9)]
-      (th/seed-episode! (str "older-" idx)
+      (let [idx* (long idx)]
+        (th/seed-episode! (str "older-" idx)
                         :processed? true
                         :session-id sid-a
                         :channel :terminal
                         :timestamp (date-at (- (.getTime now)
                                                (+ (* 2 window-ms)
-                                                  (* idx day-ms))))))
+                                                  (* idx* day-ms)))))))
     (th/seed-episode! "other-session-keep"
                       :processed? true
                       :session-id sid-b
@@ -122,10 +123,10 @@
                 set)))))
 
 (deftest test-prune-processed-episodes-clears-provenance-before-deletion
-  (let [window-ms (:full-resolution-ms (memory/episode-retention-settings))
+  (let [window-ms (long (:full-resolution-ms (memory/episode-retention-settings)))
         now       (date-at (* 10 window-ms))
         sid       (random-uuid)
-        day-ms    (* 24 60 60 1000)
+        day-ms    (long (* 24 60 60 1000))
         old-ep    (th/seed-episode! "old-processed"
                                     :processed? true
                                     :session-id sid
@@ -135,13 +136,14 @@
         alice     (th/seed-node! "Alice" "person")
         acme      (th/seed-node! "Acme" "thing")]
     (doseq [idx (range 8)]
-      (th/seed-episode! (str "keep-processed-" idx)
+      (let [idx* (long idx)]
+        (th/seed-episode! (str "keep-processed-" idx)
                         :processed? true
                         :session-id sid
                         :channel :terminal
                         :timestamp (date-at (- (.getTime now)
                                                (+ (* 2 window-ms)
-                                                  (* idx day-ms))))))
+                                                  (* idx* day-ms)))))))
     (memory/add-fact! {:node-eid alice
                        :content "worked on legacy system"
                        :source-eid old-ep})
@@ -161,9 +163,9 @@
                                                           [?e :kg.edge/label "worked at Acme"]]))))))))
 
 (deftest test-prune-processed-episodes-slows-decay-for-important-episodes
-  (let [window-ms (:full-resolution-ms (memory/episode-retention-settings))
+  (let [window-ms (long (:full-resolution-ms (memory/episode-retention-settings)))
         now       (date-at (* 12 window-ms))
-        day-ms    (* 24 60 60 1000)
+        day-ms    (long (* 24 60 60 1000))
         sid       (random-uuid)]
     (th/seed-episode! "important-1"
                       :processed? true
@@ -180,14 +182,15 @@
                       :timestamp (date-at (- (.getTime now) (+ (* 2 window-ms)
                                                                (* 11 day-ms)))))
     (doseq [idx (range 8)]
-      (th/seed-episode! (str "low-" idx)
+      (let [idx* (long idx)]
+        (th/seed-episode! (str "low-" idx)
                         :processed? true
                         :importance 0.1
                         :session-id sid
                         :channel :terminal
                         :timestamp (date-at (- (.getTime now)
                                                (+ (* 2 window-ms)
-                                                  (* (+ 12 idx) day-ms))))))
+                                                  (* (+ 12 idx*) day-ms)))))))
     (is (= 2 (memory/prune-processed-episodes! now)))
     (is (= #{"important-1"
              "important-2"

@@ -36,7 +36,8 @@
 (defonce ^:private session-snapshot-locks
   (vec (repeatedly session-snapshot-lock-count #(Object.))))
 
-(defn- now-ms []
+(defn- now-ms
+  ^long []
   (System/currentTimeMillis))
 
 (defn- enabled? []
@@ -74,9 +75,10 @@
 (defn- session-snapshot-lock
   [session-id]
   (when session-id
-    (nth session-snapshot-locks
-         (mod (bit-and Integer/MAX_VALUE (hash session-id))
-              session-snapshot-lock-count))))
+    (let [session-hash (int (hash session-id))]
+      (nth session-snapshot-locks
+           (mod (bit-and Integer/MAX_VALUE session-hash)
+                session-snapshot-lock-count)))))
 
 (defn- with-session-snapshot-lock
   [session-id f]
@@ -177,7 +179,7 @@
 (defn- install-browser!
   []
   (let [{:keys [exit] :as result} (run-playwright-cli! ["install" browser-name])]
-    (when-not (zero? exit)
+    (when-not (zero? (long exit))
       (throw (ex-info "Playwright browser installation failed."
                       (assoc result
                              :backend backend-id
@@ -197,15 +199,15 @@
        :status :unsupported-platform
        :message "Playwright system dependency installation is only supported on Linux."
        :platform platform}
-      (let [interactive? (and (not dry-run)
-                              (some? (System/console)))
-            args (cond-> ["install-deps" browser-name]
-                   dry-run (conj "--dry-run"))
-            {:keys [exit] :as result} (run-playwright-cli! args {:inherit-io? interactive?})]
-        (when-not (zero? exit)
-          (throw (ex-info "Playwright system dependency installation failed."
-                          (merge result
-                                 {:backend backend-id
+	      (let [interactive? (and (not dry-run)
+	                              (some? (System/console)))
+	            args (cond-> ["install-deps" browser-name]
+	                   dry-run (conj "--dry-run"))
+	            {:keys [exit] :as result} (run-playwright-cli! args {:inherit-io? interactive?})]
+	        (when-not (zero? (long exit))
+	          (throw (ex-info "Playwright system dependency installation failed."
+	                          (merge result
+	                                 {:backend backend-id
                                   :browser browser-name
                                   :supported? true
                                   :dry-run (boolean dry-run)
@@ -422,7 +424,9 @@
 
 (defn- session-expired?
   [{:keys [last-access]}]
-  (> (- (now-ms) last-access) live-session-ttl-ms))
+  (let [last-access-ms (long last-access)
+        live-session-ttl-ms* (long live-session-ttl-ms)]
+    (> (- (now-ms) last-access-ms) live-session-ttl-ms*)))
 
 (defn- page-text
   [^Document doc]
@@ -433,9 +437,10 @@
 
 (defn- truncate-content
   [text]
-  (let [text* (or text "")]
-    (if (> (count text*) max-content-chars)
-      [(str (subs text* 0 max-content-chars) "\n\n[content truncated]") true]
+  (let [^String text* (or text "")
+        max-content-chars* (long max-content-chars)]
+    (if (> (count text*) max-content-chars*)
+      [(str (subs text* 0 max-content-chars*) "\n\n[content truncated]") true]
       [text* false])))
 
 (defn- field-type
@@ -472,7 +477,8 @@
                                         (not (str/starts-with? href "javascript:")))
                                {:text text*
                                 :url href}))))
-                   vec)]
+                   vec)
+        link-preview-limit (long browser.query/default-link-preview-limit)]
     {:url url
      :title (or title (.title doc))
      :content content
@@ -489,8 +495,8 @@
                                    (.select f "input[type=text], input[type=email], input[type=password], input[type=search], input[type=number], input[type=tel], input[type=url], textarea, select"))})
                   forms)
      :link_count (count links)
-     :links_truncated? (> (count links) browser.query/default-link-preview-limit)
-     :links (vec (take browser.query/default-link-preview-limit links))
+     :links_truncated? (> (count links) link-preview-limit)
+     :links (vec (take link-preview-limit links))
      :truncated? truncated?}))
 
 (def ^:private query-elements-script
@@ -1055,16 +1061,16 @@
       (persist-session! ops session-id)
       (screenshot-result session-id page {:full-page full-page
                                           :detail detail})))
-  (wait-for-page* [_ session-id {:keys [timeout-ms interval-ms selector text url-contains]
-                                 :or {timeout-ms 10000
-                                      interval-ms 500}}]
-    (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
-          ^Page page (current-page-or-throw session-id session-atom)
-          timeout-ms* (long (max 0 timeout-ms))
-          interval-ms* (long (max 50 interval-ms))
-          condition? (or selector text url-contains)
-          deadline (+ (now-ms) timeout-ms*)]
+	  (wait-for-page* [_ session-id {:keys [timeout-ms interval-ms selector text url-contains]
+	                                 :or {timeout-ms 10000
+	                                      interval-ms 500}}]
+	    (let [_sess (get-session ops session-id)
+	          session-atom (.get sessions session-id)
+	          ^Page page (current-page-or-throw session-id session-atom)
+	          timeout-ms* (long (clojure.core/max 0 (long timeout-ms)))
+	          interval-ms* (long (clojure.core/max 50 (long interval-ms)))
+	          condition? (or selector text url-contains)
+	          deadline (+ (now-ms) timeout-ms*)]
       (if-not condition?
         (do
           (.waitForTimeout page (double timeout-ms*))
@@ -1106,34 +1112,35 @@
     (stop-runtime!)
     {:backend backend-id
      :status "closed"})
-  (list-sessions* [_]
-    (evict-expired! ops)
-    (let [snapshot-map (into {}
-                             (keep (fn [[session-id snapshot]]
-                                     (when-not ((:snapshot-expired? ops) snapshot)
-                                       [session-id {:session-id session-id
-                                                    :backend backend-id
-                                                    :url (get snapshot "current_url")
-                                                    :age-seconds (quot (- (now-ms)
-                                                                          (long (or (get snapshot "last_access_ms")
-                                                                                    (get snapshot "updated_at_ms")
-                                                                                    0)))
-                                                                       1000)
-                                                    :live? false
-                                                    :resumable? true}]))
-                                   (backend-snapshots ops)))]
-      (->> sessions
-           (reduce (fn [acc [session-id sess]]
-                     (let [^Page page (current-page* sess)
-                           state @sess]
-                       (assoc acc session-id
-                              {:session-id session-id
-                               :backend backend-id
-                               :url (when page (.url page))
-                               :age-seconds (quot (- (now-ms)
-                                                     (:last-access state))
-                                                  1000)
-                               :live? true
+	  (list-sessions* [_]
+	    (evict-expired! ops)
+	    (let [snapshot-map (into {}
+	                             (keep (fn [[session-id snapshot]]
+	                                     (when-not ((:snapshot-expired? ops) snapshot)
+	                                       (let [last-access-ms (long (or (get snapshot "last_access_ms")
+	                                                                      (get snapshot "updated_at_ms")
+	                                                                      0))]
+	                                       [session-id {:session-id session-id
+	                                                    :backend backend-id
+	                                                    :url (get snapshot "current_url")
+	                                                    :age-seconds (quot (- (now-ms) last-access-ms)
+	                                                                       1000)
+	                                                    :live? false
+	                                                    :resumable? true}])))
+	                                   (backend-snapshots ops)))]
+	      (->> sessions
+	           (reduce (fn [acc [session-id sess]]
+	                     (let [^Page page (current-page* sess)
+	                           state @sess
+	                           last-access-ms (long (:last-access state))]
+	                       (assoc acc session-id
+	                              {:session-id session-id
+	                               :backend backend-id
+	                               :url (when page (.url page))
+	                               :age-seconds (quot (- (now-ms)
+	                                                     last-access-ms)
+	                                                  1000)
+	                               :live? true
                                :resumable? true})))
                    snapshot-map)
            vals

@@ -40,6 +40,14 @@
 (def ^:private ddg-blocked-pattern
   #"(?i)automated traffic|unusual traffic|captcha|verify you are human")
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
 ;; ---------------------------------------------------------------------------
@@ -102,7 +110,7 @@
   [body-bytes url]
   (let [body-bytes (or body-bytes (byte-array 0))
         size       (alength ^bytes body-bytes)]
-    (when (> size max-body-bytes)
+    (when (> (long size) (long max-body-bytes))
       (throw (ex-info "Response too large"
                       {:url   url
                        :size  size
@@ -151,7 +159,7 @@
           (and (= prev 13) (= b 10))
           (let [line-bytes (.toByteArray out)
                 line-size  (alength ^bytes line-bytes)]
-            (String. ^bytes line-bytes 0 (max 0 (dec line-size)) StandardCharsets/ISO_8859_1))
+            (String. ^bytes line-bytes 0 (long-max 0 (dec line-size)) StandardCharsets/ISO_8859_1))
 
           :else
           (do
@@ -167,7 +175,7 @@
 (defn- read-exactly!
   [^BufferedInputStream in size url]
   (let [limit (long size)]
-    (when (> limit max-body-bytes)
+    (when (> limit (long max-body-bytes))
       (throw (ex-info "Response too large"
                       {:url   url
                        :size  limit
@@ -193,7 +201,7 @@
         (if (neg? read-count)
           (.toByteArray out)
           (let [next-total (+ total read-count)]
-            (when (> next-total max-body-bytes)
+            (when (> (long next-total) (long max-body-bytes))
               (throw (ex-info "Response too large"
                               {:url   url
                                :size  next-total
@@ -219,14 +227,14 @@
                     (recur))))
               (.toByteArray out))
             (let [next-total (+ total chunk-size)]
-              (when (> next-total max-body-bytes)
+              (when (> (long next-total) (long max-body-bytes))
                 (throw (ex-info "Response too large"
                                 {:url   url
                                  :size  next-total
                                  :limit max-body-bytes})))
               (loop [remaining chunk-size]
                 (when (pos? remaining)
-                  (let [read-count (.read in buffer 0 (int (min remaining (alength buffer))))]
+                  (let [read-count (.read in buffer 0 (int (long-min (long remaining) (long (alength buffer)))))]
                     (when (neg? read-count)
                       (throw (ex-info "Unexpected end of chunked response body"
                                       {:url url
@@ -376,13 +384,13 @@
                               resolution)
              status (:status resp)
              location (get-in resp [:headers "location"])]
-         (if (and (#{301 302 303 307 308} status) (seq location))
-           (do
-             (when (>= redirects max-redirects)
+           (if (and (#{301 302 303 307 308} status) (seq location))
+             (do
+             (when (>= (long redirects) (long max-redirects))
                (throw (ex-info "Too many redirects"
                                {:url current-url :redirects redirects})))
              (let [next-url (str (.resolve (URI. ^String current-url) ^String location))]
-               (recur next-url (inc redirects))))
+               (recur next-url (inc (long redirects)))))
            {:status    status
             :headers   (:headers resp)
             :body      (str (:body resp))
@@ -544,7 +552,7 @@
               (doseq [child (.childNodes el)]
                 (cond
                   (instance? Element child)
-                  (walk child (inc depth))
+                  (walk child (inc (long depth)))
 
                   (instance? TextNode child)
                   (let [text (.getWholeText ^TextNode child)]
@@ -576,16 +584,16 @@
 (defn- truncate-to-tokens
   "Truncate text to approximately max-tokens (4 chars/token estimate)."
   [^String text max-tokens]
-  (let [max-chars (* max-tokens 4)]
-    (if (<= (count text) max-chars)
+  (let [max-chars (long (* (long max-tokens) 4))]
+    (if (<= (long (count text)) max-chars)
       text
       (let [truncated (subs text 0 max-chars)
             ;; Cut at last paragraph or sentence boundary
             last-para (str/last-index-of truncated "\n\n")
             last-sent (str/last-index-of truncated ". ")
             cut-point (cond
-                        (and last-para (> last-para (* max-chars 0.5))) last-para
-                        (and last-sent (> last-sent (* max-chars 0.5))) (+ last-sent 1)
+                        (and last-para (> (double last-para) (* (double max-chars) 0.5))) last-para
+                        (and last-sent (> (double last-sent) (* (double max-chars) 0.5))) (inc (long last-sent))
                         :else max-chars)]
         (str (subs truncated 0 cut-point) "\n\n[content truncated]")))))
 
@@ -656,9 +664,9 @@
   [^String href]
   (when (seq href)
     (if (str/includes? href "uddg=")
-      (let [start (+ (str/index-of href "uddg=") 5)
+      (let [start (+ (long (str/index-of href "uddg=")) 5)
             end   (let [amp (str/index-of href "&" start)]
-                    (if amp amp (count href)))]
+                    (if amp (long amp) (long (count href))))]
         (URLDecoder/decode ^String (subs href start end) "UTF-8"))
       ;; Not a redirect — return as-is, normalizing protocol-relative URLs
       (if (str/starts-with? href "//")

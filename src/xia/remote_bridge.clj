@@ -492,7 +492,7 @@
 
 (defn- oauth-attention-items []
   (let [timestamp (.getTime ^Date (now))
-        warning-at (+ timestamp attention-expiry-warning-ms)]
+        warning-at (+ timestamp (long attention-expiry-warning-ms))]
     (reduce
       (fn [items account]
         (let [id        (:oauth.account/id account)
@@ -510,14 +510,14 @@
                          :detail "Account is not connected."
                          :oauth-account-id id})
 
-            (and expires-ms (<= expires-ms timestamp))
+            (and expires-ms (<= (long expires-ms) timestamp))
             (conj items {:type :oauth.attention
                          :severity :warn
                          :title (str "OAuth token expired: " name)
                          :detail "Stored access token has expired."
                          :oauth-account-id id})
 
-            (and expires-ms (<= expires-ms warning-at))
+            (and expires-ms (<= (long expires-ms) warning-at))
             (conj items {:type :oauth.attention
                          :severity :info
                          :title (str "OAuth token expires soon: " name)

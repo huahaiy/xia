@@ -382,7 +382,7 @@
                                                         :used-fact-eids []})
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)
                   xia.llm/chat-simple                (fn [_messages & _opts]
-                                                       (case (swap! llm-call-count inc)
+                                                       (case (int (swap! llm-call-count inc))
                                                          1 (do
                                                              (deliver first-llm-started true)
                                                              @release-first-llm

@@ -5,6 +5,14 @@
 (def ^:private month-or-time-pattern
   #"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|q[1-4]|utc)\b")
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
 (defn- compact-text
   [text]
   (some-> text
@@ -16,9 +24,10 @@
 (defn- truncate-text
   [text max-chars]
   (when-let [compact (compact-text text)]
-    (if (and max-chars (> (count compact) max-chars))
-      (str (subs compact 0 (max 0 (dec max-chars))) "…")
-      compact)))
+    (let [limit (some-> max-chars long)]
+      (if (and limit (> (long (count compact)) (long limit)))
+        (str (subs compact 0 (long-max 0 (dec (long limit)))) "…")
+        compact))))
 
 (defn- tokenize
   [text]
@@ -32,10 +41,11 @@
   (set (tokenize text)))
 
 (defn- overlap-ratio
+  ^double
   [left right]
   (let [left*  (token-set left)
         right* (token-set right)
-        denom  (max 1 (min (count left*) (count right*)))]
+        denom  (long-max 1 (long-min (long (count left*)) (long (count right*))))]
     (/ (double (count (set/intersection left* right*)))
        denom)))
 
@@ -81,22 +91,24 @@
        vec))
 
 (defn- salient-score
+  ^double
   [fragment idx heading-tokens]
   (let [compact         (compact-text fragment)
         text            (or compact "")
-        char-count      (count text)
+        char-count      (long (count text))
         fragment-tokens (token-set text)
-        heading-overlap (count (set/intersection fragment-tokens heading-tokens))]
-    (+ (max 0 (- 6 idx))
-       (cond
-         (<= 40 char-count 180) 2.5
-         (<= 25 char-count 260) 1.0
-         :else 0.0)
+        heading-overlap (long (count (set/intersection fragment-tokens heading-tokens)))
+        size-bonus      (double (cond
+                                  (<= 40 char-count 180) 2.5
+                                  (<= 25 char-count 260) 1.0
+                                  :else 0.0))]
+    (+ (double (long-max 0 (- 6 (long idx))))
+       size-bonus
        (if (re-find #"\d" text) 3.0 0.0)
        (if (re-find #"[/$%]" text) 2.0 0.0)
        (if (re-find month-or-time-pattern text) 2.0 0.0)
        (if (re-find #"\b[A-Z]{2,}\b" fragment) 1.0 0.0)
-       (* 1.5 heading-overlap))))
+       (* 1.5 (double heading-overlap)))))
 
 (defn- select-fragments
   [fragments max-chars {:keys [heading]}]
@@ -105,7 +117,7 @@
         indexed         (map-indexed vector fragments)
         anchor          (first indexed)
         candidates      (sort-by (fn [[idx fragment]]
-                                   [(- (salient-score fragment idx heading-tokens))
+                                   [(- (double (salient-score fragment idx heading-tokens)))
                                     idx])
                                  (rest indexed))
         chosen          (loop [selected (cond-> [] anchor (conj anchor))
@@ -123,7 +135,7 @@
         kept-fragments  (reduce (fn [acc fragment]
                                   (let [candidate (str/join " " (conj acc fragment))]
                                     (if (and max-chars
-                                             (> (count candidate) max-chars))
+                                             (> (long (count candidate)) (long max-chars)))
                                       acc
                                       (conj acc fragment))))
                                 []

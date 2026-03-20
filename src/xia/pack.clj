@@ -276,7 +276,7 @@
                              (not (.exists ^File (io/file db-path)))
                              (not (.exists ^File manifest-file))
                              (> (.lastModified archive-file)
-                                (tree-last-modified root-path)))
+                                (long (tree-last-modified root-path))))
           context      (if needs-refresh?
                          (assoc (unpack! archive-path root-path :force? true) :refreshed? true)
                          {:archive-path (.getAbsolutePath archive-file)

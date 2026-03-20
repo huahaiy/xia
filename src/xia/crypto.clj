@@ -194,7 +194,7 @@
     (throw (ex-info "Master passphrase is blank" {})))
   (let [chars   (.toCharArray ^String passphrase)
         factory (SecretKeyFactory/getInstance "PBKDF2WithHmacSHA256")
-        ^PBEKeySpec spec (PBEKeySpec. chars salt pbkdf2-iterations (* 8 key-bytes))]
+        ^PBEKeySpec spec (PBEKeySpec. chars salt pbkdf2-iterations (* 8 (long key-bytes)))]
     (try
       (.getEncoded (.generateSecret factory ^KeySpec spec))
       (finally

@@ -49,7 +49,7 @@
   [session-id]
   (when session-id
     (nth session-turn-locks
-         (mod (bit-and Integer/MAX_VALUE (hash session-id))
+         (mod (bit-and Integer/MAX_VALUE (int (hash session-id)))
               session-turn-lock-count))))
 
 (defn- with-session-turn-lock
@@ -178,12 +178,12 @@
 
 (defn- await-futures!
   [futures timeout-ms timeout-ex-fn]
-  (let [deadline-ms (+ (System/currentTimeMillis) timeout-ms)]
+  (let [deadline-ms (+ (long (System/currentTimeMillis)) (long timeout-ms))]
     (loop [idx 0
            results []]
       (if (= idx (count futures))
         results
-        (let [remaining-ms (- deadline-ms (System/currentTimeMillis))
+        (let [remaining-ms (- deadline-ms (long (System/currentTimeMillis)))
               future       (nth futures idx)
               result       (if (pos? remaining-ms)
                              (deref future remaining-ms future-timeout-sentinel)
@@ -197,10 +197,10 @@
 (defn- validate-user-message!
   [user-message]
   (let [message        (or user-message "")
-        char-count     (count message)
-        token-estimate (context/estimate-tokens message)
-        max-chars      (max-user-message-chars)
-        max-tokens     (max-user-message-tokens)]
+        char-count     (long (count message))
+        token-estimate (long (context/estimate-tokens message))
+        max-chars      (long (max-user-message-chars))
+        max-tokens     (long (max-user-message-tokens))]
     (cond
       (> char-count max-chars)
       (throw (ex-info (str "User message too large: "
@@ -398,9 +398,10 @@
 
 (defn- truncate-summary
   [value max-len]
-  (let [s (some-> value str)]
+  (let [s       (some-> value str)
+        max-len (long max-len)]
     (when (seq s)
-      (if (> (count s) max-len)
+      (if (> (long (count s)) max-len)
         (subs s 0 max-len)
         s))))
 
@@ -550,7 +551,7 @@
   (let [tool-count               (count tool-calls)
         max-tool-calls-per-round (cfg/positive-long :agent/max-tool-calls-per-round
                                                     default-max-tool-calls-per-round)]
-    (when (> tool-count max-tool-calls-per-round)
+    (when (> (long tool-count) (long max-tool-calls-per-round))
       (throw (ex-info (str "Too many tool calls in one round: "
                            tool-count
                            " (max "
@@ -621,7 +622,7 @@
                  :session-id session-id})
               (loop [messages messages
                      round    0]
-                (when (>= round (or max-tool-rounds (configured-max-tool-rounds)))
+                (when (>= (long round) (long (or max-tool-rounds (configured-max-tool-rounds))))
                   (throw (ex-info "Too many tool-calling rounds" {:rounds round})))
                 (report-status! (if (zero? round)
                                   "Calling model"
@@ -769,11 +770,11 @@
         branch-tasks        (->> tasks (map normalize-branch-task) (remove #(str/blank? (:prompt %))) vec)
         task-count          (count branch-tasks)
         max-tasks           (max-branch-tasks)
-        max-parallel*       (min (max 1 (or max-parallel (max-parallel-branches)))
-                                 (max 1 max-tasks))]
+        max-parallel*       (clojure.core/min (clojure.core/max 1 (long (or max-parallel (max-parallel-branches))))
+                                              (clojure.core/max 1 (long max-tasks)))]
     (when (zero? task-count)
       (throw (ex-info "Branch tasks require at least one task" {})))
-    (when (> task-count max-tasks)
+    (when (> (long task-count) (long max-tasks))
       (throw (ex-info (str "Too many branch tasks: " task-count " (max " max-tasks ")")
                       {:task-count task-count
                        :max-tasks  max-tasks})))

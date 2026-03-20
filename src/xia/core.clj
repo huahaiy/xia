@@ -130,7 +130,7 @@
   ;; Initialize identity and load skills + tools
   (identity/init-identity!)
   (let [bundled-count (tool/ensure-bundled-tools!)]
-    (when (pos? bundled-count)
+    (when (pos? (long bundled-count))
       (log/info "Installed" bundled-count "bundled tools")))
   (tool/load-all-tools!)
   (log/info "Loaded" (count (tool/registered-tools)) "tools,"

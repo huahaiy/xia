@@ -93,6 +93,18 @@
     xlsx-media-type
     pptx-media-type})
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
+(defn- indexed-ordinal
+  ^long [idx]
+  (inc (long idx)))
+
 (defn- invalid-id-ex
   [message type-key field value]
   (ex-info message {:type type-key :field field :value value}))
@@ -240,9 +252,10 @@
 
 (defn- preview-text
   [text]
-  (let [trimmed (str/trim (or text ""))]
-    (if (> (count trimmed) preview-char-limit)
-      (str (subs trimmed 0 (max 0 (dec preview-char-limit))) "…")
+  (let [trimmed (str/trim (or text ""))
+        limit   (long preview-char-limit)]
+    (if (> (long (count trimmed)) limit)
+      (str (subs trimmed 0 (long-max 0 (dec limit))) "…")
       trimmed)))
 
 (defn- compact-text
@@ -256,9 +269,10 @@
 (defn- truncate-text
   [text max-chars]
   (when-let [compact (compact-text text)]
-    (if (> (count compact) max-chars)
-      (str (subs compact 0 (max 0 (dec max-chars))) "…")
-      compact)))
+    (let [limit (long max-chars)]
+      (if (> (long (count compact)) limit)
+        (str (subs compact 0 (long-max 0 (dec limit))) "…")
+        compact))))
 
 (defn- sentence-fragments
   [text]
@@ -268,42 +282,45 @@
 
 (defn- pack-fragments
   [fragments max-chars]
-  (loop [remaining fragments
-         current []
-         current-length 0
-         packed []]
-    (if-let [fragment (first remaining)]
-      (let [separator (if (seq current) 1 0)
-            proposed  (+ current-length separator (count fragment))]
-        (if (and (seq current) (> proposed max-chars))
-          (recur remaining
-                 []
-                 0
-                 (conj packed (str/join " " current)))
-          (recur (rest remaining)
-                 (conj current fragment)
-                 proposed
-                 packed)))
-      (cond-> packed
-        (seq current) (conj (str/join " " current))))))
+  (let [limit (long max-chars)]
+    (loop [remaining fragments
+           current []
+           current-length 0
+           packed []]
+      (if-let [fragment (first remaining)]
+        (let [separator (if (seq current) 1 0)
+              proposed  (+ (long current-length) separator (long (count fragment)))]
+          (if (and (seq current) (> proposed limit))
+            (recur remaining
+                   []
+                   0
+                   (conj packed (str/join " " current)))
+            (recur (rest remaining)
+                   (conj current fragment)
+                   proposed
+                   packed)))
+        (cond-> packed
+          (seq current) (conj (str/join " " current)))))))
 
 (defn- hard-wrap-text
   [text max-chars]
-  (let [value (or (compact-text text) "")]
+  (let [^String value (or (compact-text text) "")
+        value-length  (long (count value))
+        limit         (long max-chars)]
     (loop [start 0
            pieces []]
-      (if (>= start (count value))
+      (if (>= (long start) value-length)
         pieces
-        (let [raw-end    (min (count value) (+ start max-chars))
-              space-end  (.lastIndexOf ^String value " " raw-end)
-              split-end  (if (and (< raw-end (count value))
-                                  (> space-end start))
+        (let [raw-end    (int (long-min value-length (+ (long start) limit)))
+              space-end  (.lastIndexOf value " " raw-end)
+              split-end  (if (and (< (long raw-end) value-length)
+                                  (> (long space-end) (long start)))
                            space-end
                            raw-end)
-              piece      (some-> (subs value start split-end) str/trim not-empty)
-              next-start (if (= split-end raw-end)
-                           split-end
-                           (inc split-end))]
+              piece      (some-> (subs value (int start) (int split-end)) str/trim not-empty)
+              next-start (if (= (long split-end) (long raw-end))
+                           (long split-end)
+                           (inc (long split-end)))]
           (recur next-start
                  (cond-> pieces piece (conj piece))))))))
 
@@ -314,7 +331,7 @@
       (nil? compact)
       []
 
-      (<= (count compact) chunk-max-chars)
+      (<= (long (count compact)) (long chunk-max-chars))
       [compact]
 
       :else
@@ -368,8 +385,8 @@
 (defn- append-chunk-block
   [{:keys [current-blocks current-length] :as state} block]
   (let [separator (if (seq current-blocks) 2 0)
-        proposed  (+ current-length separator (count block))]
-    (if (and (seq current-blocks) (> proposed chunk-target-chars))
+        proposed  (+ (long current-length) separator (long (count block)))]
+    (if (and (seq current-blocks) (> proposed (long chunk-target-chars)))
       (recur (finalize-chunk-state state) block)
       (assoc state
              :current-blocks (conj current-blocks block)
@@ -681,19 +698,19 @@
                                          (nth worksheet-paths idx nil))]
                            (when entry
                              {:name  (or (element-attr sheet "name")
-                                         (str "Sheet " (inc idx)))
+                                         (str "Sheet " (indexed-ordinal idx)))
                               :entry entry}))))
                   (descendant-elements-by-local-name doc "sheet"))]
         (if (seq by-workbook)
-          by-workbook
-          (into [] (map-indexed (fn [idx path]
-                                  {:name (str "Sheet " (inc idx))
-                                   :entry path}))
-                worksheet-paths)))
-      (into [] (map-indexed (fn [idx path]
-                              {:name (str "Sheet " (inc idx))
-                               :entry path}))
-            worksheet-paths))))
+	          by-workbook
+	          (into [] (map-indexed (fn [idx path]
+	                                  {:name (str "Sheet " (indexed-ordinal idx))
+	                                   :entry path}))
+	                worksheet-paths)))
+	      (into [] (map-indexed (fn [idx path]
+	                              {:name (str "Sheet " (indexed-ordinal idx))
+	                               :entry path}))
+	            worksheet-paths))))
 
 (defn- slide-entry-paths
   [entries]
@@ -752,7 +769,7 @@
                                    text-lines (eduction (keep node-text)
                                                         (descendant-elements-by-local-name slide-root "t"))]
                                (str/join "\n"
-                                         (cons (str "## Slide " (inc idx))
+                                         (cons (str "## Slide " (indexed-ordinal idx))
                                                (nonblank-lines text-lines)))))
                            (slide-entry-paths entries))]
       (normalize-text (str/join "\n\n" (eduction (remove str/blank?) slide-sections))))

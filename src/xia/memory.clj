@@ -52,6 +52,26 @@
 (def ^:private fact-confidence-weight 0.8)
 (def ^:private fact-utility-weight 0.2)
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
+(defn- double-max
+  ^double [^double a ^double b]
+  (if (> a b) a b))
+
+(defn- double-min
+  ^double [^double a ^double b]
+  (if (< a b) a b))
+
+(defn- indexed-rank
+  ^long [idx]
+  (inc (long idx)))
+
 (def ^:private episode-retention-config-keys
   {:full-resolution-ms    :memory/episode-full-resolution-ms
    :decay-half-life-ms    :memory/episode-decay-half-life-ms
@@ -72,33 +92,38 @@
                             (:retained-decayed-count default-episode-retention-config))))
 
 (defn- normalize-importance
+  ^double
   [importance]
   (let [value (double (or importance
                           (:default-importance default-episode-retention-config)))]
     (-> value
-        (max 0.0)
-        (min 1.0))))
+        (double-max 0.0)
+        (double-min 1.0))))
 
 (defn normalize-fact-confidence
+  ^double
   [confidence]
   (-> (double (or confidence 0.0))
-      (max 0.0)
-      (min 1.0)))
+      (double-max 0.0)
+      (double-min 1.0)))
 
 (defn normalize-fact-utility
+  ^double
   [utility]
   (-> (double (or utility default-fact-utility))
-      (max 0.0)
-      (min 1.0)))
+      (double-max 0.0)
+      (double-min 1.0)))
 
 (defn fact-prompt-score
+  ^double
   [{:keys [confidence utility]}]
-  (+ (* fact-confidence-weight
+  (+ (* (double fact-confidence-weight)
         (normalize-fact-confidence confidence))
-     (* fact-utility-weight
+     (* (double fact-utility-weight)
         (normalize-fact-utility utility))))
 
 (defn fact-utility-half-life-factor
+  ^double
   [utility]
   (+ 0.5 (normalize-fact-utility utility)))
 
@@ -181,18 +206,20 @@
   [(or session-id :global) (or channel :unknown) type])
 
 (defn- episode-age-ms
+  ^long
   [^java.util.Date timestamp ^java.util.Date as-of]
-  (max 0 (- (.getTime as-of) (.getTime timestamp))))
+  (long-max 0 (- (.getTime as-of) (.getTime timestamp))))
 
 (defn- decayed-episode?
   [episode ^java.util.Date as-of retention-config]
   (> (episode-age-ms (:timestamp episode) as-of)
-     (:full-resolution-ms retention-config)))
+     (long (or (:full-resolution-ms retention-config) 0))))
 
 (defn- episode-decay-score
+  ^double
   [episode ^java.util.Date as-of retention-config]
   (let [importance   (normalize-importance (:importance episode))
-        half-life-ms (:decay-half-life-ms retention-config)
+        half-life-ms (double (or (:decay-half-life-ms retention-config) 1))
         age-ms       (episode-age-ms (:timestamp episode) as-of)]
     (* importance
        (Math/pow 0.5
@@ -480,14 +507,19 @@
    :local-docs :memory/search-local-doc-candidate-pool-size
    :artifacts :memory/search-artifact-candidate-pool-size})
 
+(defn- default-candidate-pool-size
+  ^long [top]
+  (long-max (long minimum-candidate-pool-size)
+            (* (long default-candidate-pool-multiplier)
+               (long top))))
+
 (defn- candidate-pool-size
   [kind top]
-  (let [default-size (max minimum-candidate-pool-size
-                          (* default-candidate-pool-multiplier top))
-        configured   (cfg/positive-long (get candidate-pool-config-keys kind)
-                                        default-size)]
+  (let [default-size (default-candidate-pool-size top)
+        configured   (long (cfg/positive-long (get candidate-pool-config-keys kind)
+                                              default-size))]
     (-> configured
-        (max top)
+        (long-max (long top))
         int)))
 
 (defn- fulltext-domain-hits
@@ -501,13 +533,13 @@
       (try
         (->> (builtins/fulltext dbv query opts)
              (map-indexed
-               (fn [idx tuple]
-                 (let [[eid attr value score] (vec tuple)]
-                   {:eid       eid
-                    :attr      attr
-                    :value     value
-                    :lex-score (double score)
-                    :lex-rank  (inc idx)})))
+	               (fn [idx tuple]
+	                 (let [[eid attr value score] (vec tuple)]
+	                   {:eid       eid
+	                    :attr      attr
+	                    :value     value
+	                    :lex-score (double score)
+	                    :lex-rank  (indexed-rank idx)})))
              vec)
         (catch Exception _
           [])))))
@@ -523,34 +555,40 @@
       (try
         (->> (builtins/embedding-neighbors dbv query opts)
              (map-indexed
-               (fn [idx tuple]
-                 (let [[eid attr value distance] (vec tuple)]
-                   {:eid          eid
-                    :attr         attr
-                    :value        value
-                    :sem-distance (double distance)
-                    :sem-rank     (inc idx)})))
+	               (fn [idx tuple]
+	                 (let [[eid attr value distance] (vec tuple)]
+	                   {:eid          eid
+	                    :attr         attr
+	                    :value        value
+	                    :sem-distance (double distance)
+	                    :sem-rank     (indexed-rank idx)})))
              vec)
         (catch Exception _
           [])))))
 
 (defn- update-best-rank
+  ^long
   [current rank]
-  (if current
-    (min current rank)
-    rank))
+  (cond
+    (nil? rank) (long (or current Long/MAX_VALUE))
+    current (long-min (long current) (long rank))
+    :else (long rank)))
 
 (defn- update-best-score
+  ^double
   [current score]
-  (if current
-    (max current score)
-    score))
+  (cond
+    (nil? score) (double (or current 0.0))
+    current (double-max (double current) (double score))
+    :else (double score)))
 
 (defn- update-best-distance
+  ^double
   [current distance]
-  (if current
-    (min current distance)
-    distance))
+  (cond
+    (nil? distance) (double (or current Double/POSITIVE_INFINITY))
+    current (double-min (double current) (double distance))
+    :else (double distance)))
 
 (defn- merge-domain-hit
   [acc {:keys [eid attr lex-score lex-rank sem-distance sem-rank]}]
@@ -569,28 +607,29 @@
                                                               sem-rank))))))
 
 (defn- rrf-component
+  ^double
   [weight rank]
   (if rank
-    (/ weight (+ rrf-k (double rank)))
+    (/ (double weight) (+ (double rrf-k) (double rank)))
     0.0))
 
 (defn- hybrid-rrf-score
+  ^double
   [{:keys [lex-rank sem-rank]}]
   (+ (rrf-component lexical-rrf-weight lex-rank)
      (rrf-component semantic-rrf-weight sem-rank)))
 
 (defn- rank-domain-candidates
   [domain query & {:keys [top fts-query pool-size] :or {top 10}}]
-  (let [pool-size       (or pool-size
-                            (max minimum-candidate-pool-size
-                                 (* default-candidate-pool-multiplier top)))
+  (let [pool-size       (long (or pool-size
+                                  (default-candidate-pool-size top)))
         lexical-hits    (fulltext-domain-hits domain (or fts-query query) :top pool-size)
         semantic-hits   (embedding-domain-hits domain query :top pool-size)
         merged-hits     (vals (reduce merge-domain-hit {} (concat lexical-hits semantic-hits)))]
     (->> merged-hits
          (map #(assoc % :rrf-score (hybrid-rrf-score %)))
          (sort-by (fn [{:keys [rrf-score lex-score sem-distance eid]}]
-                    [(- rrf-score)
+                    [(- (double rrf-score))
                      (- (double (or lex-score 0.0)))
                      (double (or sem-distance Double/POSITIVE_INFINITY))
                      eid]))
@@ -656,12 +695,12 @@
                    session-id query opts)
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-               (fn [idx [eid attr value score]]
-                 {:eid       eid
-                  :attr      attr
-                  :value     value
-                  :lex-score (double score)
-                  :lex-rank  (inc idx)}))
+	               (fn [idx [eid attr value score]]
+	                 {:eid       eid
+	                  :attr      attr
+	                  :value     value
+	                  :lex-score (double score)
+	                  :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -684,12 +723,12 @@
                    session-id query opts)
              (sort-by #(double (nth % 3)))
              (map-indexed
-               (fn [idx [eid attr value distance]]
-                 {:eid          eid
-                  :attr         attr
-                  :value        value
-                  :sem-distance (double distance)
-                  :sem-rank     (inc idx)}))
+	               (fn [idx [eid attr value distance]]
+	                 {:eid          eid
+	                  :attr         attr
+	                  :value        value
+	                  :sem-distance (double distance)
+	                  :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -713,12 +752,12 @@
                    session-id query opts)
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-               (fn [idx [eid attr value score]]
-                 {:eid       eid
-                  :attr      attr
-                  :value     value
-                  :lex-score (double score)
-                  :lex-rank  (inc idx)}))
+	               (fn [idx [eid attr value score]]
+	                 {:eid       eid
+	                  :attr      attr
+	                  :value     value
+	                  :lex-score (double score)
+	                  :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -742,12 +781,12 @@
                    session-id query opts)
              (sort-by #(double (nth % 3)))
              (map-indexed
-               (fn [idx [eid attr value distance]]
-                 {:eid          eid
-                  :attr         attr
-                  :value        value
-                  :sem-distance (double distance)
-                  :sem-rank     (inc idx)}))
+	               (fn [idx [eid attr value distance]]
+	                 {:eid          eid
+	                  :attr         attr
+	                  :value        value
+	                  :sem-distance (double distance)
+	                  :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -788,12 +827,12 @@
     (update acc (:doc-eid doc)
             (fn [candidate]
               (let [current (or candidate doc)]
-                (-> current
-                    (merge doc)
-                    (assoc :doc-rrf-score (max (double (or (:doc-rrf-score current) 0.0))
-                                               (double (:rrf-score doc-hit)))
-                           :doc-lex-score (update-best-score (:doc-lex-score current)
-                                                             (:lex-score doc-hit))
+	                (-> current
+	                    (merge doc)
+	                    (assoc :doc-rrf-score (double-max (double (or (:doc-rrf-score current) 0.0))
+	                                                      (double (:rrf-score doc-hit)))
+	                           :doc-lex-score (update-best-score (:doc-lex-score current)
+	                                                             (:lex-score doc-hit))
                            :doc-sem-distance (update-best-distance (:doc-sem-distance current)
                                                                    (:sem-distance doc-hit))
                            :direct-doc-hit? true)))))))
@@ -846,9 +885,8 @@
 
 (defn- rank-local-doc-candidates
   [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
-  (let [pool-size        (or pool-size
-                             (max minimum-candidate-pool-size
-                                  (* default-candidate-pool-multiplier top)))
+  (let [pool-size        (long (or pool-size
+                                   (default-candidate-pool-size top)))
         doc-lexical      (local-doc-doc-fulltext-hits session-id (or fts-query query) :top pool-size)
         doc-semantic     (local-doc-doc-embedding-hits session-id query :top pool-size)
         doc-merged       (reduce merge-domain-hit {} doc-lexical)
@@ -869,7 +907,7 @@
          (map finalize-local-doc-candidate)
          (sort-by (fn [{:keys [has-chunk-hit? total-score chunk-lex-score doc-lex-score chunk-sem-distance doc-sem-distance doc-eid]}]
                     [(if has-chunk-hit? 0 1)
-                     (- (double total-score))
+                     (- (double (or total-score 0.0)))
                      (- (double (or chunk-lex-score doc-lex-score 0.0)))
                      (double (or chunk-sem-distance doc-sem-distance Double/POSITIVE_INFINITY))
                      doc-eid]))
@@ -907,12 +945,12 @@
                    session-id query opts)
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-               (fn [idx [eid attr value score]]
-                 {:eid       eid
-                  :attr      attr
-                  :value     value
-                  :lex-score (double score)
-                  :lex-rank  (inc idx)}))
+	               (fn [idx [eid attr value score]]
+	                 {:eid       eid
+	                  :attr      attr
+	                  :value     value
+	                  :lex-score (double score)
+	                  :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -935,12 +973,12 @@
                    session-id query opts)
              (sort-by #(double (nth % 3)))
              (map-indexed
-               (fn [idx [eid attr value distance]]
-                 {:eid          eid
-                  :attr         attr
-                  :value        value
-                  :sem-distance (double distance)
-                  :sem-rank     (inc idx)}))
+	               (fn [idx [eid attr value distance]]
+	                 {:eid          eid
+	                  :attr         attr
+	                  :value        value
+	                  :sem-distance (double distance)
+	                  :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -962,16 +1000,15 @@
 
 (defn- rank-artifact-candidates
   [session-id query & {:keys [top fts-query pool-size] :or {top 10}}]
-  (let [pool-size     (or pool-size
-                          (max minimum-candidate-pool-size
-                               (* default-candidate-pool-multiplier top)))
+  (let [pool-size     (long (or pool-size
+                                (default-candidate-pool-size top)))
         lexical-hits  (artifact-fulltext-hits session-id (or fts-query query) :top pool-size)
         semantic-hits (artifact-embedding-hits session-id query :top pool-size)
         merged-hits   (vals (reduce merge-domain-hit {} (concat lexical-hits semantic-hits)))]
     (->> merged-hits
          (map #(assoc % :rrf-score (hybrid-rrf-score %)))
          (sort-by (fn [{:keys [rrf-score lex-score sem-distance eid]}]
-                    [(- rrf-score)
+                    [(- (double rrf-score))
                      (- (double (or lex-score 0.0)))
                      (double (or sem-distance Double/POSITIVE_INFINITY))
                      eid]))
@@ -1081,7 +1118,7 @@
   (when-let [entity (some-> fact-eid db/entity seq (into {}))]
     (let [current    (normalize-fact-utility (:kg.fact/utility entity))
           observed   (normalize-fact-utility observed-utility)
-          adjusted   (+ (* 0.6 current) (* 0.4 observed))]
+          adjusted   (+ (* 0.6 (double current)) (* 0.4 (double observed)))]
       (db/transact! [[:db/add fact-eid :kg.fact/utility (float adjusted)]])
       adjusted)))
 

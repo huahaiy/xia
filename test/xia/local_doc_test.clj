@@ -240,7 +240,7 @@
         (is (= :model (:local.doc.chunk/summary-source chunk)))
         (is (str/starts-with? (:summary saved) "external-summary:"))
         (is (every? #(= :openai (:provider-id %)) @calls))
-        (is (every? #(zero? (:temperature %)) @calls))))))
+        (is (every? #(zero? (long (:temperature %))) @calls))))))
 
 (deftest invalid-pdf-uploads-fail-clearly
   (let [sid (db/create-session! :http)]

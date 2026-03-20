@@ -62,7 +62,7 @@
      :body           (ByteArrayInputStream. (multipart-body boundary parts))}))
 
 (defn- oversized-request-body []
-  (let [size      (long (inc (var-get #'http/max-request-body-bytes)))
+  (let [size      (inc (long (var-get #'http/max-request-body-bytes)))
         body-size (int size)
         body      (byte-array body-size)]
     (Arrays/fill body (byte (int \x)))

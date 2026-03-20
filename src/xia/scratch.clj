@@ -251,7 +251,7 @@
     (if-let [idx (nth-index-of (or content "") match occurrence*)]
       (str (subs content 0 idx)
            (or replacement "")
-           (subs content (+ idx (count match))))
+           (subs content (+ (long idx) (long (count match)))))
       (throw (ex-info "replace-string match not found"
                       {:match match :occurrence occurrence*})))))
 

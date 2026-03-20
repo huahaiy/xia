@@ -44,7 +44,8 @@
                            (+ offset (count object))
                            (conj acc offset))
                     acc))
-        xref-start (+ (count header) (reduce + (map count objects)))
+        xref-start (+ (long (count header))
+                      (long (reduce + 0 (map count objects))))
         xref       (str "xref\n0 6\n"
                         "0000000000 65535 f \n"
                         (apply str
@@ -124,11 +125,12 @@
   [values]
   (let [norm (Math/sqrt
                (reduce (fn [sum value]
-                         (+ sum (* value value)))
+                         (+ (double sum)
+                            (* (double value) (double value))))
                        0.0
                        values))]
     (if (pos? norm)
-      (mapv #(float (/ % norm)) values)
+      (mapv #(float (/ (double %) norm)) values)
       values)))
 
 (defn- embed-text

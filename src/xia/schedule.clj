@@ -30,6 +30,14 @@
 (def ^:private default-max-failure-backoff-minutes (* 12 60))
 (def ^:private default-pause-after-repeated-failures 3)
 
+(defn- long-max
+  ^long [^long a ^long b]
+  (if (> a b) a b))
+
+(defn- long-min
+  ^long [^long a ^long b]
+  (if (< a b) a b))
+
 (defn- failure-backoff-minutes
   []
   (cfg/positive-long :schedule/failure-backoff-minutes
@@ -58,9 +66,10 @@
 
 (defn- truncate-string
   [value max-len]
-  (let [s (some-> value str)]
+  (let [s       (some-> value str)
+        max-len (long max-len)]
     (when (seq s)
-      (if (> (count s) max-len)
+      (if (> (long (count s)) max-len)
         (subs s 0 max-len)
         s))))
 
@@ -186,11 +195,12 @@
     (task-state schedule-id)))
 
 (defn- failure-backoff-ms
+  ^long
   [consecutive-failures]
   (* 60 1000
-     (min (max-failure-backoff-minutes)
-          (* (failure-backoff-minutes)
-             (long (Math/pow 2.0 (double (max 0 (dec consecutive-failures)))))))))
+     (long-min (long (max-failure-backoff-minutes))
+               (* (long (failure-backoff-minutes))
+                  (long (Math/pow 2.0 (double (long-max 0 (dec (long consecutive-failures))))))))))
 
 (defn record-task-success!
   "Mark a schedule task run as successful and clear failure state."
@@ -228,12 +238,12 @@
         signature           (normalize-failure-signature error-message)
         same-failure?       (= signature (:last-failure-signature state))
         consecutive-failures (if same-failure?
-                               (inc (or (:consecutive-failures state) 0))
+                               (inc (long (or (:consecutive-failures state) 0)))
                                1)
         hint                (recovery-hint error-message)
         pause-threshold     (pause-after-repeated-failures)
         paused?             (and same-failure?
-                                 (>= consecutive-failures pause-threshold))
+                                 (>= consecutive-failures (long pause-threshold)))
         backoff-until       (when-not paused?
                               (java.util.Date.
                                 (long (+ (.getTime ^java.util.Date now)
@@ -266,7 +276,7 @@
   [schedule-id]
   (when-let [{:keys [consecutive-failures last-failure-at last-error
                      last-recovery-hint checkpoint]} (task-state schedule-id)]
-    (when (pos? (or consecutive-failures 0))
+    (when (pos? (long (or consecutive-failures 0)))
       (str/join
         "\n"
         (cond-> ["Recovery context from previous scheduled attempts:"
@@ -325,7 +335,7 @@
   (cron/validate! spec)
   ;; Reject intervals < 5 minutes
   (when-let [m (:interval-minutes spec)]
-    (when (< m min-interval-minutes)
+    (when (< (long m) (long min-interval-minutes))
       (throw (ex-info (str "Interval too frequent (minimum " min-interval-minutes " minutes)")
                       {:interval-minutes m}))))
   ;; For calendar specs, reject if it would fire more than 12 times per hour
@@ -333,7 +343,8 @@
     (let [norm (cron/normalize spec)]
       (when (and (= 24 (count (:hour norm)))
                  (= 12 (count (:month norm)))
-                 (> (count (:minute norm)) (/ 60 min-interval-minutes)))
+                 (> (long (count (:minute norm)))
+                    (long (/ 60 (long min-interval-minutes)))))
         (throw (ex-info (str "Schedule too frequent (minimum " min-interval-minutes " minutes)")
                         {:spec spec}))))))
 
@@ -372,7 +383,7 @@
 
     ;; Check schedule limit
     (let [current-count (count (db/q '[:find ?e :where [?e :schedule/id _]]))]
-      (when (>= current-count max-schedules)
+      (when (>= (long current-count) (long max-schedules))
         (throw (ex-info (str "Too many schedules (max " max-schedules ")")
                         {:current current-count}))))
 

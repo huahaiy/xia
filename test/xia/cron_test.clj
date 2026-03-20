@@ -11,7 +11,7 @@
   "Create a java.util.Date from year, month (1-based), day, hour, minute."
   [year month day hour minute]
   (let [cal (Calendar/getInstance)]
-    (.set cal year (dec month) day hour minute 0)
+    (.set cal year (dec (long month)) day hour minute 0)
     (.set cal Calendar/MILLISECOND 0)
     (.getTime cal)))
 
