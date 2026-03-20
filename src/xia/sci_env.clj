@@ -10,8 +10,12 @@
    xia.secret safe wrappers that block access to credentials and secrets.
    The sandbox explicitly denies file I/O, shell execution, source
    introspection vars, and direct long-term memory mutation so SCI default
-   namespace changes do not widen access."
-  (:require [sci.core :as sci]
+  namespace changes do not widen access."
+  (:require [clojure.string :as str]
+            [clojure.tools.reader :as tr]
+            [clojure.tools.reader.reader-types :as rt]
+            [sci.core :as sci]
+            [taoensso.timbre :as log]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.config :as cfg]
@@ -28,6 +32,28 @@
 
 (def ^:private default-sci-eval-timeout-ms 10000)
 (def ^:private default-sci-handler-timeout-ms 120000)
+(def ^:private sci-timeout-stop-grace-ms 100)
+(def ^:private sci-timeout-check-interval-mask 127)
+(def ^:private reader-eof (Object.))
+
+(def ^:dynamic *sci-timeout-state* nil)
+
+(defn- sci-timeout-ex
+  [stage timeout-ms]
+  (ex-info (str "SCI " (name stage) " timed out after " timeout-ms " ms")
+           {:stage stage
+            :timeout-ms timeout-ms}))
+
+(defn check-timeout!
+  []
+  (when-let [{:keys [^long deadline-nanos ^long timeout-ms stage ^longs counter]}
+             *sci-timeout-state*]
+    (let [n (aget counter 0)]
+      (aset ^longs counter 0 (unchecked-inc n))
+      (when (and (zero? (bit-and n (long sci-timeout-check-interval-mask)))
+                 (>= (System/nanoTime) deadline-nanos))
+        (throw (sci-timeout-ex stage timeout-ms)))))
+  nil)
 
 (defn- blocked-sci-fn
   [sym]
@@ -69,6 +95,9 @@
   {'get-config  secret/safe-get-config
    'set-config! secret/safe-set-config!
    'q           secret/safe-q})
+
+(def ^:private xia-sci-env-ns
+  {'check-timeout! check-timeout!})
 
 (def ^:private xia-scratch-ns
   {'list-pads    scratch/list-pads
@@ -235,7 +264,8 @@
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns
                   'xia.agent          xia-agent-ns
-                  'xia.db             xia-db-ns}
+                  'xia.db             xia-db-ns
+                  'xia.sci-env        xia-sci-env-ns}
      :deny       denied-sci-symbols
      :classes    {'java.util.Date java.util.Date
                   'java.util.UUID java.util.UUID}}))
@@ -252,25 +282,175 @@
   (cfg/positive-long :tool/sci-handler-timeout-ms
                      default-sci-handler-timeout-ms))
 
+(def ^:private timeout-check-form
+  '(xia.sci-env/check-timeout!))
+
+(declare instrument-timeouts)
+
+(defn- instrument-body
+  [body]
+  (let [body* (map instrument-timeouts body)]
+    (cons timeout-check-form body*)))
+
+(defn- instrument-binding-vector
+  [bindings]
+  (into []
+        (map-indexed (fn [idx form]
+                       (if (even? idx)
+                         form
+                         (instrument-timeouts form))))
+        bindings))
+
+(defn- instrument-fn-clause
+  [[params & body]]
+  (list* params (instrument-body body)))
+
+(defn- instrument-fn-form
+  [[op & more]]
+  (let [[name more] (if (symbol? (first more))
+                      [(first more) (rest more)]
+                      [nil more])]
+    (if (vector? (first more))
+      (let [[params & body] more]
+        (list* op
+               (concat (when name [name])
+                       [params]
+                       (instrument-body body))))
+      (list* op
+             (concat (when name [name])
+                     (map instrument-fn-clause more))))))
+
+(defn- instrument-loop-form
+  [[op bindings & body]]
+  (list* op
+         (instrument-binding-vector bindings)
+         (instrument-body body)))
+
+(defn- instrument-letfn-form
+  [[op bindings & body]]
+  (list* op
+         (into []
+               (map (fn [[fname params & fbody]]
+                      (list* fname params (instrument-body fbody))))
+               bindings)
+         (map instrument-timeouts body)))
+
+(defn- instrument-while-form
+  [[op test & body]]
+  (list* op
+         (instrument-timeouts test)
+         (instrument-body body)))
+
+(defn- instrument-timeouts
+  [form]
+  (cond
+    (list? form)
+    (let [op (first form)]
+      (case op
+        fn     (instrument-fn-form form)
+        fn*    (instrument-fn-form form)
+        loop   (instrument-loop-form form)
+        loop*  (instrument-loop-form form)
+        let    (list* op
+                      (instrument-binding-vector (second form))
+                      (map instrument-timeouts (nnext form)))
+        let*   (list* op
+                      (instrument-binding-vector (second form))
+                      (map instrument-timeouts (nnext form)))
+        letfn  (instrument-letfn-form form)
+        while  (instrument-while-form form)
+        doseq  (instrument-loop-form form)
+        dotimes (instrument-loop-form form)
+        for    (instrument-loop-form form)
+        (apply list (map instrument-timeouts form))))
+
+    (vector? form)
+    (mapv instrument-timeouts form)
+
+    (map? form)
+    (reduce-kv (fn [m k v]
+                 (assoc m
+                        (instrument-timeouts k)
+                        (instrument-timeouts v)))
+               (empty form)
+               form)
+
+    (set? form)
+    (into (empty form) (map instrument-timeouts) form)
+
+    :else
+    form))
+
+(defn- instrument-code-string
+  [code-str]
+  (let [reader (rt/indexing-push-back-reader
+                 (rt/string-push-back-reader code-str))]
+    (binding [*print-meta* true]
+      (loop [forms []]
+        (let [form (tr/read {:eof reader-eof
+                             :read-cond :allow
+                             :features #{:clj}}
+                            reader)]
+          (if (identical? reader-eof form)
+            (str/join "\n" (map (comp pr-str instrument-timeouts) forms))
+            (recur (conj forms form))))))))
+
+(defn- sci-worker-thread
+  [stage timeout-ms f result*]
+  (let [runner (bound-fn*
+                 (fn []
+                   (binding [*sci-timeout-state* {:stage stage
+                                                  :timeout-ms timeout-ms
+                                                  :deadline-nanos (+ (System/nanoTime)
+                                                                     (* 1000000
+                                                                        (long timeout-ms)))
+                                                  :counter (long-array 1)}]
+                     (try
+                       (deliver result* {:status :ok
+                                         :value  (f)})
+                       (catch Throwable t
+                         (deliver result* {:status :error
+                                           :throwable t}))))))]
+    (doto (Thread.
+            ^Runnable
+            (reify Runnable
+              (run [_]
+                (runner)))
+            (str "xia-sci-" (name stage) "-" (System/nanoTime)))
+      (.setDaemon true))))
+
+(defn- interrupt-sci-worker!
+  [^Thread worker]
+  (.interrupt worker)
+  (.join worker (long sci-timeout-stop-grace-ms))
+  (when (.isAlive worker)
+    (log/warn "Timed out SCI worker thread ignored interrupt and is still running"
+              {:thread (.getName worker)})
+    false)
+  (not (.isAlive worker)))
+
 (defn- call-with-timeout
   [timeout-ms stage f]
-  (let [worker   (future (f))
+  (let [result*  (promise)
+        ^Thread worker (sci-worker-thread stage timeout-ms f result*)
         timeout  (Object.)
-        result   (deref worker timeout-ms timeout)]
+        _        (.start worker)
+        result   (deref result* timeout-ms timeout)]
     (if (identical? timeout result)
       (do
-        (future-cancel worker)
-        (throw (ex-info (str "SCI " (name stage) " timed out after " timeout-ms " ms")
-                        {:stage stage
-                         :timeout-ms timeout-ms})))
-      result)))
+        (interrupt-sci-worker! worker)
+        (throw (sci-timeout-ex stage timeout-ms)))
+      (case (:status result)
+        :ok    (:value result)
+        :error (throw (:throwable result))))))
 
 (defn eval-string
   "Evaluate a string of Clojure code in the SCI sandbox."
   [code-str]
   (call-with-timeout (sci-eval-timeout-ms)
                      :eval
-                     #(sci/eval-string* @default-ctx code-str)))
+                     #(sci/eval-string* @default-ctx
+                                        (instrument-code-string code-str))))
 
 (defn call-fn
   "Invoke a compiled SCI function with a bounded execution time."

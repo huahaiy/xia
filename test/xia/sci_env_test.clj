@@ -1,5 +1,6 @@
 (ns xia.sci-env-test
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
             [xia.agent :as agent]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
@@ -76,6 +77,22 @@
     (is (= {:stage :handler
             :timeout-ms 100}
            (select-keys (ex-data ex) [:stage :timeout-ms])))))
+
+(deftest sci-timeout-does-not-leave-worker-threads-alive
+  (xia.db/set-config! :tool/sci-eval-timeout-ms 50)
+  (let [thread-count (fn []
+                       (->> (keys (Thread/getAllStackTraces))
+                            (filter #(.isAlive ^Thread %))
+                            (map #(.getName ^Thread %))
+                            (filter #(str/starts-with? % "xia-sci-"))
+                            count))]
+    (dotimes [_ 3]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo
+            #"SCI eval timed out"
+            (sci-env/eval-string "(loop [] (recur))"))))
+    (Thread/sleep 50)
+    (is (= 0 (thread-count)))))
 
 (deftest file-shell-and-source-access-are-blocked-in-sci
   (doseq [code ["(slurp \"/etc/hosts\")"
