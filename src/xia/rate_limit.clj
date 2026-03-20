@@ -1,6 +1,7 @@
 (ns xia.rate-limit
   (:import [java.util Map$Entry]
-           [java.util.concurrent ConcurrentHashMap]))
+           [java.util.concurrent ConcurrentHashMap]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (defn- recent-timestamps
   [timestamps cutoff]
@@ -30,18 +31,18 @@
 
 (defn maybe-prune-states!
   "Occasionally remove inactive rate-limit buckets from a concurrent map.
-   `cleanup-state` should be an atom holding the last sweep timestamp."
-  [^ConcurrentHashMap states cleanup-state now window-ms]
+   `cleanup-state` should be an AtomicLong holding the last sweep timestamp."
+  [^ConcurrentHashMap states ^AtomicLong cleanup-state now window-ms]
   (let [now* (long now)
         window-ms* (long window-ms)
         sweep-interval-ms window-ms*]
     (loop []
-      (let [last-sweep (long @cleanup-state)]
+      (let [last-sweep (.get cleanup-state)]
         (cond
           (< (- now* last-sweep) sweep-interval-ms)
           nil
 
-          (not (compare-and-set! cleanup-state last-sweep now*))
+          (not (.compareAndSet cleanup-state last-sweep now*))
           (recur)
 
           :else

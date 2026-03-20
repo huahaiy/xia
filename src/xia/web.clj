@@ -13,14 +13,15 @@
             [xia.db :as db]
             [xia.rate-limit :as rate-limit]
             [xia.ssrf :as ssrf])
-  (:import [org.jsoup Jsoup]
-           [org.jsoup.nodes Document Element TextNode]
-           [org.jsoup.select Elements]
-           [java.io BufferedInputStream ByteArrayOutputStream IOException OutputStreamWriter]
-           [java.net InetAddress InetSocketAddress Socket URI URLEncoder URLDecoder]
-           [java.nio.charset Charset StandardCharsets]
-           [java.util.concurrent ConcurrentHashMap]
-           [javax.net.ssl SNIHostName SSLParameters SSLSocket SSLSocketFactory]))
+   (:import [org.jsoup Jsoup]
+            [org.jsoup.nodes Document Element TextNode]
+            [org.jsoup.select Elements]
+            [java.io BufferedInputStream ByteArrayOutputStream IOException OutputStreamWriter]
+            [java.net InetAddress InetSocketAddress Socket URI URLEncoder URLDecoder]
+            [java.nio.charset Charset StandardCharsets]
+            [java.util.concurrent ConcurrentHashMap]
+            [java.util.concurrent.atomic AtomicLong]
+            [javax.net.ssl SNIHostName SSLParameters SSLSocket SSLSocketFactory]))
 
 (def ^:private user-agent "Xia/0.1 (personal AI assistant)")
 (def ^:private max-body-bytes (* 1 1024 1024)) ; 1 MB
@@ -65,7 +66,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^ConcurrentHashMap ^:private rate-limits (ConcurrentHashMap.))
-(defonce ^:private rate-limit-cleanup (atom 0))
+(defonce ^AtomicLong ^:private rate-limit-cleanup (AtomicLong. 0))
 
 (def ^:private rate-limit-max 10)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute

@@ -24,7 +24,8 @@
             [xia.oauth :as oauth]
             [xia.rate-limit :as rate-limit])
   (:import [java.util Base64]
-           [java.util.concurrent ConcurrentHashMap]))
+           [java.util.concurrent ConcurrentHashMap]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (def default-rate-limit-per-minute 60)
 
@@ -122,7 +123,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^ConcurrentHashMap ^:private service-rate-limits (ConcurrentHashMap.))
-(defonce ^:private service-rate-limit-cleanup (atom 0))
+(defonce ^AtomicLong ^:private service-rate-limit-cleanup (AtomicLong. 0))
 (def ^:private rate-limit-window-ms 60000)
 
 (defn effective-rate-limit-per-minute

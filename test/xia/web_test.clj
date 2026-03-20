@@ -5,10 +5,11 @@
             [xia.ssrf :as ssrf]
             [xia.web :as web])
   (:import [java.net InetAddress URI]
-           [java.nio.charset StandardCharsets]
-           [java.util.concurrent ConcurrentHashMap CountDownLatch]
-           [org.jsoup Jsoup]
-           [org.jsoup.nodes Document Element]))
+            [java.nio.charset StandardCharsets]
+            [java.util.concurrent ConcurrentHashMap CountDownLatch]
+            [java.util.concurrent.atomic AtomicLong]
+            [org.jsoup Jsoup]
+            [org.jsoup.nodes Document Element]))
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -101,7 +102,7 @@
         limits      (doto (ConcurrentHashMap.)
                       (.put stale-host stale-state))]
     (with-redefs [xia.web/rate-limits limits
-                  xia.web/rate-limit-cleanup (atom 0)
+                  xia.web/rate-limit-cleanup (AtomicLong. 0)
                   xia.web/rate-limit-max 2]
       (#'web/check-rate-limit! (str "https://" active-host "/path"))
       (is (nil? (.get limits stale-host)))

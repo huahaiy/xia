@@ -5,7 +5,8 @@
             [xia.secret :as secret]
             [xia.service :as service]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.util.concurrent ConcurrentHashMap CountDownLatch]))
+  (:import [java.util.concurrent ConcurrentHashMap CountDownLatch]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (use-fixtures :each with-test-db)
 
@@ -270,7 +271,7 @@
         limits      (doto (ConcurrentHashMap.)
                       (.put stale-id stale-state))]
     (with-redefs [xia.service/service-rate-limits limits
-                  xia.service/service-rate-limit-cleanup (atom 0)
+                  xia.service/service-rate-limit-cleanup (AtomicLong. 0)
                   xia.service/current-time-ms (constantly now)]
       (#'service/check-rate-limit! active-id {:rate-limit-per-minute 2})
       (is (nil? (.get limits stale-id)))
