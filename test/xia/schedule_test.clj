@@ -2,7 +2,8 @@
   (:require [clojure.test :refer :all]
             [xia.db :as db]
             [xia.schedule :as schedule]
-            [xia.test-helpers :refer [with-test-db]]))
+            [xia.test-helpers :refer [with-test-db]]
+            [xia.working-memory :as wm]))
 
 (use-fixtures :each with-test-db)
 
@@ -304,6 +305,7 @@
   (let [session-id (db/create-session! :scheduler)]
     (schedule/create-schedule!
       {:id :resume-me :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Continue the workflow"})
+    (wm/create-wm! session-id)
     (schedule/save-task-checkpoint!
       :resume-me
       {:phase :tool
@@ -312,6 +314,9 @@
     (schedule/record-task-failure! :resume-me "Timed out waiting for dashboard")
     (is (= session-id
            (schedule/resumable-session-id :resume-me)))
+    (wm/clear-wm! session-id)
+    (is (nil? (schedule/resumable-session-id :resume-me))
+        "A cleared working memory should force the schedule to start a fresh session")
     (schedule/record-task-success! :resume-me "Finished successfully.")
     (is (nil? (schedule/resumable-session-id :resume-me)))))
 

@@ -17,7 +17,8 @@
             [xia.config :as cfg]
             [xia.cron :as cron]
             [xia.db :as db]
-            [xia.remote-bridge :as remote-bridge]))
+            [xia.remote-bridge :as remote-bridge]
+            [xia.working-memory :as wm]))
 
 ;; ---------------------------------------------------------------------------
 ;; Limits
@@ -164,7 +165,8 @@
                session-id
                (ffirst (db/q '[:find ?e :in $ ?sid
                                :where [?e :session/id ?sid]]
-                             session-id)))
+                             session-id))
+               (wm/get-wm session-id))
       session-id)))
 
 (defn save-task-checkpoint!
