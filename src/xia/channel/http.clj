@@ -1284,13 +1284,16 @@
   (try
     (let [sid      (java.util.UUID/fromString session-id)
           messages (->> (db/session-messages sid)
-                        (filter #(#{:user :assistant} (:role %)))
-                        (mapv (fn [{:keys [role content created-at local-docs artifacts]}]
-                                {:role       (name role)
-                                 :content    content
-                                 :created_at (instant->str created-at)
-                                 :local_docs (mapv local-doc-ref->body (or local-docs []))
-                                 :artifacts  (mapv artifact-ref->body (or artifacts []))})))]
+                        (into [] (comp
+                                   (filter #(#{:user :assistant} (:role %)))
+                                   (map (fn [{:keys [role content created-at local-docs artifacts]}]
+                                          {:role       (name role)
+                                           :content    content
+                                           :created_at (instant->str created-at)
+                                           :local_docs (into [] (map local-doc-ref->body)
+                                                             (or local-docs []))
+                                           :artifacts  (into [] (map artifact-ref->body)
+                                                             (or artifacts []))})))))]
       (touch-rest-session! session-id)
       (json-response 200 {:session_id session-id
                           :messages   messages}))
@@ -1317,8 +1320,8 @@
 (defn- handle-history-sessions []
   (json-response 200
                  {:sessions (->> (db/list-sessions)
-                                 (filter #(contains? history-session-channels (:channel %)))
-                                 (mapv history-session->body))}))
+                                 (into [] (comp (filter #(contains? history-session-channels (:channel %)))
+                                                (map history-session->body))))}))
 
 (defn- handle-history-schedules []
   (json-response 200
@@ -1328,7 +1331,7 @@
                                                  (date->millis (:next-run sched))
                                                  Long/MIN_VALUE))
                                            >)
-                                  (mapv history-schedule->body))}))
+                                  (into [] (map history-schedule->body)))}))
 
 (defn- handle-history-schedule-runs
   [schedule-id]
@@ -1339,7 +1342,7 @@
         (json-response 404 {:error "schedule not found"})
         (json-response 200
                        {:schedule (history-schedule->body sched)
-                        :runs     (mapv history-run->body
+                        :runs     (into [] (map history-run->body)
                                         (schedule/schedule-history sid 20))})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
@@ -1357,9 +1360,9 @@
       (touch-rest-session! session-id)
       (json-response 200
                      {:session_id session-id
-                      :pads       (mapv scratch-metadata->body
-                                        (scratch/list-pads {:scope :session
-                                                            :session-id session-id}))}))))
+                      :pads       (into [] (map scratch-metadata->body)
+                                         (scratch/list-pads {:scope :session
+                                                             :session-id session-id}))}))))
 
 (defn- handle-create-scratch-pad [session-id req]
   (cond
@@ -1516,8 +1519,8 @@
                   :else
                   [])]
     (->> entries
-         (filter map?)
-         (mapv parse-local-doc-upload))))
+         (into [] (comp (filter map?)
+                        (map parse-local-doc-upload))))))
 
 (defn- multipart-local-doc-upload?
   [value]
@@ -1564,8 +1567,8 @@
            (sequential? uploads) uploads
            (some? uploads)       [uploads]
            :else                 [])
-         (filter multipart-local-doc-upload?)
-         (mapv multipart-local-doc-upload-entry))))
+         (into [] (comp (filter multipart-local-doc-upload?)
+                        (map multipart-local-doc-upload-entry))))))
 
 (defn- local-doc-upload-entries
   [req]
@@ -1592,8 +1595,8 @@
       (touch-rest-session! session-id)
       (json-response 200
                      {:session_id session-id
-                      :documents  (mapv local-doc-metadata->body
-                                        (local-doc/list-docs session-id))}))))
+                      :documents  (into [] (map local-doc-metadata->body)
+                                         (local-doc/list-docs session-id))}))))
 
 (defn- handle-create-local-docs [session-id req]
   (cond
@@ -1768,8 +1771,8 @@
       (touch-rest-session! session-id)
       (json-response 200
                      {:session_id session-id
-                      :artifacts  (mapv artifact-metadata->body
-                                        (artifact/list-artifacts session-id))}))))
+                      :artifacts  (into [] (map artifact-metadata->body)
+                                         (artifact/list-artifacts session-id))}))))
 
 (defn- handle-create-artifact [session-id req]
   (cond
@@ -1845,39 +1848,39 @@
   (json-response
     200
     {:providers (->> (db/list-providers)
-                     (map provider->admin-body)
+                     (into [] (map provider->admin-body))
                      sort-by-name)
      :conversation_context (conversation-context->admin-body)
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
      :local_doc_summarization (local-doc-summarization->admin-body)
      :database_backup (database-backup->admin-body)
-     :llm_workloads (mapv (fn [{:keys [id label description]}]
-                            {:id          (name id)
-                             :label       label
-                             :description description})
+     :llm_workloads (into [] (map (fn [{:keys [id label description]}]
+                                    {:id          (name id)
+                                     :label       label
+                                     :description description}))
                           (llm/workload-routes))
      :oauth_provider_templates (->> (oauth-template/list-templates)
-                                    (map oauth-template->admin-body)
+                                    (into [] (map oauth-template->admin-body))
                                     sort-by-name)
      :oauth_accounts (->> (db/list-oauth-accounts)
-                          (map oauth-account->admin-body)
+                          (into [] (map oauth-account->admin-body))
                           sort-by-name)
      :services  (->> (db/list-services)
-                     (map service->admin-body)
+                     (into [] (map service->admin-body))
                      sort-by-name)
      :sites     (->> (db/list-site-creds)
-                     (map site->admin-body)
+                     (into [] (map site->admin-body))
                      sort-by-name)
      :tools     (->> (db/list-tools)
-                     (map tool->admin-body)
+                     (into [] (map tool->admin-body))
                      sort-by-name)
      :skills    (->> (db/list-skills)
-                     (map skill->body)
+                     (into [] (map skill->body))
                      sort-by-name)
      :remote_bridge   (remote-bridge->admin-body (remote-bridge/bridge-config))
-     :remote_devices  (mapv remote-device->admin-body (remote-bridge/list-devices))
-     :remote_events   (mapv remote-event->admin-body (remote-bridge/list-events 20))
+     :remote_devices  (into [] (map remote-device->admin-body) (remote-bridge/list-devices))
+     :remote_events   (into [] (map remote-event->admin-body) (remote-bridge/list-events 20))
      :remote_snapshot (remote-snapshot->admin-body (remote-bridge/status-snapshot))}))
 
 (defn- handle-save-provider [req]

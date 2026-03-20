@@ -629,16 +629,21 @@
 
 (defn- shared-string-item-text
   [si]
-  (->> (descendant-elements-by-local-name si "t")
-       (keep node-text)
-       (str/join "")))
+  (transduce (keep node-text)
+             (completing
+               (fn [^StringBuilder sb fragment]
+                 (.append sb ^String fragment))
+               (fn [^StringBuilder sb]
+                 (.toString sb)))
+             (StringBuilder.)
+             (descendant-elements-by-local-name si "t")))
 
 (defn- xlsx-shared-strings
   [entries]
   (if-let [shared-strings-bytes (get entries "xl/sharedStrings.xml")]
     (let [^Document shared-doc (parse-xml-bytes shared-strings-bytes)
           doc (.getDocumentElement shared-doc)]
-      (mapv shared-string-item-text
+      (into [] (map shared-string-item-text)
             (descendant-elements-by-local-name doc "si")))
     []))
 
@@ -669,29 +674,25 @@
       (let [^Document workbook-doc (parse-xml-bytes workbook-bytes)
             doc (.getDocumentElement workbook-doc)
             by-workbook
-            (->> (descendant-elements-by-local-name doc "sheet")
-                 (map-indexed
-                   (fn [idx sheet]
-                     (let [entry (or (some-> (element-attr-ns sheet office-rel-ns "id" "r:id")
-                                             rel-map)
-                                     (nth worksheet-paths idx nil))]
-                       (when entry
-                         {:name  (or (element-attr sheet "name")
-                                     (str "Sheet " (inc idx)))
-                          :entry entry}))))
-                 (remove nil?)
-                 vec)]
+            (into [] (keep-indexed
+                       (fn [idx sheet]
+                         (let [entry (or (some-> (element-attr-ns sheet office-rel-ns "id" "r:id")
+                                                 rel-map)
+                                         (nth worksheet-paths idx nil))]
+                           (when entry
+                             {:name  (or (element-attr sheet "name")
+                                         (str "Sheet " (inc idx)))
+                              :entry entry}))))
+                  (descendant-elements-by-local-name doc "sheet"))]
         (if (seq by-workbook)
           by-workbook
-          (mapv (fn [idx path]
-                  {:name (str "Sheet " (inc idx))
-                   :entry path})
-                (range (count worksheet-paths))
+          (into [] (map-indexed (fn [idx path]
+                                  {:name (str "Sheet " (inc idx))
+                                   :entry path}))
                 worksheet-paths)))
-      (mapv (fn [idx path]
-              {:name (str "Sheet " (inc idx))
-               :entry path})
-            (range (count worksheet-paths))
+      (into [] (map-indexed (fn [idx path]
+                              {:name (str "Sheet " (inc idx))
+                               :entry path}))
             worksheet-paths))))
 
 (defn- slide-entry-paths
@@ -710,8 +711,8 @@
           ^Document document-doc (parse-xml-bytes document-bytes)
           document-root  (.getDocumentElement document-doc)]
       (->> (descendant-elements-by-local-name document-root "p")
-           (keep docx-paragraph-text)
-           (remove str/blank?)
+           (eduction (keep docx-paragraph-text)
+                     (remove str/blank?))
            (str/join "\n")
            normalize-text))
     (catch Exception e
@@ -728,14 +729,15 @@
                             (let [^Document sheet-doc (parse-xml-bytes sheet-bytes)
                                   sheet-root (.getDocumentElement sheet-doc)
                                   rows       (->> (descendant-elements-by-local-name sheet-root "row")
-                                                  (map (fn [row]
-                                                         (->> (direct-child-elements-by-local-name row "c")
-                                                              (map #(xlsx-cell-text % shared-strings))
-                                                              (remove str/blank?)
-                                                              (str/join "\t"))))
-                                                  (remove str/blank?))]
+                                                  (eduction
+                                                    (map (fn [row]
+                                                           (->> (direct-child-elements-by-local-name row "c")
+                                                                (eduction (map #(xlsx-cell-text % shared-strings))
+                                                                          (remove str/blank?))
+                                                                (str/join "\t"))))
+                                                    (remove str/blank?)))]
                               (str/join "\n" (cons (str "## Sheet: " name) rows))))]
-      (normalize-text (str/join "\n\n" (remove str/blank? sheet-sections))))
+      (normalize-text (str/join "\n\n" (eduction (remove str/blank?) sheet-sections))))
     (catch Exception e
       (office-extraction-failed :local-doc/xlsx-extraction-failed name media-type e))))
 
@@ -747,13 +749,13 @@
                            (fn [idx entry-path]
                              (let [^Document slide-doc (parse-xml-bytes (get entries entry-path))
                                    slide-root (.getDocumentElement slide-doc)
-                                   text-lines (->> (descendant-elements-by-local-name slide-root "t")
-                                                   (keep node-text))]
+                                   text-lines (eduction (keep node-text)
+                                                        (descendant-elements-by-local-name slide-root "t"))]
                                (str/join "\n"
                                          (cons (str "## Slide " (inc idx))
                                                (nonblank-lines text-lines)))))
                            (slide-entry-paths entries))]
-      (normalize-text (str/join "\n\n" (remove str/blank? slide-sections))))
+      (normalize-text (str/join "\n\n" (eduction (remove str/blank?) slide-sections))))
     (catch Exception e
       (office-extraction-failed :local-doc/pptx-extraction-failed name media-type e))))
 

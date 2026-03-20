@@ -237,10 +237,9 @@
                  (sequential? value) value
                  :else [value])]
     (when topics
-      (let [parsed (->> topics
-                        (map #(some-> % str keyword))
-                        (filter supported-topics)
-                        set)]
+      (let [parsed (into #{} (comp (map #(some-> % str keyword))
+                                   (filter supported-topics))
+                         topics)]
         (when (seq parsed)
           parsed)))))
 
@@ -272,7 +271,7 @@
                         created-ms (.getTime ^Date created-at)]
                     [(- (long created-ms))
                      (str (:remote.device/name entity))])))
-       (mapv device->body)))
+       (into [] (map device->body))))
 
 (defn pair-device!
   [pairing-token]
@@ -336,8 +335,7 @@
                             [?e :remote.event/created-at ?created]])
                     (sort-by second #(compare %2 %1))
                     (drop keep-event-count)
-                    (map first)
-                    vec)]
+                    (into [] (map first)))]
     (when (seq events)
       (db/transact! (mapv (fn [eid] [:db/retractEntity eid]) events)))))
 
@@ -364,9 +362,9 @@
                 [?e :remote.event/created-at ?created]])
         (sort-by second #(compare %2 %1))
         (take limit)
-        (map first)
-        (map db/entity)
-        (mapv event->body))))
+        (into [] (comp (map first)
+                       (map db/entity)
+                       (map event->body))))))
 
 (defn record-event!
   [{:keys [type topic severity title detail metadata status device-id created-at]}]
@@ -605,5 +603,5 @@
      :running (running-schedules)
      :recent-failures (recent-runs-by-status :error 5)
      :recent-successes (recent-runs-by-status :success 5)
-     :attention (vec (concat (oauth-attention-items)
-                             (service-attention-items)))}))
+     :attention (into [] cat [(oauth-attention-items)
+                              (service-attention-items)])}))

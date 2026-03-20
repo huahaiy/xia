@@ -274,6 +274,20 @@
       (seq tool-calls)
       (into (map render-tool-call-summary tool-calls)))))
 
+(defn- history-summary-text
+  [messages]
+  (transduce
+    (mapcat history-message->summary-lines)
+    (completing
+      (fn [^StringBuilder sb line]
+        (when (pos? (.length sb))
+          (.append sb "\n"))
+        (.append sb ^String line))
+      (fn [^StringBuilder sb]
+        (.toString sb)))
+    (StringBuilder.)
+    messages))
+
 (defn- history-message->llm-message
   [{:keys [role content tool-calls tool-id tool-result]}]
   (cond-> {:role (name role)
@@ -402,9 +416,9 @@
             (take 3 (:outgoing edges)))
     (let [detail (when (pos? (.length detail-builder))
                    (.toString detail-builder))]
-    {:content       (str "- " name type-str
-                         (when-not (str/blank? detail) (str ": " detail)))
-     :used-fact-eids (into [] (keep :eid) selected-facts)})))
+      {:content        (str "- " name type-str
+                            (when-not (str/blank? detail) (str ": " detail)))
+       :used-fact-eids (into [] (keep :eid) selected-facts)})))
 
 (defn- render-entity
   [entity]
@@ -607,19 +621,16 @@
   ([messages budget]
    (compact-history messages budget nil))
   ([messages budget {:keys [provider-id workload]}]
-   (let [total-tokens (->> messages
-                           (map #(estimate-tokens (:content %)))
-                           (reduce +))
-         msg-count    (count messages)]
+   (let [messages*     (if (vector? messages) messages (vec messages))
+         total-tokens  (transduce (map #(estimate-tokens (:content %))) + 0 messages*)
+         msg-count     (count messages*)]
      (if (or (<= total-tokens budget) (<= msg-count 4))
-       messages ; fits in budget or too few to compact
+       messages* ; fits in budget or too few to compact
        ;; Summarize the older half
        (let [keep-count  (max 4 (quot msg-count 2))
-             old-msgs    (subvec (vec messages) 0 (- msg-count keep-count))
-             recent-msgs (subvec (vec messages) (- msg-count keep-count))
-             old-text    (->> old-msgs
-                              (mapcat history-message->summary-lines)
-                              (str/join "\n"))]
+             old-msgs    (subvec messages* 0 (- msg-count keep-count))
+             recent-msgs (subvec messages* (- msg-count keep-count))
+             old-text    (history-summary-text old-msgs)]
          (try
            (let [recap (summarize-history-text old-text {:provider-id provider-id
                                                          :workload workload})]
@@ -640,8 +651,8 @@
         metadata     (db/session-message-metadata session-id)
         total        (count metadata)]
     (if (<= total recent-limit)
-      (mapv history-message->llm-message
-            (db/session-messages-by-eids (mapv :eid metadata)))
+      (into [] (map history-message->llm-message)
+            (db/session-messages-by-eids (into [] (map :eid) metadata)))
       (let [recent-start      (max 0 (- total recent-limit))
             recap-state       (db/session-history-recap session-id)
             summarized-count0 (long (or (:message-count recap-state) 0))
@@ -652,16 +663,16 @@
                                 (:content recap-state))
             newly-archived    (subvec metadata summarized-count recent-start)
             recent-meta       (subvec metadata recent-start total)
-            recent-eids       (mapv :eid recent-meta)
+            recent-eids       (into [] (map :eid) recent-meta)
             recent-messages   (db/session-messages-by-eids recent-eids)]
         (if-not (seq newly-archived)
-          (let [recent-history (mapv history-message->llm-message recent-messages)]
+          (let [recent-history (into [] (map history-message->llm-message) recent-messages)]
             (if (seq recap-content)
               (into [(history-recap-message recap-content)] recent-history)
               recent-history))
-          (let [archived-text (->> (db/session-messages-by-eids (mapv :eid newly-archived))
-                                   (mapcat history-message->summary-lines)
-                                   (str/join "\n"))]
+          (let [archived-text (history-summary-text
+                                (db/session-messages-by-eids
+                                  (into [] (map :eid) newly-archived)))]
             (try
               (let [new-recap (summarize-history-text archived-text
                                                       recap-content
@@ -672,12 +683,13 @@
                   (do
                     (db/save-session-history-recap! session-id new-recap recent-start)
                     (into [(history-recap-message new-recap)]
-                          (map history-message->llm-message recent-messages)))
-                  (mapv history-message->llm-message
+                          (map history-message->llm-message)
+                          recent-messages))
+                  (into [] (map history-message->llm-message)
                         (db/session-messages session-id))))
               (catch Exception e
                 (log/warn "Failed to update session history recap:" (.getMessage e))
-                (mapv history-message->llm-message
+                (into [] (map history-message->llm-message)
                       (db/session-messages session-id))))))))))
 
 ;; ============================================================================

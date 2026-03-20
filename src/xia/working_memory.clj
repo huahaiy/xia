@@ -202,8 +202,10 @@ Rules:
                                           (:local-doc-refs wm))]
                      (into slot-names doc-names)))
         ;; Combine, deduplicate
-        all-terms (distinct (concat proper-nouns meaningful wm-names))]
-     (into [] (take 20) all-terms))))
+        all-terms (into []
+                        (comp cat (distinct) (take 20))
+                        [proper-nouns meaningful wm-names])]
+     all-terms)))
 
 ;; ============================================================================
 ;; Stage 2: Hybrid Search
@@ -243,19 +245,19 @@ Rules:
     (fn [acc eid]
       (let [edges  (memory/node-edges eid)
             ;; Get connected node eids from edges
-            connected (->> (db/q '[:find ?to
-                                   :in $ ?from
-                                   :where [?e :kg.edge/from ?from]
-                                          [?e :kg.edge/to ?to]]
-                                 eid)
-                           (map first))
-            incoming  (->> (db/q '[:find ?from
-                                   :in $ ?to
-                                   :where [?e :kg.edge/to ?to]
-                                          [?e :kg.edge/from ?from]]
-                                 eid)
-                           (map first))
-            all-connected (distinct (concat connected incoming))]
+            connected (into [] (map first)
+                            (db/q '[:find ?to
+                                    :in $ ?from
+                                    :where [?e :kg.edge/from ?from]
+                                           [?e :kg.edge/to ?to]]
+                                  eid))
+            incoming  (into [] (map first)
+                            (db/q '[:find ?from
+                                    :in $ ?to
+                                    :where [?e :kg.edge/to ?to]
+                                           [?e :kg.edge/from ?from]]
+                                  eid))
+            all-connected (into [] (comp cat (distinct)) [connected incoming])]
         (reduce (fn [a c-eid]
                   (if (contains? a c-eid)
                     a ; already known
@@ -316,24 +318,22 @@ Rules:
 (defn- merge-bounded-refs
   [existing-refs new-refs ref-id-key max-count]
   (if (pos? (long max-count))
-    (let [selected
-          (reduce
-            (fn [selected ref]
-              (let [ref-id (ref-id-key ref)]
-                (if-let [existing (get selected ref-id)]
-                  (if (better-ref? ref existing)
-                    (assoc selected ref-id ref)
-                    selected)
-                  (if (< (count selected) max-count)
-                    (assoc selected ref-id ref)
-                    (let [[lowest-id lowest-ref] (lowest-ranked-ref-entry selected)]
-                      (if (better-ref? ref lowest-ref)
-                        (-> selected
-                            (dissoc lowest-id)
-                            (assoc ref-id ref))
-                        selected))))))
-            {}
-            (concat existing-refs new-refs))]
+    (let [select-ref (fn [selected ref]
+                       (let [ref-id (ref-id-key ref)]
+                         (if-let [existing (get selected ref-id)]
+                           (if (better-ref? ref existing)
+                             (assoc selected ref-id ref)
+                             selected)
+                           (if (< (count selected) max-count)
+                             (assoc selected ref-id ref)
+                             (let [[lowest-id lowest-ref] (lowest-ranked-ref-entry selected)]
+                               (if (better-ref? ref lowest-ref)
+                                 (-> selected
+                                     (dissoc lowest-id)
+                                     (assoc ref-id ref))
+                                 selected))))))
+          selected   (reduce select-ref {} existing-refs)
+          selected   (reduce select-ref selected new-refs)]
       (->> selected
            vals
            (sort-by :relevance >)
@@ -377,28 +377,27 @@ Rules:
                     expanded-nodes)
             ;; Merge episode refs
             max-refs (get-in wm [:config :max-episode-refs])
-            new-refs (->> (:episodes search-results)
-                          (mapv (fn [{:keys [eid summary timestamp]}]
-                                  {:episode-eid eid
-                                   :summary     summary
-                                   :timestamp   timestamp
-                                   :relevance   0.7})))
+            new-refs (into [] (map (fn [{:keys [eid summary timestamp]}]
+                                     {:episode-eid eid
+                                      :summary     summary
+                                      :timestamp   timestamp
+                                      :relevance   0.7}))
+                           (:episodes search-results))
             merged-refs (merge-bounded-refs (:episode-refs wm)
                                             new-refs
                                             :episode-eid
                                             max-refs)
             max-doc-refs (get-in wm [:config :max-local-doc-refs])
-            new-doc-refs (->> (:local-docs search-results)
-                              (map-indexed
-                                (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
-                                  {:doc-id         id
-                                   :name           name
-                                   :media-type     media-type
-                                   :summary        summary
-                                   :preview        preview
-                                   :matched-chunks matched-chunks
-                                   :relevance      (max 0.45 (- 0.8 (* idx 0.1)))}))
-                              vec)
+            new-doc-refs (into [] (map-indexed
+                                    (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
+                                      {:doc-id         id
+                                       :name           name
+                                       :media-type     media-type
+                                       :summary        summary
+                                       :preview        preview
+                                       :matched-chunks matched-chunks
+                                       :relevance      (max 0.45 (- 0.8 (* idx 0.1)))}))
+                               (:local-docs search-results))
             merged-doc-refs (merge-bounded-refs (:local-doc-refs wm)
                                                 new-doc-refs
                                                 :doc-id
@@ -520,14 +519,22 @@ Rules:
   (let [user-msg  (str "User message:\n" (or user-message "")
                        "\n\nAssistant response:\n" (or assistant-response "")
                        "\n\nFacts:\n"
-                       (->> facts
-                            (map-indexed
-                              (fn [idx {:keys [content confidence utility]}]
-                                (str "Fact " idx
-                                     "\nContent: " content
-                                     "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
-                                     "\nUtility: " (format "%.3f" (double (or utility 0.5))))))
-                            (str/join "\n\n---\n\n")))
+                       (transduce
+                         (map-indexed
+                           (fn [idx {:keys [content confidence utility]}]
+                             (str "Fact " idx
+                                  "\nContent: " content
+                                  "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
+                                  "\nUtility: " (format "%.3f" (double (or utility 0.5))))))
+                         (completing
+                           (fn [^StringBuilder sb fact-text]
+                             (when (pos? (.length sb))
+                               (.append sb "\n\n---\n\n"))
+                             (.append sb ^String fact-text))
+                           (fn [^StringBuilder sb]
+                             (.toString sb)))
+                         (StringBuilder.)
+                         facts))
         defaults  (fact-utility-defaults facts)]
     (try
       (let [response (llm/chat-simple

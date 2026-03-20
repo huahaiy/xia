@@ -819,8 +819,10 @@
                 (-> current
                     (merge (select-keys chunk [:id :name :media-type :status :size-bytes :summary :preview :chunk-count]))
                     (assoc :chunk-hits chunk-hits
-                           :chunk-rrf-score (reduce + 0.0 (map #(double (or (:rrf-score %) 0.0))
-                                                               chunk-hits))
+                           :chunk-rrf-score (transduce (map #(double (or (:rrf-score %) 0.0)))
+                                                       +
+                                                       0.0
+                                                       chunk-hits)
                            :chunk-lex-score (reduce (fn [best hit]
                                                       (update-best-score best (:lex-score hit)))
                                                     nil
@@ -832,7 +834,8 @@
 
 (defn- finalize-local-doc-candidate
   [{:keys [chunk-hits doc-rrf-score chunk-rrf-score summary preview] :as candidate}]
-  (let [matched-chunks (mapv #(select-keys % [:id :index :summary :preview]) (or chunk-hits []))
+  (let [matched-chunks (into [] (map #(select-keys % [:id :index :summary :preview]))
+                            (or chunk-hits []))
         total-score    (+ (* 0.8 (double (or doc-rrf-score 0.0)))
                           (* 1.2 (double (or chunk-rrf-score 0.0))))]
     (-> candidate
@@ -848,12 +851,16 @@
                                   (* default-candidate-pool-multiplier top)))
         doc-lexical      (local-doc-doc-fulltext-hits session-id (or fts-query query) :top pool-size)
         doc-semantic     (local-doc-doc-embedding-hits session-id query :top pool-size)
-        doc-hits         (->> (vals (reduce merge-domain-hit {} (concat doc-lexical doc-semantic)))
-                              (map #(assoc % :rrf-score (hybrid-rrf-score %))))
+        doc-merged       (reduce merge-domain-hit {} doc-lexical)
+        doc-merged       (reduce merge-domain-hit doc-merged doc-semantic)
+        doc-hits         (into [] (map #(assoc % :rrf-score (hybrid-rrf-score %)))
+                               (vals doc-merged))
         chunk-lexical    (local-doc-chunk-fulltext-hits session-id (or fts-query query) :top pool-size)
         chunk-semantic   (local-doc-chunk-embedding-hits session-id query :top pool-size)
-        chunk-hits       (->> (vals (reduce merge-domain-hit {} (concat chunk-lexical chunk-semantic)))
-                              (map #(assoc % :rrf-score (hybrid-rrf-score %))))
+        chunk-merged     (reduce merge-domain-hit {} chunk-lexical)
+        chunk-merged     (reduce merge-domain-hit chunk-merged chunk-semantic)
+        chunk-hits       (into [] (map #(assoc % :rrf-score (hybrid-rrf-score %)))
+                               (vals chunk-merged))
         merged-candidates (reduce merge-local-doc-chunk-hit
                                   (reduce merge-local-doc-doc-hit {} doc-hits)
                                   chunk-hits)]
