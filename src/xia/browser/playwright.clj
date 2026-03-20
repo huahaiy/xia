@@ -23,7 +23,7 @@
 (def ^:private max-content-chars 8000)
 (def ^:private live-session-ttl-ms (* 60 60 1000))
 (def ^:private action-settle-ms 1200)
-(def ^:private session-restore-lock-count 256)
+(def ^:private session-snapshot-lock-count 256)
 
 (defonce ^:private runtime (atom {:playwright nil
                                   :browser nil
@@ -33,8 +33,8 @@
                                   :driver-resource-fs nil}))
 (defonce ^:private runtime-lock (Object.))
 (defonce ^ConcurrentHashMap ^:private sessions (ConcurrentHashMap.))
-(defonce ^:private session-restore-locks
-  (vec (repeatedly session-restore-lock-count #(Object.))))
+(defonce ^:private session-snapshot-locks
+  (vec (repeatedly session-snapshot-lock-count #(Object.))))
 
 (defn- now-ms []
   (System/currentTimeMillis))
@@ -71,16 +71,16 @@
   {:os-name (System/getProperty "os.name")
    :arch (System/getProperty "os.arch")})
 
-(defn- session-restore-lock
+(defn- session-snapshot-lock
   [session-id]
   (when session-id
-    (nth session-restore-locks
+    (nth session-snapshot-locks
          (mod (bit-and Integer/MAX_VALUE (hash session-id))
-              session-restore-lock-count))))
+              session-snapshot-lock-count))))
 
-(defn- with-session-restore-lock
+(defn- with-session-snapshot-lock
   [session-id f]
-  (if-let [lock (session-restore-lock session-id)]
+  (if-let [lock (session-snapshot-lock session-id)]
     (locking lock
       (f))
     (f)))
@@ -676,10 +676,13 @@
 
 (defn- persist-session!
   [ops session-id]
-  (when-let [sess (.get sessions session-id)]
-    ((:write-snapshot! ops)
-     session-id
-     (live-session->snapshot session-id sess))))
+  (with-session-snapshot-lock
+    session-id
+    (fn []
+      (when-let [sess (.get sessions session-id)]
+        ((:write-snapshot! ops)
+         session-id
+         (live-session->snapshot session-id sess))))))
 
 (defn- close-session-value!
   [sess]
@@ -816,7 +819,7 @@
 (defn- get-session
   [ops session-id]
   (let [sess (or (.get sessions session-id)
-                 (with-session-restore-lock
+                 (with-session-snapshot-lock
                    session-id
                    (fn []
                      (or (.get sessions session-id)
@@ -828,7 +831,7 @@
                            ". Call browser-open first.")
                       {:session-id session-id})))
     (let [sess (if (session-expired? @sess)
-                 (with-session-restore-lock
+                 (with-session-snapshot-lock
                    session-id
                    (fn []
                      (let [current (.get sessions session-id)]

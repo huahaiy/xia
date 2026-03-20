@@ -341,6 +341,43 @@
     (is (= true (:resumable? entry)))
     (browser/close-session sid)))
 
+(deftest playwright-snapshot-persistence-serializes-per-session
+  (let [persist-session! (var-get (playwright-var 'persist-session!))
+        sessions*        (var-get (playwright-var 'sessions))
+        session-id       (str (random-uuid))
+        session-value    (atom {:last-access 1
+                                :created-at-ms 1
+                                :js-enabled true})
+        snapshots        (atom {})
+        active           (atom 0)
+        max-active       (atom 0)
+        ops              {:write-snapshot! (fn [sid snapshot]
+                                             (swap! snapshots assoc sid snapshot))}]
+    (.put sessions* session-id session-value)
+    (try
+      (with-redefs-fn {(playwright-var 'live-session->snapshot)
+                       (fn [sid _sess]
+                         (let [n (swap! active inc)]
+                           (swap! max-active max n)
+                           (Thread/sleep 40)
+                           (swap! active dec)
+                           {"session_id" sid
+                            "backend" "playwright"
+                            "current_url" (str "https://example.com/" n)}))}
+        #(let [start   (promise)
+               futures (mapv (fn [_]
+                               (future
+                                 @start
+                                 (persist-session! ops session-id)))
+                             (range 8))]
+           (deliver start true)
+           (doseq [fut futures]
+             (is (not= ::timeout (deref fut 5000 ::timeout))))
+           (is (= 1 @max-active))
+           (is (= session-id (-> @snapshots (get session-id) (get "session_id"))))))
+      (finally
+        (.remove sessions* session-id)))))
+
 (deftest ^:integration read-page-restores-from-snapshot
   (let [result (browser/open-session "https://example.com")
         sid    (:session-id result)
