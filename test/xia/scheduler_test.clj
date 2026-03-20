@@ -3,6 +3,7 @@
             [xia.agent]
             [xia.db :as db]
             [xia.hippocampus]
+            [xia.oauth]
             [xia.schedule]
             [xia.scheduler :as scheduler]
             [xia.test-helpers :refer [with-test-db]]
@@ -218,3 +219,39 @@
         (is (= :ran (deref called 1000 nil))))
       (finally
         (reset! maintenance-atom original-last)))))
+
+(deftest execute-schedule-proactively-refreshes-oauth-before-run
+  (let [calls        (atom [])
+        running-atom @#'scheduler/running-schedules
+        original     @running-atom]
+    (reset! running-atom #{})
+    (try
+      (with-redefs [xia.oauth/refresh-autonomous-accounts! (fn []
+                                                             (swap! calls conj :refresh)
+                                                             {:status :ok
+                                                              :checked 1
+                                                              :refreshed [:github]
+                                                              :errors []})
+                    xia.scheduler/execute-tool-schedule (fn [_sched]
+                                                          (swap! calls conj :execute))
+                    xia.schedule/trim-history! (fn [& _] nil)]
+        (#'scheduler/execute-schedule! {:id :nightly :type :tool})
+        (is (= [:refresh :execute] @calls)))
+      (finally
+        (reset! running-atom original)))))
+
+(deftest execute-schedule-continues-when-proactive-oauth-refresh-fails
+  (let [executed?    (atom false)
+        running-atom @#'scheduler/running-schedules
+        original     @running-atom]
+    (reset! running-atom #{})
+    (try
+      (with-redefs [xia.oauth/refresh-autonomous-accounts! (fn []
+                                                             (throw (ex-info "refresh boom" {})))
+                    xia.scheduler/execute-tool-schedule (fn [_sched]
+                                                          (reset! executed? true))
+                    xia.schedule/trim-history! (fn [& _] nil)]
+        (#'scheduler/execute-schedule! {:id :nightly :type :tool})
+        (is (true? @executed?)))
+      (finally
+        (reset! running-atom original)))))

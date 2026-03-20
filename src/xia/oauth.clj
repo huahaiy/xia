@@ -3,6 +3,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.http-client :as http])
   (:import [java.net URI URLDecoder URLEncoder]
@@ -11,9 +12,14 @@
            [java.time Instant]
            [java.util Base64 Date]))
 (defonce ^:private pending-authorizations (atom {}))
+(defonce ^:private proactive-refresh-lock (Object.))
+(defonce ^:private last-proactive-refresh-at-ms (atom 0))
 
 (def ^:private auth-state-ttl-ms (* 15 60 1000))
 (def ^:private refresh-skew-ms 60000)
+(def ^:private proactive-refresh-min-interval-ms 30000)
+
+(declare ensure-account-ready!)
 
 (defn- now-ms []
   (System/currentTimeMillis))
@@ -183,6 +189,64 @@
 (defn list-accounts
   []
   (db/list-oauth-accounts))
+
+(defn- refreshable-account?
+  [account]
+  (boolean (nonblank-str (:oauth.account/refresh-token account))))
+
+(defn- proactive-refresh-needed?
+  [account]
+  (or (and (nil? (nonblank-str (:oauth.account/access-token account)))
+           (refreshable-account? account))
+      (account-expiring? account)))
+
+(defn refresh-autonomous-accounts!
+  "Proactively refresh autonomous-approved OAuth accounts before autonomous
+   work starts, so tools do not discover expired tokens later via opaque 401s.
+
+   Returns a summary map and never throws for per-account refresh failures."
+  ([] (refresh-autonomous-accounts! {}))
+  ([{:keys [force?]
+     :or   {force? false}}]
+   (locking proactive-refresh-lock
+     (let [started-at (now-ms)]
+       (if (and (not force?)
+                (< (- started-at @last-proactive-refresh-at-ms)
+                   proactive-refresh-min-interval-ms))
+         {:status    :skipped
+          :reason    :recent
+          :checked   0
+          :refreshed []
+          :errors    []}
+         (let [accounts (into []
+                              (comp (filter autonomous/oauth-account-autonomous-approved?)
+                                    (filter refreshable-account?)
+                                    (filter proactive-refresh-needed?))
+                              (db/list-oauth-accounts))
+               result   (reduce (fn [acc account]
+                                  (let [account-id (:oauth.account/id account)]
+                                    (try
+                                      (ensure-account-ready! account-id)
+                                      (update acc :refreshed conj account-id)
+                                      (catch Exception e
+                                        (log/warn e "Failed to proactively refresh OAuth account"
+                                                  (name account-id))
+                                        (update acc :errors conj
+                                                {:account-id account-id
+                                                 :error      (.getMessage e)})))))
+                                {:refreshed []
+                                 :errors    []}
+                                accounts)
+               status   (cond
+                          (empty? accounts) :idle
+                          (and (seq (:errors result))
+                               (seq (:refreshed result))) :partial
+                          (seq (:errors result)) :error
+                          :else :ok)]
+           (reset! last-proactive-refresh-at-ms started-at)
+           (assoc result
+                  :status status
+                  :checked (count accounts))))))))
 
 (defn start-authorization!
   [account-id callback-url]

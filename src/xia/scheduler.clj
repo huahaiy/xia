@@ -16,6 +16,7 @@
             [xia.agent :as agent]
             [xia.config :as cfg]
             [xia.hippocampus :as hippo]
+            [xia.oauth :as oauth]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
             [xia.working-memory :as wm])
@@ -186,6 +187,20 @@
     (when-not (contains? @running-schedules id)
       (swap! running-schedules conj id)
       (try
+        (try
+          (let [{:keys [status refreshed errors]}
+                (oauth/refresh-autonomous-accounts!)]
+            (when (seq refreshed)
+              (log/info "Proactively refreshed" (count refreshed)
+                        "OAuth account(s) before autonomous schedule execution"))
+            (when (seq errors)
+              (log/warn "Proactive OAuth refresh completed with"
+                        (count errors) "failure(s) before schedule" (name id)))
+            (when (= status :skipped)
+              (log/debug "Skipped proactive OAuth refresh before schedule" (name id)
+                         "because a recent sweep already ran")))
+          (catch Exception e
+            (log/warn e "Proactive OAuth refresh failed before schedule" (name id))))
         (log/info "Executing schedule:" (name id) "type:" (:type sched))
         (case (:type sched)
           :tool   (execute-tool-schedule sched)
