@@ -238,6 +238,39 @@
    :skill/import-warnings {:db/valueType :db.type/string :db/cardinality :db.cardinality/many}
    :skill/imported-from-openclaw? {:db/valueType :db.type/boolean}
 
+   ;; --- Remote Bridge (notification/status bridge state) ---
+   :remote.bridge/id           {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :remote.bridge/enabled?     {:db/valueType :db.type/boolean}
+   :remote.bridge/instance-id  {:db/valueType :db.type/string}
+   :remote.bridge/instance-label {:db/valueType :db.type/string}
+   :remote.bridge/relay-url    {:db/valueType :db.type/string}
+   :remote.bridge/public-key   {:db/valueType :db.type/string}
+   :remote.bridge/connected-at {:db/valueType :db.type/instant}
+   :remote.bridge/last-seen-at {:db/valueType :db.type/instant}
+
+   :remote.device/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :remote.device/name        {:db/valueType :db.type/string}
+   :remote.device/public-key  {:db/valueType :db.type/string}
+   :remote.device/platform    {:db/valueType :db.type/keyword}
+   :remote.device/push-token  {:db/valueType :db.type/string}
+   :remote.device/status      {:db/valueType :db.type/keyword}
+   :remote.device/topics      {:db/valueType :db.type/keyword :db/cardinality :db.cardinality/many}
+   :remote.device/muted?      {:db/valueType :db.type/boolean}
+   :remote.device/created-at  {:db/valueType :db.type/instant}
+   :remote.device/last-seen-at {:db/valueType :db.type/instant}
+
+   :remote.event/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :remote.event/type        {:db/valueType :db.type/keyword}
+   :remote.event/topic       {:db/valueType :db.type/keyword}
+   :remote.event/severity    {:db/valueType :db.type/keyword}
+   :remote.event/title       {:db/valueType :db.type/string}
+   :remote.event/detail      {:db/valueType :db.type/string}
+   :remote.event/metadata    {:db/valueType :db.type/idoc :db/domain "remote-event-metadata"}
+   :remote.event/status      {:db/valueType :db.type/keyword}
+   :remote.event/device-id   {:db/valueType :db.type/uuid}
+   :remote.event/created-at  {:db/valueType :db.type/instant}
+   :remote.event/delivered-at {:db/valueType :db.type/instant}
+
    ;; --- Working Memory (crash-recovery snapshots) ---
    :wm/id               {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :wm/session           {:db/valueType :db.type/ref}     ; → session

@@ -16,7 +16,8 @@
             [taoensso.timbre :as log]
             [xia.config :as cfg]
             [xia.cron :as cron]
-            [xia.db :as db]))
+            [xia.db :as db]
+            [xia.remote-bridge :as remote-bridge]))
 
 ;; ---------------------------------------------------------------------------
 ;; Limits
@@ -192,7 +193,8 @@
 (defn record-task-success!
   "Mark a schedule task run as successful and clear failure state."
   [schedule-id result-summary]
-  (let [now      (java.util.Date.)
+  (let [now       (java.util.Date.)
+        state     (task-state schedule-id)
         state-eid (schedule-state-eid schedule-id)]
     (db/transact!
       (cond-> [{:schedule.state/schedule-id schedule-id
@@ -206,6 +208,11 @@
                 :schedule.state/last-recovery-hint ""}]
         state-eid
         (conj [:db/retract state-eid :schedule.state/backoff-until])))
+    (when (pos? (long (or (:consecutive-failures state) 0)))
+      (remote-bridge/notify-schedule-recovered!
+        schedule-id
+        {:previous-failures (:consecutive-failures state)
+         :result-summary result-summary}))
     (task-state schedule-id)))
 
 (defn record-task-failure!
@@ -244,6 +251,12 @@
                  backoff-until (assoc :schedule/next-run backoff-until))]
         (and paused? state-eid)
         (conj [:db/retract state-eid :schedule.state/backoff-until])))
+    (remote-bridge/notify-schedule-failure!
+      schedule-id
+      {:paused? paused?
+       :consecutive-failures consecutive-failures
+       :backoff-until backoff-until
+       :error-message error-message})
     (task-state schedule-id)))
 
 (defn recovery-brief

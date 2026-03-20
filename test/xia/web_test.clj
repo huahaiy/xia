@@ -4,7 +4,7 @@
             [charred.api :as json]
             [xia.ssrf :as ssrf]
             [xia.web :as web])
-  (:import [java.net InetAddress]
+  (:import [java.net InetAddress URI]
            [java.nio.charset StandardCharsets]
            [java.util.concurrent ConcurrentHashMap]
            [org.jsoup Jsoup]
@@ -431,6 +431,38 @@
     #(is (thrown-with-msg?
            clojure.lang.ExceptionInfo #"private/internal"
            (#'web/fetch-raw "https://public.example/start")))))
+
+(deftest fetch-url-uses-pinned-addresses-for-connection
+  (let [first-address  (InetAddress/getByAddress "example.com"
+                                                 (byte-array [(byte 93) (byte -72) (byte 34) (byte 20)]))
+        second-address (InetAddress/getByAddress "example.com"
+                                                 (byte-array [(byte 93) (byte -72) (byte 34) (byte 21)]))
+        attempts       (atom [])]
+    (with-redefs-fn {#'web/fetch-address!
+                     (fn [url _headers resolution address]
+                       (swap! attempts conj {:url url
+                                             :host (:host resolution)
+                                             :address (.getHostAddress ^InetAddress address)})
+                       (if (= (.getHostAddress ^InetAddress address) "93.184.34.20")
+                         (throw (java.io.IOException. "connect failed"))
+                         {:status 200
+                          :headers {"content-type" "text/plain"}
+                          :body "ok"}))}
+      #(let [result (#'web/fetch-url! "https://example.com/start"
+                                      {"User-Agent" "Xia/0.1"}
+                                      {:url "https://example.com/start"
+                                       :uri (URI. "https://example.com/start")
+                                       :host "example.com"
+                                       :addresses [first-address second-address]})]
+         (is (= [{:url "https://example.com/start"
+                  :host "example.com"
+                  :address "93.184.34.20"}
+                 {:url "https://example.com/start"
+                  :host "example.com"
+                  :address "93.184.34.21"}]
+                @attempts))
+         (is (= 200 (:status result)))
+         (is (= "ok" (:body result)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Integration: extract-data (live HTTP)

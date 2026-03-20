@@ -3,6 +3,7 @@
             [clojure.test :refer :all]
             [datalevin.core :as d]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.test-helpers :refer [minimal-pdf-base64 office-fixture-base64 test-llm-provider with-test-db]]
@@ -186,6 +187,35 @@
         (is (= :model (:local.doc.chunk/summary-source chunk)))
         (is (str/starts-with? (:summary saved) "model-summary:"))
         (is (str/starts-with? (:local.doc.chunk/summary chunk) "model-summary:"))))))
+
+(deftest local-documents-can-use-external-llm-summaries
+  (let [sid   (db/create-session! :http)
+        calls (atom [])]
+    (db/set-config! :local-doc/model-summaries-enabled? true)
+    (db/set-config! :local-doc/model-summary-backend "external")
+    (db/set-config! :local-doc/model-summary-provider-id "openai")
+    (with-redefs [db/current-llm-provider (constantly nil)
+                  llm/chat-simple (fn [_messages & opts]
+                                    (swap! calls conj (apply hash-map opts))
+                                    "external-summary: atlas launch priya june 12")]
+      (let [saved (local-doc/save-upload! {:session-id sid
+                                           :name "brief.txt"
+                                           :media-type "text/plain"
+                                           :text "Atlas launch is scheduled for June 12. Priya owns readiness."})
+            eid   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
+                                 (:id saved)))
+            raw   (into {} (d/entity (d/db (db/conn)) eid))
+            chunk-eid (ffirst (db/q '[:find ?chunk
+                                      :in $ ?doc
+                                      :where [?doc :local.doc/chunks ?chunk]]
+                                    eid))
+            chunk (into {} (d/entity (d/db (db/conn)) chunk-eid))]
+        (is (= :model (:summary-source saved)))
+        (is (= :model (:local.doc/summary-source raw)))
+        (is (= :model (:local.doc.chunk/summary-source chunk)))
+        (is (str/starts-with? (:summary saved) "external-summary:"))
+        (is (every? #(= :openai (:provider-id %)) @calls))
+        (is (every? #(zero? (:temperature %)) @calls))))))
 
 (deftest invalid-pdf-uploads-fail-clearly
   (let [sid (db/create-session! :http)]

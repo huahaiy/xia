@@ -11,14 +11,15 @@
   (:require [clojure.string :as str]
             [charred.api :as json]
             [xia.db :as db]
-            [xia.http-client :as http]
             [xia.ssrf :as ssrf])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
            [org.jsoup.select Elements]
-           [java.net URI URLEncoder URLDecoder]
+           [java.io BufferedInputStream ByteArrayOutputStream IOException OutputStreamWriter]
+           [java.net InetAddress InetSocketAddress Socket URI URLEncoder URLDecoder]
            [java.nio.charset Charset StandardCharsets]
-           [java.util.concurrent ConcurrentHashMap]))
+           [java.util.concurrent ConcurrentHashMap]
+           [javax.net.ssl SNIHostName SSLParameters SSLSocket SSLSocketFactory]))
 
 (def ^:private user-agent "Xia/0.1 (personal AI assistant)")
 (def ^:private max-body-bytes (* 1 1024 1024)) ; 1 MB
@@ -119,21 +120,256 @@
                        :limit max-body-bytes})))
     body-bytes))
 
-(defn- fetch-url!
-  [url headers _resolution]
-  (let [{:keys [status headers body]}
-        (http/request {:url            url
-                       :method         :get
-                       :headers        headers
-                       :connect-timeout connect-timeout-ms
-                       :timeout        request-timeout-ms
-                       :max-attempts   1
-                       :retry-enabled? false
-                       :as             :byte-array})
-        body-bytes (read-body-bytes! body url)]
+(defn- default-port
+  [^URI uri]
+  (case (.getScheme uri)
+    "https" 443
+    80))
+
+(defn- effective-port
+  [^URI uri]
+  (let [port (.getPort uri)]
+    (if (neg? port)
+      (default-port uri)
+      port)))
+
+(defn- request-target
+  [^URI uri]
+  (let [path  (or (.getRawPath uri) "")
+        query (.getRawQuery uri)]
+    (str (if (seq path) path "/")
+         (when (seq query)
+           (str "?" query)))))
+
+(defn- host-header
+  [^URI uri host]
+  (let [port          (effective-port uri)
+        default-port? (= port (default-port uri))]
+    (if default-port?
+      host
+      (str host ":" port))))
+
+(defn- read-line!
+  [^BufferedInputStream in]
+  (let [out (ByteArrayOutputStream.)]
+    (loop [prev -1]
+      (let [b (.read in)]
+        (cond
+          (= b -1)
+          (when (or (pos? (.size out)) (not= prev -1))
+            (.toString out "ISO-8859-1"))
+
+          (and (= prev 13) (= b 10))
+          (let [line-bytes (.toByteArray out)
+                line-size  (alength ^bytes line-bytes)]
+            (String. ^bytes line-bytes 0 (max 0 (dec line-size)) StandardCharsets/ISO_8859_1))
+
+          :else
+          (do
+            (.write out b)
+            (recur b)))))))
+
+(defn- header-body-allowed?
+  [status]
+  (not (or (<= 100 status 199)
+           (= 204 status)
+           (= 304 status))))
+
+(defn- read-exactly!
+  [^BufferedInputStream in size url]
+  (let [limit (long size)]
+    (when (> limit max-body-bytes)
+      (throw (ex-info "Response too large"
+                      {:url   url
+                       :size  limit
+                       :limit max-body-bytes})))
+    (let [buffer (byte-array (int limit))]
+      (loop [offset 0]
+        (if (= offset limit)
+          buffer
+          (let [read-count (.read in buffer offset (int (- limit offset)))]
+            (when (neg? read-count)
+              (throw (ex-info "Unexpected end of response body"
+                              {:url url
+                               :expected-bytes limit
+                               :received-bytes offset})))
+            (recur (+ offset read-count))))))))
+
+(defn- read-until-eof!
+  [^BufferedInputStream in url]
+  (let [buffer (byte-array 8192)
+        out    (ByteArrayOutputStream.)]
+    (loop [total 0]
+      (let [read-count (.read in buffer)]
+        (if (neg? read-count)
+          (.toByteArray out)
+          (let [next-total (+ total read-count)]
+            (when (> next-total max-body-bytes)
+              (throw (ex-info "Response too large"
+                              {:url   url
+                               :size  next-total
+                               :limit max-body-bytes})))
+            (.write out buffer 0 read-count)
+            (recur next-total)))))))
+
+(defn- read-chunked-body!
+  [^BufferedInputStream in url]
+  (let [buffer (byte-array 8192)
+        out    (ByteArrayOutputStream.)]
+    (loop [total 0]
+      (let [line (some-> (read-line! in) str/trim)]
+        (when-not (some? line)
+          (throw (ex-info "Unexpected end of chunked response"
+                          {:url url})))
+        (let [chunk-size (Long/parseLong (first (str/split line #";")) 16)]
+          (if (zero? chunk-size)
+            (do
+              (loop []
+                (let [trailer (read-line! in)]
+                  (when (and trailer (not (str/blank? trailer)))
+                    (recur))))
+              (.toByteArray out))
+            (let [next-total (+ total chunk-size)]
+              (when (> next-total max-body-bytes)
+                (throw (ex-info "Response too large"
+                                {:url   url
+                                 :size  next-total
+                                 :limit max-body-bytes})))
+              (loop [remaining chunk-size]
+                (when (pos? remaining)
+                  (let [read-count (.read in buffer 0 (int (min remaining (alength buffer))))]
+                    (when (neg? read-count)
+                      (throw (ex-info "Unexpected end of chunked response body"
+                                      {:url url
+                                       :remaining-bytes remaining})))
+                    (.write out buffer 0 read-count)
+                    (recur (- remaining read-count)))))
+              (let [chunk-end (read-line! in)]
+                (when-not (string? chunk-end)
+                  (throw (ex-info "Malformed chunked response terminator"
+                                  {:url url}))))
+              (recur next-total))))))))
+
+(defn- parse-status-line
+  [status-line url]
+  (let [[_ status reason] (re-matches #"HTTP/\d+(?:\.\d+)?\s+(\d{3})(?:\s+(.*))?" (or status-line ""))]
+    (when-not status
+      (throw (ex-info "Malformed HTTP response status line"
+                      {:url url
+                       :status-line status-line})))
+    {:status (Long/parseLong status)
+     :reason (or reason "")}))
+
+(defn- read-response!
+  [^BufferedInputStream in url]
+  (let [status-line        (read-line! in)
+        {:keys [status]}   (parse-status-line status-line url)
+        headers            (loop [acc {}]
+                             (let [line (read-line! in)]
+                               (cond
+                                 (nil? line) acc
+                                 (str/blank? line) acc
+                                 :else
+                                 (let [[name value] (str/split line #":\s*" 2)
+                                       header-name  (str/lower-case name)
+                                       header-value (or value "")]
+                                   (recur (update acc header-name
+                                                  (fn [existing]
+                                                    (if (seq existing)
+                                                      (str existing "," header-value)
+                                                      header-value))))))))
+        transfer-encoding  (some-> (get headers "transfer-encoding") str/lower-case)
+        content-length     (some-> (get headers "content-length")
+                                   str/trim
+                                   Long/parseLong)
+        body-bytes         (cond
+                             (not (header-body-allowed? status))
+                             (byte-array 0)
+
+                             (and transfer-encoding
+                                  (str/includes? transfer-encoding "chunked"))
+                             (read-chunked-body! in url)
+
+                             (some? content-length)
+                             (read-exactly! in content-length url)
+
+                             :else
+                             (read-until-eof! in url))]
     {:status  status
      :headers headers
-     :body    (decode-body body-bytes headers)}))
+     :body    (decode-body (read-body-bytes! body-bytes url) headers)}))
+
+(defn- open-plain-socket!
+  [^InetAddress address port]
+  (doto (Socket.)
+    (.connect (InetSocketAddress. address (int port)) (int connect-timeout-ms))
+    (.setSoTimeout (int request-timeout-ms))))
+
+(defn- open-ssl-socket!
+  [^Socket plain-socket ^String host port]
+  (let [factory ^SSLSocketFactory (SSLSocketFactory/getDefault)
+        ^SSLSocket socket         (.createSocket factory plain-socket host (int port) true)
+        ^SSLParameters params     (.getSSLParameters socket)]
+    (.setEndpointIdentificationAlgorithm params "HTTPS")
+    (.setServerNames params (java.util.Collections/singletonList (SNIHostName. host)))
+    (.setSSLParameters socket params)
+    (.setSoTimeout socket (int request-timeout-ms))
+    (.startHandshake socket)
+    socket))
+
+(defn- request-socket!
+  [resolution ^InetAddress address]
+  (let [^URI uri     (:uri resolution)
+        host         (:host resolution)
+        port         (effective-port uri)
+        plain-socket (open-plain-socket! address port)]
+    (if (= "https" (.getScheme uri))
+      (open-ssl-socket! plain-socket host port)
+      plain-socket)))
+
+(defn- write-request!
+  [^Socket socket resolution headers]
+  (let [^URI uri (:uri resolution)
+        request-headers (merge {"Host"            (host-header uri (:host resolution))
+                                "Connection"      "close"
+                                "Accept-Encoding" "identity"}
+                               headers)
+        writer (OutputStreamWriter. (.getOutputStream socket) StandardCharsets/ISO_8859_1)]
+    ;; Do not close the writer here; it would close the underlying socket
+    ;; before we can read the response body.
+    (.write writer (str "GET " (request-target uri) " HTTP/1.1\r\n"))
+    (doseq [[name value] request-headers]
+      (.write writer (str name ": " value "\r\n")))
+    (.write writer "\r\n")
+    (.flush writer)))
+
+(defn- fetch-address!
+  [url headers resolution ^InetAddress address]
+  (with-open [^Socket socket (request-socket! resolution address)
+              in     (BufferedInputStream. (.getInputStream socket))]
+    (write-request! socket resolution headers)
+    (read-response! in url)))
+
+(defn- fetch-url!
+  [url headers resolution]
+  (let [addresses (:addresses resolution)]
+    (loop [[^InetAddress address & more] addresses
+           last-error nil]
+      (if-not address
+        (throw (or last-error
+                   (ex-info "Host did not resolve to any addresses"
+                            {:url  url
+                             :host (:host resolution)})))
+        (let [{:keys [response error]}
+              (try
+                {:response (fetch-address! url headers resolution address)}
+                (catch IOException e
+                  {:error e}))]
+          (if response
+            response
+            (if (seq more)
+              (recur more error)
+              (throw error))))))))
 
 (defn- fetch-raw
   "Fetch a URL, return {:status :headers :body :final-url}."

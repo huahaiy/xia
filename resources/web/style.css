@@ -661,6 +661,14 @@ textarea:focus {
   font-size: 0.82rem;
   line-height: 1.5;
 }
+.bridge-grid {
+  align-items: start;
+}
+.capability-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
 .capability-import-result {
   min-height: 0;
   max-height: 220px;

@@ -16,6 +16,7 @@
             [xia.memory :as memory]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
+            [xia.remote-bridge :as remote-bridge]
             [xia.service :as service-proxy]
             [xia.schedule :as schedule]
             [xia.agent :as agent]
@@ -1008,6 +1009,90 @@
   [skill]
   (skill->body skill))
 
+(defn- remote-bridge->admin-body
+  [bridge]
+  {:id               (some-> (:id bridge) name)
+   :enabled          (boolean (:enabled? bridge))
+   :instance_id      (:instance-id bridge)
+   :instance_label   (:instance-label bridge)
+   :relay_url        (:relay-url bridge)
+   :public_key       (:public-key bridge)
+   :keypair_ready    (boolean (:keypair-ready? bridge))
+   :connected_at     (instant->str (:connected-at bridge))
+   :last_seen_at     (instant->str (:last-seen-at bridge))
+   :connection_state (some-> (:connection-state bridge) name)})
+
+(defn- remote-device->admin-body
+  [device]
+  {:id           (some-> (:id device) str)
+   :name         (:name device)
+   :public_key   (:public-key device)
+   :platform     (some-> (:platform device) name)
+   :status       (some-> (:status device) name)
+   :topics       (->> (or (:topics device) [])
+                      (map name)
+                      sort
+                      vec)
+   :muted        (boolean (:muted? device))
+   :created_at   (instant->str (:created-at device))
+   :last_seen_at (instant->str (:last-seen-at device))})
+
+(defn- remote-event->admin-body
+  [event]
+  {:id           (some-> (:id event) str)
+   :type         (some-> (:type event) name)
+   :topic        (some-> (:topic event) name)
+   :severity     (some-> (:severity event) name)
+   :title        (:title event)
+   :detail       (:detail event)
+   :metadata     (:metadata event)
+   :status       (some-> (:status event) name)
+   :device_id    (some-> (:device-id event) str)
+   :created_at   (instant->str (:created-at event))
+   :delivered_at (instant->str (:delivered-at event))})
+
+(defn- remote-snapshot-run->admin-body
+  [run]
+  {:id            (some-> (:id run) str)
+   :schedule_id   (some-> (:schedule-id run) name)
+   :schedule_name (:schedule-name run)
+   :status        (some-> (:status run) name)
+   :started_at    (instant->str (:started-at run))
+   :finished_at   (instant->str (:finished-at run))
+   :detail        (:detail run)})
+
+(defn- remote-snapshot-attention->admin-body
+  [item]
+  {:type             (some-> (:type item) name)
+   :severity         (some-> (:severity item) name)
+   :title            (:title item)
+   :detail           (:detail item)
+   :schedule_id      (some-> (:schedule-id item) name)
+   :service_id       (some-> (:service-id item) name)
+   :oauth_account_id (some-> (:oauth-account-id item) name)})
+
+(defn- remote-snapshot-running->admin-body
+  [item]
+  {:schedule_id   (some-> (:schedule-id item) name)
+   :schedule_name (:schedule-name item)
+   :phase         (some-> (:phase item) name)
+   :checkpoint_at (instant->str (:checkpoint-at item))})
+
+(defn- remote-snapshot->admin-body
+  [snapshot]
+  {:instance {:id      (get-in snapshot [:instance :id])
+              :label   (get-in snapshot [:instance :label])
+              :version (get-in snapshot [:instance :version])}
+   :connectivity {:enabled          (boolean (get-in snapshot [:connectivity :enabled?]))
+                  :relay_url        (get-in snapshot [:connectivity :relay-url])
+                  :connection_state (some-> (get-in snapshot [:connectivity :connection-state]) name)
+                  :connected_at     (instant->str (get-in snapshot [:connectivity :connected-at]))
+                  :last_seen_at     (instant->str (get-in snapshot [:connectivity :last-seen-at]))}
+   :running (mapv remote-snapshot-running->admin-body (get snapshot :running))
+   :recent_failures (mapv remote-snapshot-run->admin-body (get snapshot :recent-failures))
+   :recent_successes (mapv remote-snapshot-run->admin-body (get snapshot :recent-successes))
+   :attention (mapv remote-snapshot-attention->admin-body (get snapshot :attention))})
+
 (defn- session-scratch-pad
   [session-id pad-id]
   (let [pad (scratch/get-pad pad-id)]
@@ -1756,7 +1841,11 @@
                      sort-by-name)
      :skills    (->> (db/list-skills)
                      (map skill->body)
-                     sort-by-name)}))
+                     sort-by-name)
+     :remote_bridge   (remote-bridge->admin-body (remote-bridge/bridge-config))
+     :remote_devices  (mapv remote-device->admin-body (remote-bridge/list-devices))
+     :remote_events   (mapv remote-event->admin-body (remote-bridge/list-events 20))
+     :remote_snapshot (remote-snapshot->admin-body (remote-bridge/status-snapshot))}))
 
 (defn- handle-save-provider [req]
   (try
@@ -1874,6 +1963,47 @@
         (save-config-override! :memory/knowledge-decay-archive-after-bottom-ms
                                (some-> archive-after-bottom-days (* ms-per-day))))
       (json-response 200 {:knowledge_decay (knowledge-decay->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-save-remote-bridge [req]
+  (try
+    (let [data          (or (read-body req) {})
+          enabled?      (if (contains? data "enabled")
+                          (true? (get data "enabled"))
+                          false)
+          instance-label (nonblank-str (get data "instance_label"))
+          relay-url     (get data "relay_url")
+          bridge        (remote-bridge/save-bridge-config!
+                          {:enabled? enabled?
+                           :instance-label instance-label
+                           :relay-url relay-url})]
+      (json-response 200 {:remote_bridge (remote-bridge->admin-body bridge)
+                          :remote_snapshot (remote-snapshot->admin-body
+                                             (remote-bridge/status-snapshot))}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-pair-remote-device [req]
+  (try
+    (let [data          (or (read-body req) {})
+          pairing-token (nonblank-str (get data "pairing_token"))]
+      (when-not pairing-token
+        (throw (ex-info "missing 'pairing_token' field"
+                        {:field "pairing_token"})))
+      (let [device (remote-bridge/pair-device! pairing-token)]
+        (json-response 200 {:device (remote-device->admin-body device)
+                            :remote_devices (mapv remote-device->admin-body
+                                                  (remote-bridge/list-devices))})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-revoke-remote-device [device-id]
+  (try
+    (let [device (remote-bridge/revoke-device! device-id)]
+      (json-response 200 {:device (remote-device->admin-body device)
+                          :remote_devices (mapv remote-device->admin-body
+                                                (remote-bridge/list-devices))}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -2210,6 +2340,7 @@
           artifact-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)" uri)
           artifact-scratch-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/scratch-pads" uri)
           artifact-download-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/download" uri)
+          admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
           admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
@@ -2334,6 +2465,15 @@
 
         (and (= method :post) (= uri "/admin/knowledge-decay"))
         (protected-route-response req #(handle-save-knowledge-decay req))
+
+        (and (= method :post) (= uri "/admin/remote-bridge"))
+        (protected-route-response req #(handle-save-remote-bridge req))
+
+        (and (= method :post) (= uri "/admin/remote-bridge/pair"))
+        (protected-route-response req #(handle-pair-remote-device req))
+
+        (and (= method :delete) admin-remote-device-match)
+        (protected-route-response req #(handle-revoke-remote-device (second admin-remote-device-match)))
 
         (and (= method :post) (= uri "/admin/oauth-accounts"))
         (protected-route-response req #(handle-save-oauth-account req))

@@ -1,10 +1,12 @@
 (ns xia.summarizer
-  "Local, in-process summarization backed by Datalevin's llama.cpp runtime."
+  "Document summarization using either the local Datalevin runtime or an
+   external OpenAI-compatible LLM API."
   (:require [clojure.string :as str]
             [datalevin.core :as d]
             [taoensso.timbre :as log]
             [xia.config :as config]
-            [xia.db :as db]))
+            [xia.db :as db]
+            [xia.llm :as llm]))
 
 (def ^:private default-enabled?
   false)
@@ -14,6 +16,12 @@
 
 (def ^:private default-doc-summary-max-tokens
   160)
+
+(def ^:private default-backend
+  :local)
+
+(def ^:private supported-backends
+  #{:local :external})
 
 (def ^:private chunk-summary-instructions
   (str "You are writing a retrieval summary for Xia, an assistant that helps users search uploaded local documents.\n"
@@ -61,6 +69,17 @@
   (config/positive-long :local-doc/doc-summary-max-tokens
                         default-doc-summary-max-tokens))
 
+(defn summary-backend
+  []
+  (config/keyword-option :local-doc/model-summary-backend
+                         default-backend
+                         supported-backends))
+
+(defn external-provider-id
+  []
+  (some-> (config/string-option :local-doc/model-summary-provider-id nil)
+          keyword))
+
 (defn build-chunk-prompt
   [text]
   (str chunk-summary-instructions
@@ -76,16 +95,37 @@
        text
        "\n\nDocument retrieval summary:"))
 
+(defn- generate-local-summary*
+  [input max-tokens max-chars kind]
+  (when-let [provider (db/current-llm-provider)]
+    (try
+      (some-> (d/generate-text provider input (long max-tokens))
+              (truncate-text max-chars))
+      (catch Throwable t
+        (log/warn t "Local" (name kind) "summarization failed; using extractive fallback")
+        nil))))
+
+(defn- generate-external-summary*
+  [input max-tokens max-chars kind]
+  (let [provider-id (external-provider-id)
+        messages    [{"role" "user" "content" input}]
+        opts        (cond-> [:max-tokens (long max-tokens)
+                             :temperature 0]
+                      provider-id (into [:provider-id provider-id]))]
+    (try
+      (some-> (apply llm/chat-simple messages opts)
+              (truncate-text max-chars))
+      (catch Throwable t
+        (log/warn t "External" (name kind) "summarization failed; using extractive fallback")
+        nil))))
+
 (defn- generate-summary*
   [prompt max-tokens max-chars kind]
-  (when-let [provider (and (enabled?) (db/current-llm-provider))]
+  (when (enabled?)
     (when-let [input (compact-text prompt)]
-      (try
-        (some-> (d/generate-text provider input (long max-tokens))
-                (truncate-text max-chars))
-        (catch Throwable t
-          (log/warn t "Local" (name kind) "summarization failed; using extractive fallback")
-          nil)))))
+      (case (summary-backend)
+        :external (generate-external-summary* input max-tokens max-chars kind)
+        (generate-local-summary* input max-tokens max-chars kind)))))
 
 (defn summarize-chunk
   [text max-chars]

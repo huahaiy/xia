@@ -8,6 +8,7 @@
             [xia.channel.http :as http]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
+            [xia.remote-bridge :as remote-bridge]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
             [xia.test-helpers :refer [minimal-pdf-bytes with-test-db]])
@@ -15,6 +16,8 @@
            [java.nio.charset StandardCharsets]
            [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
+           [java.security KeyPairGenerator]
+           [java.security.spec NamedParameterSpec]
            [java.util Arrays Base64 UUID]))
 
 (use-fixtures :each with-test-db)
@@ -67,6 +70,27 @@
 (defn- response-json [response]
   (json/read-json (:body response)))
 
+(defn- x25519-public-key []
+  (let [generator (KeyPairGenerator/getInstance "X25519")]
+    (.initialize generator (NamedParameterSpec. "X25519"))
+    (-> (Base64/getUrlEncoder)
+        (.withoutPadding)
+        (.encodeToString (.getEncoded (.getPublic (.generateKeyPair generator)))))))
+
+(defn- remote-pairing-token
+  [{:keys [device-id device-name platform topics push-token]
+    :or {device-id (random-uuid)
+         device-name "Phone"
+         platform "ios"
+         topics ["schedule.failed" "schedule.recovered"]}}]
+  (json/write-json-str
+    {"device_id"   (str device-id)
+     "device_name" device-name
+     "public_key"  (x25519-public-key)
+     "platform"    platform
+     "topics"      topics
+     "push_token"  push-token}))
+
 (defn- local-session-cookie []
   (let [response (#'http/router {:uri "/" :request-method :get})]
     (first (str/split (get-in response [:headers "Set-Cookie"]) #";"))))
@@ -102,6 +126,7 @@
     (is (re-find #"Scheduled Runs" (:body response)))
     (is (re-find #"Settings" (:body response)))
     (is (re-find #"AI Models" (:body response)))
+    (is (re-find #"Notification Bridge" (:body response)))
     (is (re-find #"Episode Retention" (:body response)))
     (is (re-find #"Knowledge Decay" (:body response)))
     (is (re-find #"Archive After Bottom \(Days\)" (:body response)))
@@ -1063,7 +1088,11 @@
         service  (first (filter #(= "github" (get % "id")) (get body "services")))
         site     (first (filter #(= "github" (get % "id")) (get body "sites")))
         tool     (first (filter #(= "demo-tool" (get % "id")) (get body "tools")))
-        skill    (first (filter #(= "demo-skill" (get % "id")) (get body "skills")))]
+        skill    (first (filter #(= "demo-skill" (get % "id")) (get body "skills")))
+        remote-bridge (get body "remote_bridge")
+        remote-devices (get body "remote_devices")
+        remote-events (get body "remote_events")
+        remote-snapshot (get body "remote_snapshot")]
     (is (= 200 (:status response)))
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
@@ -1112,7 +1141,61 @@
     (is (= "https://clawhub.ai/downloads/demo-skill.zip" (get skill "source_url")))
     (is (= "demo-skill.zip" (get skill "source_name")))
     (is (= true (get skill "imported_from_openclaw")))
-    (is (= ["Ignored unsupported frontmatter field `homepage`."] (get skill "import_warnings")))))
+    (is (= ["Ignored unsupported frontmatter field `homepage`."] (get skill "import_warnings")))
+    (is (= "primary" (get remote-bridge "id")))
+    (is (= false (get remote-bridge "enabled")))
+    (is (= true (get remote-bridge "keypair_ready")))
+    (is (string? (get remote-bridge "public_key")))
+    (is (= "disabled" (get remote-bridge "connection_state")))
+    (is (= [] remote-devices))
+    (is (= [] remote-events))
+    (is (= [] (get remote-snapshot "attention")))
+    (is (= "disabled" (get-in remote-snapshot ["connectivity" "connection_state"])))))
+
+(deftest admin-remote-bridge-route-saves-config
+  (let [response (#'http/router {:uri            "/admin/remote-bridge"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"enabled" true
+                                                                "instance_label" "Desk Xia"
+                                                                "relay_url" "https://relay.example.test"})})
+        body     (response-json response)]
+    (is (= 200 (:status response)))
+    (is (= true (get-in body ["remote_bridge" "enabled"])))
+    (is (= "Desk Xia" (get-in body ["remote_bridge" "instance_label"])))
+    (is (= "https://relay.example.test" (get-in body ["remote_bridge" "relay_url"])))
+    (is (= true (get-in body ["remote_snapshot" "connectivity" "enabled"])))
+    (is (= "Desk Xia" (get-in body ["remote_snapshot" "instance" "label"])))
+    (is (= true (:enabled? (remote-bridge/bridge-config))))))
+
+(deftest admin-remote-bridge-device-routes-pair-and-revoke
+  (let [device-id (random-uuid)
+        pair-response (#'http/router {:uri            "/admin/remote-bridge/pair"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"pairing_token"
+                                                                     (remote-pairing-token {:device-id device-id
+                                                                                            :device-name "Desk Phone"
+                                                                                            :platform "ios"
+                                                                                            :topics ["schedule.failed"
+                                                                                                     "service.attention"]})})})
+        pair-body     (response-json pair-response)
+        revoke-response (#'http/router {:uri            (str "/admin/remote-bridge/devices/" device-id)
+                                        :request-method :delete
+                                        :headers        (ui-headers)})
+        revoke-body     (response-json revoke-response)]
+    (is (= 200 (:status pair-response)))
+    (is (= (str device-id) (get-in pair-body ["device" "id"])))
+    (is (= "Desk Phone" (get-in pair-body ["device" "name"])))
+    (is (= "paired" (get-in pair-body ["device" "status"])))
+    (is (= ["schedule.failed" "service.attention"]
+           (get-in pair-body ["device" "topics"])))
+    (is (= 1 (count (get pair-body "remote_devices"))))
+    (is (= 200 (:status revoke-response)))
+    (is (= (str device-id) (get-in revoke-body ["device" "id"])))
+    (is (= "revoked" (get-in revoke-body ["device" "status"])))
+    (is (= "revoked"
+           (get-in (first (get revoke-body "remote_devices")) ["status"])))))
 
 (deftest admin-openclaw-import-route-imports-skill-bundle
   (let [^File root (.toFile (Files/createTempDirectory "xia-http-openclaw" (into-array FileAttribute [])))]
