@@ -477,12 +477,15 @@ Rules:
          :error       error-message})
       (do
         (locking fact-merge-lock
-          (db/transact! (build-merge-tx extraction
-                                        eid
-                                        :mark-processed? true
-                                        :importance (or importance
-                                                        default-episode-importance))))
-        (memory/prune-processed-episodes!)
+          (let [merge-tx   (build-merge-tx extraction
+                                           eid
+                                           :mark-processed? true
+                                           :importance (or importance
+                                                           default-episode-importance))
+                prune-plan (memory/processed-episode-prune-plan
+                             (java.util.Date.)
+                             {:exclude-eids [eid]})]
+            (db/transact! (into merge-tx (:tx-data prune-plan)))))
         (log/info "Consolidated episode, extracted"
                   (count (get extraction "entities" []))
                   "entities and"

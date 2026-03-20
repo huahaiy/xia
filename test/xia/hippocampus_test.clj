@@ -325,10 +325,11 @@
     (with-redefs [xia.llm/chat-simple
                   (fn [_messages & _opts]
                     "{\"entities\": [], \"relations\": []}")
-                  xia.memory/prune-processed-episodes!
-                  (fn []
+                  xia.memory/processed-episode-prune-plan
+                  (fn [& _]
                     (reset! called? true)
-                    0)]
+                    {:to-remove []
+                     :tx-data []})]
       (hippo/consolidate-episode!
         {:eid     ep-eid
          :summary "Prunable episode"
@@ -354,6 +355,30 @@
     (is (some #(= [:db/add ep-eid :episode/processed? true] %) @seen-tx))
     (is (false? (:episode/processed? (db/entity ep-eid))))
     (is (empty? (memory/find-node "RollbackNode")))))
+
+(deftest test-consolidate-episode-combines-pruning-with-merge-transaction
+  (let [ep-eid      (th/seed-episode! "Atomic prune")
+        stale-eid   (th/seed-episode! "Older processed episode")
+        seen-tx     (atom nil)]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [_messages & _opts]
+                    "{\"entities\": [], \"relations\": []}")
+                  xia.memory/processed-episode-prune-plan
+                  (fn [& _]
+                    {:to-remove [{:eid stale-eid}]
+                     :tx-data   [[:db/retractEntity stale-eid]]})
+                  xia.db/transact!
+                  (fn [tx-data]
+                    (reset! seen-tx tx-data)
+                    (throw (ex-info "synthetic failure" {:tx-count (count tx-data)})))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"synthetic failure"
+            (hippo/consolidate-episode!
+              {:eid     ep-eid
+               :summary "Atomic prune"
+               :type    :conversation}))))
+    (is (some? @seen-tx))
+    (is (some #(= [:db/add ep-eid :episode/processed? true] %) @seen-tx))
+    (is (some #(= [:db/retractEntity stale-eid] %) @seen-tx))))
 
 (deftest test-consolidate-episode-quarantines-invalid-extractions
   (let [ep-eid (th/seed-episode! "Bad extraction")]
@@ -407,9 +432,10 @@
                                            (swap! extraction-calls inc)
                                            "{\"entities\": [], \"relations\": []}")
                       "{\"entities\": [], \"relations\": []}"))
-                  xia.memory/prune-processed-episodes!
-                  (fn []
-                    0)]
+                  xia.memory/processed-episode-prune-plan
+                  (fn [& _]
+                    {:to-remove []
+                     :tx-data []})]
       (hippo/consolidate-pending!))
     (is (= 1 @importance-calls))
     (is (= 2 @extraction-calls))
@@ -433,8 +459,10 @@
                     (if (= "Bad extraction" summary)
                       nil
                       {"entities" [] "relations" []}))
-                  xia.memory/prune-processed-episodes!
-                  (fn [] 0)]
+                  xia.memory/processed-episode-prune-plan
+                  (fn [& _]
+                    {:to-remove []
+                     :tx-data []})]
       (hippo/consolidate-pending!))
     (let [bad  (db/entity bad-eid)
           good (db/entity good-eid)]

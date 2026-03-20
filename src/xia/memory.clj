@@ -291,6 +291,26 @@
              edge-eids)
         [[:db/retractEntity episode-eid]]))))
 
+(defn processed-episode-prune-plan
+  "Return the prune transaction and affected episodes for processed episodes.
+
+   `exclude-eids` can be used to defer pruning a just-processed episode until the
+   next pass, while still pruning older processed episodes atomically with the
+   caller's transaction."
+  ([] (processed-episode-prune-plan (java.util.Date.) nil))
+  ([^java.util.Date as-of] (processed-episode-prune-plan as-of nil))
+  ([^java.util.Date as-of {:keys [exclude-eids]}]
+   (let [retention-config (episode-retention-settings)
+         excluded         (set exclude-eids)
+         to-remove        (->> (prunable-processed-episodes (processed-episodes)
+                                                            as-of
+                                                            retention-config)
+                               (remove #(contains? excluded (:eid %)))
+                               vec)]
+     {:to-remove to-remove
+      :tx-data   (into [] (mapcat #(detach-episode-provenance-tx (:eid %))
+                                  to-remove))})))
+
 (defn prune-processed-episodes!
   "Prune processed episodes with exponential-decay downsampling.
 
@@ -299,13 +319,9 @@
    older items are retained per session/channel/type."
   ([] (prune-processed-episodes! (java.util.Date.)))
   ([^java.util.Date as-of]
-   (let [retention-config (episode-retention-settings)
-         to-remove        (prunable-processed-episodes (processed-episodes)
-                                                       as-of
-                                                       retention-config)]
-     (when (seq to-remove)
-       (db/transact! (vec (mapcat #(detach-episode-provenance-tx (:eid %))
-                                  to-remove))))
+   (let [{:keys [to-remove tx-data]} (processed-episode-prune-plan as-of)]
+     (when (seq tx-data)
+       (db/transact! tx-data))
      (count to-remove))))
 
 ;; ============================================================================
