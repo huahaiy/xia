@@ -128,10 +128,7 @@
   (+ 0.5 (normalize-fact-utility utility)))
 
 (defn unprocessed-episodes
-  "Get episodes not yet consolidated by the hippocampus.
-   In Datalevin 0.10.x, `[?e :episode/processed? false]` can still match an
-   entity after it has been updated to true, so pending episodes are queried as
-   the absence of `:episode/processed? true` rather than the presence of false."
+  "Get episodes not yet consolidated by the hippocampus."
   []
   (->> (db/q '[:find ?e ?summary ?ctx ?ts ?type ?importance
                :where
@@ -140,7 +137,7 @@
                [?e :episode/type ?type]
                [(get-else $ ?e :episode/context "") ?ctx]
                [(get-else $ ?e :episode/importance 0.5) ?importance]
-               (not [?e :episode/processed? true])])
+               [?e :episode/processed? false]])
        (map (fn [[eid summary ctx ts type importance]]
               {:eid        eid
                :summary    summary
@@ -179,18 +176,24 @@
                 :type       type
                 :importance (double importance)}))))
 
-(defn- processed-episodes
+(defn- processed-episodes-query
   []
-  (->> (db/q '[:find ?e ?summary ?ctx ?ts ?type ?channel ?session-id ?importance
-               :where
-                [?e :episode/summary ?summary]
-                [?e :episode/timestamp ?ts]
-                [?e :episode/type ?type]
-                [(get-else $ ?e :episode/context "") ?ctx]
-                [(get-else $ ?e :episode/channel "") ?channel]
-                [(get-else $ ?e :episode/session-id "") ?session-id]
-                [(get-else $ ?e :episode/importance 0.5) ?importance]
-               [?e :episode/processed? true]])
+  '[:find ?e ?summary ?ctx ?ts ?type ?channel ?session-id ?importance
+    :in $ ?cutoff
+    :where
+    [?e :episode/summary ?summary]
+    [?e :episode/timestamp ?ts]
+    [(< ?ts ?cutoff)]
+    [?e :episode/type ?type]
+    [(get-else $ ?e :episode/context "") ?ctx]
+    [(get-else $ ?e :episode/channel "") ?channel]
+    [(get-else $ ?e :episode/session-id "") ?session-id]
+    [(get-else $ ?e :episode/importance 0.5) ?importance]
+    [?e :episode/processed? true]])
+
+(defn- processed-episodes
+  [^java.util.Date cutoff]
+  (->> (db/q (processed-episodes-query) cutoff)
        (mapv (fn [[eid summary ctx ts type channel session-id importance]]
                {:eid        eid
                 :summary    summary
@@ -301,8 +304,12 @@
   ([^java.util.Date as-of] (processed-episode-prune-plan as-of nil))
   ([^java.util.Date as-of {:keys [exclude-eids]}]
    (let [retention-config (episode-retention-settings)
+         cutoff-ms        (long-max 0 (- (.getTime as-of)
+                                         (long (or (:full-resolution-ms retention-config)
+                                                   0))))
+         cutoff           (java.util.Date. cutoff-ms)
          excluded         (set exclude-eids)
-         to-remove        (->> (prunable-processed-episodes (processed-episodes)
+         to-remove        (->> (prunable-processed-episodes (processed-episodes cutoff)
                                                             as-of
                                                             retention-config)
                                (remove #(contains? excluded (:eid %)))

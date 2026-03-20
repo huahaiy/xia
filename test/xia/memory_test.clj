@@ -122,6 +122,22 @@
                 (map first)
                 set)))))
 
+(deftest test-processed-episode-prune-plan-queries-only-episodes-past-the-retention-window
+  (let [window-ms  (long (:full-resolution-ms (memory/episode-retention-settings)))
+        now        (date-at (* 3 window-ms))
+        expected   (date-at (- (.getTime now) window-ms))
+        query-seen (atom nil)
+        cutoff-seen (atom nil)]
+    (with-redefs [db/q (fn [query & args]
+                         (reset! query-seen query)
+                         (reset! cutoff-seen (first args))
+                         [])
+                  memory/detach-episode-provenance-tx (constantly [])]
+      (#'xia.memory/processed-episode-prune-plan now)
+      (is (= (#'xia.memory/processed-episodes-query)
+             @query-seen))
+      (is (= expected @cutoff-seen)))))
+
 (deftest test-prune-processed-episodes-clears-provenance-before-deletion
   (let [window-ms (long (:full-resolution-ms (memory/episode-retention-settings)))
         now       (date-at (* 10 window-ms))
