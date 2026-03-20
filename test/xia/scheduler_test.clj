@@ -162,3 +162,21 @@
     (is (= [[sid true]] @activated?))
     (is (= true (:resumed? @seen)))
     (is (= sid (:session-id @seen)))))
+
+(deftest tick-starts-scheduled-backup-when-due
+  (let [called           (promise)
+        maintenance-atom @#'scheduler/last-maintenance-at
+        original-last    @maintenance-atom]
+    (reset! maintenance-atom (java.util.Date.))
+    (try
+      (with-redefs [xia.schedule/due-schedules (fn [_now] [])
+                    xia.backup/backup-due? (fn [] true)
+                    xia.backup/run-scheduled-backup! (fn []
+                                                       (deliver called :ran)
+                                                       {:status :success})
+                    xia.hippocampus/consolidate-if-pending! (fn [] nil)
+                    xia.hippocampus/maintain-knowledge! (fn [_now] nil)]
+        (#'scheduler/tick!)
+        (is (= :ran (deref called 1000 nil))))
+      (finally
+        (reset! maintenance-atom original-last)))))

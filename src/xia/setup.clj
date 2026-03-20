@@ -26,7 +26,7 @@
 (defn- setup-identity! []
   (println)
   (println "=== Identity ===")
-  (let [name (prompt "What should I call myself?" "Xia")]
+  (let [name (prompt "What should I call myself?" "Xia (夏)")]
     (db/set-identity! :name name)
     (println (str "  → I am " name "."))))
 
@@ -64,7 +64,7 @@
   []
   (println)
   (println "╔══════════════════════════════════════╗")
-  (println "║       Welcome to Xia — v0.1.0       ║")
+  (println "║     Welcome to Xia (夏) — v0.1.0    ║")
   (println "║   Your portable personal assistant   ║")
   (println "╚══════════════════════════════════════╝")
   (println)

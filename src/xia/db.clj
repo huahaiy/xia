@@ -397,6 +397,7 @@
 (defonce ^:private conn-atom (atom nil))
 (defonce ^:private embedding-provider-atom (atom nil))
 (defonce ^:private llm-provider-atom (atom nil))
+(defonce ^:private db-path-atom (atom nil))
 (declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
@@ -714,6 +715,7 @@
          c              (d/get-conn db-path schema datalevin-opts)]
      (try
        (reset! conn-atom c)
+       (reset! db-path-atom db-path)
        (crypto/configure! db-path crypto-opts)
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
@@ -723,6 +725,7 @@
          (close-llm-provider!)
          (close-embedding-provider!)
          (reset! conn-atom nil)
+         (reset! db-path-atom nil)
          (try
            (d/close c)
            (catch Exception _))
@@ -742,12 +745,17 @@
   []
   @llm-provider-atom)
 
+(defn current-db-path
+  []
+  @db-path-atom)
+
 (defn close! []
   (close-llm-provider!)
   (close-embedding-provider!)
   (when-let [c @conn-atom]
     (d/close c)
-    (reset! conn-atom nil)))
+    (reset! conn-atom nil))
+  (reset! db-path-atom nil))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic helpers

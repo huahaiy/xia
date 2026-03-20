@@ -25,8 +25,8 @@
               <h1>Xia</h1>
             </div>
           </div>
-          <p class="tagline">“There is an old Chinese story about the 田螺姑娘, a gentle spirit who appears each day to care for a home before anyone returns. Xia (虾) is a modern echo of that tale.”</p>
-          <p class="lead">Xia is an online-first assistant designed for research and automation. Anything Xia cannot read from disk can be provided through these tools.</p>
+          <p class="tagline">“There is an old Chinese story about the Snail Maiden (田螺姑娘), a gentle spirit who appears each day to care for a home before anyone returns. Xia (夏) is a modern echo of that tale.”</p>
+          <p class="lead">Xia is an online-first assistant for research, memory, automation, and the quiet tending that accumulates around digital life. Anything Xia cannot read from disk can be provided through these tools.</p>
         </div>
         <aside class="hero-meta">
           <div class="meta-row">
@@ -466,6 +466,49 @@
                 <div class="admin-status" id="local-doc-summarization-status">Loading local document summarization settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-local-doc-summarization">Save summarization settings</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="admin-card">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Database Backups</h3>
+                  <p class="panel-note">Schedule automatic portable backups built from a safe LMDB snapshot of the live Datalevin database.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field full">
+                  <div class="check-row">
+                    <input type="checkbox" id="database-backup-enabled">
+                    <label class="check-label" for="database-backup-enabled">Enable automatic scheduled database backups</label>
+                  </div>
+                </div>
+                <div class="field full">
+                  <label class="field-label" for="database-backup-directory">Backup Directory</label>
+                  <input type="text" id="database-backup-directory" class="text-input" placeholder="/path/to/backups">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="database-backup-interval-hours">Backup Interval (Hours)</label>
+                  <input type="number" min="1" step="1" id="database-backup-interval-hours" class="text-input" placeholder="24">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="database-backup-retain-count">Retain Most Recent</label>
+                  <input type="number" min="1" step="1" id="database-backup-retain-count" class="text-input" placeholder="7">
+                </div>
+                <div class="field full">
+                  <label class="field-label" for="database-backup-last-success">Last Successful Backup</label>
+                  <input type="text" id="database-backup-last-success" class="text-input" readonly>
+                </div>
+                <div class="field full">
+                  <label class="field-label" for="database-backup-last-archive">Last Archive Path</label>
+                  <input type="text" id="database-backup-last-archive" class="text-input" readonly>
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="database-backup-status">Loading database backup settings...</div>
+                <div class="actions">
+                  <button type="button" class="primary" id="save-database-backup">Save backup settings</button>
                 </div>
               </div>
             </div>

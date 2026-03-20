@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [xia.agent]
             [xia.artifact :as artifact]
+            [xia.backup :as backup]
             [xia.channel.http :as http]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
@@ -1083,6 +1084,7 @@
         memory-retention (get body "memory_retention")
         knowledge-decay (get body "knowledge_decay")
         local-doc-summarization (get body "local_doc_summarization")
+        database-backup (get body "database_backup")
         llm-workloads (get body "llm_workloads")
         templates (get body "oauth_provider_templates")
         oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
@@ -1114,6 +1116,13 @@
     (is (nil? (get local-doc-summarization "model_summary_provider_id")))
     (is (= 96 (get local-doc-summarization "chunk_summary_max_tokens")))
     (is (= 160 (get local-doc-summarization "doc_summary_max_tokens")))
+    (is (= false (get database-backup "enabled")))
+    (is (= (backup/backup-directory) (get database-backup "directory")))
+    (is (= 24 (get database-backup "interval_hours")))
+    (is (= 7 (get database-backup "retain_count")))
+    (is (= false (get database-backup "running")))
+    (is (nil? (get database-backup "last_success_at")))
+    (is (nil? (get database-backup "last_error")))
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
@@ -1219,6 +1228,42 @@
     (is (nil? (db/get-config :local-doc/model-summary-provider-id)))
     (is (nil? (db/get-config :local-doc/chunk-summary-max-tokens)))
     (is (nil? (db/get-config :local-doc/doc-summary-max-tokens)))))
+
+(deftest admin-database-backup-route-saves-and-clears-settings
+  (let [save-response (#'http/router {:uri            "/admin/database-backup"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"enabled" true
+                                                                     "directory" "/tmp/xia-backups"
+                                                                     "interval_hours" "12"
+                                                                     "retain_count" "5"})})
+        save-body     (response-json save-response)]
+    (is (= 200 (:status save-response)))
+    (is (= true (get-in save-body ["database_backup" "enabled"])))
+    (is (= "/tmp/xia-backups" (get-in save-body ["database_backup" "directory"])))
+    (is (= 12 (get-in save-body ["database_backup" "interval_hours"])))
+    (is (= 5 (get-in save-body ["database_backup" "retain_count"])))
+    (is (= "true" (str (db/get-config :backup/enabled?))))
+    (is (= "/tmp/xia-backups" (db/get-config :backup/directory)))
+    (is (= "12" (db/get-config :backup/interval-hours)))
+    (is (= "5" (db/get-config :backup/retain-count))))
+  (let [clear-response (#'http/router {:uri            "/admin/database-backup"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"enabled" false
+                                                                      "directory" ""
+                                                                      "interval_hours" ""
+                                                                      "retain_count" ""})})
+        clear-body     (response-json clear-response)]
+    (is (= 200 (:status clear-response)))
+    (is (= false (get-in clear-body ["database_backup" "enabled"])))
+    (is (= (backup/backup-directory) (get-in clear-body ["database_backup" "directory"])))
+    (is (= 24 (get-in clear-body ["database_backup" "interval_hours"])))
+    (is (= 7 (get-in clear-body ["database_backup" "retain_count"])))
+    (is (= "false" (str (db/get-config :backup/enabled?))))
+    (is (nil? (db/get-config :backup/directory)))
+    (is (nil? (db/get-config :backup/interval-hours)))
+    (is (nil? (db/get-config :backup/retain-count)))))
 
 (deftest admin-remote-bridge-device-routes-pair-and-revoke
   (let [device-id (random-uuid)

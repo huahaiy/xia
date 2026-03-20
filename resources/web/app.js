@@ -26,6 +26,7 @@ const state = {
     memoryRetention: null,
     knowledgeDecay: null,
     localDocSummarization: null,
+    databaseBackup: null,
     llmWorkloads: [],
     oauthProviderTemplates: [],
     oauthAccounts: [],
@@ -54,12 +55,14 @@ const state = {
   retentionSaving: false,
   knowledgeDecaySaving: false,
   localDocSummarizationSaving: false,
+  databaseBackupSaving: false,
   oauthSaving: false,
   serviceSaving: false,
   siteSaving: false,
   remoteBridgeSaving: false,
   remotePairing: false,
   localDocSummarizationStatus: 'Loading local document summarization settings...',
+  databaseBackupStatus: 'Loading database backup settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
   remotePairStatus: 'Paste a pairing token from the mobile app to authorize a phone.',
   openclawImporting: false,
@@ -133,6 +136,14 @@ const localDocChunkSummaryMaxTokensEl = document.getElementById('local-doc-chunk
 const localDocDocSummaryMaxTokensEl = document.getElementById('local-doc-doc-summary-max-tokens');
 const localDocSummarizationStatusEl = document.getElementById('local-doc-summarization-status');
 const saveLocalDocSummarizationEl = document.getElementById('save-local-doc-summarization');
+const databaseBackupEnabledEl = document.getElementById('database-backup-enabled');
+const databaseBackupDirectoryEl = document.getElementById('database-backup-directory');
+const databaseBackupIntervalHoursEl = document.getElementById('database-backup-interval-hours');
+const databaseBackupRetainCountEl = document.getElementById('database-backup-retain-count');
+const databaseBackupLastSuccessEl = document.getElementById('database-backup-last-success');
+const databaseBackupLastArchiveEl = document.getElementById('database-backup-last-archive');
+const databaseBackupStatusEl = document.getElementById('database-backup-status');
+const saveDatabaseBackupEl = document.getElementById('save-database-backup');
 const oauthAccountListEl = document.getElementById('oauth-account-list');
 const oauthTemplateEl = document.getElementById('oauth-template');
 const oauthTemplateNoteEl = document.getElementById('oauth-template-note');
@@ -947,6 +958,11 @@ function updateAdminButtons() {
   localDocChunkSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
   localDocDocSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
   saveLocalDocSummarizationEl.disabled = state.localDocSummarizationSaving;
+  databaseBackupEnabledEl.disabled = state.databaseBackupSaving;
+  databaseBackupDirectoryEl.disabled = state.databaseBackupSaving;
+  databaseBackupIntervalHoursEl.disabled = state.databaseBackupSaving;
+  databaseBackupRetainCountEl.disabled = state.databaseBackupSaving;
+  saveDatabaseBackupEl.disabled = state.databaseBackupSaving;
   oauthAccountIdEl.disabled = state.oauthSaving || !!state.activeOauthAccountId;
   saveOauthAccountEl.disabled = state.oauthSaving;
   newOauthAccountEl.disabled = state.oauthSaving;
@@ -1167,6 +1183,37 @@ function renderLocalDocSummarizationSettings() {
   localDocModelSummaryProviderIdEl.disabled = state.localDocSummarizationSaving
     || localDocModelSummaryBackendEl.value !== 'external';
   localDocSummarizationStatusEl.textContent = state.localDocSummarizationStatus || defaultLocalDocSummarizationStatus();
+  updateAdminButtons();
+}
+
+function defaultDatabaseBackupStatus() {
+  const settings = state.admin.databaseBackup || {};
+  const bits = [];
+  bits.push(settings.enabled ? 'Automatic backups enabled' : 'Automatic backups disabled');
+  bits.push('Every ' + firstNonEmpty(settings.interval_hours, 24) + 'h');
+  bits.push('Keep ' + firstNonEmpty(settings.retain_count, 7));
+  if (settings.running) {
+    bits.push('Running now');
+  } else if (settings.last_success_at) {
+    bits.push('Last success: ' + settings.last_success_at);
+  } else if (settings.next_due_at) {
+    bits.push('Next due: ' + settings.next_due_at);
+  }
+  if (settings.last_error) {
+    bits.push('Last error: ' + settings.last_error);
+  }
+  return bits.join(' • ');
+}
+
+function renderDatabaseBackupSettings() {
+  const settings = state.admin.databaseBackup || {};
+  databaseBackupEnabledEl.checked = !!settings.enabled;
+  databaseBackupDirectoryEl.value = settings.directory || '';
+  databaseBackupIntervalHoursEl.value = settings.interval_hours || '';
+  databaseBackupRetainCountEl.value = settings.retain_count || '';
+  databaseBackupLastSuccessEl.value = settings.last_success_at || '';
+  databaseBackupLastArchiveEl.value = settings.last_archive_path || '';
+  databaseBackupStatusEl.textContent = state.databaseBackupStatus || defaultDatabaseBackupStatus();
   updateAdminButtons();
 }
 
@@ -1460,6 +1507,7 @@ async function loadAdminConfig() {
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.localDocSummarization = data.local_doc_summarization || null;
+    state.admin.databaseBackup = data.database_backup || null;
     state.admin.llmWorkloads = Array.isArray(data.llm_workloads) ? data.llm_workloads : [];
     state.admin.oauthProviderTemplates = Array.isArray(data.oauth_provider_templates) ? data.oauth_provider_templates : [];
     state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];
@@ -1472,6 +1520,7 @@ async function loadAdminConfig() {
     state.admin.remoteEvents = Array.isArray(data.remote_events) ? data.remote_events : [];
     state.admin.remoteSnapshot = data.remote_snapshot || null;
     state.localDocSummarizationStatus = defaultLocalDocSummarizationStatus();
+    state.databaseBackupStatus = defaultDatabaseBackupStatus();
     state.remoteBridgeStatus = defaultRemoteBridgeStatus();
     state.remotePairStatus = defaultRemotePairStatus();
     const provider = state.admin.providers.find((entry) => entry.id === state.activeProviderId);
@@ -1484,6 +1533,7 @@ async function loadAdminConfig() {
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
     renderLocalDocSummarizationSettings();
+    renderDatabaseBackupSettings();
     if (provider) {
       selectProvider(provider);
     } else if (!state.activeProviderId) {
@@ -1800,6 +1850,36 @@ async function saveLocalDocSummarization() {
     renderLocalDocSummarizationSettings();
   } finally {
     state.localDocSummarizationSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveDatabaseBackup() {
+  if (state.databaseBackupSaving) return;
+  state.databaseBackupSaving = true;
+  state.databaseBackupStatus = 'Saving...';
+  renderDatabaseBackupSettings();
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/database-backup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: databaseBackupEnabledEl.checked,
+        directory: databaseBackupDirectoryEl.value,
+        interval_hours: databaseBackupIntervalHoursEl.value,
+        retain_count: databaseBackupRetainCountEl.value
+      })
+    });
+    state.admin.databaseBackup = data.database_backup || state.admin.databaseBackup;
+    state.databaseBackupStatus = 'Database backup settings saved.';
+    renderDatabaseBackupSettings();
+    setStatus('Database backup settings saved');
+  } catch (err) {
+    state.databaseBackupStatus = err.message || 'Failed to save database backup settings.';
+    renderDatabaseBackupSettings();
+  } finally {
+    state.databaseBackupSaving = false;
     updateAdminButtons();
   }
 }
@@ -3076,6 +3156,7 @@ saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
 localDocModelSummaryBackendEl.addEventListener('change', () => updateAdminButtons());
+saveDatabaseBackupEl.addEventListener('click', () => saveDatabaseBackup());
 
 newOauthAccountEl.addEventListener('click', () => {
   resetOauthAccountForm('Create a connection.');
@@ -3178,6 +3259,7 @@ syncScratchEditor('No note selected.');
 resetProviderForm('Loading...');
 resetMemoryRetentionForm('Loading...');
 renderLocalDocSummarizationSettings();
+renderDatabaseBackupSettings();
 resetOauthAccountForm('Loading...');
 resetServiceForm('Loading...');
 resetSiteForm('Loading...');

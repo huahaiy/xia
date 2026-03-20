@@ -2,14 +2,15 @@
 
 ![Xia logo](xia-logo.png)
 
-> There is an old Chinese story about the Snail Maiden, a gentle spirit who appears
-> each day to care for a home before anyone returns. Xia is a modern echo of
-> that tale: an autonomous AI assistant that quietly tends to the details of your digital life.
+> There is an old Chinese story about the Snail Maiden (田螺姑娘), a gentle
+> spirit who appears each day to care for a home before anyone returns. Xia
+> (夏) is a modern echo of that tale: an autonomous AI assistant that quietly
+> tends to the details of your digital life.
 
-Xia (/çja/, pronounced 'shyah') is a portable personal AI assistant for online
-work. It runs as a single local application, remembers context across sessions,
-works with any OpenAI-compatible LLM models, and helps with web research,
-browser automation, authenticated APIs, and recurring tasks.
+Xia (夏) (/ɕja/, pronounced "shyah") is a portable personal AI assistant for
+online work. It runs as a single local application, remembers context across
+sessions, works with any OpenAI-compatible LLM models, and helps with web
+research, browser automation, authenticated APIs, and recurring tasks.
 
 ## What Xia Is For
 

@@ -6,6 +6,7 @@
             [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
+            [xia.backup :as backup]
             [xia.artifact :as artifact]
             [xia.scratch :as scratch]
             [xia.autonomous :as autonomous]
@@ -912,6 +913,21 @@
    :model_summary_provider_id (some-> (summarizer/external-provider-id) name)
    :chunk_summary_max_tokens  (summarizer/chunk-summary-max-tokens)
    :doc_summary_max_tokens    (summarizer/document-summary-max-tokens)})
+
+(defn- database-backup->admin-body
+  []
+  (let [settings (backup/admin-body)]
+    {:enabled           (boolean (:enabled settings))
+     :directory         (:directory settings)
+     :interval_hours    (:interval_hours settings)
+     :retain_count      (:retain_count settings)
+     :running           (boolean (:running settings))
+     :started_at        (instant->str (:started_at settings))
+     :last_attempt_at   (instant->str (:last_attempt_at settings))
+     :last_success_at   (instant->str (:last_success_at settings))
+     :last_archive_path (:last_archive_path settings)
+     :last_error        (:last_error settings)
+     :next_due_at       (instant->str (:next_due_at settings))}))
 
 (defn- save-config-override!
   [config-key value]
@@ -1829,6 +1845,7 @@
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
      :local_doc_summarization (local-doc-summarization->admin-body)
+     :database_backup (database-backup->admin-body)
      :llm_workloads (mapv (fn [{:keys [id label description]}]
                             {:id          (name id)
                              :label       label
@@ -2029,6 +2046,31 @@
         (save-config-override! :local-doc/doc-summary-max-tokens
                                doc-summary-max-tokens))
       (json-response 200 {:local_doc_summarization (local-doc-summarization->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-save-database-backup [req]
+  (try
+    (let [data           (or (read-body req) {})
+          enabled?       (when (contains? data "enabled")
+                           (true? (get data "enabled")))
+          directory      (when (contains? data "directory")
+                           (nonblank-str (get data "directory")))
+          interval-hours (when (contains? data "interval_hours")
+                           (parse-optional-positive-long (get data "interval_hours")
+                                                         "interval_hours"))
+          retain-count   (when (contains? data "retain_count")
+                           (parse-optional-positive-long (get data "retain_count")
+                                                         "retain_count"))]
+      (when (contains? data "enabled")
+        (save-config-override! :backup/enabled? enabled?))
+      (when (contains? data "directory")
+        (save-config-override! :backup/directory directory))
+      (when (contains? data "interval_hours")
+        (save-config-override! :backup/interval-hours interval-hours))
+      (when (contains? data "retain_count")
+        (save-config-override! :backup/retain-count retain-count))
+      (json-response 200 {:database_backup (database-backup->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -2534,6 +2576,9 @@
 
         (and (= method :post) (= uri "/admin/local-doc-summarization"))
         (protected-route-response req #(handle-save-local-doc-summarization req))
+
+        (and (= method :post) (= uri "/admin/database-backup"))
+        (protected-route-response req #(handle-save-database-backup req))
 
         (and (= method :post) (= uri "/admin/remote-bridge"))
         (protected-route-response req #(handle-save-remote-bridge req))

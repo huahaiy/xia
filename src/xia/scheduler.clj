@@ -11,6 +11,7 @@
 
    Lifecycle: start! → (tick every 60s) → stop!"
   (:require [taoensso.timbre :as log]
+            [xia.backup :as backup]
             [xia.db :as db]
             [xia.agent :as agent]
             [xia.hippocampus :as hippo]
@@ -167,6 +168,12 @@
         (doseq [sched due]
           ;; Execute each in a future to avoid blocking the tick thread
           (future (execute-schedule! sched))))
+      (when (backup/backup-due?)
+        (future
+          (try
+            (backup/run-scheduled-backup!)
+            (catch Exception e
+              (log/error e "Automatic database backup failed")))))
       (when (and (or (nil? @last-maintenance-at)
                      (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
                          maintenance-interval-ms))

@@ -302,7 +302,8 @@
    - the DB contents under `db/`
    - required local support files under `db/.xia/`
    - `manifest.edn` with restore instructions"
-  [db-path archive-path & {:keys [force?] :or {force? false}}]
+  [db-path archive-path & {:keys [force? manifest-db-path]
+                           :or {force? false}}]
   (let [^File archive-file (ensure-output-path! archive-path force?)
         db-files         (db-entries db-path)
         {:keys [key-source archive-entries restore-requires]} (key-context db-path)
@@ -310,7 +311,7 @@
         manifest         {:format           :xia-pack/v1
                           :created-at       (str (Instant/now))
                           :db-entry         "db"
-                          :db-path          db-path
+                          :db-path          (or manifest-db-path db-path)
                           :key-source       key-source
                           :archive-entries  (mapv :entry all-file-entries)
                           :restore-requires restore-requires}]
