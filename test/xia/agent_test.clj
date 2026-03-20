@@ -364,6 +364,39 @@
           (is (= 2 (count (filter :worker? worker-sessions))))
           (is (every? false? (map :active? (filter :worker? worker-sessions)))))))))
 
+(deftest run-branch-tasks-times-out-hung-batches
+  (let [parent-session-id (db/create-session! :terminal)
+        started           (atom [])]
+    (db/set-config! :agent/branch-task-timeout-ms 50)
+    (with-redefs [xia.agent/process-message
+                  (fn [_session-id message & _]
+                    (swap! started conj message)
+                    (if (str/includes? message "What to do:\nslow branch")
+                      (Thread/sleep 10000)
+                      "done"))]
+      (let [started-at (System/nanoTime)
+            err        (try
+                         (agent/run-branch-tasks
+                          [{:task "slow" :prompt "slow branch"}
+                           {:task "fast" :prompt "fast branch"}]
+                          :session-id parent-session-id
+                          :max-parallel 2)
+                         (catch clojure.lang.ExceptionInfo e
+                           e))
+            elapsed-ms (/ (double (- (System/nanoTime) started-at)) 1000000.0)]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Branch task timed out: slow"
+                     (.getMessage ^Exception err)))
+        (is (= {:type :branch-task-timeout
+                :timeout-ms 50
+                :task "slow"}
+               (select-keys (ex-data err)
+                            [:type :timeout-ms :task])))
+        (is (< elapsed-ms 1000.0))
+        (is (= 2 (count @started)))
+        (is (some #(str/includes? % "What to do:\nslow branch") @started))
+        (is (some #(str/includes? % "What to do:\nfast branch") @started))))))
+
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)
         max-active (atom 0)
@@ -469,6 +502,39 @@
           (is (instance? clojure.lang.ExceptionInfo err))
           (is (re-find #"Parallel tool execution failed: web-fetch"
                        (.getMessage ^Exception err))))))))
+
+(deftest execute-tool-calls-times-out-hung-parallel-futures
+  (let [started    (atom [])
+        tool-calls [{"id"       "call-1"
+                     "function" {"name"      "web-fetch"
+                                 "arguments" "{}"}}
+                    {"id"       "call-2"
+                     "function" {"name"      "web-search"
+                                 "arguments" "{}"}}]]
+    (db/set-config! :agent/parallel-tool-timeout-ms 50)
+    (with-redefs [tool/parallel-safe? (constantly true)
+                  tool/execute-tool   (fn [tool-id _args _context]
+                                        (swap! started conj tool-id)
+                                        (if (= :web-fetch tool-id)
+                                          (Thread/sleep 10000)
+                                          {:tool (name tool-id)}))]
+      (let [started-at (System/nanoTime)
+            err        (try
+                         (#'agent/execute-tool-calls tool-calls {:channel :terminal})
+                         (catch clojure.lang.ExceptionInfo e
+                           e))
+            elapsed-ms (/ (double (- (System/nanoTime) started-at)) 1000000.0)]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Parallel tool execution timed out: web-fetch"
+                     (.getMessage ^Exception err)))
+        (is (= {:type :parallel-tool-timeout
+                :timeout-ms 50
+                :tool-id :web-fetch
+                :func-name "web-fetch"}
+               (select-keys (ex-data err)
+                            [:type :timeout-ms :tool-id :func-name])))
+        (is (< elapsed-ms 1000.0))
+        (is (= #{:web-fetch :web-search} (set @started)))))))
 
 (deftest execute-tool-calls-rejects-oversized-rounds-before-execution
   (let [executed   (atom 0)

@@ -14,22 +14,66 @@
             [xia.backup :as backup]
             [xia.db :as db]
             [xia.agent :as agent]
+            [xia.config :as cfg]
             [xia.hippocampus :as hippo]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
             [xia.working-memory :as wm])
-  (:import [java.util.concurrent Executors ScheduledExecutorService TimeUnit]))
+  (:import [java.util.concurrent ExecutorService Executors ScheduledExecutorService ThreadFactory TimeUnit RejectedExecutionException ThreadPoolExecutor]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private executor (atom nil))
+(defonce ^:private tick-executor (atom nil))
+(defonce ^:private work-executor (atom nil))
 (defonce ^:private running-schedules (atom #{}))
 (defonce ^:private maintenance-running? (atom false))
 (defonce ^:private last-maintenance-at (atom nil))
+(defonce ^:private thread-counter (atom 0))
 
 (def ^:private maintenance-interval-ms (* 24 60 60 1000))
+(def ^:private default-max-concurrent-runs 4)
+
+(defn- max-concurrent-runs
+  []
+  (cfg/positive-long :scheduler/max-concurrent-runs
+                     default-max-concurrent-runs))
+
+(defn- daemon-thread-factory
+  [prefix]
+  (reify ThreadFactory
+    (newThread [_ runnable]
+      (doto (Thread. ^Runnable runnable
+                     (str prefix "-" (swap! thread-counter inc)))
+        (.setDaemon true)))))
+
+(defn- ensure-work-executor!
+  []
+  (locking work-executor
+    (let [exec @work-executor]
+      (if (and exec (not (.isShutdown ^ExecutorService exec)))
+        exec
+        (let [new-exec (Executors/newFixedThreadPool (int (max-concurrent-runs))
+                                                     (daemon-thread-factory "xia-scheduler-work"))]
+          (reset! work-executor new-exec)
+          new-exec)))))
+
+(defn- submit-work!
+  [kind f]
+  (let [^ExecutorService exec (ensure-work-executor!)]
+    (try
+      (.submit exec
+               ^Runnable
+               (fn []
+                 (try
+                   (f)
+                   (catch Throwable t
+                     (log/error t "Scheduler work item failed:" kind)))))
+      true
+      (catch RejectedExecutionException e
+        (log/error e "Scheduler work submission rejected:" kind)
+        false))))
 
 ;; ---------------------------------------------------------------------------
 ;; Execution
@@ -166,27 +210,26 @@
       (when (seq due)
         (log/info "Scheduler tick:" (count due) "schedule(s) due")
         (doseq [sched due]
-          ;; Execute each in a future to avoid blocking the tick thread
-          (future (execute-schedule! sched))))
+          ;; Dispatch due schedules onto a bounded worker pool.
+          (submit-work! (str "schedule " (name (:id sched)))
+                        #(execute-schedule! sched))))
       (when (backup/backup-due?)
-        (future
-          (try
-            (backup/run-scheduled-backup!)
-            (catch Exception e
-              (log/error e "Automatic database backup failed")))))
+        (submit-work! "automatic backup"
+                      #(backup/run-scheduled-backup!)))
       (when (and (or (nil? @last-maintenance-at)
                      (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
                          maintenance-interval-ms))
                  (compare-and-set! maintenance-running? false true))
-        (future
-          (try
-            (hippo/consolidate-if-pending!)
-            (hippo/maintain-knowledge! now)
-            (reset! last-maintenance-at now)
-            (catch Exception e
-              (log/error e "Background maintenance failed"))
-            (finally
-              (reset! maintenance-running? false))))))
+        (submit-work! "background maintenance"
+                      (fn []
+                        (try
+                          (hippo/consolidate-if-pending!)
+                          (hippo/maintain-knowledge! now)
+                          (reset! last-maintenance-at now)
+                          (catch Exception e
+                            (log/error e "Background maintenance failed"))
+                          (finally
+                            (reset! maintenance-running? false)))))))
     (catch Exception e
       (log/error e "Scheduler tick failed"))))
 
@@ -197,24 +240,32 @@
 (defn start!
   "Start the background scheduler. Ticks every 60 seconds."
   []
-  (when @executor
+  (when @tick-executor
     (log/warn "Scheduler already running"))
-  (when-not @executor
+  (when-not @tick-executor
     (let [^ScheduledExecutorService exec (Executors/newSingleThreadScheduledExecutor)]
+      (ensure-work-executor!)
       (.scheduleAtFixedRate exec ^Runnable tick! 60 60 TimeUnit/SECONDS)
-      (reset! executor exec)
+      (reset! tick-executor exec)
       (log/info "Scheduler started (60s interval)"))))
 
 (defn stop!
   "Stop the background scheduler gracefully."
   []
-  (when-let [^ScheduledExecutorService exec @executor]
+  (when-let [^ScheduledExecutorService exec @tick-executor]
     (.shutdown exec)
     (try
       (.awaitTermination exec 30 TimeUnit/SECONDS)
       (catch InterruptedException _
         (.shutdownNow exec)))
-    (reset! executor nil)
+    (reset! tick-executor nil)
+    (when-let [^ExecutorService work @work-executor]
+      (.shutdown work)
+      (try
+        (.awaitTermination work 30 TimeUnit/SECONDS)
+        (catch InterruptedException _
+          (.shutdownNow work)))
+      (reset! work-executor nil))
     (reset! maintenance-running? false)
     (reset! last-maintenance-at nil)
     (log/info "Scheduler stopped")))
@@ -222,4 +273,4 @@
 (defn running?
   "Check if the scheduler is currently running."
   []
-  (some? @executor))
+  (some? @tick-executor))

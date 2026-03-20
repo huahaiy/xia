@@ -88,6 +88,19 @@
          (is (= :env-passphrase (:source (crypto/current-key-source))))
          (is (zero? @calls))))))
 
+(deftest blank-passphrase-provider-is-rejected-at-provider-boundary
+  (let [db-path (temp-db-path)]
+    (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
+      #(let [ex (try
+                  (crypto/configure! db-path {:passphrase-provider (constantly "   ")})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+          (is (instance? clojure.lang.ExceptionInfo ex))
+          (is (= "Master passphrase provider returned a blank value"
+                 (.getMessage ^clojure.lang.ExceptionInfo ex)))
+          (is (= :passphrase-provider (:source (ex-data ex))))))))
+
 (deftest db-connect-accepts-crypto-options
   (let [db-path (temp-db-path)]
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}

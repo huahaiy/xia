@@ -21,7 +21,8 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.http-client :as http]
-            [xia.oauth :as oauth])
+            [xia.oauth :as oauth]
+            [xia.rate-limit :as rate-limit])
   (:import [java.util Base64]
            [java.util.concurrent ConcurrentHashMap]))
 
@@ -133,19 +134,6 @@
 (defn- current-time-ms []
   (System/currentTimeMillis))
 
-(defn- consume-rate-limit-slot!
-  [state now limit error-fn]
-  (loop []
-    (let [{:keys [timestamps] :as current} @state
-          cutoff (- now rate-limit-window-ms)
-          recent (filterv #(> % cutoff) timestamps)]
-      (when (>= (count recent) limit)
-        (throw (error-fn)))
-      (let [updated {:timestamps (conj recent now)
-                     :cleaned    now}]
-        (when-not (compare-and-set! state current updated)
-          (recur))))))
-
 (defn- check-rate-limit!
   [service-id service]
   (let [limit (effective-rate-limit-per-minute service)
@@ -153,9 +141,10 @@
         state (.computeIfAbsent service-rate-limits service-id
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
-    (consume-rate-limit-slot!
+    (rate-limit/consume-slot!
       state
       now
+      rate-limit-window-ms
       limit
       (fn []
         (ex-info (str "Rate limit exceeded for service " (name service-id)
@@ -189,11 +178,10 @@
        :autonomous-approved? (autonomous/service-autonomous-approved? svc)
        :rate-limit-per-minute (effective-rate-limit-per-minute svc)
        :oauth-account-id (when (= :oauth-account auth-type)
-                           (when-not oauth-account-id
-                             (throw (ex-info (str "Service " (name service-id)
-                                                  " is missing an OAuth account")
-                                             {:service-id service-id})))
-                           oauth-account-id)})))
+                           (or oauth-account-id
+                               (throw (ex-info (str "Service " (name service-id)
+                                                    " is missing an OAuth account")
+                                               {:service-id service-id}))))})))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API — exposed to SCI sandbox

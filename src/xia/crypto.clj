@@ -217,7 +217,11 @@
   (when provider
     (let [value (provider ctx)]
       (when (some? value)
-        (str value)))))
+        (let [passphrase (str value)]
+          (when (str/blank? passphrase)
+            (throw (ex-info "Master passphrase provider returned a blank value"
+                            {:source :passphrase-provider})))
+          passphrase)))))
 
 (defn- resolve-key
   ([db-path] (resolve-key db-path nil))

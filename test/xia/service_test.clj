@@ -5,7 +5,7 @@
             [xia.secret :as secret]
             [xia.service :as service]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.util.concurrent ConcurrentHashMap]))
+  (:import [java.util.concurrent ConcurrentHashMap CountDownLatch]))
 
 (use-fixtures :each with-test-db)
 
@@ -181,6 +181,14 @@
         clojure.lang.ExceptionInfo #"disabled"
         (#'service/resolve-service :disabled-svc))))
 
+(deftest resolve-service-oauth-account-required
+  (db/register-service! {:id :oauth-svc
+                         :base-url "https://example.com"
+                         :auth-type :oauth-account})
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo #"missing an OAuth account"
+        (#'service/resolve-service :oauth-svc))))
+
 (deftest resolve-service-applies-default-rate-limit
   (db/register-service! {:id :default-rate-limit
                          :base-url "https://example.com"
@@ -228,6 +236,30 @@
       (is (= {:timestamps [59001 59002]
               :cleaned    now}
              @state)))))
+
+(deftest check-rate-limit-remains-bounded-under-concurrency
+  (let [now    60000
+        state  (atom {:timestamps []
+                      :cleaned    now})
+        limits (doto (ConcurrentHashMap.)
+                 (.put :limited state))
+        start  (CountDownLatch. 1)]
+    (with-redefs [xia.service/service-rate-limits limits
+                  xia.service/current-time-ms     (constantly now)]
+      (let [results (doall
+                      (for [_ (range 8)]
+                        (future
+                          (.await start)
+                          (try
+                            (#'service/check-rate-limit! :limited {:rate-limit-per-minute 2})
+                            :ok
+                            (catch clojure.lang.ExceptionInfo _
+                              :limited)))))]
+        (.countDown start)
+        (let [outcomes (mapv deref results)]
+          (is (= 2 (count (filter #{:ok} outcomes))))
+          (is (= 6 (count (filter #{:limited} outcomes))))
+          (is (= 2 (count (:timestamps @state)))))))))
 
 (deftest request-query-param-auth-overrides-tool-param-by-normalized-name
   (db/register-service! {:id          :query-auth-svc

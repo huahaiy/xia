@@ -26,6 +26,8 @@
 (def ^:private default-max-branch-tasks 5)
 (def ^:private default-max-parallel-branches 3)
 (def ^:private default-max-branch-tool-rounds 2)
+(def ^:private default-parallel-tool-timeout-ms 30000)
+(def ^:private default-branch-task-timeout-ms 300000)
 (def ^:private session-turn-lock-count 256)
 (defonce ^:private session-turn-locks
   (vec (repeatedly session-turn-lock-count #(Object.))))
@@ -75,6 +77,41 @@
   []
   (cfg/positive-long :agent/max-branch-tool-rounds
                      default-max-branch-tool-rounds))
+
+(defn- parallel-tool-timeout-ms
+  []
+  (cfg/positive-long :agent/parallel-tool-timeout-ms
+                     default-parallel-tool-timeout-ms))
+
+(defn- branch-task-timeout-ms
+  []
+  (cfg/positive-long :agent/branch-task-timeout-ms
+                     default-branch-task-timeout-ms))
+
+(def ^:private future-timeout-sentinel ::future-timeout)
+
+(defn- cancel-futures!
+  [futures]
+  (doseq [f futures]
+    (future-cancel f)))
+
+(defn- await-futures!
+  [futures timeout-ms timeout-ex-fn]
+  (let [deadline-ms (+ (System/currentTimeMillis) timeout-ms)]
+    (loop [idx 0
+           results []]
+      (if (= idx (count futures))
+        results
+        (let [remaining-ms (- deadline-ms (System/currentTimeMillis))
+              future       (nth futures idx)
+              result       (if (pos? remaining-ms)
+                             (deref future remaining-ms future-timeout-sentinel)
+                             future-timeout-sentinel)]
+          (if (= future-timeout-sentinel result)
+            (do
+              (cancel-futures! futures)
+              (throw (timeout-ex-fn idx timeout-ms)))
+            (recur (inc idx) (conj results result))))))))
 
 (defn- validate-user-message!
   [user-message]
@@ -357,16 +394,24 @@
                       :parallel true
                       :tool-count (count calls))
       (log/debug "Executing tool batch in parallel:" (mapv :func-name calls))
-      (let [results (->> calls
-                         (mapv (fn [call]
-                                 (future
-                                   (try
-                                     {:call   call
-                                      :result (execute-tool-call call context)}
-                                     (catch Throwable t
-                                       {:call      call
-                                        :exception t})))))
-                         (mapv deref))
+      (let [futures (mapv (fn [call]
+                            (future
+                              (try
+                                {:call   call
+                                 :result (execute-tool-call call context)}
+                                (catch Throwable t
+                                  {:call      call
+                                   :exception t}))))
+                          calls)
+            results (await-futures! futures
+                                    (parallel-tool-timeout-ms)
+                                    (fn [idx timeout-ms]
+                                      (let [call (nth calls idx)]
+                                        (ex-info (str "Parallel tool execution timed out: " (:func-name call))
+                                                 {:type       :parallel-tool-timeout
+                                                  :timeout-ms timeout-ms
+                                                  :tool-id    (:tool-id call)
+                                                  :func-name  (:func-name call)}))))
             failures (keep #(when-let [t (:exception %)]
                               (assoc % :throwable t))
                            results)]
@@ -619,7 +664,18 @@
                                                                                               (max-branch-tool-rounds))
                                                                          :tool-context tool-context})))
                                                   batch)]
-                                (mapv deref futures)))
+                                (await-futures! futures
+                                                (branch-task-timeout-ms)
+                                                (fn [idx timeout-ms]
+                                                  (let [branch-task (nth batch idx)]
+                                                    (ex-info (str "Branch task timed out: "
+                                                                  (or (:task branch-task)
+                                                                      (:prompt branch-task)
+                                                                      "unnamed"))
+                                                             {:type       :branch-task-timeout
+                                                              :timeout-ms timeout-ms
+                                                              :task       (:task branch-task)
+                                                              :prompt     (:prompt branch-task)}))))))
                             (partition-all max-parallel* branch-tasks)))]
       {:summary            (branch-result-summary results)
        :parent_session_id  parent-session-id

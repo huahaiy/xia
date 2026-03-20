@@ -163,6 +163,40 @@
     (is (= true (:resumed? @seen)))
     (is (= sid (:session-id @seen)))))
 
+(deftest scheduler-work-executor-is-bounded
+  (let [work-executor-atom @#'scheduler/work-executor]
+    (when-let [exec @work-executor-atom]
+      (.shutdownNow ^java.util.concurrent.ExecutorService exec))
+    (reset! work-executor-atom nil)
+    (db/set-config! :scheduler/max-concurrent-runs 3)
+    (let [^java.util.concurrent.ThreadPoolExecutor exec (#'scheduler/ensure-work-executor!)]
+      (try
+        (is (= 3 (.getCorePoolSize exec)))
+        (is (= 3 (.getMaximumPoolSize exec)))
+        (finally
+          (.shutdownNow exec)
+          (reset! work-executor-atom nil))))))
+
+(deftest tick-submits-due-schedules-through-worker-pool
+  (let [submitted        (atom [])
+        maintenance-atom @#'scheduler/last-maintenance-at
+        original-last    @maintenance-atom]
+    (reset! maintenance-atom (java.util.Date.))
+    (try
+      (with-redefs [xia.schedule/due-schedules (fn [_now]
+                                                 [{:id :alpha}
+                                                  {:id :beta}])
+                    xia.backup/backup-due? (fn [] false)
+                    xia.hippocampus/consolidate-if-pending! (fn [] nil)
+                    xia.hippocampus/maintain-knowledge! (fn [_now] nil)
+                    xia.scheduler/submit-work! (fn [kind _f]
+                                                 (swap! submitted conj kind)
+                                                 true)]
+        (#'scheduler/tick!)
+        (is (= ["schedule alpha" "schedule beta"] @submitted)))
+      (finally
+        (reset! maintenance-atom original-last)))))
+
 (deftest tick-starts-scheduled-backup-when-due
   (let [called           (promise)
         maintenance-atom @#'scheduler/last-maintenance-at
@@ -171,6 +205,10 @@
     (try
       (with-redefs [xia.schedule/due-schedules (fn [_now] [])
                     xia.backup/backup-due? (fn [] true)
+                    xia.scheduler/submit-work! (fn [kind f]
+                                                 (is (= "automatic backup" kind))
+                                                 (f)
+                                                 true)
                     xia.backup/run-scheduled-backup! (fn []
                                                        (deliver called :ran)
                                                        {:status :success})

@@ -6,7 +6,7 @@
             [xia.web :as web])
   (:import [java.net InetAddress URI]
            [java.nio.charset StandardCharsets]
-           [java.util.concurrent ConcurrentHashMap]
+           [java.util.concurrent ConcurrentHashMap CountDownLatch]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element]))
 
@@ -67,6 +67,30 @@
       (is (= {:timestamps (vec (repeat (var-get #'web/rate-limit-max) hit-ts))
               :cleaned    now}
              @state)))))
+
+(deftest rate-limit-remains-bounded-under-concurrency
+  (let [host   "example.com"
+        state  (atom {:timestamps []
+                      :cleaned    0})
+        limits (doto (ConcurrentHashMap.)
+                 (.put host state))
+        start  (CountDownLatch. 1)]
+    (with-redefs [xia.web/rate-limits limits
+                  xia.web/rate-limit-max 2]
+      (let [results (doall
+                      (for [_ (range 8)]
+                        (future
+                          (.await start)
+                          (try
+                            (#'web/check-rate-limit! "https://example.com/path")
+                            :ok
+                            (catch clojure.lang.ExceptionInfo _
+                              :limited)))))]
+        (.countDown start)
+        (let [outcomes (mapv deref results)]
+          (is (= 2 (count (filter #{:ok} outcomes))))
+          (is (= 6 (count (filter #{:limited} outcomes))))
+          (is (= 2 (count (:timestamps @state)))))))))
 
 (deftest read-body-bytes-enforces-byte-limit-before-decoding
   (let [char-count (inc (quot (var-get #'web/max-body-bytes) 3))

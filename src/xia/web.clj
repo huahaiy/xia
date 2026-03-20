@@ -11,6 +11,7 @@
   (:require [clojure.string :as str]
             [charred.api :as json]
             [xia.db :as db]
+            [xia.rate-limit :as rate-limit]
             [xia.ssrf :as ssrf])
   (:import [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element TextNode]
@@ -60,19 +61,6 @@
 (def ^:private rate-limit-max 10)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute
 
-(defn- consume-rate-limit-slot!
-  [state now limit error-fn]
-  (loop []
-    (let [{:keys [timestamps] :as current} @state
-          cutoff (- now rate-limit-window-ms)
-          recent (filterv #(> % cutoff) timestamps)]
-      (when (>= (count recent) limit)
-        (throw (error-fn)))
-      (let [updated {:timestamps (conj recent now)
-                     :cleaned    now}]
-        (when-not (compare-and-set! state current updated)
-          (recur))))))
-
 (defn- check-rate-limit!
   "Enforce per-domain rate limiting. Throws if limit exceeded."
   [url]
@@ -81,9 +69,10 @@
         state (.computeIfAbsent rate-limits host
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
-    (consume-rate-limit-slot!
+    (rate-limit/consume-slot!
       state
       now
+      rate-limit-window-ms
       rate-limit-max
       (fn []
         (ex-info (str "Rate limit exceeded for " host
