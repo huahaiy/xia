@@ -287,6 +287,54 @@ Rules:
             :pinned?    false
             :added-turn turn-count})))
 
+(defn- ref-relevance
+  [ref]
+  (double (or (:relevance ref) 0.0)))
+
+(defn- better-ref?
+  [candidate existing]
+  (> (ref-relevance candidate)
+     (ref-relevance existing)))
+
+(defn- lowest-ranked-ref-entry
+  [selected]
+  (reduce-kv
+    (fn [lowest ref-id ref]
+      (if (or (nil? lowest)
+              (< (ref-relevance ref)
+                 (ref-relevance (second lowest))))
+        [ref-id ref]
+        lowest))
+    nil
+    selected))
+
+(defn- merge-bounded-refs
+  [existing-refs new-refs ref-id-key max-count]
+  (if (pos? (long max-count))
+    (let [selected
+          (reduce
+            (fn [selected ref]
+              (let [ref-id (ref-id-key ref)]
+                (if-let [existing (get selected ref-id)]
+                  (if (better-ref? ref existing)
+                    (assoc selected ref-id ref)
+                    selected)
+                  (if (< (count selected) max-count)
+                    (assoc selected ref-id ref)
+                    (let [[lowest-id lowest-ref] (lowest-ranked-ref-entry selected)]
+                      (if (better-ref? ref lowest-ref)
+                        (-> selected
+                            (dissoc lowest-id)
+                            (assoc ref-id ref))
+                        selected))))))
+            {}
+            (concat existing-refs new-refs))]
+      (->> selected
+           vals
+           (sort-by :relevance >)
+           vec))
+    []))
+
 (defn- merge-results!
   "Merge search + expansion results into working memory."
   [session-id search-results expanded-nodes]
@@ -330,14 +378,10 @@ Rules:
                                    :summary     summary
                                    :timestamp   timestamp
                                    :relevance   0.7})))
-            merged-refs (->> (concat (:episode-refs wm) new-refs)
-                             (group-by :episode-eid)
-                             vals
-                             (map (fn [dups]
-                                    (apply max-key :relevance dups)))
-                             (sort-by :relevance >)
-                             (take max-refs)
-                             vec)
+            merged-refs (merge-bounded-refs (:episode-refs wm)
+                                            new-refs
+                                            :episode-eid
+                                            max-refs)
             max-doc-refs (get-in wm [:config :max-local-doc-refs])
             new-doc-refs (->> (:local-docs search-results)
                               (map-indexed
@@ -350,14 +394,10 @@ Rules:
                                    :matched-chunks matched-chunks
                                    :relevance      (max 0.45 (- 0.8 (* idx 0.1)))}))
                               vec)
-            merged-doc-refs (->> (concat (:local-doc-refs wm) new-doc-refs)
-                                 (group-by :doc-id)
-                                 vals
-                                 (map (fn [dups]
-                                        (apply max-key :relevance dups)))
-                                 (sort-by :relevance >)
-                                 (take max-doc-refs)
-                             vec)]
+            merged-doc-refs (merge-bounded-refs (:local-doc-refs wm)
+                                                new-doc-refs
+                                                :doc-id
+                                                max-doc-refs)]
         (assoc wm
                :slots        slots-with-expanded
                :episode-refs merged-refs

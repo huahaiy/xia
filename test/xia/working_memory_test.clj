@@ -196,6 +196,61 @@
 
     (wm/clear-wm! sid)))
 
+(deftest merge-bounded-refs-dedupes-and-stays-capped
+  (let [merge-refs #'xia.working-memory/merge-bounded-refs]
+    (testing "episode refs keep the highest-relevance copy per episode"
+      (let [merged (merge-refs [{:episode-eid :old-low
+                                 :summary "old-low"
+                                 :relevance 0.2}
+                                {:episode-eid :keep
+                                 :summary "keep-old"
+                                 :relevance 0.75}]
+                               [{:episode-eid :old-low
+                                 :summary "old-high"
+                                 :relevance 0.9}
+                                {:episode-eid :new-mid
+                                 :summary "new-mid"
+                                 :relevance 0.6}
+                                {:episode-eid :drop
+                                 :summary "drop"
+                                 :relevance 0.1}]
+                               :episode-eid
+                               2)]
+        (is (= [:old-low :keep]
+               (mapv :episode-eid merged)))
+        (is (= [0.9 0.75]
+               (mapv :relevance merged)))
+        (is (= "old-high"
+               (:summary (first merged))))))
+
+    (testing "local doc refs replace weaker duplicates without exceeding the cap"
+      (let [merged (merge-refs [{:doc-id "a"
+                                 :name "A-old"
+                                 :relevance 0.55}
+                                {:doc-id "b"
+                                 :name "B"
+                                 :relevance 0.7}]
+                               [{:doc-id "a"
+                                 :name "A-new"
+                                 :matched-chunks [{:index 0}]
+                                 :relevance 0.8}
+                                {:doc-id "c"
+                                 :name "C"
+                                 :relevance 0.6}
+                                {:doc-id "d"
+                                 :name "D"
+                                 :relevance 0.4}]
+                               :doc-id
+                               3)
+            by-id  (into {} (map (juxt :doc-id identity) merged))]
+        (is (= ["a" "b" "c"]
+               (mapv :doc-id merged)))
+        (is (= "A-new"
+               (get-in by-id ["a" :name])))
+        (is (= [{:index 0}]
+               (get-in by-id ["a" :matched-chunks])))
+        (is (= 3 (count merged)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Pin / Unpin
 ;; ---------------------------------------------------------------------------
