@@ -58,15 +58,20 @@ Unlike tools like Claude Code or Codex, Xia is not designed for local file syste
 
 ### Interoperability
 
-While Xia does not touch local files directly, it can orchestrate local tools that expose an API. If you have a local service or a coding assistant with an accessible endpoint, Xia can interact with it through its service capability proxy without broadening host access.
+While Xia does not grant tools direct local file access, it can orchestrate
+local tools that expose an API. If you have a local service or a coding
+assistant with an accessible endpoint, Xia can interact with it through its
+service capability proxy without broadening host access.
 
 ## Core Capabilities
 
 Xia is designed to be a long-lived assistant that learns from every interaction.
 
 - **Human-inspired memory:** separate working memory, knowledge graph, and episodic memory layers.
-- **Secure web and browser automation:** SSRF-protected fetch tools and a headless browser inside the sandbox.
+- **Secure web and browser automation:** SSRF-protected fetch tools with DNS-pinned outbound connections and a Playwright browser runtime.
 - **Authenticated online work:** stored API credentials, website logins, and first-class OAuth accounts.
+- **Session-scoped local documents:** explicit uploads of text, PDF, and Office docs with chunk-preferred retrieval and summary generation.
+- **Portable prompt skills:** native Xia skills plus a safe importer for a prompt-only subset of OpenClaw skills.
 - **Autonomous task scheduling:** recurring tasks, background maintenance, and session continuity.
 - **Privacy-first security:** strict credential isolation even when tools act on the user’s behalf.
 
@@ -96,15 +101,52 @@ The knowledge graph stores structured entities, relations, and atomic facts.
 
 Every interaction is recorded as an episode. A background consolidation process reviews episodes to extract knowledge and reinforce existing patterns, moving them from raw conversation history into long-term structure.
 
+## Local Document Ingestion
+
+Local documents are explicit user uploads, not ambient host file access. Xia
+stores them as session-scoped records in the DB so they can be recalled later
+without exposing the host file system to tools.
+
+### Supported Formats
+
+Current ingestion supports:
+
+- plain text and text-like formats such as Markdown, JSON, EDN, XML, YAML, CSV, TSV, logs, and source code
+- PDF extraction through OpenPDF
+- Office extraction for `docx`, `xlsx`, and `pptx`
+
+### Chunking And Retrieval
+
+Large documents are normalized and chunked at natural boundaries rather than by
+blind fixed-width slicing.
+
+- blank-line-separated blocks are preserved where possible
+- short heading-like blocks are attached to the following body text
+- oversized blocks split by sentence when possible, then by hard wrap as a fallback
+- retrieval prefers chunk-level matches while still returning parent document metadata
+- chunk hits carry parent doc name and summary so prompt assembly can stay document-aware
+
+### Summaries
+
+Document ingestion always stores a preview and a summary, but the summary path is configurable.
+
+- **Default:** extractive summaries, using heading-aware and salience-aware heuristics
+- **Optional local model:** Datalevin-backed local generation through the embedded llama.cpp runtime
+- **Optional external model:** an OpenAI-compatible provider selected from Xia's provider config
+
+Model-based summaries are off by default. The default experience remains fully
+local and deterministic, and the admin UI exposes the summary backend and token
+budget settings when users want to opt in.
+
 ## Web, Browser, And Service Automation
 
 Xia can interact with the live web through secure, sandboxed tools.
 
-- **Headless browser backends:** Playwright for modern sites, with first-use browser install support and an explicit Linux system-deps setup path, plus HtmlUnit as a lightweight fallback.
+- **Browser runtime:** Playwright only, with first-use browser install support and an explicit Linux system-deps setup path.
 - **Resumable browser sessions:** backend-specific browser state and current URL persist in Xia's DB.
 - **Stealth authenticated login:** stored credentials are injected by a proxy, not exposed to the LLM.
 - **Interactive login:** for MFA or complex flows, Xia can prompt the user directly and avoid storage.
-- **Secure fetch and search:** SSRF-protected web fetching, structured extraction, and search.
+- **Secure fetch and search:** SSRF-protected web fetching, structured extraction, and search. Validation and the actual HTTP connection both use the same resolved addresses to avoid DNS TOCTOU gaps.
 
 ### Authenticated Services And OAuth
 
@@ -122,9 +164,11 @@ For API-based online work, Xia supports:
 The local browser UI is intended to be the main interface for non-technical users.
 
 - **Chat and scratch pads:** paste local material, keep per-session notes, and copy output without direct file access.
-- **Admin panel:** configure LLM providers, OAuth accounts, services, and site logins.
+- **Admin panel:** configure LLM providers, OAuth accounts, services, site logins, local-document summarization settings, and the notification bridge foundation.
 - **OAuth templates:** start from common provider presets and edit as needed.
 - **OAuth-to-service handoff:** prefill service forms from saved OAuth accounts.
+- **Local document workflows:** upload text, PDF, and Office docs, then insert summaries or excerpts into chat and notes.
+- **Skill import:** install Xia skills directly and import a safe prompt-only subset of OpenClaw skills from directories, zip files, or ClawHub zip URLs.
 - **Local trust boundary:** Xia binds to localhost by default and uses a local session secret cookie, while privileged actions still go through approval policy.
 
 ## Automation And Scheduling
@@ -134,6 +178,25 @@ Xia does not only answer ad hoc prompts.
 - **Background scheduler:** interval-based or calendar-based scheduled runs.
 - **Maintenance jobs:** memory consolidation, knowledge graph maintenance, and session cleanup.
 - **Warm starts:** resume a conversation with working memory already populated from prior context.
+
+## Notification Bridge Foundation
+
+Xia now includes the local-side substrate for a notification and remote-status bridge.
+
+- persistent bridge identity and key material
+- paired device records
+- a compact event log for schedule failures, recovery, and related operational state
+- a computed status snapshot suitable for a future mobile status view
+
+What is intentionally not implemented yet:
+
+- relay transport
+- end-to-end encrypted fanout
+- mobile push delivery
+- a mobile client
+
+In other words, Xia currently exposes the bridge configuration and local event
+snapshot model in the admin UI, but not the full relay/mobile system.
 
 ## Security Model
 
@@ -172,6 +235,7 @@ The `xia.db` functions exposed to the sandbox are safe wrappers that enforce acc
 Xia is designed to be safe for the host system.
 
 - **No local file access:** the SCI sandbox does not expose file system APIs such as `java.io` or `java.nio` to tool handlers.
+- **Explicit ingestion only:** user-initiated uploads and imports are processed by Xia itself and then stored in its DB or skill store, but those paths do not grant tools ambient file access.
 - **Restricted storage:** Xia only has read/write access to its own database file and support files, not arbitrary host paths.
 
 ### Capability Proxy (`xia.service`)

@@ -16,14 +16,16 @@ browser automation, authenticated APIs, and recurring tasks.
 Xia is built for the parts of your digital life that live beyond your local file
 system:
 
+- keeping long-term memory about people, projects, and ongoing work
 - researching the web and extracting structured information
 - signing into websites and using saved site logins
 - calling authenticated APIs through stored service connections
-- keeping long-term memory about people, projects, and ongoing work
 - running recurring background tasks on a schedule
 
 Xia is not a local computer-control agent. It does not access arbitrary
 files on your machine or drive your terminal like a coding assistant.
+User-initiated uploads and imports are supported, but they stay explicit and
+scoped.
 
 ## Quick Start
 
@@ -52,9 +54,16 @@ What to expect:
   settings, and saved connections travel together.
 - The local web UI is intended to be the main interface for non-technical users.
 - Semantic memory recall uses a local embedding model. On first use, Xia will
-download the default
-[`nomic-embed-text-v2-moe`](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe)
-GGUF model, which is about 512 MiB.
+  download the default
+  [`nomic-embed-text-v2-moe`](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe)
+  GGUF model, which is about 512 MiB. You can switch to a bigger model if your
+  computer supports it.
+- Browser automation uses [Playwright](https://playwright.dev/). On first use,
+  Xia may also install Playwright browser binaries, and on Linux it can preview
+  or run Playwright's system dependency setup as a separate explicit step.
+- Local-document summarization defaults to extractive summaries. If you opt into
+  model-generated summaries, Xia can use either a local model or an external
+  OpenAI-compatible provider.
 - You still provide your own LLM provider credentials, and you can use multiple
   LLMs at the same time.
 - None of your credentials or secrets is exposed to LLM providers. Prompt
@@ -81,10 +90,13 @@ By default, the web UI listens on `http://localhost:3008/`.
 What the local web UI is for:
 
 - chat with Xia from a browser instead of the terminal
-- upload local text-like documents and PDFs, then insert full text or a selected excerpt into chat or notes
+- upload local text, PDF, and Office documents; Xia extracts text, chunks large
+  docs along natural boundaries, and keeps summary plus chunk-level recall
 - use scratch pads for copied notes and working context
 - download Xia produced artifacts
-- configure LLM providers, OAuth accounts, services, and saved site logins
+- configure LLM providers, OAuth accounts, services, saved site logins, local
+  document summarization settings, and the notification bridge foundation
+- import safe prompt-only OpenClaw skills from local bundles or ClawHub zip URLs
 - manage scheduled tasks and other local assistant settings
 
 The server binds to `127.0.0.1` by default. Use `--bind 0.0.0.0` only when you
@@ -95,19 +107,20 @@ intentionally want to expose it beyond the local machine.
 - Keep an assistant that remembers your projects, contacts, preferences, and
   prior conversations.
 - Let Xia research websites, follow links, fill forms, and return structured
-  results through a real Playwright browser when available, with HtmlUnit
-  fallback for lighter environments. On first use, Xia can detect missing
-  Playwright browser binaries and install them automatically. On Linux, Xia
-  can also preview or run Playwright's system dependency setup as a separate
-  explicit step.
-- Connect services such as GitHub or Google through static credentials or OAuth,
+  results through Playwright browser automation. On first use, Xia can detect
+  missing Playwright browser binaries and install them automatically. On Linux,
+- Connect services such as Google or Github through static credentials or OAuth,
   then let Xia use them without exposing secrets to tools.
+- Upload PDFs, DOCX/XLSX/PPTX files, Markdown, and other text-like documents so
+  Xia can find them using hybrid search (fulltext + semantic).
+- Import safe OpenClaw-compatible prompt skills from ClawHub zip URLs or local
+  bundles when they fit Xia's security model.
 - Schedule recurring work like checks, summaries, monitoring, and maintenance.
 
 ## Privacy And Safety
 
 Xia is built to be useful on a daily machine without getting broad access to the
-host machine:
+host machine, so you do not have to provision a dedicated machine for Xia:
 
 - secrets are encrypted at rest in the database
 - tools run inside a restricted sandbox
@@ -115,6 +128,8 @@ host machine:
   credentials
 - the local web UI uses a local session secret and local-origin checks
 - Xia is designed around online work, not arbitrary local file access
+- explicit user uploads and imports are supported, but Xia still does not give
+  tools ambient access to your host file system
 
 ## More Documentation
 
