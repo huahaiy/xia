@@ -155,6 +155,14 @@
       (is (re-find #"click here" result))
       (is (not (re-find #"https://example.com" result))))))
 
+(deftest escapes-markdown-control-characters-in-text
+  (let [result (html->markdown "<p>Use *stars* _underscores_ [brackets]</p>")]
+    (is (= "Use \\*stars\\* \\_underscores\\_ \\[brackets\\]" result))))
+
+(deftest escapes-markdown-control-characters-in-link-text
+  (let [result (html->markdown "<a href=\"https://example.com\">[click]_me*</a>")]
+    (is (= "[\\[click\\]\\_me\\*](https://example.com)" result))))
+
 (deftest converts-lists
   (testing "unordered list"
     (let [result (html->markdown "<ul><li>Apple</li><li>Banana</li></ul>")]

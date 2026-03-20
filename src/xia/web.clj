@@ -435,6 +435,10 @@
     ;; Fallback: body
     (.body doc)))
 
+(defn- escape-markdown-text
+  [text]
+  (str/replace (or text "") #"[\\*_\[\]]" #(str "\\" %)))
+
 (defn- element->markdown
   "Convert a Jsoup Element to compact markdown-like text."
   [^Element elem include-links?]
@@ -448,7 +452,7 @@
                     (when (pos? (.length sb)) (.append sb "\n\n"))
                     (.append sb (apply str (repeat level "#")))
                     (.append sb " ")
-                    (.append sb (str/trim (.text el)))
+                    (.append sb (escape-markdown-text (str/trim (.text el))))
                     (.append sb "\n"))
 
                   ;; Paragraphs
@@ -469,7 +473,8 @@
                                          "- ")]
                             (.append sb "\n")
                             (.append sb prefix)
-                            (.append sb (str/trim (.text li)))))))
+                            (.append sb (escape-markdown-text
+                                          (str/trim (.text li))))))))
 
                   ;; List items handled by parent ul/ol
                   "li" nil
@@ -481,8 +486,12 @@
                     (when (seq text)
                       (if (and include-links? (seq href)
                                (not (str/starts-with? href "javascript:")))
-                        (do (.append sb "[") (.append sb text) (.append sb "](") (.append sb href) (.append sb ")"))
-                        (.append sb text))))
+                        (do (.append sb "[")
+                            (.append sb (escape-markdown-text text))
+                            (.append sb "](")
+                            (.append sb href)
+                            (.append sb ")"))
+                        (.append sb (escape-markdown-text text)))))
 
                   ;; Code blocks
                   "pre"
@@ -503,14 +512,14 @@
                   (do (when (pos? (.length sb)) (.append sb "\n\n"))
                       (doseq [line (str/split-lines (str/trim (.text el)))]
                         (.append sb "> ")
-                        (.append sb line)
+                        (.append sb (escape-markdown-text line))
                         (.append sb "\n")))
 
                   ;; Images
                   "img"
                   (let [alt (.attr el "alt")]
                     (when (seq alt)
-                      (.append sb (str "[image: " alt "]"))))
+                      (.append sb (str "[image: " (escape-markdown-text alt) "]"))))
 
                   ;; Tables
                   "table"
@@ -523,7 +532,8 @@
                               (.append sb "| ")
                               (dotimes [c (.size cells)]
                                 (when (pos? c) (.append sb " | "))
-                                (.append sb (str/trim (.text ^Element (.get cells c)))))
+                                (.append sb (escape-markdown-text
+                                              (str/trim (.text ^Element (.get cells c))))))
                               (.append sb " |\n")
                               ;; Header separator after first row
                               (when (and (zero? r) (pos? (.size (.select row "th"))))
@@ -551,7 +561,7 @@
                   ;; Everything else — just get the text
                   (let [text (.ownText el)]
                     (when (seq text)
-                      (.append sb text))
+                      (.append sb (escape-markdown-text text)))
                     (walk-children el depth)))))
 
             (walk-children [^Element el depth]
@@ -563,7 +573,7 @@
                   (instance? TextNode child)
                   (let [text (.getWholeText ^TextNode child)]
                     (when-not (str/blank? text)
-                      (.append sb (str/trim text))
+                      (.append sb (escape-markdown-text (str/trim text)))
                       (.append sb " "))))))]
 
       (walk elem 0))

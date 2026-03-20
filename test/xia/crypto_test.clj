@@ -175,3 +175,42 @@
                                      :allow-insecure-key-file? true})
          (is (= :key-file (:source (crypto/current-key-source))))
          (is (= key-file (:path (crypto/current-key-source))))))))
+
+(deftest validate-secret-file-warns-when-posix-perms-cannot-be-verified
+  (let [db-path  (temp-db-path)
+        key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
+                          (into-array FileAttribute [])))
+        warnings (atom [])]
+    (spit key-file (encode-key 9))
+    (with-redefs-fn {#'xia.crypto/get-posix-file-permissions
+                     (fn [_]
+                       (throw (UnsupportedOperationException. "no posix")))
+                     #'xia.crypto/warn-unverifiable-secret-file-perms!
+                     (fn [label path]
+                       (swap! warnings conj {:label label :path (str path)}))}
+      #(do
+         (is (= key-file
+                (str (#'xia.crypto/validate-secret-file! db-path
+                                                        key-file
+                                                        "Encryption key file"
+                                                        false))))
+         (is (= [{:label "Encryption key file"
+                  :path key-file}]
+                @warnings))))))
+
+(deftest set-owner-only-perms-warns-when-posix-set-is-unavailable
+  (let [secret-file (str (Files/createTempFile "xia-crypto-secret" ".txt"
+                             (into-array FileAttribute [])))
+        warnings    (atom [])]
+    (with-redefs-fn {#'xia.crypto/set-posix-file-permissions!
+                     (fn [_ _]
+                       (throw (UnsupportedOperationException. "no posix")))
+                     #'xia.crypto/warn-unset-secret-file-perms!
+                     (fn [path reason]
+                       (swap! warnings conj {:path (str path) :reason reason}))}
+      #(do
+         (#'xia.crypto/set-owner-only-perms! (path-of secret-file))
+         (is (= 1 (count @warnings)))
+         (is (= secret-file (:path (first @warnings))))
+         (is (.contains ^String (:reason (first @warnings))
+                        "POSIX file permissions are unavailable"))))))

@@ -6,7 +6,8 @@
    2. XIA_MASTER_KEY_FILE — path to a file containing the same base64 key
    3. XIA_MASTER_PASSPHRASE / XIA_MASTER_PASSPHRASE_FILE — derive with PBKDF2
    4. Interactive passphrase provider — derive with PBKDF2 for new startups"
-  (:require [clojure.string :as str])
+  (:require [clojure.string :as str]
+            [taoensso.timbre :as log])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files LinkOption Path Paths StandardCopyOption]
            [java.nio.file.attribute PosixFilePermission PosixFilePermissions]
@@ -59,13 +60,37 @@
   (when-let [parent (.getParent path)]
     (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0))))
 
+(defn- get-posix-file-permissions [^Path path]
+  (Files/getPosixFilePermissions path (make-array LinkOption 0)))
+
+(defn- set-posix-file-permissions! [^Path path perms]
+  (Files/setPosixFilePermissions path perms))
+
+(defn- warn-unverifiable-secret-file-perms!
+  [label ^Path path]
+  (log/warn label "permissions could not be verified for secret file"
+            (str path)
+            "because POSIX file permissions are unavailable on this platform/filesystem;"
+            "ensure equivalent OS-level ACLs restrict access."))
+
+(defn- warn-unset-secret-file-perms!
+  [^Path path reason]
+  (log/warn reason
+            "Could not set owner-only POSIX permissions for secret file"
+            (str path)
+            "- ensure equivalent OS-level ACLs restrict access."))
+
 (defn- set-owner-only-perms! [^Path path]
   (try
-    (Files/setPosixFilePermissions
+    (set-posix-file-permissions!
       path
       (PosixFilePermissions/fromString "rw-------"))
-    (catch UnsupportedOperationException _)
-    (catch Exception _)))
+    (catch UnsupportedOperationException _
+      (warn-unset-secret-file-perms! path
+                                     "POSIX file permissions are unavailable on this platform/filesystem"))
+    (catch Exception e
+      (warn-unset-secret-file-perms! path
+                                     (str "Failed to set owner-only permissions: " (.getMessage e))))))
 
 (def ^:private disallowed-secret-file-perms
   #{PosixFilePermission/OWNER_EXECUTE
@@ -99,15 +124,17 @@
     (or (path-within? (absolute-path file-path*) (absolute-path db-path*))
         (path-within? (real-path file-path*) (real-path db-path*)))))
 
-(defn- insecure-secret-file-perms
+(defn- secret-file-permission-state
   [^Path path]
   (try
-    (let [perms     (Files/getPosixFilePermissions path (make-array LinkOption 0))
+    (let [perms     (get-posix-file-permissions path)
           insecure? (some disallowed-secret-file-perms perms)]
-      (when insecure?
-        {:permissions (PosixFilePermissions/toString perms)}))
+      (if insecure?
+        {:status :insecure
+         :permissions (PosixFilePermissions/toString perms)}
+        {:status :secure}))
     (catch UnsupportedOperationException _
-      nil)))
+      {:status :unverifiable})))
 
 (defn- validate-secret-file!
   [db-path file-path label allow-insecure-key-file?]
@@ -122,13 +149,20 @@
                  {:path file-path
                   :db-path db-path
                   :reason :inside-db-path})))
-      (when-let [{:keys [permissions]} (insecure-secret-file-perms path)]
-        (throw (ex-info
-                 (str label " must use owner-only permissions unless "
-                      ":allow-insecure-key-file? is true")
-                 {:path file-path
-                  :permissions permissions
-                  :reason :insecure-permissions}))))
+      (let [{:keys [status permissions]} (secret-file-permission-state path)]
+        (case status
+          :insecure
+          (throw (ex-info
+                   (str label " must use owner-only permissions unless "
+                        ":allow-insecure-key-file? is true")
+                   {:path file-path
+                    :permissions permissions
+                    :reason :insecure-permissions}))
+
+          :unverifiable
+          (warn-unverifiable-secret-file-perms! label path)
+
+          nil)))
     path))
 
 (defn- read-key-file [db-path file-path allow-insecure-key-file?]
