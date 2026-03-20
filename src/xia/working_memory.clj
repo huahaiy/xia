@@ -178,27 +178,32 @@ Rules:
    (extract-search-terms nil message))
   ([session-id message]
    (let [;; Tokenize and clean
-        words (->> (str/split (str/lower-case message) #"[^\w'-]+")
-                   (remove str/blank?)
-                   (remove #(< (count %) 2)))
+        words (into []
+                    (comp (remove str/blank?)
+                          (remove #(< (count %) 2)))
+                    (str/split (str/lower-case message) #"[^\w'-]+"))
         ;; Filter stopwords
-        meaningful (remove stopwords words)
+        meaningful (into [] (remove stopwords) words)
         ;; Extract capitalized words from original message (proper nouns)
-        proper-nouns (->> (re-seq #"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*" message)
-                         (map str/lower-case))
+        proper-nouns (into [] (map str/lower-case)
+                           (or (re-seq #"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*" message)
+                               []))
         ;; Include active entity names from WM
         wm-names (when-let [wm (session-wm session-id)]
-                   (->> (:slots wm)
-                        vals
-                        (map :name)
-                        (remove nil?)
-                        (concat (->> (:local-doc-refs wm)
-                                     (map :name)
-                                     (remove nil?)))
-                        (map str/lower-case)))
+                   (let [slot-names (into []
+                                          (comp (map :name)
+                                                (remove nil?)
+                                                (map str/lower-case))
+                                          (vals (:slots wm)))
+                         doc-names  (into []
+                                          (comp (map :name)
+                                                (remove nil?)
+                                                (map str/lower-case))
+                                          (:local-doc-refs wm))]
+                     (into slot-names doc-names)))
         ;; Combine, deduplicate
         all-terms (distinct (concat proper-nouns meaningful wm-names))]
-     (vec (take 20 all-terms)))))
+     (into [] (take 20) all-terms))))
 
 ;; ============================================================================
 ;; Stage 2: Hybrid Search
@@ -463,9 +468,12 @@ Rules:
    (run-session-op! session-id
      (fn [sid]
        (let [wm       (session-wm sid)
-             entities (->> (:slots wm) vals (map :name) (remove nil?) (str/join ", "))
-             local-docs (->> (:local-doc-refs wm) (map :name) (remove nil?) (str/join ", "))
-             episodes (->> (:episode-refs wm) (map :summary) (str/join "; "))
+             entities (str/join ", " (into [] (comp (map :name) (remove nil?))
+                                           (vals (:slots wm))))
+             local-docs (str/join ", " (into [] (comp (map :name) (remove nil?))
+                                             (:local-doc-refs wm)))
+             episodes (str/join "; " (into [] (comp (map :summary) (remove nil?))
+                                            (:episode-refs wm)))
              prompt   (str "Current entities in focus: " entities
                            "\nRelevant local documents: " local-docs
                            "\nRecent relevant episodes: " episodes
@@ -753,33 +761,32 @@ Rules:
   ([session-id]
    (when-let [wm (session-wm session-id)]
     {:topics       (:topics wm)
-     :entities     (->> (:slots wm)
-                        vals
-                        (sort-by :relevance >)
-                        (mapv (fn [{:keys [name type facts edges properties relevance pinned?]}]
+     :entities     (into []
+                         (map (fn [{:keys [name type facts edges properties relevance pinned?]}]
                                 {:name       name
                                  :type       type
                                  :facts      facts
                                  :edges      edges
                                  :properties properties
                                  :relevance  relevance
-                                 :pinned?    pinned?})))
-     :episodes     (->> (:episode-refs wm)
-                        (sort-by :relevance >)
-                        (mapv (fn [{:keys [summary timestamp relevance]}]
+                                 :pinned?    pinned?}))
+                         (sort-by :relevance > (vals (:slots wm))))
+     :episodes     (into []
+                         (map (fn [{:keys [summary timestamp relevance]}]
                                 {:summary   summary
                                  :timestamp timestamp
-                                 :relevance relevance})))
-     :local-docs   (->> (:local-doc-refs wm)
-                        (sort-by :relevance >)
-                        (mapv (fn [{:keys [doc-id name media-type summary preview matched-chunks relevance]}]
-                                {:id         doc-id
-                                 :name       name
-                                 :media-type media-type
-                                 :summary    summary
-                                 :preview    preview
+                                 :relevance relevance}))
+                         (sort-by :relevance > (:episode-refs wm)))
+     :local-docs   (into []
+                         (map (fn [{:keys [doc-id name media-type summary preview matched-chunks relevance]}]
+                                {:id             doc-id
+                                 :name           name
+                                 :media-type     media-type
+                                 :summary        summary
+                                 :preview        preview
                                  :matched-chunks matched-chunks
-                                 :relevance  relevance})))
+                                 :relevance      relevance}))
+                         (sort-by :relevance > (:local-doc-refs wm)))
      :turn-count   (:turn-count wm)})))
 
 ;; ============================================================================

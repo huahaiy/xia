@@ -334,19 +334,48 @@
   (when-let [topics (:topics wm-context)]
     (str "Topic: " topics "\n\n")))
 
+(defn- append-detail-fragment!
+  [^StringBuilder sb fragment]
+  (when (seq fragment)
+    (when (pos? (.length sb))
+      (.append sb "; "))
+    (.append sb ^String fragment))
+  sb)
+
+(defn- append-props-to-detail!
+  [^StringBuilder sb m prefix]
+  (reduce-kv
+    (fn [^StringBuilder sb k v]
+      (let [path (if prefix
+                   (str prefix "." (clojure.core/name k))
+                   (clojure.core/name k))]
+        (if (map? v)
+          (append-props-to-detail! sb v path)
+          (append-detail-fragment! sb (str path ": " v)))))
+    sb
+    m))
+
+(defn- flatten-props-into
+  [acc m prefix]
+  (reduce-kv
+    (fn [acc k v]
+      (let [path (if prefix
+                   (str prefix "." (clojure.core/name k))
+                   (clojure.core/name k))]
+        (if (map? v)
+          (flatten-props-into acc v path)
+          (conj! acc (str path ": " v)))))
+    acc
+    m))
+
 (defn- flatten-props
   "Flatten a nested property map into key=value pairs for compact display.
    {:location \"Seattle\" :work {:title \"Engineer\"}} → [\"location: Seattle\" \"work.title: Engineer\"]"
   ([m] (flatten-props m nil))
   ([m prefix]
-   (reduce-kv
-     (fn [acc k v]
-       (let [path (if prefix (str prefix "." (clojure.core/name k)) (clojure.core/name k))]
-         (if (map? v)
-           (into acc (flatten-props v path))
-           (conj acc (str path ": " v)))))
-     []
-     m)))
+   (if (and (map? m) (seq m))
+     (persistent! (flatten-props-into (transient []) m prefix))
+     [])))
 
 (defn- select-facts-for-entity
   [facts]
@@ -357,23 +386,25 @@
        vec))
 
 (defn- render-entity-data [{:keys [name type facts edges properties]}]
-  (let [type-str (when type (str " (" (clojure.core/name type) ")"))
-        ;; Properties as compact key: value pairs
-        prop-strs (when (and properties (map? properties) (seq properties))
-                    (flatten-props properties))
-        selected-facts (select-facts-for-entity facts)
-        fact-strs (map :content selected-facts)
-        ;; Outgoing edges
-        edge-strs (->> (:outgoing edges)
-                       (take 3)
-                       (map (fn [{:keys [type target]}]
-                              (str (clojure.core/name type) "→" target))))
-        detail (str/join "; " (concat prop-strs fact-strs edge-strs))]
+  (let [type-str        (when type (str " (" (clojure.core/name type) ")"))
+        selected-facts  (select-facts-for-entity facts)
+        ^StringBuilder detail-builder (StringBuilder.)]
+    (when (and properties (map? properties) (seq properties))
+      (append-props-to-detail! detail-builder properties nil))
+    (reduce (fn [^StringBuilder sb {:keys [content]}]
+              (append-detail-fragment! sb content))
+            detail-builder
+            selected-facts)
+    (reduce (fn [^StringBuilder sb {:keys [type target]}]
+              (append-detail-fragment! sb
+                                       (str (clojure.core/name type) "→" target)))
+            detail-builder
+            (take 3 (:outgoing edges)))
+    (let [detail (when (pos? (.length detail-builder))
+                   (.toString detail-builder))]
     {:content       (str "- " name type-str
                          (when-not (str/blank? detail) (str ": " detail)))
-     :used-fact-eids (->> selected-facts
-                          (keep :eid)
-                          vec)}))
+     :used-fact-eids (into [] (keep :eid) selected-facts)})))
 
 (defn- render-entity
   [entity]
@@ -450,8 +481,8 @@
                      (str (subs summary* 0 219) "…")
                      summary*))
         chunk*   (some->> matched-chunks
-                          (map :summary)
-                          (remove str/blank?)
+                          (into [] (comp (map :summary)
+                                         (remove str/blank?)))
                           (str/join " | ")
                           not-empty)
         chunk*   (when chunk*
