@@ -8,7 +8,8 @@
             [xia.browser.playwright]
             [xia.db :as db]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.net InetAddress ServerSocket]
+  (:import [java.net InetAddress ServerSocket URI]
+           [java.nio.file FileSystemAlreadyExistsException FileSystems]
            [java.util.concurrent ConcurrentHashMap]))
 
 (use-fixtures :each
@@ -43,6 +44,16 @@
       (f)
       (finally
         (reset! runtime* original)))))
+
+(defn- empty-playwright-runtime-state
+  []
+  {:playwright nil
+   :browser nil
+   :bootstrapped? false
+   :browser-installed? false
+   :browser-executable nil
+   :driver-resource-fs nil
+   :driver-resource-fs-owned? false})
 
 (defn- ephemeral-port
   []
@@ -378,6 +389,44 @@
            (is (= session-id (-> @snapshots (get session-id) (get "session_id"))))))
       (finally
         (.remove sessions* session-id)))))
+
+(deftest playwright-driver-resource-fs-recovers-existing-filesystem
+  (let [existing-fs (FileSystems/getDefault)
+        resource-uri (URI. "resource:/playwright-driver")]
+    (with-playwright-runtime-state (empty-playwright-runtime-state)
+      #(with-redefs-fn {(playwright-var 'driver-resource-uri) (constantly resource-uri)
+                        (playwright-var 'open-driver-resource-fs)
+                        (fn [_]
+                          (throw (FileSystemAlreadyExistsException. "exists")))
+                        (playwright-var 'existing-driver-resource-fs)
+                        (constantly existing-fs)}
+         (fn []
+           (call-playwright-private 'ensure-driver-resource-fs!)
+           (let [runtime* (var-get (playwright-var 'runtime))]
+             (is (identical? existing-fs (:driver-resource-fs @runtime*)))
+             (is (= false (:driver-resource-fs-owned? @runtime*)))))))))
+
+(deftest playwright-stop-runtime-closes-only-owned-driver-filesystems
+  (let [closed (atom [])]
+    (with-redefs-fn {(playwright-var 'close-driver-resource-fs!)
+                     (fn [driver-fs]
+                       (swap! closed conj driver-fs))}
+      #(do
+         (with-playwright-runtime-state
+           (assoc (empty-playwright-runtime-state)
+                  :driver-resource-fs ::owned
+                  :driver-resource-fs-owned? true)
+           (fn []
+             (call-playwright-private 'stop-runtime!)))
+         (is (= [::owned] @closed))
+         (reset! closed [])
+         (with-playwright-runtime-state
+           (assoc (empty-playwright-runtime-state)
+                  :driver-resource-fs ::borrowed
+                  :driver-resource-fs-owned? false)
+           (fn []
+             (call-playwright-private 'stop-runtime!)))
+         (is (empty? @closed))))))
 
 (deftest ^:integration read-page-restores-from-snapshot
   (let [result (browser/open-session "https://example.com")

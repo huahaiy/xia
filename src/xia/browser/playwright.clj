@@ -30,7 +30,8 @@
                                   :bootstrapped? false
                                   :browser-installed? false
                                   :browser-executable nil
-                                  :driver-resource-fs nil}))
+                                  :driver-resource-fs nil
+                                  :driver-resource-fs-owned? false}))
 (defonce ^:private runtime-lock (Object.))
 (defonce ^ConcurrentHashMap ^:private sessions (ConcurrentHashMap.))
 (defonce ^:private session-snapshot-locks
@@ -94,27 +95,56 @@
     (catch Exception _
       false)))
 
+(defn- driver-resource-uri
+  []
+  (try
+    (DriverJar/getDriverResourceURI)
+    (catch Exception e
+      (log/debug e "Unable to resolve Playwright driver resource URI")
+      nil)))
+
+(defn- open-driver-resource-fs
+  [^URI resource-uri]
+  (let [^Map fs-env (Collections/emptyMap)]
+    (FileSystems/newFileSystem resource-uri fs-env)))
+
+(defn- existing-driver-resource-fs
+  [^URI resource-uri]
+  (FileSystems/getFileSystem resource-uri))
+
+(defn- close-driver-resource-fs!
+  [driver-fs]
+  (when (instance? FileSystem driver-fs)
+    (.close ^FileSystem driver-fs)))
+
+(defn- ensure-driver-resource-fs!
+  []
+  (locking runtime-lock
+    (when-not (:driver-resource-fs @runtime)
+      (when-let [^URI resource-uri (driver-resource-uri)]
+        (when-not (= "jar" (.getScheme resource-uri))
+          (try
+            (let [^FileSystem fs (open-driver-resource-fs resource-uri)]
+              (swap! runtime assoc
+                     :driver-resource-fs fs
+                     :driver-resource-fs-owned? true))
+            (catch FileSystemAlreadyExistsException _
+              (try
+                (let [^FileSystem fs (existing-driver-resource-fs resource-uri)]
+                  (swap! runtime assoc
+                         :driver-resource-fs fs
+                         :driver-resource-fs-owned? false))
+                (catch Exception e
+                  (log/debug e "Failed to recover existing Playwright driver resource filesystem"))))
+            (catch UnsupportedOperationException e
+              (log/debug e "Playwright driver resource URI does not support explicit filesystem initialization"))
+            (catch Exception e
+              (log/debug e "Failed to initialize Playwright driver resource filesystem"))))))))
+
 (defn- create-playwright
   []
   (let [env (playwright-env)]
-    (locking runtime-lock
-      (when-not (:driver-resource-fs @runtime)
-        (when-let [^URI resource-uri (try
-                                       (DriverJar/getDriverResourceURI)
-                                       (catch Exception e
-                                         (log/debug e "Unable to resolve Playwright driver resource URI")
-                                         nil))]
-          (when-not (= "jar" (.getScheme resource-uri))
-            (try
-              (let [^Map fs-env (Collections/emptyMap)
-                    ^FileSystem fs (FileSystems/newFileSystem resource-uri fs-env)]
-                (swap! runtime assoc :driver-resource-fs fs))
-              (catch FileSystemAlreadyExistsException _
-                (swap! runtime assoc :driver-resource-fs :already-exists))
-              (catch UnsupportedOperationException e
-                (log/debug e "Playwright driver resource URI does not support explicit filesystem initialization"))
-              (catch Exception e
-                (log/debug e "Failed to initialize Playwright driver resource filesystem")))))))
+    (ensure-driver-resource-fs!)
     (if (seq env)
       (Playwright/create (doto (Playwright$CreateOptions.)
                            (.setEnv env)))
@@ -266,7 +296,7 @@
 (defn- stop-runtime!
   []
   (locking runtime-lock
-    (let [{:keys [browser playwright]} @runtime]
+    (let [{:keys [browser playwright driver-resource-fs driver-resource-fs-owned?]} @runtime]
       (try
         (when browser
           (.close ^Browser browser))
@@ -276,16 +306,16 @@
           (.close ^Playwright playwright))
         (catch Exception _))
       (try
-        (when-let [driver-fs (:driver-resource-fs @runtime)]
-          (when (instance? FileSystem driver-fs)
-            (.close ^FileSystem driver-fs)))
+        (when driver-resource-fs-owned?
+          (close-driver-resource-fs! driver-resource-fs))
         (catch Exception _))
       (reset! runtime {:playwright nil
                        :browser nil
                        :bootstrapped? false
                        :browser-installed? false
                        :browser-executable nil
-                       :driver-resource-fs nil}))))
+                       :driver-resource-fs nil
+                       :driver-resource-fs-owned? false}))))
 
 (defn runtime-status
   []
