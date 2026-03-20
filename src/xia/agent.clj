@@ -486,6 +486,33 @@
      :follow-up-messages (when (llm/vision-capable? (:assistant-provider context))
                            (multimodal-follow-up-messages result))}))
 
+(defn- bind-original-tool-call-ids
+  [prepared-calls tool-results]
+  (let [prepared-count (count prepared-calls)
+        result-count   (count tool-results)]
+    (when (not= prepared-count result-count)
+      (throw (ex-info "Tool execution result count mismatch"
+                      {:prepared-count prepared-count
+                       :result-count   result-count})))
+    (mapv (fn [{:keys [tool-call func-name tool-id]} result]
+            (let [original-id  (get tool-call "id")
+                  result-id    (:tool_call_id result)
+                  effective-id (or original-id result-id)]
+              (when (and (some? original-id)
+                         (some? result-id)
+                         (not= original-id result-id))
+                (log/warn "Tool result returned mismatched tool_call_id; using original call id"
+                          (merge {:func-name func-name
+                                  :tool-id tool-id
+                                  :tool-call-id effective-id
+                                  :result-tool-call-id result-id}
+                                 (trace-context prompt/*interaction-context*))))
+              (cond-> result
+                effective-id (assoc :tool_call_id effective-id)
+                (nil? (:role result)) (assoc :role "tool"))))
+          prepared-calls
+          tool-results)))
+
 (defn- tool-call-batches
   [prepared-calls]
   (->> prepared-calls
@@ -559,11 +586,12 @@
                            ")")
                       {:tool-count               tool-count
                        :max-tool-calls-per-round max-tool-calls-per-round})))
-    (->> tool-calls
-         (mapv prepare-tool-call)
-         tool-call-batches
-         (mapcat #(execute-tool-batch % context))
-         vec)))
+    (let [prepared-calls (mapv prepare-tool-call tool-calls)
+          tool-results   (->> prepared-calls
+                              tool-call-batches
+                              (mapcat #(execute-tool-batch % context))
+                              vec)]
+      (bind-original-tool-call-ids prepared-calls tool-results))))
 
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.

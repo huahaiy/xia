@@ -468,6 +468,26 @@
         (is (= "{\"status\":200,\"title\":\"Example Domain\"}"
                (:content tool-msg)))))))
 
+(deftest test-build-messages-restores-missing-tool-call-id-from-assistant-call
+  (db/set-identity! :name "TestXia")
+  (db/set-identity! :description "Test")
+  (let [sid        (db/create-session! :terminal)
+        tool-calls [{"id"       "call_1"
+                     "function" {"name"      "web-fetch"
+                                 "arguments" "{\"url\":\"https://example.com\"}"}}]]
+    (db/add-message! sid :assistant "Fetching page" :tool-calls tool-calls)
+    (db/add-message! sid :tool nil
+                     :tool-result {"status" 200
+                                   "title" "Example Domain"})
+    (with-redefs [xia.context/assemble-system-prompt (fn [_sid _opts] "system")
+                  xia.context/compact-history        (fn [messages _budget & _] messages)]
+      (let [msgs     (ctx/build-messages sid)
+            tool-msg (last msgs)]
+        (is (= "tool" (:role tool-msg)))
+        (is (= "call_1" (:tool_call_id tool-msg)))
+        (is (= "{\"status\":200,\"title\":\"Example Domain\"}"
+               (:content tool-msg)))))))
+
 (deftest test-build-messages-data-returns-used-fact-eids
   (let [sid (db/create-session! :terminal)]
     (with-redefs [xia.context/assemble-system-prompt-data (fn [_sid _opts]

@@ -559,6 +559,22 @@
         (is (= 1 @max-active))
         (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))))))
 
+(deftest bind-original-tool-call-ids-preserves-llm-tool-call-id
+  (let [prepared-calls [{:tool-call {"id" "call-1"
+                                     "function" {"name" "web-search"
+                                                 "arguments" "{}"}}
+                         :func-name "web-search"
+                         :tool-id :web-search}]
+        results        [{:role "tool"
+                         :tool_call_id "wrong-id"
+                         :content "{\"ok\":true}"
+                         :result {"ok" true}}]]
+    (is (= [{:role "tool"
+             :tool_call_id "call-1"
+             :content "{\"ok\":true}"
+             :result {"ok" true}}]
+           (#'agent/bind-original-tool-call-ids prepared-calls results)))))
+
 (deftest prepare-tool-call-warns-on-malformed-json-arguments
   (let [logged   (atom nil)
         tool-call {"id"       "call-1"

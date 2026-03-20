@@ -250,6 +250,64 @@
     (some? role)    (str role)
     :else           "unknown"))
 
+(defn- tool-call-id-value
+  [call]
+  (let [call-id (some-> (or (:id call)
+                            (get call "id"))
+                        str
+                        str/trim)]
+    (when (seq call-id)
+      call-id)))
+
+(defn- message-tool-call-id
+  [message]
+  (let [call-id (some-> (or (:tool-id message)
+                            (:tool_call_id message)
+                            (get message "tool_call_id"))
+                        str
+                        str/trim)]
+    (when (seq call-id)
+      call-id)))
+
+(defn- remove-pending-tool-call-id
+  [pending tool-call-id]
+  (let [[prefix suffix] (split-with #(not= % tool-call-id) pending)]
+    (if (seq suffix)
+      (into [] (concat prefix (next suffix)))
+      pending)))
+
+(defn- restore-history-tool-call-ids
+  [messages]
+  (loop [remaining messages
+         pending   []
+         acc       []]
+    (if-let [{:keys [tool-calls] :as message} (first remaining)]
+      (let [role*      (history-role-name (:role message))
+            tool-calls* (or tool-calls
+                            (:tool_calls message)
+                            (get message "tool_calls"))]
+        (cond
+          (and (= role* "assistant") (seq tool-calls*))
+          (recur (next remaining)
+                 (into [] (keep tool-call-id-value) tool-calls*)
+                 (conj acc message))
+
+          (= role* "tool")
+          (let [existing-id (message-tool-call-id message)
+                [tool-call-id pending*]
+                (cond
+                  existing-id [existing-id (remove-pending-tool-call-id pending existing-id)]
+                  (seq pending) [(first pending) (into [] (rest pending))]
+                  :else         [nil pending])]
+            (recur (next remaining)
+                   pending*
+                   (conj acc (cond-> message
+                               tool-call-id (assoc :tool-id tool-call-id)))))
+
+          :else
+          (recur (next remaining) [] (conj acc message))))
+      (vec acc))))
+
 (defn- history-summary-fragment
   [value]
   (when (some? value)
@@ -785,14 +843,15 @@
                   (configured-recent-history-message-limit))]
     (max 4 (long limit))))
 
-  (defn- build-history-with-session-recap
+(defn- build-history-with-session-recap
   [session-id opts]
   (let [recent-limit (long (recent-history-message-limit opts))
         metadata     (db/session-message-metadata session-id)
         total        (long (count metadata))]
     (if (<= total recent-limit)
       (into [] (map history-message->llm-message)
-            (db/session-messages-by-eids (into [] (map :eid) metadata)))
+            (restore-history-tool-call-ids
+              (db/session-messages-by-eids (into [] (map :eid) metadata))))
       (let [recent-start       (long-max 0 (- total recent-limit))
             recap-state        (db/session-history-recap session-id)
             recap-count0       (long (or (:message-count recap-state) 0))
@@ -808,7 +867,8 @@
             new-tool-meta      (subvec metadata tool-count recent-start)
             recent-meta        (subvec metadata recent-start total)
             recent-eids        (into [] (map :eid) recent-meta)
-            recent-messages    (db/session-messages-by-eids recent-eids)
+            recent-messages    (restore-history-tool-call-ids
+                                 (db/session-messages-by-eids recent-eids))
             recent-history     (into [] (map history-message->llm-message) recent-messages)]
         (if (and (not (seq new-recap-meta))
                  (not (seq new-tool-meta)))
@@ -817,11 +877,13 @@
             (seq recap-content)      (conj (history-recap-message recap-content))
             true                     (into recent-history))
           (let [history-archived-messages (when (seq new-recap-meta)
-                                            (db/session-messages-by-eids
-                                              (into [] (map :eid) new-recap-meta)))
+                                            (restore-history-tool-call-ids
+                                              (db/session-messages-by-eids
+                                                (into [] (map :eid) new-recap-meta))))
                 tool-archived-messages    (when (seq new-tool-meta)
-                                            (db/session-messages-by-eids
-                                              (into [] (map :eid) new-tool-meta)))
+                                            (restore-history-tool-call-ids
+                                              (db/session-messages-by-eids
+                                                (into [] (map :eid) new-tool-meta))))
                 new-tool-recap            (or (when (seq tool-archived-messages)
                                                 (merge-tool-recap tool-recap-content
                                                                   tool-archived-messages))
@@ -832,8 +894,8 @@
                                   (history-summary-text history-archived-messages)
                                   recap-content
                                   {:provider-id (:compaction-provider-id opts)
-                                   :workload (or (:compaction-workload opts)
-                                                 :history-compaction)})
+                                   :workload    (or (:compaction-workload opts)
+                                                    :history-compaction)})
                                 recap-content)]
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
@@ -845,13 +907,15 @@
                       true                 (conj (history-recap-message new-recap))
                       true                 (into recent-history)))
                   (into [] (map history-message->llm-message)
-                        (db/session-messages session-id))))
+                        (restore-history-tool-call-ids
+                          (db/session-messages session-id)))))
               (catch Exception e
                 (log/warn "Failed to update session history recap:" (.getMessage e))
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
                 (into [] (map history-message->llm-message)
-                      (db/session-messages session-id))))))))))
+                      (restore-history-tool-call-ids
+                        (db/session-messages session-id)))))))))))
 
 ;; ============================================================================
 ;; Build messages (moved from agent.clj)

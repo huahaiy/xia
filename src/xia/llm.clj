@@ -40,7 +40,6 @@
    {:id :fact-utility
     :label "Fact Utility"
     :description "Post-response rating of which retrieved facts were useful."}])
-(def ^:private workload-id-set (set (map :id workload-options)))
 (defonce ^:private workload-counters (atom {}))
 (defonce ^:private provider-health (atom {}))
 
@@ -61,9 +60,13 @@
   []
   workload-options)
 
+(defn- current-workload-id-set
+  []
+  (set (map :id (workload-routes))))
+
 (defn known-workload?
   [workload]
-  (contains? workload-id-set workload))
+  (contains? (current-workload-id-set) workload))
 
 (defn- normalize-workload
   [workload]
@@ -75,9 +78,9 @@
                                            {:workload workload})))]
     (when (and normalized
                (not (known-workload? normalized)))
-      (throw (ex-info (str "Unknown LLM workload: " normalized)
-                      {:workload normalized
-                       :known-workloads (mapv :id workload-options)})))
+                      (throw (ex-info (str "Unknown LLM workload: " normalized)
+                                      {:workload normalized
+                       :known-workloads (mapv :id (workload-routes))})))
     normalized))
 
 (defn- provider-key
@@ -287,7 +290,11 @@
 
 (defn- round-robin-provider
   [workload providers]
-  (let [state (swap! workload-counters update workload (fnil inc -1))
+  (let [active-workloads (current-workload-id-set)
+        state (swap! workload-counters
+                     (fn [counters]
+                       (let [counters* (select-keys counters active-workloads)]
+                         (update counters* workload (fnil inc -1)))))
         index (mod (get state workload 0) (count providers))]
     (nth providers index)))
 

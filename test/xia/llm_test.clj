@@ -62,6 +62,24 @@
       (is (= :openai-b (:provider-id second-selection)))
       (is (= :openai-a (:provider-id third-selection))))))
 
+(deftest resolve-provider-selection-prunes-stale-workload-counters
+  (let [counters (atom {:assistant 7
+                        :removed-workload 42})]
+    (with-redefs [xia.db/list-providers
+                  (constantly [{:llm.provider/id :openai-a
+                                :llm.provider/workloads #{:assistant}}
+                               {:llm.provider/id :openai-b
+                                :llm.provider/workloads #{:assistant}}])
+                  xia.db/get-default-provider
+                  (constantly {:llm.provider/id :fallback})
+                  xia.llm/workload-counters
+                  counters]
+      (llm/resolve-provider-selection {:workload :assistant})
+      (is (= #{:assistant}
+             (set (keys @counters))))
+      (is (= 8
+             (:assistant @counters))))))
+
 (deftest resolve-provider-selection-prefers-healthy-providers
   (let [future-ms (+ (System/currentTimeMillis) 60000)]
     (with-redefs [xia.db/list-providers
