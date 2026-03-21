@@ -74,6 +74,25 @@
   (cfg/positive-long :agent/max-tool-rounds
                      default-max-tool-rounds))
 
+(defn- configured-max-tool-calls-per-round
+  []
+  (cfg/positive-long :agent/max-tool-calls-per-round
+                     default-max-tool-calls-per-round))
+
+(defn- validate-tool-round-call-count!
+  [tool-calls]
+  (let [tool-count               (count tool-calls)
+        max-tool-calls-per-round (configured-max-tool-calls-per-round)]
+    (when (> (long tool-count) (long max-tool-calls-per-round))
+      (throw (ex-info (str "Too many tool calls in one round: "
+                           tool-count
+                           " (max "
+                           max-tool-calls-per-round
+                           ")")
+                      {:tool-count               tool-count
+                       :max-tool-calls-per-round max-tool-calls-per-round})))
+    tool-count))
+
 (defn- branch-error-stack-frames
   []
   (cfg/positive-long :agent/branch-error-stack-frames
@@ -576,23 +595,13 @@
 (defn- execute-tool-calls
   "Execute tool calls from the LLM response, return tool result messages."
   [tool-calls context]
-  (let [tool-count               (count tool-calls)
-        max-tool-calls-per-round (cfg/positive-long :agent/max-tool-calls-per-round
-                                                    default-max-tool-calls-per-round)]
-    (when (> (long tool-count) (long max-tool-calls-per-round))
-      (throw (ex-info (str "Too many tool calls in one round: "
-                           tool-count
-                           " (max "
-                           max-tool-calls-per-round
-                           ")")
-                      {:tool-count               tool-count
-                       :max-tool-calls-per-round max-tool-calls-per-round})))
-    (let [prepared-calls (mapv prepare-tool-call tool-calls)
-          tool-results   (->> prepared-calls
-                              tool-call-batches
-                              (mapcat #(execute-tool-batch % context))
-                              vec)]
-      (bind-original-tool-call-ids prepared-calls tool-results))))
+  (validate-tool-round-call-count! tool-calls)
+  (let [prepared-calls (mapv prepare-tool-call tool-calls)
+        tool-results   (->> prepared-calls
+                            tool-call-batches
+                            (mapcat #(execute-tool-batch % context))
+                            vec)]
+    (bind-original-tool-call-ids prepared-calls tool-results)))
 
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.
