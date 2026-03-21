@@ -1655,10 +1655,32 @@
 ;; Services (external service registrations)
 ;; ---------------------------------------------------------------------------
 
+(defn- validate-service-base-url!
+  [base-url]
+  (when (str/blank? (or base-url ""))
+    (throw (ex-info "Service base URL is required"
+                    {:field "base_url"})))
+  (let [uri (try
+              (URI. base-url)
+              (catch Exception e
+                (throw (ex-info "Service base URL must be a valid absolute HTTPS URL"
+                                {:field "base_url"
+                                 :value base-url}
+                                e))))
+        scheme (some-> (.getScheme uri) str/lower-case)
+        host   (.getHost uri)]
+    (when-not (and (= "https" scheme)
+                   (some? host))
+      (throw (ex-info "Service base URL must use HTTPS"
+                      {:field "base_url"
+                       :value base-url})))
+    base-url))
+
 (defn save-service!
   [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?
            autonomous-approved?] :as service}]
-  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
+  (let [base-url (validate-service-base-url! base-url)
+        eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current (when eid (raw-entity eid))
         rate-limit-per-minute (or (:service/rate-limit-per-minute service)
                                   (:rate-limit-per-minute service))

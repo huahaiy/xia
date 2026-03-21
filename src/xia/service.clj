@@ -33,6 +33,24 @@
 ;; URL safety
 ;; ---------------------------------------------------------------------------
 
+(defn- https-service-base-url?
+  [base-url]
+  (try
+    (let [uri    (java.net.URI. (or base-url ""))
+          scheme (some-> (.getScheme uri) str/lower-case)
+          host   (.getHost uri)]
+      (and (= "https" scheme)
+           (some? host)))
+    (catch Exception _
+      false)))
+
+(defn- ensure-https-service-base-url!
+  [service-id base-url]
+  (when-not (https-service-base-url? base-url)
+    (throw (ex-info (str "Service " (name service-id) " base URL must use HTTPS")
+                    {:service-id service-id
+                     :base-url   base-url}))))
+
 (defn- safe-resolve-url
   "Resolve a path against a base URL. Rejects absolute URLs, path traversal,
    and anything that would escape the base URL."
@@ -173,6 +191,7 @@
     (when-not (:service/enabled? svc)
       (throw (ex-info (str "Service " (name service-id) " is disabled")
                       {:service-id service-id})))
+    (ensure-https-service-base-url! service-id (:service/base-url svc))
     (let [auth-type (:service/auth-type svc)
           oauth-account-id (:service/oauth-account svc)]
       {:base-url      (:service/base-url svc)

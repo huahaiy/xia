@@ -169,10 +169,41 @@
 ;; Service resolution
 ;; ---------------------------------------------------------------------------
 
+(deftest register-service-requires-https-base-url
+  (testing "rejects insecure public HTTP services"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"must use HTTPS"
+          (db/register-service! {:id        :insecure
+                                 :base-url  "http://api.example.com"
+                                 :auth-type :bearer
+                                 :auth-key  "tok"})))
+    (is (nil? (db/get-service :insecure))))
+  (testing "allow-private-network does not bypass HTTPS"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"must use HTTPS"
+          (db/register-service! {:id                     :insecure-private
+                                 :base-url               "http://127.0.0.1:8080"
+                                 :auth-type              :bearer
+                                 :auth-key               "tok"
+                                 :allow-private-network? true})))
+    (is (nil? (db/get-service :insecure-private)))))
+
 (deftest resolve-service-unknown
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo #"Unknown service"
         (#'service/resolve-service :nonexistent))))
+
+(deftest resolve-service-rejects-insecure-base-url
+  (with-redefs [xia.db/get-service (fn [_]
+                                     {:service/id       :legacy-http
+                                      :service/name     "Legacy HTTP"
+                                      :service/base-url "http://legacy.example"
+                                      :service/auth-type :bearer
+                                      :service/auth-key "tok"
+                                      :service/enabled? true})]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"base URL must use HTTPS"
+          (#'service/resolve-service :legacy-http)))))
 
 (deftest resolve-service-disabled
   (db/register-service! {:id :disabled-svc :base-url "https://example.com"
@@ -240,7 +271,7 @@
 
 (deftest request-blocks-private-base-url-by-default
   (db/register-service! {:id        :private-svc
-                         :base-url  "http://127.0.0.1:8080"
+                         :base-url  "https://127.0.0.1:8443"
                          :auth-type :bearer
                          :auth-key  "tok"})
   (with-redefs [xia.http-client/send-request! (fn [_]
@@ -251,7 +282,7 @@
 
 (deftest request-allows-private-base-url-when-explicitly-configured
   (db/register-service! {:id                     :private-svc
-                         :base-url               "http://127.0.0.1:8080"
+                         :base-url               "https://127.0.0.1:8443"
                          :auth-type              :bearer
                          :auth-key               "tok"
                          :allow-private-network? true})
