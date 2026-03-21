@@ -232,39 +232,24 @@ Rules:
   "For matched nodes, pull facts and one-hop edges.
    Returns additional nodes that are connected to matched nodes."
   [node-eids]
-  (reduce
-    (fn [acc eid]
-      (let [edges  (memory/node-edges eid)
-            ;; Get connected node eids from edges
-            connected (into [] (map first)
-                            (db/q '[:find ?to
-                                    :in $ ?from
-                                    :where [?e :kg.edge/from ?from]
-                                           [?e :kg.edge/to ?to]]
-                                  eid))
-            incoming  (into [] (map first)
-                            (db/q '[:find ?from
-                                    :in $ ?to
-                                    :where [?e :kg.edge/to ?to]
-                                           [?e :kg.edge/from ?from]]
-                                  eid))
-            all-connected (into [] (comp cat (distinct)) [connected incoming])]
-        (reduce (fn [a c-eid]
-                  (if (contains? a c-eid)
-                    a ; already known
-                    (let [node (memory/get-node c-eid)]
-                      (assoc a c-eid {:node-eid c-eid
-                                      :name     (:kg.node/name node)
-                                      :type     (:kg.node/type node)
-                                      :expanded? true}))))
-                acc
-                all-connected)))
-    {}
-    node-eids))
+  (memory/connected-node-summaries node-eids))
 
 ;; ============================================================================
 ;; Stage 4: Working Memory Merge, Decay, Eviction
 ;; ============================================================================
+
+(defn- boost-relevance
+  ^double
+  [existing boost]
+  (let [existing* (-> (double (or existing 0.0))
+                      (clojure.core/max 0.0)
+                      (clojure.core/min 1.0))
+        boost*    (-> (double (or boost 0.0))
+                      (clojure.core/max 0.0)
+                      (clojure.core/min 1.0))]
+    ;; Refreshes should strengthen active slots without letting them get pinned
+    ;; at 1.0 under repeated mention-plus-decay cycles.
+    (+ existing* (* (- 1.0 existing*) boost*))))
 
 (defn- merge-node-into-slot
   "Merge a search result node into WM, refreshing or creating a slot."
@@ -272,9 +257,8 @@ Rules:
   (if-let [existing (get slots node-eid)]
     ;; Refresh: boost relevance
     (assoc slots node-eid
-           (assoc existing :relevance (clojure.core/min 1.0
-                                                        (+ (double (:relevance existing))
-                                                           (double relevance)))))
+           (assoc existing :relevance (boost-relevance (:relevance existing)
+                                                       relevance)))
     ;; New slot
     (assoc slots node-eid
            {:node-eid   node-eid
@@ -352,7 +336,7 @@ Rules:
 	                      (if (contains? slots node-eid)
 	                        ;; Boost existing slot
 	                        (update-in slots [node-eid :relevance]
-	                                   #(clojure.core/min 1.0 (+ (double %) 0.3)))
+	                                   #(boost-relevance % 0.3))
                         ;; Add the node
                         (let [node (memory/get-node node-eid)]
                           (merge-node-into-slot

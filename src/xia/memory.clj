@@ -474,6 +474,42 @@
                        {:source name :type type :label (empty->nil label)})
                      incoming)}))
 
+(defn connected-node-summaries
+  "Return one-hop neighboring nodes for the given seed node eids.
+   Uses bulk queries so graph expansion does not issue per-node edge lookups
+   and per-neighbor entity fetches."
+  [node-eids]
+  (if-not (seq node-eids)
+    {}
+    (let [seed-eids (vec (distinct node-eids))
+          seed-set  (set seed-eids)
+          outgoing  (db/q '[:find ?neighbor ?name ?type
+                            :in $ [?seed ...]
+                            :where
+                            [?edge :kg.edge/from ?seed]
+                            [?edge :kg.edge/to ?neighbor]
+                            [?neighbor :kg.node/name ?name]
+                            [?neighbor :kg.node/type ?type]]
+                          seed-eids)
+          incoming  (db/q '[:find ?neighbor ?name ?type
+                            :in $ [?seed ...]
+                            :where
+                            [?edge :kg.edge/to ?seed]
+                            [?edge :kg.edge/from ?neighbor]
+                            [?neighbor :kg.node/name ?name]
+                            [?neighbor :kg.node/type ?type]]
+                          seed-eids)]
+      (reduce (fn [acc [neighbor-eid name type]]
+                (if (contains? seed-set neighbor-eid)
+                  acc
+                  (assoc acc neighbor-eid
+                         {:node-eid  neighbor-eid
+                          :name      name
+                          :type      type
+                          :expanded? true})))
+              {}
+              (concat outgoing incoming)))))
+
 ;; --- Facts (atomic knowledge attached to nodes) ---
 
 (defn add-fact!

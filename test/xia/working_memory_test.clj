@@ -135,6 +135,32 @@
               :local-docs []}
              results)))))
 
+(deftest expand-graph-bulk-loads-neighbors
+  (let [seed-a   (th/seed-node! "SeedA" "concept")
+        seed-b   (th/seed-node! "SeedB" "concept")
+        friend   (th/seed-node! "Friend" "concept")
+        parent   (th/seed-node! "Parent" "concept")
+        q-calls  (atom 0)
+        node-loads (atom 0)
+        orig-q   xia.db/q]
+    (memory/add-edge! {:from-eid seed-a :to-eid friend :type :related-to})
+    (memory/add-edge! {:from-eid parent :to-eid seed-a :type :related-to})
+    (memory/add-edge! {:from-eid seed-a :to-eid seed-b :type :related-to})
+    (with-redefs [xia.db/q (fn [query & inputs]
+                             (swap! q-calls inc)
+                             (apply orig-q query inputs))
+                  xia.memory/get-node (fn [& _]
+                                        (swap! node-loads inc)
+                                        nil)]
+      (let [expanded (wm/expand-graph [seed-a seed-b])]
+        (is (= #{friend parent}
+               (set (keys expanded))))
+        (is (= "Friend" (:name (get expanded friend))))
+        (is (= "Parent" (:name (get expanded parent))))
+        (is (every? :expanded? (vals expanded)))
+        (is (= 2 @q-calls))
+        (is (= 0 @node-loads))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Slot merge with properties
 ;; ---------------------------------------------------------------------------
@@ -209,6 +235,25 @@
           "Pinned slot should not decay"))
 
     (wm/clear-wm! sid)))
+
+(deftest test-refresh-boost-does-not-pin-slot
+  (let [node-eid        (th/seed-node! "Sticky" "concept")
+        merge-slot      #'xia.working-memory/merge-node-into-slot
+        decay-slot-map  #'xia.working-memory/decay-slot-map
+        step            (fn [slots]
+                          (-> slots
+                              (merge-slot node-eid "Sticky" :concept 0.8 1)
+                              (decay-slot-map 0.85)))
+        relevances      (->> {}
+                             (iterate step)
+                             (drop 1)
+                             (take 12)
+                             (map #(double (get-in % [node-eid :relevance])))
+                             vec)]
+    (is (every? #(< % 1.0) relevances))
+    (is (< (last relevances) 0.85))
+    (is (> (last relevances) 0.75))
+    (is (> (last relevances) (first relevances)))))
 
 (deftest merge-bounded-refs-dedupes-and-stays-capped
   (let [merge-refs #'xia.working-memory/merge-bounded-refs]
