@@ -70,6 +70,49 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest process-message-can-be-cancelled
+  (let [session-id (db/create-session! :terminal)
+        started    (promise)
+        statuses   (atom [])]
+    (prompt/register-status! :terminal
+                             (fn [status]
+                               (swap! statuses conj (select-keys status
+                                                                 [:state :phase :message]))))
+    (try
+      (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.tool/tool-definitions          (constantly [])
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.llm/chat-simple                (fn [_messages & _opts]
+                                                         (deliver started true)
+                                                         (Thread/sleep 10000)
+                                                         "done")]
+        (let [result (future
+                       (try
+                         (agent/process-message session-id "cancel me" :channel :terminal)
+                         (catch Exception e
+                           e)))]
+          (is (= true (deref started 1000 ::timeout)))
+          (is (true? (agent/cancel-session! session-id "user requested cancel")))
+          (let [err (deref result 1000 ::timeout)]
+            (is (instance? clojure.lang.ExceptionInfo err))
+            (is (= {:type :request-cancelled
+                    :status 499
+                    :error "request cancelled"
+                    :session-id session-id
+                    :reason "user requested cancel"}
+                   (select-keys (ex-data err)
+                                [:type :status :error :session-id :reason]))))))
+      (is (= {:state :cancelled
+              :phase :cancelled
+              :message "Request cancelled"}
+             (last @statuses)))
+      (finally
+        (prompt/register-status! :terminal nil)))))
+
 (deftest process-message-propagates-request-trace-to-status-and-checkpoints
   (let [session-id   (db/create-session! :scheduler)
         statuses     (atom [])
@@ -659,6 +702,45 @@
         (is (= 2 (count @started)))
         (is (some #(str/includes? % "What to do:\nslow branch") @started))
         (is (some #(str/includes? % "What to do:\nfast branch") @started))))))
+
+(deftest run-branch-tasks-timeout-interrupts-child-process-message
+  (let [parent-session-id (db/create-session! :terminal)
+        started           (promise)
+        stopped           (promise)]
+    (db/set-config! :agent/branch-task-timeout-ms 50)
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-simple                (fn [_messages & _opts]
+                                                       (deliver started true)
+                                                       (try
+                                                         (Thread/sleep 10000)
+                                                         "done"
+                                                         (finally
+                                                           (deliver stopped true))))]
+      (let [result (future
+                     (try
+                       (agent/run-branch-tasks
+                        [{:task "slow" :prompt "slow branch"}]
+                        :session-id parent-session-id
+                        :max-parallel 1)
+                       (catch Exception e
+                         e)))]
+        (is (= true (deref started 1000 ::timeout)))
+        (let [err (deref result 1000 ::timeout)]
+          (is (instance? clojure.lang.ExceptionInfo err))
+          (is (re-find #"Branch task timed out: slow"
+                       (.getMessage ^Exception err)))
+          (is (= {:type :branch-task-timeout
+                  :timeout-ms 50
+                  :task "slow"}
+                 (select-keys (ex-data err)
+                              [:type :timeout-ms :task]))))
+        (is (= true (deref stopped 1000 ::timeout)))))))
 
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)

@@ -480,6 +480,32 @@
                                [(get-else $ ?s :session/active? false) ?active]]
                              sid))))))))
 
+(deftest close-session-route-cancels-busy-rest-session
+  (let [sid       (db/create-session! :http)
+        cancelled (atom nil)
+        finalized (atom false)]
+    (swap! @#'xia.channel.http/session-statuses
+           assoc
+           (str sid)
+           {:state :running
+            :message "Calling model"})
+    (try
+      (with-redefs [xia.agent/cancel-session! (fn [session-id reason]
+                                                (reset! cancelled [session-id reason])
+                                                true)
+                    xia.channel.http/finalize-rest-session! (fn [& _]
+                                                              (reset! finalized true)
+                                                              true)]
+        (let [response (#'http/handle-close-session (str sid))
+              body     (response-json response)]
+          (is (= 202 (:status response)))
+          (is (= [(str sid) "session close requested"] @cancelled))
+          (is (= "cancelling" (get body "status")))
+          (is (= true (get body "closing")))
+          (is (false? @finalized))))
+      (finally
+        (swap! @#'xia.channel.http/session-statuses dissoc (str sid))))))
+
 (deftest chat-route-validates-required-message
   (let [response (#'http/router {:uri            "/chat"
                                  :request-method :post

@@ -666,7 +666,7 @@
 
 (defn- terminal-status-state?
   [state]
-  (contains? #{:done :error} state))
+  (contains? #{:done :error :cancelled} state))
 
 (defn- http-status-handler
   [{:keys [session-id state] :as status}]
@@ -1325,7 +1325,12 @@
     (json-response 404 {:error "session not found"})
 
     (session-busy? session-id)
-    (json-response 409 {:error "session is still processing a request"})
+    (if (agent/cancel-session! (parse-session-id session-id)
+                               "session close requested")
+      (json-response 202 {:session_id (parse-session-id session-id)
+                          :status     "cancelling"
+                          :closing    true})
+      (json-response 409 {:error "session is still processing a request"}))
 
     :else
     (let [closed? (finalize-rest-session! session-id :explicit)]
