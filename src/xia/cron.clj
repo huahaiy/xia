@@ -11,7 +11,7 @@
 
    Day matching follows standard cron semantics: if both :dom and :dow
    are restricted, match on EITHER (OR)."
-  (:import [java.time LocalDateTime ZoneId]))
+  (:import [java.time DayOfWeek LocalDateTime ZoneId]))
 
 ;; ---------------------------------------------------------------------------
 ;; Defaults
@@ -84,16 +84,27 @@
 ;; Next-run calculation
 ;; ---------------------------------------------------------------------------
 
+(def ^:private cron-dow-by-java-dow
+  {DayOfWeek/SUNDAY    0
+   DayOfWeek/MONDAY    1
+   DayOfWeek/TUESDAY   2
+   DayOfWeek/WEDNESDAY 3
+   DayOfWeek/THURSDAY  4
+   DayOfWeek/FRIDAY    5
+   DayOfWeek/SATURDAY  6})
+
 (defn- java-dow->cron
-  "Convert java.time DayOfWeek (1=Mon..7=Sun) to cron-style (0=Sun..6=Sat)."
+  "Convert java.time DayOfWeek to cron-style (0=Sun..6=Sat)."
   [java-dow]
-  (mod java-dow 7))
+  (or (get cron-dow-by-java-dow java-dow)
+      (throw (ex-info "Unsupported java.time.DayOfWeek value"
+                      {:value java-dow}))))
 
 (defn- day-matches?
   "Standard cron day semantics: if both DOM and DOW are restricted, match EITHER."
   [{:keys [dom dow dom-restricted? dow-restricted?]} ^LocalDateTime t]
   (let [dom-match? (contains? dom (.getDayOfMonth t))
-        dow-match? (contains? dow (java-dow->cron (.getValue (.getDayOfWeek t))))]
+        dow-match? (contains? dow (java-dow->cron (.getDayOfWeek t)))]
     (cond
       (and (not dom-restricted?) (not dow-restricted?)) true
       (not dom-restricted?) dow-match?
