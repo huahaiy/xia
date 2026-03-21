@@ -147,7 +147,7 @@ const knowledgeHalfLifeDaysEl = document.getElementById('knowledge-half-life-day
 const knowledgeMinConfidenceEl = document.getElementById('knowledge-min-confidence');
 const knowledgeMaintenanceIntervalDaysEl = document.getElementById('knowledge-maintenance-interval-days');
 const knowledgeArchiveAfterBottomDaysEl = document.getElementById('knowledge-archive-after-bottom-days');
-const knowledgeStatusEl = document.getElementById('knowledge-status');
+const knowledgeDecayStatusEl = document.getElementById('knowledge-decay-status');
 const saveKnowledgeDecayEl = document.getElementById('save-knowledge-decay');
 const localDocModelSummariesEnabledEl = document.getElementById('local-doc-model-summaries-enabled');
 const localDocModelSummaryBackendEl = document.getElementById('local-doc-model-summary-backend');
@@ -338,6 +338,28 @@ function setStatus(text) {
   syncStatus();
 }
 
+function safeFetch(url, options) {
+  const opts = Object.assign({}, options);
+  opts.headers = Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, opts.headers || {});
+  return fetch(url, opts);
+}
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+const _pending = {};
+function dedup(key, fn) {
+  if (_pending[key]) return _pending[key];
+  const promise = fn().finally(() => { delete _pending[key]; });
+  _pending[key] = promise;
+  return promise;
+}
+
 function prettyJson(value) {
   try {
     return JSON.stringify(value == null ? {} : value, null, 2);
@@ -365,7 +387,7 @@ async function copyText(text, successLabel) {
 }
 
 async function fetchJson(url, options) {
-  const response = await fetch(url, options || {});
+  const response = await safeFetch(url, options || {});
   const data = await response.json();
   if (!response.ok) {
     throw new Error(data.error || 'Request failed');
@@ -378,7 +400,7 @@ function firstNonEmpty(value, fallback) {
 }
 
 function renderSelectableList(target, items, activeId, emptyText, titleFn, metaFn, onSelect) {
-  target.innerHTML = '';
+  target.replaceChildren();
   if (!items.length) {
     const empty = document.createElement('div');
     empty.className = 'admin-list-empty';
@@ -398,13 +420,18 @@ function renderSelectableList(target, items, activeId, emptyText, titleFn, metaF
     meta.textContent = metaFn(item);
     button.appendChild(title);
     button.appendChild(meta);
-    button.addEventListener('click', () => onSelect(item));
+    button.addEventListener('click', () => {
+      const result = onSelect(item);
+      if (result && typeof result.catch === 'function') {
+        result.catch((err) => console.error('Selection handler failed:', err));
+      }
+    });
     target.appendChild(button);
   });
 }
 
 function renderCapabilityList(target, items, emptyText, detailFn) {
-  target.innerHTML = '';
+  target.replaceChildren();
   if (!items.length) {
     const empty = document.createElement('div');
     empty.className = 'admin-list-empty';
@@ -513,7 +540,7 @@ function remoteBadge(label, off) {
 }
 
 function renderRemoteDevices() {
-  remoteDeviceListEl.innerHTML = '';
+  remoteDeviceListEl.replaceChildren();
   const devices = Array.isArray(state.admin.remoteDevices) ? state.admin.remoteDevices : [];
   if (!devices.length) {
     const empty = document.createElement('div');
@@ -569,7 +596,7 @@ function renderRemoteDevices() {
 }
 
 function renderRemoteEvents() {
-  remoteEventListEl.innerHTML = '';
+  remoteEventListEl.replaceChildren();
   const events = Array.isArray(state.admin.remoteEvents) ? state.admin.remoteEvents : [];
   if (!events.length) {
     const empty = document.createElement('div');
@@ -641,7 +668,7 @@ function buildRemoteSnapshotCard(titleText, lines, badgeText, badgeOff) {
 }
 
 function renderRemoteSnapshot() {
-  remoteSnapshotListEl.innerHTML = '';
+  remoteSnapshotListEl.replaceChildren();
   const snapshot = state.admin.remoteSnapshot || null;
   if (!snapshot) {
     const empty = document.createElement('div');
@@ -899,7 +926,7 @@ function buildKnowledgeFactEl(fact) {
 }
 
 function renderKnowledgeFacts() {
-  knowledgeFactListEl.innerHTML = '';
+  knowledgeFactListEl.replaceChildren();
   if (!state.activeKnowledgeNodeId) {
     const empty = document.createElement('div');
     empty.className = 'admin-list-empty';
@@ -948,7 +975,7 @@ function renderHistoryScheduleList() {
 }
 
 function renderHistorySessionMessages() {
-  historySessionMessagesEl.innerHTML = '';
+  historySessionMessagesEl.replaceChildren();
   if (!state.history.activeSessionId) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -1037,7 +1064,7 @@ function buildHistoryRunEl(run) {
 }
 
 function renderHistoryScheduleRuns() {
-  historyScheduleRunsEl.innerHTML = '';
+  historyScheduleRunsEl.replaceChildren();
   if (!state.history.activeScheduleId) {
     const empty = document.createElement('div');
     empty.className = 'admin-list-empty';
@@ -1132,7 +1159,7 @@ function renderOauthAccountList() {
 
 function renderOauthTemplateOptions() {
   const selected = oauthTemplateEl.value;
-  oauthTemplateEl.innerHTML = '';
+  oauthTemplateEl.replaceChildren();
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = 'Custom';
@@ -1152,7 +1179,7 @@ function renderOauthTemplateOptions() {
 
 function renderOauthAccountOptions() {
   const previous = serviceOauthAccountEl.value;
-  serviceOauthAccountEl.innerHTML = '';
+  serviceOauthAccountEl.replaceChildren();
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = 'None';
@@ -1276,7 +1303,7 @@ function renderKnowledgeDecaySettings() {
   knowledgeMinConfidenceEl.value = settings.min_confidence ?? '';
   knowledgeMaintenanceIntervalDaysEl.value = settings.maintenance_interval_days || '';
   knowledgeArchiveAfterBottomDaysEl.value = settings.archive_after_bottom_days || '';
-  knowledgeStatusEl.textContent = 'Tune how quickly stale fact confidence fades after the grace period.';
+  knowledgeDecayStatusEl.textContent = 'Tune how quickly stale fact confidence fades after the grace period.';
   updateAdminButtons();
 }
 
@@ -1293,7 +1320,7 @@ function defaultLocalDocSummarizationStatus() {
 
 function renderLocalDocSummarizationProviderOptions() {
   const selected = localDocModelSummaryProviderIdEl.value;
-  localDocModelSummaryProviderIdEl.innerHTML = '';
+  localDocModelSummaryProviderIdEl.replaceChildren();
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = 'Default provider';
@@ -1541,6 +1568,9 @@ async function loadHistorySessionMessages(sessionId) {
 }
 
 async function loadHistorySessions() {
+  return dedup('loadHistorySessions', loadHistorySessionsImpl);
+}
+async function loadHistorySessionsImpl() {
   historySessionStatusEl.textContent = 'Loading sessions...';
   try {
     const data = await fetchJson('/history/sessions');
@@ -1611,6 +1641,9 @@ async function loadHistoryScheduleRuns(scheduleId) {
 }
 
 async function loadHistorySchedules() {
+  return dedup('loadHistorySchedules', loadHistorySchedulesImpl);
+}
+async function loadHistorySchedulesImpl() {
   historyScheduleStatusEl.textContent = 'Loading schedules...';
   try {
     const data = await fetchJson('/history/schedules');
@@ -1761,6 +1794,9 @@ async function forgetKnowledgeFact(fact) {
 }
 
 async function loadAdminConfig() {
+  return dedup('loadAdminConfig', loadAdminConfigImpl);
+}
+async function loadAdminConfigImpl() {
   try {
     const data = await fetchJson('/admin/config');
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
@@ -1925,7 +1961,7 @@ async function importOpenClawSkill() {
       skill: data.skill || null
     };
     await loadAdminConfig();
-    const importedName = firstNonEmpty(data.skill && data.skill.name, data.import && data.import.name, 'skill');
+    const importedName = firstNonEmpty(data.skill && data.skill.name, firstNonEmpty(data.import && data.import.name, 'skill'));
     const warningCount = Array.isArray(data.import && data.import.warnings) ? data.import.warnings.length : 0;
     state.openclawImportStatus = warningCount
       ? ('Imported ' + importedName + ' with ' + warningCount + ' ' + pluralize(warningCount, 'warning') + '.')
@@ -2088,7 +2124,7 @@ async function saveConversationContext() {
 async function saveKnowledgeDecay() {
   if (state.knowledgeDecaySaving) return;
   state.knowledgeDecaySaving = true;
-  knowledgeStatusEl.textContent = 'Saving...';
+  knowledgeDecayStatusEl.textContent = 'Saving...';
   updateAdminButtons();
   try {
     const data = await fetchJson('/admin/knowledge-decay', {
@@ -2104,10 +2140,10 @@ async function saveKnowledgeDecay() {
     });
     state.admin.knowledgeDecay = data.knowledge_decay || state.admin.knowledgeDecay;
     renderKnowledgeDecaySettings();
-    knowledgeStatusEl.textContent = 'Knowledge decay settings saved.';
+    knowledgeDecayStatusEl.textContent = 'Knowledge decay settings saved.';
     setStatus('Knowledge decay settings saved');
   } catch (err) {
-    knowledgeStatusEl.textContent = err.message || 'Failed to save.';
+    knowledgeDecayStatusEl.textContent = err.message || 'Failed to save.';
   } finally {
     state.knowledgeDecaySaving = false;
     updateAdminButtons();
@@ -2438,7 +2474,7 @@ function buildMessageEl(message) {
   body.className = 'message-body';
   if (message.role === 'assistant' && typeof marked !== 'undefined') {
     const raw = marked.parse(message.content);
-    body.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(raw) : raw.replace(/</g, '&lt;');
+    body.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(raw) : escapeHtml(raw);
   } else {
     body.textContent = message.content;
   }
@@ -2476,14 +2512,14 @@ function addMessage(role, content, extra) {
   }, extra || {});
   state.messages.push(message);
   if (state.messages.length === 1) {
-    messagesEl.innerHTML = '';
+    messagesEl.replaceChildren();
   }
   messagesEl.appendChild(buildMessageEl(message));
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function renderMessages() {
-  messagesEl.innerHTML = '';
+  messagesEl.replaceChildren();
   if (!state.messages.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -2575,7 +2611,7 @@ function upsertLocalDocMeta(doc) {
 }
 
 function renderLocalDocList() {
-  localDocListEl.innerHTML = '';
+  localDocListEl.replaceChildren();
   if (!state.localDocs.length) {
     const empty = document.createElement('div');
     empty.className = 'scratch-empty';
@@ -2672,7 +2708,7 @@ function upsertArtifactMeta(artifact) {
 }
 
 function renderArtifactList() {
-  artifactListEl.innerHTML = '';
+  artifactListEl.replaceChildren();
   if (!state.artifacts.length) {
     const empty = document.createElement('div');
     empty.className = 'scratch-empty';
@@ -2766,7 +2802,7 @@ function upsertScratchMeta(pad) {
 }
 
 function renderScratchList() {
-  scratchListEl.innerHTML = '';
+  scratchListEl.replaceChildren();
   if (!state.scratchPads.length) {
     const empty = document.createElement('div');
     empty.className = 'scratch-empty';
@@ -2821,7 +2857,7 @@ function discardScratchChanges() {
 
 async function ensureSession() {
   if (state.sessionId) return state.sessionId;
-  const response = await fetch('/sessions', { method: 'POST' });
+  const response = await safeFetch('/sessions', { method: 'POST' });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Failed to create session');
   state.sessionId = data.session_id || '';
@@ -2983,7 +3019,7 @@ async function loadScratchPads(options) {
     return;
   }
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads');
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads');
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load');
     state.scratchPads = Array.isArray(data.pads) ? data.pads : [];
@@ -3006,7 +3042,7 @@ async function loadScratchPad(padId, bypassDirtyCheck) {
   if (!padId) return;
   if (!bypassDirtyCheck && !discardScratchChanges()) return;
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads/' + encodeURIComponent(padId));
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads/' + encodeURIComponent(padId));
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load');
     state.activePadId = padId;
@@ -3028,7 +3064,7 @@ async function saveScratchPad() {
   state.scratchSaving = true;
   syncScratchEditor('Saving...');
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads/' + encodeURIComponent(state.activePad.id), {
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads/' + encodeURIComponent(state.activePad.id), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3057,7 +3093,7 @@ async function deleteScratchPad() {
   if (!window.confirm('Delete this note?')) return;
   try {
     const deletingId = state.activePad.id;
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads/' + encodeURIComponent(deletingId), { method: 'DELETE' });
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/scratch-pads/' + encodeURIComponent(deletingId), { method: 'DELETE' });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to delete');
     state.scratchPads = state.scratchPads.filter((pad) => pad.id !== deletingId);
@@ -3187,7 +3223,7 @@ function downloadFilenameFromHeaders(headers, fallback) {
 async function downloadArtifact() {
   if (!state.activeArtifact || !state.sessionId) return;
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId)
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId)
       + '/artifacts/' + encodeURIComponent(state.activeArtifact.id)
       + '/download');
     if (!response.ok) {
@@ -3234,6 +3270,8 @@ async function deleteArtifact() {
   }
 }
 
+let _pollFailures = 0;
+
 async function pollApproval() {
   if (!state.sessionId) {
     state.pendingApproval = null;
@@ -3242,13 +3280,19 @@ async function pollApproval() {
     return;
   }
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval');
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval');
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load');
     state.pendingApproval = data.pending ? (data.approval || null) : null;
+    _pollFailures = 0;
     renderApproval();
     syncStatus();
-  } catch (_err) {}
+  } catch (err) {
+    _pollFailures++;
+    if (_pollFailures >= 5 && !state.sending) {
+      setStatus('Connection lost — retrying...');
+    }
+  }
 }
 
 async function pollStatus() {
@@ -3258,10 +3302,14 @@ async function pollStatus() {
     return;
   }
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/status');
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/status');
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load');
     state.liveStatus = data.status || null;
+    if (_pollFailures >= 5) {
+      _pollFailures = 0;
+      setStatus('Reconnected');
+    }
     syncStatus();
   } catch (_err) {}
 }
@@ -3271,7 +3319,7 @@ async function submitApproval(decision) {
   state.approvalSubmitting = true;
   renderApproval();
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval', {
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3317,7 +3365,7 @@ async function sendMessage(text, options) {
     if (state.sessionId) payload.session_id = state.sessionId;
     if (localDocIds.length) payload.local_doc_ids = localDocIds;
     if (artifactIds.length) payload.artifact_ids = artifactIds;
-    const responsePromise = fetch('/chat', {
+    const responsePromise = safeFetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -3354,7 +3402,7 @@ async function loadSessionMessages() {
     return;
   }
   try {
-    const response = await fetch('/sessions/' + encodeURIComponent(state.sessionId) + '/messages');
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/messages');
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Failed to load');
     state.messages = Array.isArray(data.messages)
@@ -3572,16 +3620,42 @@ renderCapabilities();
 updateAdminButtons();
 updateComposerState();
 composerEl.focus();
-loadSessionMessages();
-loadLocalDocs();
-loadArtifacts();
-loadScratchPads();
-loadAdminConfig();
-loadHistorySessions();
-loadHistorySchedules();
-window.setInterval(() => {
+Promise.all([
+  loadSessionMessages(),
+  loadLocalDocs(),
+  loadArtifacts(),
+  loadScratchPads(),
+  loadAdminConfig(),
+  loadHistorySessions(),
+  loadHistorySchedules()
+]).catch(() => {
+  setStatus('Some data failed to load — check your connection');
+});
+let _pollIntervalId = window.setInterval(() => {
   if (state.sessionId) {
     pollApproval();
     if (state.sending) pollStatus();
   }
 }, 1000);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (_pollIntervalId) {
+      window.clearInterval(_pollIntervalId);
+      _pollIntervalId = null;
+    }
+  } else {
+    if (!_pollIntervalId) {
+      _pollIntervalId = window.setInterval(() => {
+        if (state.sessionId) {
+          pollApproval();
+          if (state.sending) pollStatus();
+        }
+      }, 1000);
+    }
+    if (state.sessionId) {
+      pollApproval();
+      if (state.sending) pollStatus();
+    }
+  }
+});

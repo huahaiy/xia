@@ -10,8 +10,8 @@
   <link rel="apple-touch-icon" sizes="180x180" href="favicon/apple-touch-icon.png">
   <link rel="manifest" href="favicon/site.webmanifest">
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
 </head>
 <body>
   <div class="shell">
@@ -375,7 +375,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="knowledge-status">Loading knowledge decay settings...</div>
+                <div class="admin-status" id="knowledge-decay-status">Loading knowledge decay settings...</div>
                 <button type="button" class="primary" id="save-knowledge-decay">Save decay</button>
               </div>
             </div>
@@ -787,7 +787,7 @@
         </section>
       </div>
 
-      <footer class="hero" style="grid-template-columns:1fr; text-align:center; padding:40px 0; opacity:0.6; pointer-events:none;">
+      <footer class="hero footer">
         <p class="lead">Xia v0.1.0 • Built for local work with online power.</p>
       </footer>
     </div>
