@@ -127,6 +127,12 @@
   []
   @registry)
 
+(defn reset-runtime!
+  "Clear runtime-only tool state so a fresh load can rebuild handlers."
+  []
+  (reset! registry {})
+  (reset! session-approvals {}))
+
 (defn clear-session-approvals!
   "Clear cached approval decisions for a session."
   [session-id]

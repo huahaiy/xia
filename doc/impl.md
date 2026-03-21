@@ -8,8 +8,7 @@ For a product overview and quick start, see the [README](../README.md).
 
 Xia is an **online-first** assistant. Its primary focus is the digital world beyond your local machine: web research, form automation, API orchestration, and maintaining a persistent knowledge graph of your digital life.
 
-Its product identity comes from the old Chinese Snail Maiden story
-(`田螺姑娘`). Xia (夏) is meant to feel less like a commanding operator and
+Its product identity comes from the old Snail Maiden story. Xia is meant to feel less like a commanding operator and
 more like a quiet household spirit for the online parts of a user's life:
 present, dependable, and attentive to details.
 

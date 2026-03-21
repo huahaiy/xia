@@ -1,7 +1,7 @@
 (ns xia.core
-  "Entry point for xia — a portable personal AI assistant.
+  "Entry point for Xia — a portable personal AI assistant.
 
-   A xia = single binary + Datalevin DB.
+   Xia = single binary + Datalevin DB.
    Download, run, answer a few questions, done."
   (:require [clojure.tools.cli :refer [parse-opts]]
             [taoensso.timbre :as log]
@@ -24,29 +24,36 @@
 ;; CLI options
 ;; ---------------------------------------------------------------------------
 
+(def default-run-options
+  {:db (str (System/getProperty "user.home") "/.xia/db")
+   :bind "127.0.0.1"
+   :port 3008
+   :mode "terminal"
+   :web-dev false})
+
 (def cli-options
   [["-d" "--db PATH" "Database path"
-    :default (str (System/getProperty "user.home") "/.xia/db")]
+    :default (:db default-run-options)]
    ["-b" "--bind HOST" "HTTP/WebSocket bind address (default: 127.0.0.1)"
-    :default "127.0.0.1"]
+    :default (:bind default-run-options)]
    ["-p" "--port PORT" "HTTP/WebSocket port"
-    :default 3008
+    :default (:port default-run-options)
     :parse-fn #(Integer/parseInt %)]
    ["-m" "--mode MODE" "Run mode: terminal, server, both"
-    :default "terminal"]
+    :default (:mode default-run-options)]
    [nil "--web-dev" "Enable live-reloading local web assets from resources/web"]
    ["-l" "--log-file PATH" "Write INFO+ logs to this file (or set XIA_LOG_FILE)"]
    ["-h" "--help" "Show help"]])
 
 (def pack-cli-options
   [["-d" "--db PATH" "Database path"
-    :default (str (System/getProperty "user.home") "/.xia/db")]
+    :default (:db default-run-options)]
    ["-f" "--force" "Overwrite existing archive"]
    ["-h" "--help" "Show help"]])
 
 (defn- print-help [summary]
   (println)
-  (println "xia — your portable personal assistant")
+  (println "Xia — your portable personal assistant")
   (println)
   (println "Usage: xia [archive.xia] [options]")
   (println)
@@ -67,7 +74,7 @@
 
 (defn- print-pack-help [summary]
   (println)
-  (println "xia pack — package a portable Xia archive")
+  (println "`xia pack` — package a portable Xia archive")
   (println)
   (println "Usage: xia pack [archive-path] [options]")
   (println)
@@ -122,7 +129,10 @@
                 (recur))))
           passphrase)))))
 
-(defn- start! [{:keys [db bind port mode crypto-opts web-dev]}]
+(declare make-cleanup)
+
+(defn- initialize-runtime!
+  [{:keys [db mode crypto-opts]}]
   (ensure-db-dir! db)
   (db/connect! db (merge {:passphrase-provider (startup-passphrase-provider mode)}
                          crypto-opts))
@@ -138,25 +148,54 @@
   (let [bundled-count (tool/ensure-bundled-tools!)]
     (when (pos? (long bundled-count))
       (log/info "Installed" bundled-count "bundled tools")))
+  (tool/reset-runtime!)
   (tool/load-all-tools!)
   (log/info "Loaded" (count (tool/registered-tools)) "tools,"
             (count (skill/all-enabled-skills)) "skills")
 
   ;; Start background scheduler
-  (scheduler/start!)
+  (scheduler/start!))
 
-  ;; Start channels based on mode
-  (case mode
-    "server"   (do (http/start! bind port {:web-dev? web-dev})
-                   (println (str "xia server running on " bind ":" port))
-                   (println (str "open " (local-ui-url bind port)))
-                   @(promise))
-    "both"     (do (http/start! bind port {:web-dev? web-dev})
-                   (println (str "xia server running on " bind ":" port))
-                   (println (str "open " (local-ui-url bind port)))
-                   (terminal/start!))
-    ;; default: terminal
-    (terminal/start!)))
+(defn start-server-runtime!
+  "Start Xia in non-blocking server mode for REPL-driven development."
+  [{:keys [bind port web-dev] :as options}]
+  (let [options* (merge default-run-options
+                        {:mode "server"}
+                        options)]
+    (initialize-runtime! options*)
+    (http/start! (or bind (:bind options*))
+                 (or port (:port options*))
+                 {:web-dev? (true? web-dev)})
+    (println (str "Xia server running on " (:bind options*) ":" (:port options*)))
+    (println (str "open " (local-ui-url (:bind options*) (:port options*))))
+    options*))
+
+(defn stop-runtime!
+  "Stop Xia runtime components that were started in the current process."
+  [options]
+  ((make-cleanup (merge default-run-options options))))
+
+(defn- start!
+  [options]
+  (let [options* (merge default-run-options options)]
+    (initialize-runtime! options*)
+
+    ;; Start channels based on mode
+    (case (:mode options*)
+      "server"   (do (http/start! (:bind options*)
+                                  (:port options*)
+                                  {:web-dev? (:web-dev options*)})
+                     (println (str "Xia server running on " (:bind options*) ":" (:port options*)))
+                     (println (str "open " (local-ui-url (:bind options*) (:port options*))))
+                     @(promise))
+      "both"     (do (http/start! (:bind options*)
+                                  (:port options*)
+                                  {:web-dev? (:web-dev options*)})
+                     (println (str "Xia server running on " (:bind options*) ":" (:port options*)))
+                     (println (str "open " (local-ui-url (:bind options*) (:port options*))))
+                     (terminal/start!))
+      ;; default: terminal
+      (terminal/start!))))
 
 (defn- resolve-run-options
   [options arguments]
@@ -165,7 +204,7 @@
     options
 
     (> (count arguments) 1)
-    (throw (ex-info "xia accepts at most one positional archive path"
+    (throw (ex-info "Xia accepts at most one positional archive path"
                     {:arguments arguments}))
 
     :else

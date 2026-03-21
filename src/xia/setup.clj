@@ -1,5 +1,5 @@
 (ns xia.setup
-  "First-run setup — interactive wizard that configures a new xia instance."
+  "First-run setup — interactive wizard that configures a new Xia instance."
   (:require [clojure.string :as str]
             [xia.db :as db]
             [xia.identity :as identity]))
@@ -26,7 +26,7 @@
 (defn- setup-identity! []
   (println)
   (println "=== Identity ===")
-  (let [name (prompt "What should I call myself?" "Xia (夏)")]
+  (let [name (prompt "What should I call myself?" "Xia")]
     (db/set-identity! :name name)
     (println (str "  → I am " name "."))))
 
@@ -55,7 +55,7 @@
     (println (str "  → Nice to meet you, " user-name "."))))
 
 (defn needs-setup?
-  "Check if this xia instance needs first-run setup."
+  "Check if this Xia instance needs first-run setup."
   []
   (nil? (db/get-config :setup/complete)))
 
@@ -64,7 +64,7 @@
   []
   (println)
   (println "╔══════════════════════════════════════╗")
-  (println "║     Welcome to Xia (夏) — v0.1.0    ║")
+  (println "║       Welcome to Xia — v0.1.0       ║")
   (println "║   Your portable personal assistant   ║")
   (println "╚══════════════════════════════════════╝")
   (println)
@@ -81,5 +81,5 @@
   (db/set-config! :setup/complete "true")
 
   (println)
-  (println "Setup complete! Starting xia...")
+  (println "Setup complete! Starting Xia...")
   (println))

@@ -1,5 +1,6 @@
 (ns xia.db-test
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.java.io :as io]
+            [clojure.test :refer [deftest is use-fixtures]]
             [xia.db :as db]
             [xia.test-helpers :as th]))
 
@@ -8,11 +9,21 @@
 (deftest default-datalevin-opts-use-xia-managed-nomic-provider
   (let [opts        (db/default-datalevin-opts)
         provider-id (get-in opts [:embedding-opts :provider])
-        provider    (get-in opts [:embedding-providers provider-id])]
-    (is (= :xia-default provider-id))
+        provider    (get-in opts [:embedding-providers provider-id])
+        domains     (:embedding-domains opts)]
+    (is (= :llama.cpp provider-id))
     (is (= :llama.cpp (:provider provider)))
     (is (= "nomic-embed-text-v2-moe-q8_0.gguf" (:model-filename provider)))
     (is (= 768 (get-in provider [:embedding-metadata :embedding/output :dimensions])))
+    (is (= #{db/episode-text-domain
+             db/kg-node-domain
+             db/kg-fact-domain
+             db/local-doc-domain
+             db/local-doc-chunk-domain
+             db/artifact-domain}
+           (set (keys domains))))
+    (is (every? #(= :llama.cpp (:provider %))
+                (vals domains)))
     (is (true? (:validate-data? opts)))
     (is (true? (:auto-entity-time? opts)))))
 
@@ -29,6 +40,36 @@
       (is (= :terminal (:session/channel entity)))
       (is (integer? (:db/created-at entity)))
       (is (instance? java.util.Date (:created-at session))))))
+
+(deftest connect-prefetches-managed-embedding-model-before-opening-db
+  (let [path      (str (java.nio.file.Files/createTempDirectory
+                         "xia-db-connect"
+                         (make-array java.nio.file.attribute.FileAttribute 0)))
+        calls     (atom [])
+        output    (with-out-str
+                    (with-redefs-fn {#'xia.db/download-file!
+                                     (fn [url target-path]
+                                       (swap! calls conj [:download url target-path])
+                                       (io/make-parents target-path)
+                                       (spit target-path "test-model")
+                                       target-path)
+                                     #'datalevin.core/get-conn
+                                     (fn [_db-path _schema _opts]
+                                       (swap! calls conj :get-conn)
+                                       ::conn)
+                                     #'xia.crypto/configure! (fn [& _] nil)
+                                     #'xia.db/init-embedding-provider! (fn [& _] nil)
+                                     #'xia.db/init-llm-provider! (fn [& _] nil)
+                                     #'xia.db/migrate-secrets! (fn [] nil)
+                                     #'datalevin.core/close (fn [_] nil)}
+                      #(try
+                         (db/connect! path {:local-llm-provider false
+                                            :passphrase-provider (constantly "xia-test-passphrase")})
+                         (finally
+                           (db/close!)))))]
+    (is (= [:download :get-conn]
+           (mapv #(if (vector? %) (first %) %) @calls)))
+    (is (.contains ^String output "Downloading Xia embedding model"))))
 
 (deftest providers-persist-vision-capability
   (db/upsert-provider! {:id       :openai

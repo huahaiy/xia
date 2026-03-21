@@ -1,7 +1,7 @@
 name: Release Binaries
 
 on:
-  push:
+  # push:
   workflow_dispatch:
   release:
     types:

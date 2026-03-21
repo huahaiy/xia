@@ -6,6 +6,7 @@
             [datalevin.core :as d]
             [datalevin.embedding :as emb]
             [datalevin.llm :as llm]
+            [taoensso.timbre :as log]
             [xia.crypto :as crypto]
             [xia.sensitive :as sensitive])
   (:import [java.io InputStream]
@@ -13,7 +14,7 @@
            [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
            [java.nio.file Files Path Paths StandardCopyOption]
            [java.nio.file.attribute FileAttribute]
-           [java.time Instant]
+           [java.time Duration Instant]
            [java.util UUID]))
 
 ;; ---------------------------------------------------------------------------
@@ -411,8 +412,10 @@
 (declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
-  ;; Keep Xia's provider key stable even if the underlying model changes.
-  :xia-default)
+  ;; Datalevin persists embedding domain provider ids and only accepts its
+  ;; built-in ids when reopening a store, so Xia's managed default must use
+  ;; the concrete provider keyword here.
+  :llama.cpp)
 
 (def ^:private default-embedding-model-file
   "nomic-embed-text-v2-moe-q8_0.gguf")
@@ -467,9 +470,21 @@
    :model-url default-llm-model-url
    :ctx-size 4096})
 
+(defn- default-embedding-domains
+  []
+  (->> schema
+       vals
+       (mapcat #(or (:db.embedding/domains %) []))
+       set
+       sort
+       (map (fn [domain]
+              [domain {:provider default-embedding-provider-id}]))
+       (into {})))
+
 (def ^:private default-datalevin-opts-map
   {:embedding-opts      {:provider default-embedding-provider-id
                          :metric-type :cosine}
+   :embedding-domains   (default-embedding-domains)
    :validate-data?      true
    :auto-entity-time?   true
    :embedding-providers {default-embedding-provider-id
@@ -530,6 +545,7 @@
 (defn- create-http-client
   []
   (-> (HttpClient/newBuilder)
+      (.connectTimeout (Duration/ofSeconds 20))
       (.followRedirects HttpClient$Redirect/NORMAL)
       (.build)))
 
@@ -560,6 +576,7 @@
         ^HttpRequest req   (-> (HttpRequest/newBuilder (URI/create url))
                                (.header "User-Agent" "xia")
                                (.header "Accept" "application/octet-stream")
+                               (.timeout (Duration/ofMinutes 30))
                                (.GET)
                                (.build))
         ^"[Ljava.nio.file.CopyOption;" copy-opts
@@ -581,8 +598,25 @@
             (Files/deleteIfExists tmp)
             (catch Exception _)))))))
 
+(defn- announce-managed-model-download!
+  [artifact-label provider-spec]
+  (let [model-path (or (:model provider-spec) (:model-path provider-spec))
+        model-id   (or (:model-id provider-spec)
+                       (:model-filename provider-spec)
+                       "managed-model")
+        message    (str "Downloading Xia "
+                        artifact-label
+                        " model "
+                        model-id
+                        " to "
+                        model-path
+                        ". This may take a few minutes the first time.")]
+    (log/info message)
+    (println message)
+    (flush)))
+
 (defn- ensure-managed-model!
-  [provider-spec lock]
+  [provider-spec lock artifact-label]
   (let [model-path (or (:model provider-spec) (:model-path provider-spec))]
     (cond
       (not (map? provider-spec))
@@ -596,12 +630,13 @@
       :else
       (locking lock
         (when-not (.exists (io/file model-path))
+          (announce-managed-model-download! artifact-label provider-spec)
           (download-file! (:model-url provider-spec) model-path))
         provider-spec))))
 
 (defn- ensure-managed-embedding-model!
   [provider-spec]
-  (ensure-managed-model! provider-spec embedding-model-lock))
+  (ensure-managed-model! provider-spec embedding-model-lock "embedding"))
 
 (defn- close-embedding-provider! []
   (when-let [provider @embedding-provider-atom]
@@ -688,6 +723,12 @@
       (catch Exception _))
     (reset! llm-provider-atom nil)))
 
+(defn- prepare-managed-embedding-runtime!
+  [datalevin-opts db-path]
+  (let [provider-spec (resolve-embedding-provider-spec db-path datalevin-opts)]
+    (ensure-managed-embedding-model! provider-spec)
+    datalevin-opts))
+
 (defn- init-embedding-provider!
   [db-path datalevin-opts]
   (let [provider-spec (-> (resolve-embedding-provider-spec db-path datalevin-opts)
@@ -721,7 +762,8 @@
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
   ([db-path crypto-opts]
-   (let [datalevin-opts (resolve-datalevin-opts crypto-opts)
+   (let [datalevin-opts (-> (resolve-datalevin-opts crypto-opts)
+                            (prepare-managed-embedding-runtime! db-path))
          c              (d/get-conn db-path schema datalevin-opts)]
      (try
        (reset! conn-atom c)

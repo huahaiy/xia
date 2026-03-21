@@ -101,3 +101,92 @@
       #(core/-main "--mode" "server" "--web-dev"))
     (is (= "server" (:mode @started)))
     (is (= true (:web-dev @started)))))
+
+(deftest start-server-runtime-initializes-http-runtime
+  (let [calls   (atom [])
+        started (atom nil)
+        options {:db "/tmp/xia-dev-repl"
+                 :bind "0.0.0.0"
+                 :port 4011
+                 :web-dev true}]
+    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [db-path]
+                                                 (swap! calls conj [:ensure-db-dir db-path]))
+                     #'xia.db/connect! (fn [db-path crypto-opts]
+                                         (swap! calls conj [:db/connect db-path
+                                                            (contains? crypto-opts :passphrase-provider)]))
+                     #'xia.crypto/current-key-source (fn [] :passphrase)
+                     #'xia.setup/needs-setup? (constantly false)
+                     #'xia.setup/run-setup! (fn [] (swap! calls conj :setup/run))
+                     #'xia.identity/init-identity! (fn [] (swap! calls conj :identity/init))
+                     #'xia.tool/ensure-bundled-tools! (fn [] 0)
+                     #'xia.tool/reset-runtime! (fn [] (swap! calls conj :tool/reset))
+                     #'xia.tool/load-all-tools! (fn [] (swap! calls conj :tool/load))
+                     #'xia.tool/registered-tools (fn [] [:tool-a :tool-b])
+                     #'xia.skill/all-enabled-skills (fn [] [:skill-a])
+                     #'xia.scheduler/start! (fn [] (swap! calls conj :scheduler/start))
+                     #'xia.channel.http/start! (fn [bind port opts]
+                                                (swap! calls conj [:http/start bind port opts]))
+                     #'xia.core/local-ui-url (fn [bind port]
+                                              (str "http://"
+                                                   (if (= bind "0.0.0.0") "localhost" bind)
+                                                   ":"
+                                                   port
+                                                   "/"))}
+      #(let [output (with-out-str
+                      (reset! started (core/start-server-runtime! options)))]
+         (is (.contains ^String output "Xia server running on 0.0.0.0:4011"))
+         (is (.contains ^String output "open http://localhost:4011/"))))
+    (is (= "server" (:mode @started)))
+    (is (= true (:web-dev @started)))
+    (is (= [[:ensure-db-dir "/tmp/xia-dev-repl"]
+            [:db/connect "/tmp/xia-dev-repl" true]
+            :identity/init
+            :tool/reset
+            :tool/load
+            :scheduler/start
+            [:http/start "0.0.0.0" 4011 {:web-dev? true}]]
+           @calls))))
+
+(deftest connect-passes-built-in-embedding-provider-ids-to-datalevin
+  (let [captured (atom nil)]
+    (with-redefs-fn {#'datalevin.core/get-conn
+                     (fn [_db-path _schema opts]
+                       (reset! captured opts)
+                       ::conn)
+                     #'xia.db/download-file! (fn [& _] nil)
+                     #'xia.crypto/configure! (fn [& _] nil)
+                     #'xia.db/init-embedding-provider! (fn [_ _] ::embedding-provider)
+                     #'xia.db/init-llm-provider! (fn [_ _] nil)
+                     #'xia.db/migrate-secrets! (fn [] nil)
+                     #'datalevin.core/close (fn [_] nil)}
+      #(try
+         (db/connect! "/tmp/xia-dev-connect"
+                      {:local-llm-provider false
+                       :passphrase-provider (constantly "xia-test-passphrase")})
+         (finally
+           (db/close!))))
+    (is (= :llama.cpp
+           (get-in @captured [:embedding-opts :provider])))
+    (is (= #{db/episode-text-domain
+             db/kg-node-domain
+             db/kg-fact-domain
+             db/local-doc-domain
+             db/local-doc-chunk-domain
+             db/artifact-domain}
+           (set (keys (:embedding-domains @captured)))))
+    (is (every? #(= :llama.cpp (:provider %))
+                (vals (:embedding-domains @captured))))))
+
+(deftest stop-runtime-stops-process-components
+  (let [calls (atom [])]
+    (with-redefs-fn {#'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
+                     #'xia.scheduler/stop! (fn [] (swap! calls conj :scheduler/stop))
+                     #'xia.db/close! (fn [] (swap! calls conj :db/close))
+                     #'xia.core/save-archive! (fn [options]
+                                                (swap! calls conj [:save-archive (:db options)]))}
+      #(core/stop-runtime! {:db "/tmp/xia-dev-repl"}))
+    (is (= [:http/stop
+            :scheduler/stop
+            :db/close
+            [:save-archive "/tmp/xia-dev-repl"]]
+           @calls))))

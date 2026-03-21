@@ -1,5 +1,5 @@
 (ns xia.channel.terminal
-  "Terminal channel — interactive REPL for talking to xia."
+  "Terminal channel — interactive REPL for talking to Xia."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.db :as db]
@@ -67,7 +67,7 @@
       :else
       (do
         (swap! terminal-statuses assoc sid next)
-        (println (str "xia: " display-message))
+        (println (str "Xia: " display-message))
         (flush)
         (when (= :error state)
           (swap! terminal-statuses dissoc sid))))))
@@ -83,7 +83,7 @@
     ;; Initialize working memory with warm start
     (wm/ensure-wm! session-id)
     (println)
-    (println (str "xia ready. Type your message (or /quit to exit, /help for commands)"))
+    (println (str "Xia ready. Type your message (or /quit to exit, /help for commands)"))
     (println)
     (loop []
       (print "you> ")
@@ -103,7 +103,7 @@
             (= trimmed "/help")
             (do (println)
                 (println "Commands:")
-                (println "  /quit              — exit xia")
+                (println "  /quit              — exit Xia")
                 (println "  /skills            — list installed skills")
                 (println "  /tools             — list installed tools")
                 (println "  /memories          — show recent memories")
@@ -248,7 +248,7 @@
             (do (try
                   (let [response (agent/process-message session-id trimmed :channel :terminal)]
                     (println)
-                    (println (str "xia> " response))
+                    (println (str "Xia> " response))
                     (println))
                   (catch Exception e
                     (log/error e "Error processing message")
