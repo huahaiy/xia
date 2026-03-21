@@ -1,0 +1,201 @@
+name: Release Binaries
+
+on:
+  push:
+  workflow_dispatch:
+  release:
+    types:
+      - created
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: JVM Tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13
+        with:
+          cli: latest
+
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+            .cpcache
+          key: clj-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            clj-${{ runner.os }}-
+
+      - name: Prefetch dependencies
+        run: clojure -P
+
+      - name: Run test suite
+        run: clojure -M:test
+
+  build:
+    name: Native ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: macos-arm64
+            binary-name: xia
+          - runner: ubuntu-24.04
+            target: linux-amd64
+            binary-name: xia
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+            binary-name: xia
+          - runner: windows-latest
+            target: windows-amd64
+            binary-name: xia.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13
+        with:
+          cli: latest
+
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+            .cpcache
+          key: clj-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            clj-${{ runner.os }}-${{ matrix.target }}-
+            clj-${{ runner.os }}-
+
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          distribution: graalvm
+          java-version: "25"
+          components: native-image
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Visual Studio shell
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Prefetch dependencies
+        run: clojure -P
+
+      - name: Compute artifact names
+        id: names
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="manual-${GITHUB_SHA::7}"
+          fi
+          archive="xia-${version}-${{ matrix.target }}.zip"
+          folder="xia-${version}-${{ matrix.target }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "folder=$folder" >> "$GITHUB_OUTPUT"
+
+      - name: Build native binary (Unix)
+        if: runner.os != 'Windows'
+        run: bash script/compile-native
+
+      - name: Build native binary (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: call script\compile-native.bat
+
+      - name: Smoke test native binary (Unix)
+        if: runner.os != 'Windows'
+        run: ./target/native-image/xia --help > /dev/null
+
+      - name: Smoke test native binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\target\native-image\xia.exe --help > $null
+
+      - name: Package native binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="dist/${{ steps.names.outputs.folder }}"
+          mkdir -p "$folder"
+          cp "target/native-image/${{ matrix.binary-name }}" "$folder/${{ matrix.binary-name }}"
+          cp README.md LICENSE "$folder/"
+          (
+            cd dist
+            zip -r "../${{ steps.names.outputs.archive }}" "${{ steps.names.outputs.folder }}"
+          )
+
+      - name: Package native binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $folder = Join-Path "dist" "${{ steps.names.outputs.folder }}"
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          Copy-Item "target/native-image/${{ matrix.binary-name }}" (Join-Path $folder "${{ matrix.binary-name }}")
+          Copy-Item "README.md","LICENSE" $folder
+          Compress-Archive -Path $folder -DestinationPath "${{ steps.names.outputs.archive }}" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ steps.names.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish Release Assets
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Upload assets to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" release-assets/*.zip --clobber

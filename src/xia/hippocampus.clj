@@ -242,6 +242,8 @@ Rules:
         (and (seq ta) (seq tb) (set/subset? ta tb))
         (and (seq ta) (seq tb) (set/subset? tb ta)))))
 
+(declare refreshed-fact-tx)
+
 (defn- dedup-fact!
   "Add a fact with deduplication. If a similar fact exists on the node,
    update it instead of creating a duplicate. If the new fact contradicts
@@ -252,16 +254,26 @@ Rules:
           similar  (first (filter #(fact-similar? (:content %) content) existing))
           now      (java.util.Date.)]
       (if similar
-        ;; Update existing fact (refresh timestamp, keep higher confidence)
-        (let [bottomed-at (:kg.fact/bottomed-at (db/entity (:eid similar)))]
-          (db/transact! (cond-> [[:db/add (:eid similar) :kg.fact/updated-at now]
-                                 [:db/add (:eid similar) :kg.fact/decayed-at now]]
-                          bottomed-at
-                          (conj [:db/retract (:eid similar) :kg.fact/bottomed-at bottomed-at]))))
+        ;; Update existing fact: repeated extraction should restore confidence,
+        ;; not just stop further decay from the old level.
+        (db/transact! (refreshed-fact-tx (:eid similar)
+                                         (:confidence similar)
+                                         now))
         ;; No similar fact — add new
         (memory/add-fact! {:node-eid   node-eid
                            :content    content
                            :source-eid source-eid})))))
+
+(defn- refreshed-fact-tx
+  [fact-eid current-confidence ^java.util.Date now]
+  (let [bottomed-at (:kg.fact/bottomed-at (db/entity fact-eid))
+        confidence  (float (memory/reinforce-fact-confidence current-confidence
+                                                             1.0))]
+    (cond-> [[:db/add fact-eid :kg.fact/confidence confidence]
+             [:db/add fact-eid :kg.fact/updated-at now]
+             [:db/add fact-eid :kg.fact/decayed-at now]]
+      bottomed-at
+      (conj [:db/retract fact-eid :kg.fact/bottomed-at bottomed-at]))))
 
 (defn- node-facts-for-dedup
   [node-eid episode-eid]
@@ -340,13 +352,11 @@ Rules:
         (cond
           (and similar (:eid similar))
           (when-not (contains? @refreshed-facts (:eid similar))
-            (let [bottomed-at (:kg.fact/bottomed-at (db/entity (:eid similar)))]
-              (swap! refreshed-facts conj (:eid similar))
-              (swap! fact-tx* into
-                     (cond-> [[:db/add (:eid similar) :kg.fact/updated-at now]
-                              [:db/add (:eid similar) :kg.fact/decayed-at now]]
-                       bottomed-at
-                       (conj [:db/retract (:eid similar) :kg.fact/bottomed-at bottomed-at])))))
+            (swap! refreshed-facts conj (:eid similar))
+            (swap! fact-tx* into
+                   (refreshed-fact-tx (:eid similar)
+                                      (:confidence similar)
+                                      now)))
 
           similar
           nil

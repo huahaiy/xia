@@ -51,6 +51,7 @@
 (def ^:private default-fact-utility 0.5)
 (def ^:private fact-confidence-weight 0.8)
 (def ^:private fact-utility-weight 0.2)
+(def ^:private fact-confidence-reinforcement-weight 0.4)
 
 (defn- long-max
   ^long [^long a ^long b]
@@ -106,6 +107,16 @@
   (-> (double (or confidence 0.0))
       (double-max 0.0)
       (double-min 1.0)))
+
+(defn reinforce-fact-confidence
+  ^double
+  [current-confidence observed-confidence]
+  (let [current  (normalize-fact-confidence current-confidence)
+        observed (normalize-fact-confidence observed-confidence)]
+    (+ current
+       (* (double fact-confidence-reinforcement-weight)
+          observed
+          (- 1.0 current)))))
 
 (defn normalize-fact-utility
   ^double

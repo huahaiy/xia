@@ -111,6 +111,38 @@
       (let [facts (memory/node-facts node-eid)]
         (is (= 2 (count facts)))))))
 
+(deftest test-dedup-fact-reinforces-confidence
+  (let [node-eid  (th/seed-node! "Riley" "person")
+        ep-eid    (th/seed-episode! "repeat fact episode")]
+    (#'xia.hippocampus/dedup-fact! node-eid "likes Clojure" ep-eid)
+    (let [fact-eid (-> (memory/node-facts node-eid) first :eid)]
+      (db/transact! [[:db/add fact-eid :kg.fact/confidence 0.2]])
+      (#'xia.hippocampus/dedup-fact! node-eid "likes Clojure" ep-eid)
+      (let [fact      (-> (memory/node-facts node-eid) first)
+            expected  (memory/reinforce-fact-confidence 0.2 1.0)]
+        (is (= 1 (count (memory/node-facts node-eid))))
+        (is (< (abs-double (- (:confidence fact) expected)) 1.0e-6))
+        (is (> (:confidence fact) 0.2))
+        (is (< (:confidence fact) 1.0))))))
+
+(deftest test-merge-extraction-reinforces-existing-fact-confidence
+  (let [node-eid   (th/seed-node! "Morgan" "person")
+        fact-eid   (th/seed-fact! node-eid "likes Clojure" :confidence 0.25)
+        episode-eid (th/seed-episode! "merge repeated fact")
+        extraction {"entities" [{"name" "Morgan"
+                                 "type" "person"
+                                 "facts" ["likes Clojure"]}]
+                    "relations" []}]
+    (#'xia.hippocampus/merge-extraction! extraction episode-eid)
+    (let [facts     (memory/node-facts node-eid)
+          refreshed (db/entity fact-eid)
+          expected  (memory/reinforce-fact-confidence 0.25 1.0)]
+      (is (= 1 (count facts)))
+      (is (= "likes Clojure" (:content (first facts))))
+      (is (< (abs-double (- (:kg.fact/confidence refreshed) expected)) 1.0e-6))
+      (is (> (:kg.fact/confidence refreshed) 0.25))
+      (is (< (:kg.fact/confidence refreshed) 1.0)))))
+
 (deftest test-dedup-fact-keeps-high-overlap-corrections
   (let [node-eid (th/seed-node! "Avery" "person")
         ep-eid   (th/seed-episode! "correction episode")]
