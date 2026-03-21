@@ -59,6 +59,15 @@
                 "(ns-aliases 'clojure.core)"]]
     (is (sci-blocked? code) code)))
 
+(deftest secret-queries-cannot-bypass-safe-q-with-dynamic-symbols
+  (doseq [code ["(let [attr (symbol (str \"llm.provider/\" \"api-key\"))] (xia.db/q (vector :find '?v :where (vector '?e attr '?v))))"
+                "(let [attr (symbol (str \"llm.provider/\" \"api-key\"))] (xia.db/q (list :find '?v :where ['?e attr '?v])))"]]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo
+          #"Access denied"
+          (sci-env/eval-string code))
+        code)))
+
 (deftest sci-eval-times-out
   (xia.db/set-config! :tool/sci-eval-timeout-ms 100)
   (let [ex (try

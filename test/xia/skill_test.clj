@@ -41,6 +41,15 @@
     (let [s (db/get-skill :email-drafting)]
       (is (some? (:skill/doc s)) "Should have idoc document"))))
 
+(deftest test-import-skill-file-rejects-reader-eval
+  (let [path (doto (java.io.File/createTempFile "xia-skill" ".edn")
+               (.deleteOnExit))]
+    (spit path "#=(+ 1 2)")
+    (is (thrown-with-msg?
+          RuntimeException
+          #"No dispatch macro for: ="
+          (skill/import-skill-file! (.getAbsolutePath path))))))
+
 (deftest test-import-skill-mixed-content-fallback
   (testing "skill with mixed content/subheaders falls back gracefully"
     ;; This would have both content AND subheaders under one heading

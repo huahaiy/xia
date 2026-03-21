@@ -124,6 +124,15 @@
       (let [result (fp {:a {:b {:c "deep"}}})]
         (is (= ["a.b.c: deep"] result))))))
 
+(deftest test-config-parsers-ignore-reader-eval
+  (db/set-config! :context/budget "#=(+ 1 2)")
+  (db/set-config! :context/history-budget "#=(+ 1 2)")
+  (db/set-config! :context/recent-history-message-limit "#=(+ 1 2)")
+  (is (= @#'xia.context/default-system-prompt-budget
+         (#'xia.context/configured-system-prompt-budget)))
+  (is (= 8000 (#'xia.context/configured-history-budget)))
+  (is (= 24 (ctx/recent-history-message-limit-config))))
+
 ;; ---------------------------------------------------------------------------
 ;; render-entity
 ;; ---------------------------------------------------------------------------

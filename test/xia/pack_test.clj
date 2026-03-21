@@ -192,3 +192,17 @@
       (catch FileSystemException _
         (testing "symbolic links unavailable in this environment"
           (is true))))))
+
+(deftest manifest-reading-rejects-reader-eval
+  (let [dir     (temp-dir)
+        archive (str dir "/evil.xia")]
+    (write-zip! archive {"manifest.edn" "#=(+ 1 2)"})
+    (is (thrown-with-msg?
+          RuntimeException
+          #"No dispatch macro for: ="
+          (pack/read-manifest archive)))
+    (spit (str dir "/manifest.edn") "#=(+ 1 2)")
+    (is (thrown-with-msg?
+          RuntimeException
+          #"No dispatch macro for: ="
+          (#'xia.pack/read-manifest-file dir)))))

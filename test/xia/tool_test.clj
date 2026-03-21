@@ -31,6 +31,15 @@
     (is (= "Tool privileged-tool blocked: No approval handler available for current channel"
            (:error result)))))
 
+(deftest import-tool-file-rejects-reader-eval
+  (let [path (doto (java.io.File/createTempFile "xia-tool" ".edn")
+               (.deleteOnExit))]
+    (spit path "#=(+ 1 2)")
+    (is (thrown-with-msg?
+          RuntimeException
+          #"No dispatch macro for: ="
+          (tool/import-tool-file! (.getAbsolutePath path))))))
+
 (deftest autonomous-service-tools-require-approved-services
   (db/register-service! {:id                   :gmail
                          :name                 "Gmail"

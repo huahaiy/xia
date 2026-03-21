@@ -60,12 +60,19 @@
 (def ^:private query-section-keys
   #{:find :with :in :where :keys :strs :syms})
 
-(defn- secret-like-keyword?
+(defn- ident-name
   [form]
-  (and (keyword? form)
-       (or (secret-attr? form)
-           (when-let [n (name form)]
-             (re-find blocked-attrs-pattern n)))))
+  (cond
+    (keyword? form) (name form)
+    (symbol? form)  (name form)
+    :else           nil))
+
+(defn- secret-like-ident?
+  [form]
+  (or (and (keyword? form)
+           (secret-attr? form))
+      (when-let [n (ident-name form)]
+        (re-find blocked-attrs-pattern n))))
 
 (defn- split-query-sections
   [query]
@@ -83,7 +90,7 @@
 (defn- unsafe-form?
   [form]
   (cond
-    (secret-like-keyword? form)
+    (secret-like-ident? form)
     true
 
     (seq? form)
@@ -110,7 +117,7 @@
   [clause]
   (let [attr (nth clause 1)]
     (or (not (keyword? attr))
-        (secret-like-keyword? attr))))
+        (secret-like-ident? attr))))
 
 (defn- unsafe-where-clause?
   [clause]
@@ -139,13 +146,12 @@
    can enumerate attributes indirectly. Computed :where clauses are rejected
    outright because they can call host functions outside the attribute filter."
   [query]
-  (let [sections (if (vector? query)
-                   (split-query-sections query)
-                   {})]
-    (boolean
-      (or (unsafe-form? (get sections :find))
-          (some unsafe-where-clause? (get sections :where))
-          (and (empty? sections) (unsafe-form? query))))))
+  (if-not (vector? query)
+    true
+    (let [sections (split-query-sections query)]
+      (boolean
+        (or (unsafe-form? (get sections :find))
+            (some unsafe-where-clause? (get sections :where)))))))
 
 (defn safe-q
   "Restricted Datalog query for the SCI sandbox.
@@ -153,6 +159,6 @@
    access such as pull, computed clauses, or attr-position variables."
   [query & inputs]
   (when (query-references-secret? query)
-    (throw (ex-info "Access denied: query references secret attributes"
+    (throw (ex-info "Access denied: query references secret attributes or uses unsupported query forms"
                     {:query query})))
   (apply db/q query inputs))

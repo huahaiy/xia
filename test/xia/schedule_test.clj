@@ -83,6 +83,12 @@
                  {:id :every-5 :spec {:interval-minutes 5} :type :tool :tool-id :x})]
     (is (= :every-5 (:id result)))))
 
+(deftest read-spec-rejects-reader-eval
+  (is (thrown-with-msg?
+        RuntimeException
+        #"No dispatch macro for: ="
+        (#'xia.schedule/read-spec "#=(+ 1 2)"))))
+
 (deftest create-coerces-vectors-to-sets
   ;; Tool params arrive as JSON arrays → vectors
   (let [result (schedule/create-schedule!

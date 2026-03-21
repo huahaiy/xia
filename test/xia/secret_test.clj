@@ -141,6 +141,19 @@
           (secret/safe-q '[:find ?v :in $ ?attr :where [?e ?attr ?v]]
                          :service/auth-key)))))
 
+(deftest safe-q-blocks-non-vector-and-symbol-built-secret-queries
+  (testing "rejects non-vector query forms outright"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '(:find ?v :where [?e :llm.provider/api-key ?v])))))
+
+  (testing "rejects secret-like symbols constructed dynamically"
+    (let [attr  (symbol (str "llm.provider/" "api-key"))
+          query [:find '?v :where ['?e attr '?v]]]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"Access denied"
+            (secret/safe-q query))))))
+
 (deftest safe-q-blocks-pull
   (db/transact! [{:llm.provider/id       :test
                   :llm.provider/name     "test"
