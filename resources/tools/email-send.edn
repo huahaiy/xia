@@ -1,0 +1,43 @@
+;; Send an email through Gmail.
+;; Import with: /import-tool resources/tools/email-send.edn
+
+{:id          :email-send
+ :name        "email-send"
+ :description "Send an email through Gmail. Supports basic reply threading fields so you can continue an existing conversation."
+ :tags        #{:email :gmail :send :communication}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"to"          {"type"        "string"
+                                             "description" "Primary recipient email address or RFC 5322 To header value"}
+                             "cc"          {"type"        "string"
+                                             "description" "Optional CC recipient list"}
+                             "bcc"         {"type"        "string"
+                                             "description" "Optional BCC recipient list"}
+                             "reply_to"    {"type"        "string"
+                                             "description" "Optional Reply-To header value"}
+                             "subject"     {"type"        "string"
+                                             "description" "Message subject"}
+                             "body"        {"type"        "string"
+                                             "description" "Plain-text message body"}
+                             "in_reply_to" {"type"        "string"
+                                             "description" "Optional Message-Id of the message being replied to"}
+                             "references"  {"oneOf"       [{"type" "string"}
+                                                           {"type" "array" "items" {"type" "string"}}]
+                                             "description" "Optional References header value or list of message ids"}
+                             "thread_id"   {"type"        "string"
+                                             "description" "Optional Gmail thread id to attach the send to"}
+                             "service_id"  {"type"        "string"
+                                             "description" "Optional Gmail service id if you have more than one configured"}}
+               "required"   ["to" "subject" "body"]}
+ :handler     "(fn [args]
+                 (xia.email/send-message
+                   (get args \"to\")
+                   (get args \"subject\")
+                   (get args \"body\")
+                   :cc (get args \"cc\")
+                   :bcc (get args \"bcc\")
+                   :reply-to (get args \"reply_to\")
+                   :in-reply-to (get args \"in_reply_to\")
+                   :references (get args \"references\")
+                   :thread-id (get args \"thread_id\")
+                   :service-id (get args \"service_id\")))"}

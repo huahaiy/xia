@@ -219,6 +219,28 @@
                 <div class="admin-list-empty">Select a schedule to inspect recent runs.</div>
               </div>
             </div>
+
+            <div class="admin-card admin-card-wide">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">Knowledge Graph</h3>
+                  <p class="panel-note">Search what Xia has learned, inspect stored facts, and forget anything incorrect.</p>
+                </div>
+                <div class="actions knowledge-search">
+                  <input type="search" id="knowledge-query" class="text-input" placeholder="Search people, places, projects...">
+                  <button type="button" class="secondary" id="search-knowledge">Search</button>
+                </div>
+              </div>
+              <div class="knowledge-grid">
+                <div class="admin-list" id="knowledge-node-list">
+                  <div class="admin-list-empty">Search for a person, project, or topic to inspect stored facts.</div>
+                </div>
+                <div class="history-runs knowledge-fact-list" id="knowledge-fact-list">
+                  <div class="admin-list-empty">Select an entity to inspect its stored facts.</div>
+                </div>
+              </div>
+              <div class="admin-status" id="knowledge-status">Search for a person, project, or topic to inspect stored facts.</div>
+            </div>
           </div>
         </section>
       </div>

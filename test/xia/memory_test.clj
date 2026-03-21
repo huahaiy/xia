@@ -339,6 +339,18 @@
       (is (= "likes Python" (:content (first facts))))
       (is (= 0.5 (:utility (first facts)))))))
 
+(deftest test-forget-fact
+  (let [node-eid     (th/seed-node! "Carol" "person")
+        forgotten-eid (th/seed-fact! node-eid "prefers tea")
+        kept-eid      (th/seed-fact! node-eid "works remotely")
+        forgotten     (memory/forget-fact! forgotten-eid)]
+    (is (= forgotten-eid (:eid forgotten)))
+    (is (= node-eid (:node-eid forgotten)))
+    (is (= "prefers tea" (:content forgotten)))
+    (is (empty? (into {} (db/entity forgotten-eid))))
+    (is (= [kept-eid]
+           (mapv :eid (memory/node-facts-with-eids node-eid))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Full-text Search
 ;; ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
             [xia.remote-bridge :as remote-bridge]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
-            [xia.test-helpers :refer [minimal-pdf-bytes with-test-db]])
+            [xia.test-helpers :as th :refer [minimal-pdf-bytes with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream File]
            [java.nio.charset StandardCharsets]
            [java.nio.file Files]
@@ -125,6 +125,7 @@
     (is (re-find #"Notes" (:body response)))
     (is (re-find #"History" (:body response)))
     (is (re-find #"Scheduled Runs" (:body response)))
+    (is (re-find #"Knowledge Graph" (:body response)))
     (is (re-find #"Settings" (:body response)))
     (is (re-find #"AI Models" (:body response)))
     (is (re-find #"Notification Bridge" (:body response)))
@@ -956,6 +957,66 @@
     (is (= 200 (:status delete-res)))
     (is (= "deleted" (get delete-body "status")))
     (is (= [] (get empty-body "artifacts")))))
+
+(deftest knowledge-routes-search-list-and-forget-facts
+  (let [alice-eid      (th/seed-node! "Alice Johnson" "person")
+        _bob-eid       (th/seed-node! "Bob Team" "person")
+        forgotten-eid  (th/seed-fact! alice-eid "prefers green tea")
+        kept-eid       (th/seed-fact! alice-eid "works on billing")
+        _bob-fact-eid  (th/seed-fact! (th/seed-node! "Infra Project" "project")
+                                      "tracks deployment incidents")
+        search-res     (#'http/router {:uri            "/knowledge/nodes"
+                                       :query-string   "query=Alice"
+                                       :request-method :get
+                                       :headers        (ui-headers)})
+        search-body    (response-json search-res)
+        node-id        (get-in search-body ["nodes" 0 "id"])
+        facts-res      (#'http/router {:uri            (str "/knowledge/nodes/" node-id "/facts")
+                                       :request-method :get
+                                       :headers        (ui-headers)})
+        facts-body     (response-json facts-res)
+        delete-res     (#'http/router {:uri            (str "/knowledge/facts/" forgotten-eid)
+                                       :request-method :delete
+                                       :headers        (ui-headers)})
+        delete-body    (response-json delete-res)
+        facts-after    (#'http/router {:uri            (str "/knowledge/nodes/" node-id "/facts")
+                                       :request-method :get
+                                       :headers        (ui-headers)})
+        facts-after-body (response-json facts-after)]
+    (is (= 200 (:status search-res)))
+    (is (= "Alice Johnson" (get-in search-body ["nodes" 0 "name"])))
+    (is (= "person" (get-in search-body ["nodes" 0 "type"])))
+    (is (= (str alice-eid) node-id))
+    (is (= 200 (:status facts-res)))
+    (is (= "Alice Johnson" (get-in facts-body ["node" "name"])))
+    (is (= #{"prefers green tea" "works on billing"}
+           (set (map #(get % "content") (get facts-body "facts")))))
+    (is (= 200 (:status delete-res)))
+    (is (= "forgotten" (get delete-body "status")))
+    (is (= forgotten-eid (get-in delete-body ["fact" "eid"])))
+    (is (empty? (into {} (db/entity forgotten-eid))))
+    (is (= 200 (:status facts-after)))
+    (is (= [kept-eid] (mapv #(get % "eid") (get facts-after-body "facts"))))))
+
+(deftest knowledge-routes-validate-inputs
+  (let [missing-query (#'http/router {:uri            "/knowledge/nodes"
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        missing-body  (response-json missing-query)
+        invalid-node  (#'http/router {:uri            "/knowledge/nodes/not-a-number/facts"
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        invalid-node-body (response-json invalid-node)
+        missing-fact  (#'http/router {:uri            "/knowledge/facts/999999"
+                                      :request-method :delete
+                                      :headers        (ui-headers)})
+        missing-fact-body (response-json missing-fact)]
+    (is (= 400 (:status missing-query)))
+    (is (= "missing query" (get missing-body "error")))
+    (is (= 400 (:status invalid-node)))
+    (is (= "'node id' must be a positive integer" (get invalid-node-body "error")))
+    (is (= 404 (:status missing-fact)))
+    (is (= "fact not found" (get missing-fact-body "error")))))
 
 (deftest binary-artifact-routes-round-trip
   (let [sid          (str (db/create-session! :http))

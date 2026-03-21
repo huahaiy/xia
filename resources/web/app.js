@@ -48,6 +48,13 @@ const state = {
     sessionMessages: [],
     scheduleRuns: []
   },
+  knowledgeQuery: '',
+  knowledgeNodes: [],
+  activeKnowledgeNodeId: '',
+  knowledgeFacts: [],
+  knowledgeSearching: false,
+  knowledgeLoadingFacts: false,
+  knowledgeForgettingFactId: '',
   activeProviderId: '',
   activeOauthAccountId: '',
   activeServiceId: '',
@@ -106,6 +113,11 @@ const historyScheduleStatusEl = document.getElementById('history-schedule-status
 const historyScheduleRunsEl = document.getElementById('history-schedule-runs');
 const refreshHistorySessionsEl = document.getElementById('refresh-history-sessions');
 const refreshHistorySchedulesEl = document.getElementById('refresh-history-schedules');
+const knowledgeQueryEl = document.getElementById('knowledge-query');
+const searchKnowledgeEl = document.getElementById('search-knowledge');
+const knowledgeNodeListEl = document.getElementById('knowledge-node-list');
+const knowledgeFactListEl = document.getElementById('knowledge-fact-list');
+const knowledgeStatusEl = document.getElementById('knowledge-status');
 const providerListEl = document.getElementById('provider-list');
 const providerIdEl = document.getElementById('provider-id');
 const providerNameEl = document.getElementById('provider-name');
@@ -827,6 +839,90 @@ function historyScheduleMeta(schedule) {
   return bits.join(' • ');
 }
 
+function knowledgeNodeMeta(node) {
+  return node.type ? String(node.type) : 'Entity';
+}
+
+function formatKnowledgeScore(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(2) : '0.00';
+}
+
+function renderKnowledgeNodeList() {
+  renderSelectableList(
+    knowledgeNodeListEl,
+    state.knowledgeNodes,
+    state.activeKnowledgeNodeId,
+    state.knowledgeQuery
+      ? 'No matching entities found.'
+      : 'Search for a person, project, or topic to inspect stored facts.',
+    (node) => firstNonEmpty(node.name, node.id),
+    knowledgeNodeMeta,
+    selectKnowledgeNode
+  );
+}
+
+function buildKnowledgeFactEl(fact) {
+  const card = document.createElement('article');
+  card.className = 'history-run knowledge-fact';
+
+  const head = document.createElement('div');
+  head.className = 'knowledge-fact-head';
+
+  const body = document.createElement('div');
+  body.className = 'knowledge-fact-content';
+  body.textContent = firstNonEmpty(fact.content, 'Untitled fact');
+  head.appendChild(body);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const forgetButton = document.createElement('button');
+  forgetButton.type = 'button';
+  forgetButton.className = 'secondary';
+  forgetButton.textContent = state.knowledgeForgettingFactId === fact.id ? 'Forgetting...' : 'Forget';
+  forgetButton.disabled = state.knowledgeForgettingFactId === fact.id || state.knowledgeLoadingFacts;
+  forgetButton.addEventListener('click', () => forgetKnowledgeFact(fact));
+  actions.appendChild(forgetButton);
+  head.appendChild(actions);
+  card.appendChild(head);
+
+  const meta = document.createElement('div');
+  meta.className = 'history-run-meta';
+  meta.textContent = [
+    'Confidence ' + formatKnowledgeScore(fact.confidence),
+    'Utility ' + formatKnowledgeScore(fact.utility),
+    fact.updated_at ? ('Updated ' + formatDateTime(fact.updated_at)) : ''
+  ].filter(Boolean).join(' • ');
+  card.appendChild(meta);
+
+  return card;
+}
+
+function renderKnowledgeFacts() {
+  knowledgeFactListEl.innerHTML = '';
+  if (!state.activeKnowledgeNodeId) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = state.knowledgeQuery
+      ? 'Select a matching entity to inspect its stored facts.'
+      : 'Select an entity to inspect its stored facts.';
+    knowledgeFactListEl.appendChild(empty);
+    return;
+  }
+  if (!state.knowledgeFacts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = state.knowledgeLoadingFacts
+      ? 'Loading facts...'
+      : 'No facts stored for this entity.';
+    knowledgeFactListEl.appendChild(empty);
+    return;
+  }
+  state.knowledgeFacts.forEach((fact) => {
+    knowledgeFactListEl.appendChild(buildKnowledgeFactEl(fact));
+  });
+}
+
 function renderHistorySessionList() {
   renderSelectableList(
     historySessionListEl,
@@ -962,6 +1058,8 @@ function renderHistoryScheduleRuns() {
 }
 
 function updateAdminButtons() {
+  knowledgeQueryEl.disabled = state.knowledgeSearching;
+  searchKnowledgeEl.disabled = state.knowledgeSearching || !knowledgeQueryEl.value.trim();
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   saveProviderEl.disabled = state.providerSaving;
   newProviderEl.disabled = state.providerSaving;
@@ -1538,6 +1636,127 @@ async function loadHistorySchedules() {
     renderHistoryScheduleList();
     renderHistoryScheduleRuns();
     historyScheduleStatusEl.textContent = err.message || 'Failed to load schedules.';
+  }
+}
+
+async function selectKnowledgeNode(node) {
+  const nodeId = (node && node.id) || '';
+  state.activeKnowledgeNodeId = nodeId;
+  state.knowledgeFacts = [];
+  state.knowledgeLoadingFacts = false;
+  renderKnowledgeNodeList();
+  renderKnowledgeFacts();
+  if (nodeId) {
+    await loadKnowledgeFacts(nodeId);
+  } else {
+    knowledgeStatusEl.textContent = 'No knowledge entity selected.';
+  }
+}
+
+async function searchKnowledgeNodes() {
+  if (state.knowledgeSearching) return;
+  const query = knowledgeQueryEl.value.trim();
+  state.knowledgeQuery = query;
+  state.knowledgeNodes = [];
+  state.activeKnowledgeNodeId = '';
+  state.knowledgeFacts = [];
+  state.knowledgeLoadingFacts = false;
+  renderKnowledgeNodeList();
+  renderKnowledgeFacts();
+  if (!query) {
+    knowledgeStatusEl.textContent = 'Enter a person, project, or topic to search stored knowledge.';
+    updateAdminButtons();
+    return;
+  }
+  state.knowledgeSearching = true;
+  updateAdminButtons();
+  knowledgeStatusEl.textContent = 'Searching knowledge graph...';
+  try {
+    const data = await fetchJson('/knowledge/nodes?query=' + encodeURIComponent(query));
+    if (state.knowledgeQuery !== query) return;
+    state.knowledgeNodes = Array.isArray(data.nodes) ? data.nodes : [];
+    const nextNodeId = (state.knowledgeNodes[0] && state.knowledgeNodes[0].id) || '';
+    state.activeKnowledgeNodeId = nextNodeId;
+    renderKnowledgeNodeList();
+    renderKnowledgeFacts();
+    if (!nextNodeId) {
+      knowledgeStatusEl.textContent = 'No matching entities found.';
+      return;
+    }
+    knowledgeStatusEl.textContent = state.knowledgeNodes.length
+      + (state.knowledgeNodes.length === 1 ? ' matching entity found.' : ' matching entities found.');
+    await loadKnowledgeFacts(nextNodeId);
+  } catch (err) {
+    if (state.knowledgeQuery !== query) return;
+    state.knowledgeNodes = [];
+    state.activeKnowledgeNodeId = '';
+    state.knowledgeFacts = [];
+    renderKnowledgeNodeList();
+    renderKnowledgeFacts();
+    knowledgeStatusEl.textContent = err.message || 'Failed to search knowledge graph.';
+  } finally {
+    if (state.knowledgeQuery === query) {
+      state.knowledgeSearching = false;
+      updateAdminButtons();
+    }
+  }
+}
+
+async function loadKnowledgeFacts(nodeId) {
+  if (!nodeId) {
+    state.knowledgeFacts = [];
+    renderKnowledgeFacts();
+    knowledgeStatusEl.textContent = 'No knowledge entity selected.';
+    return;
+  }
+  const activeNode = state.knowledgeNodes.find((node) => node.id === nodeId);
+  state.knowledgeLoadingFacts = true;
+  renderKnowledgeFacts();
+  knowledgeStatusEl.textContent = activeNode
+    ? ('Loading facts for ' + firstNonEmpty(activeNode.name, activeNode.id) + '...')
+    : 'Loading facts...';
+  try {
+    const data = await fetchJson('/knowledge/nodes/' + encodeURIComponent(nodeId) + '/facts');
+    if (state.activeKnowledgeNodeId !== nodeId) return;
+    state.knowledgeFacts = Array.isArray(data.facts) ? data.facts : [];
+    renderKnowledgeFacts();
+    const node = data.node || activeNode || {};
+    const nodeName = firstNonEmpty(node.name, node.id);
+    knowledgeStatusEl.textContent = state.knowledgeFacts.length
+      ? ('Showing ' + state.knowledgeFacts.length + ' facts for ' + nodeName + '.')
+      : ('No facts stored for ' + nodeName + '.');
+  } catch (err) {
+    if (state.activeKnowledgeNodeId !== nodeId) return;
+    state.knowledgeFacts = [];
+    renderKnowledgeFacts();
+    knowledgeStatusEl.textContent = err.message || 'Failed to load knowledge facts.';
+  } finally {
+    if (state.activeKnowledgeNodeId === nodeId) {
+      state.knowledgeLoadingFacts = false;
+      renderKnowledgeFacts();
+    }
+  }
+}
+
+async function forgetKnowledgeFact(fact) {
+  if (!fact || !fact.id || state.knowledgeForgettingFactId) return;
+  if (!window.confirm('Forget this fact?\n\n' + firstNonEmpty(fact.content, 'Untitled fact'))) return;
+  const activeNode = state.knowledgeNodes.find((node) => node.id === state.activeKnowledgeNodeId) || {};
+  state.knowledgeForgettingFactId = fact.id;
+  renderKnowledgeFacts();
+  try {
+    await fetchJson('/knowledge/facts/' + encodeURIComponent(fact.id), { method: 'DELETE' });
+    state.knowledgeFacts = state.knowledgeFacts.filter((entry) => entry.id !== fact.id);
+    renderKnowledgeFacts();
+    const nodeName = firstNonEmpty(activeNode.name, activeNode.id);
+    knowledgeStatusEl.textContent = state.knowledgeFacts.length
+      ? ('Forgot 1 fact. Showing ' + state.knowledgeFacts.length + ' facts for ' + nodeName + '.')
+      : ('Forgot 1 fact. No facts remain for ' + nodeName + '.');
+  } catch (err) {
+    knowledgeStatusEl.textContent = err.message || 'Failed to forget fact.';
+  } finally {
+    state.knowledgeForgettingFactId = '';
+    renderKnowledgeFacts();
   }
 }
 
@@ -3219,6 +3438,14 @@ artifactDownloadEl.addEventListener('click', () => downloadArtifact());
 artifactDeleteEl.addEventListener('click', () => deleteArtifact());
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
+searchKnowledgeEl.addEventListener('click', () => searchKnowledgeNodes());
+knowledgeQueryEl.addEventListener('input', () => updateAdminButtons());
+knowledgeQueryEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    searchKnowledgeNodes();
+  }
+});
 
 newProviderEl.addEventListener('click', () => {
   resetProviderForm('Create a model.');
@@ -3331,6 +3558,8 @@ renderMessages();
 syncLocalDocPanel('No local document selected.');
 syncArtifactPanel('No artifact selected.');
 syncScratchEditor('No note selected.');
+renderKnowledgeNodeList();
+renderKnowledgeFacts();
 resetProviderForm('Loading...');
 resetConversationContextForm('Loading...');
 resetMemoryRetentionForm('Loading...');

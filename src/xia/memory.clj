@@ -1162,9 +1162,9 @@
   (->> fact-eids
        distinct
        (keep (fn [fact-eid]
-               (when-let [entity (some-> fact-eid db/entity seq (into {}))]
+               (when-let [entity (some-> fact-eid db/entity not-empty)]
                  {:eid        fact-eid
-                  :node-eid   (:kg.fact/node entity)
+                  :node-eid   (ref-eid (:kg.fact/node entity))
                   :content    (:kg.fact/content entity)
                   :confidence (:kg.fact/confidence entity)
                   :utility    (double (or (:kg.fact/utility entity)
@@ -1172,9 +1172,17 @@
                   :updated-at (:kg.fact/updated-at entity)})))
        vec))
 
+(defn forget-fact!
+  [fact-eid]
+  (when-let [fact (first (facts-by-eids [fact-eid]))]
+    (let [now (java.util.Date.)]
+      (db/transact! [[:db/retractEntity fact-eid]
+                     [:db/add (:node-eid fact) :kg.node/updated-at now]])
+      fact)))
+
 (defn update-fact-utility!
   [fact-eid observed-utility]
-  (when-let [entity (some-> fact-eid db/entity seq (into {}))]
+  (when-let [entity (some-> fact-eid db/entity not-empty)]
     (let [current    (normalize-fact-utility (:kg.fact/utility entity))
           observed   (normalize-fact-utility observed-utility)
           adjusted   (+ (* 0.6 (double current)) (* 0.4 (double observed)))]

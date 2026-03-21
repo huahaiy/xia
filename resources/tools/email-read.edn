@@ -1,0 +1,18 @@
+;; Read a Gmail message by id.
+;; Import with: /import-tool resources/tools/email-read.edn
+
+{:id          :email-read
+ :name        "email-read"
+ :description "Read a Gmail message by id and return the best available plain-text body plus common headers."
+ :tags        #{:email :gmail :read :communication}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"message_id" {"type"        "string"
+                                           "description" "Gmail message id to read"}
+                             "service_id" {"type"        "string"
+                                           "description" "Optional Gmail service id if you have more than one configured"}}
+               "required"   ["message_id"]}
+ :handler     "(fn [args]
+                 (xia.email/read-message
+                   (get args \"message_id\")
+                   :service-id (get args \"service_id\")))"}

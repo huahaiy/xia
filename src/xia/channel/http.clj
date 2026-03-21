@@ -785,6 +785,33 @@
    :title  (:title artifact)
    :status (some-> (:status artifact) name)})
 
+(defn- named-value->str
+  [value]
+  (cond
+    (keyword? value) (name value)
+    (symbol? value)  (name value)
+    (some? value)    (str value)
+    :else            nil))
+
+(defn- knowledge-node->body
+  [node]
+  (let [eid (or (:eid node) (:db/id node))]
+    {:id   (some-> eid str)
+     :eid  eid
+     :name (or (:name node) (:kg.node/name node))
+     :type (named-value->str (or (:type node) (:kg.node/type node)))}))
+
+(defn- knowledge-fact->body
+  [fact]
+  {:id         (some-> (:eid fact) str)
+   :eid        (:eid fact)
+   :node_id    (some-> (:node-eid fact) str)
+   :node_eid   (:node-eid fact)
+   :content    (:content fact)
+   :confidence (:confidence fact)
+   :utility    (:utility fact)
+   :updated_at (instant->str (:updated-at fact))})
+
 (defn- nonblank-str
   [value]
   (let [s (some-> value str str/trim)]
@@ -821,6 +848,34 @@
           (throw (ex-info (str "'" field-name "' must be a positive integer")
                           {:field field-name
                            :value value})))))))
+
+(def ^:private default-knowledge-search-top 12)
+(def ^:private max-knowledge-search-top 25)
+
+(defn- parse-knowledge-search-top
+  [value]
+  (-> (or (parse-optional-positive-long value "top")
+          default-knowledge-search-top)
+      long
+      (long-min max-knowledge-search-top)
+      int))
+
+(defn- search-knowledge-nodes
+  [query top]
+  (loop [results (concat (memory/find-node query)
+                         (memory/search-nodes query :top top))
+         acc     []
+         seen    #{}]
+    (if-let [node (first results)]
+      (let [node-eid (:eid node)]
+        (if (or (nil? node-eid)
+                (contains? seen node-eid))
+          (recur (rest results) acc seen)
+          (recur (rest results)
+                 (cond-> acc
+                   (< (count acc) top) (conj node))
+                 (conj seen node-eid))))
+      acc)))
 
 (defn- parse-provider-workloads
   [value]
@@ -1867,6 +1922,35 @@
                           :session_id session-id
                           :artifact_id artifact-id}))))
 
+(defn- handle-search-knowledge-nodes [req]
+  (let [params (parse-query-string (:query-string req))
+        query  (nonblank-str (get params "query"))
+        top    (parse-knowledge-search-top (get params "top"))]
+    (if-not query
+      (json-response 400 {:error "missing query"})
+      (json-response 200 {:query query
+                          :nodes (mapv knowledge-node->body
+                                       (search-knowledge-nodes query top))}))))
+
+(defn- handle-list-knowledge-node-facts [node-id]
+  (if-let [node-eid (parse-optional-positive-long node-id "node id")]
+    (if-let [node (some-> node-eid memory/get-node not-empty)]
+      (json-response 200
+                     {:node  (knowledge-node->body (assoc node :db/id node-eid))
+                      :facts (mapv (fn [fact]
+                                     (knowledge-fact->body (assoc fact :node-eid node-eid)))
+                                   (memory/node-facts-with-eids node-eid))})
+      (json-response 404 {:error "node not found"}))
+    (json-response 400 {:error "invalid node id"})))
+
+(defn- handle-delete-knowledge-fact [fact-id]
+  (if-let [fact-eid (parse-optional-positive-long fact-id "fact id")]
+    (if-let [forgotten (memory/forget-fact! fact-eid)]
+      (json-response 200 {:status "forgotten"
+                          :fact   (knowledge-fact->body forgotten)})
+      (json-response 404 {:error "fact not found"}))
+    (json-response 400 {:error "invalid fact id"})))
+
 (defn- handle-admin-config [_req]
   (json-response
     200
@@ -2503,6 +2587,8 @@
           artifact-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)" uri)
           artifact-scratch-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/scratch-pads" uri)
           artifact-download-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/download" uri)
+          knowledge-node-facts-match (re-matches #"/knowledge/nodes/([^/]+)/facts" uri)
+          knowledge-fact-match (re-matches #"/knowledge/facts/([^/]+)" uri)
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
@@ -2616,6 +2702,17 @@
         (and (= method :delete) artifact-match)
         (protected-route-response req #(handle-delete-artifact (second artifact-match)
                                                                (nth artifact-match 2)))
+
+        (and (= method :get) (= uri "/knowledge/nodes"))
+        (protected-route-response req #(handle-search-knowledge-nodes req))
+
+        (and (= method :get) knowledge-node-facts-match)
+        (protected-route-response req #(handle-list-knowledge-node-facts
+                                         (second knowledge-node-facts-match)))
+
+        (and (= method :delete) knowledge-fact-match)
+        (protected-route-response req #(handle-delete-knowledge-fact
+                                         (second knowledge-fact-match)))
 
         (and (= method :get) (= uri "/admin/config"))
         (protected-route-response req #(handle-admin-config req))
