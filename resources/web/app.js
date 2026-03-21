@@ -115,6 +115,7 @@ const providerWorkloadsEl = document.getElementById('provider-workloads');
 const providerWorkloadsNoteEl = document.getElementById('provider-workloads-note');
 const providerSystemPromptBudgetEl = document.getElementById('provider-system-prompt-budget');
 const providerHistoryBudgetEl = document.getElementById('provider-history-budget');
+const providerRateLimitEl = document.getElementById('provider-rate-limit-per-minute');
 const providerVisionEl = document.getElementById('provider-vision');
 const providerApiKeyEl = document.getElementById('provider-api-key');
 const providerDefaultEl = document.getElementById('provider-default');
@@ -728,6 +729,9 @@ function providerMeta(provider) {
   if (Array.isArray(provider.workloads) && provider.workloads.length) {
     bits.push('Workloads: ' + provider.workloads.join(', '));
   }
+  if (provider.effective_rate_limit_per_minute) {
+    bits.push('Rate ' + provider.effective_rate_limit_per_minute + '/min');
+  }
   if (provider.health_status && provider.health_status !== 'healthy') {
     const label = provider.health_status === 'cooling-down'
       ? 'Cooling down'
@@ -1122,6 +1126,7 @@ function resetProviderForm(statusText) {
   providerWorkloadsEl.value = '';
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
+  providerRateLimitEl.value = '';
   providerVisionEl.checked = false;
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !state.admin.providers.some((provider) => provider.default);
@@ -1313,12 +1318,16 @@ function selectProvider(provider) {
   providerWorkloadsEl.value = Array.isArray(provider.workloads) ? provider.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
+  providerRateLimitEl.value = provider.rate_limit_per_minute || '';
   providerVisionEl.checked = !!provider.vision;
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !!provider.default;
   providerStatusEl.textContent = provider.api_key_configured
     ? 'API key stored. Enter a new one to replace it.'
     : 'No API key stored yet.';
+  if (provider.effective_rate_limit_per_minute) {
+    providerStatusEl.textContent += ' Rate limit: ' + provider.effective_rate_limit_per_minute + '/min.';
+  }
   if (provider.health_status && provider.health_status !== 'healthy') {
     providerStatusEl.textContent += ' Current health: ' + provider.health_status + '.';
     if (provider.health_last_error) {
@@ -1783,6 +1792,7 @@ async function saveProvider() {
         workloads: parseProviderWorkloadsInput(),
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
+        rate_limit_per_minute: providerRateLimitEl.value,
         vision: providerVisionEl.checked,
         api_key: providerApiKeyEl.value,
         default: providerDefaultEl.checked

@@ -898,6 +898,8 @@
      :allow_private_network (boolean (:llm.provider/allow-private-network? provider))
      :system_prompt_budget  (:llm.provider/system-prompt-budget provider)
      :history_budget        (:llm.provider/history-budget provider)
+     :rate_limit_per_minute (:llm.provider/rate-limit-per-minute provider)
+     :effective_rate_limit_per_minute (llm/effective-rate-limit-per-minute provider)
      :health_status         (name (:status health))
      :health_failures       (:consecutive-failures health)
      :health_cooldown_ms    (:cooldown-remaining-ms health)
@@ -1923,6 +1925,8 @@
                                                              "system_prompt_budget")
           history-budget (parse-optional-positive-long (get data "history_budget")
                                                        "history_budget")
+          rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
+                                                              "rate_limit_per_minute")
           make-default (true? (get data "default"))
           has-default? (some? (db/get-default-provider))]
       (when-not base-url
@@ -1934,7 +1938,8 @@
                                     :base-url base-url
                                     :model    model
                                     :system-prompt-budget system-prompt-budget
-                                    :history-budget history-budget}
+                                    :history-budget history-budget
+                                    :rate-limit-per-minute rate-limit-per-minute}
                              (contains? data "vision")
                              (assoc :vision? vision?)
                              (contains? data "allow_private_network")

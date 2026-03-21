@@ -50,6 +50,7 @@
    :llm.provider/allow-private-network? {:db/valueType :db.type/boolean}
    :llm.provider/system-prompt-budget {:db/valueType :db.type/long}
    :llm.provider/history-budget {:db/valueType :db.type/long}
+   :llm.provider/rate-limit-per-minute {:db/valueType :db.type/long}
    :llm.provider/default? {:db/valueType :db.type/boolean}
 
    ;; --- Episodic Memory ---
@@ -1042,6 +1043,8 @@
                                          (:system-prompt-budget provider))
         history-budget               (or (:llm.provider/history-budget provider)
                                          (:history-budget provider))
+        rate-limit-per-minute        (or (:llm.provider/rate-limit-per-minute provider)
+                                         (:rate-limit-per-minute provider))
         vision?                      (or (:llm.provider/vision? provider)
                                          (:vision? provider))
         allow-private-network?       (or (:llm.provider/allow-private-network? provider)
@@ -1056,6 +1059,8 @@
                                          (contains? provider :system-prompt-budget))
         has-history-budget?          (or (contains? provider :llm.provider/history-budget)
                                          (contains? provider :history-budget))
+        has-rate-limit?              (or (contains? provider :llm.provider/rate-limit-per-minute)
+                                         (contains? provider :rate-limit-per-minute))
         provider-tx                  (cond-> {:llm.provider/id provider-id}
                                        (contains? provider :llm.provider/name)
                                        (assoc :llm.provider/name (:llm.provider/name provider))
@@ -1086,6 +1091,9 @@
                                        (and has-history-budget?
                                             (some? history-budget))
                                        (assoc :llm.provider/history-budget history-budget)
+                                       (and has-rate-limit?
+                                            (some? rate-limit-per-minute))
+                                       (assoc :llm.provider/rate-limit-per-minute rate-limit-per-minute)
                                        (contains? provider :llm.provider/default?)
                                        (assoc :llm.provider/default? (:llm.provider/default? provider))
                                        (contains? provider :default?)
@@ -1108,7 +1116,12 @@
                                             has-history-budget?
                                             (nil? history-budget))
                                        (conj [:db/retract provider-eid
-                                              :llm.provider/history-budget]))]
+                                              :llm.provider/history-budget])
+                                       (and provider-eid
+                                            has-rate-limit?
+                                            (nil? rate-limit-per-minute))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/rate-limit-per-minute]))]
     (transact! (conj retracts provider-tx))))
 
 (defn get-default-provider []

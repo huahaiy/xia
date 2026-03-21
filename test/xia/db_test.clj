@@ -44,6 +44,20 @@
                         :vision?  false})
   (is (false? (:llm.provider/vision? (db/get-provider :openai)))))
 
+(deftest providers-persist-rate-limit-and-can-clear-it
+  (db/upsert-provider! {:id                    :openai
+                        :name                  "OpenAI"
+                        :base-url              "https://api.openai.com/v1"
+                        :model                 "gpt-4o"
+                        :rate-limit-per-minute 45})
+  (is (= 45 (:llm.provider/rate-limit-per-minute (db/get-provider :openai))))
+  (db/upsert-provider! {:id                    :openai
+                        :name                  "OpenAI"
+                        :base-url              "https://api.openai.com/v1"
+                        :model                 "gpt-4o-mini"
+                        :rate-limit-per-minute nil})
+  (is (nil? (:llm.provider/rate-limit-per-minute (db/get-provider :openai)))))
+
 (deftest worker-sessions-are-hidden-by-default
   (let [parent (db/create-session! :terminal)
         child  (db/create-session! :branch {:parent-session-id parent

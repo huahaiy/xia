@@ -7,11 +7,13 @@
             [taoensso.timbre :as log]
             [xia.config :as cfg]
             [xia.db :as db]
-            [xia.http-client :as http])
+            [xia.http-client :as http]
+            [xia.rate-limit :as rate-limit])
   (:import [java.net URI]
            [java.time ZonedDateTime]
            [java.time.format DateTimeFormatter]
-           [java.util.concurrent TimeoutException]))
+           [java.util.concurrent ConcurrentHashMap TimeoutException]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (def ^:private request-timeout-ms 120000)
 (def ^:private provider-health-base-cooldown-ms 30000)
@@ -19,6 +21,7 @@
 (def ^:private llm-retry-statuses #{408 409 425 429 500 502 503 504})
 (def ^:private default-max-provider-retry-rounds 4)
 (def ^:private default-max-provider-retry-wait-ms 300000)
+(def default-rate-limit-per-minute 60)
 (def ^:private workload-options
   [{:id :assistant
     :label "Assistant"
@@ -43,7 +46,10 @@
     :description "Post-response rating of which retrieved facts were useful."}])
 (defonce ^:private workload-counters (atom {}))
 (defonce ^:private provider-health (atom {}))
+(defonce ^ConcurrentHashMap ^:private provider-rate-limits (ConcurrentHashMap.))
+(defonce ^AtomicLong ^:private provider-rate-limit-cleanup (AtomicLong. 0))
 (def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
+(def ^:private rate-limit-window-ms 60000)
 
 (defn- long-max
   ^long [^long a ^long b]
@@ -93,6 +99,13 @@
   [provider]
   (set (or (:llm.provider/workloads provider)
            (:workloads provider))))
+
+(defn effective-rate-limit-per-minute
+  "Return the effective per-provider request cap for a minute window."
+  [provider]
+  (long (or (:llm.provider/rate-limit-per-minute provider)
+            (:rate-limit-per-minute provider)
+            default-rate-limit-per-minute)))
 
 (defn- loopback-base-url?
   [base-url]
@@ -570,11 +583,40 @@
       (.getMessage e)
       (str "provider " provider-id " request failed")))
 
+(defn- local-rate-limit-error?
+  [^Throwable e]
+  (= :llm/rate-limit (some-> e ex-data :type)))
+
+(defn- check-rate-limit!
+  [provider-id provider workload]
+  (let [limit (effective-rate-limit-per-minute provider)
+        now   (long (now-ms))
+        _     (rate-limit/maybe-prune-states! provider-rate-limits
+                                              provider-rate-limit-cleanup
+                                              now
+                                              rate-limit-window-ms)
+        state (.computeIfAbsent provider-rate-limits provider-id
+                (reify java.util.function.Function
+                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
+    (rate-limit/consume-slot!
+      state
+      now
+      rate-limit-window-ms
+      limit
+      (fn []
+        (ex-info (str "Rate limit exceeded for provider " (name provider-id)
+                      " (max " limit " requests/minute)")
+                 {:type        :llm/rate-limit
+                  :provider-id provider-id
+                  :workload    workload
+                  :limit       limit})))))
+
 (defn- attempt-chat
   [messages opts {:keys [provider provider-id workload]}]
   (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
         api-key   (or (:llm.provider/api-key provider) (:api-key provider))
         model     (or (:llm.provider/model provider) (:model provider))
+        _         (check-rate-limit! provider-id provider workload)
         req       (build-request {:base-url base-url
                                   :api-key api-key
                                   :model model
@@ -659,18 +701,26 @@
           (let [e           (:error result)
                 attempt-id  (:provider-id attempt)
                 error-text  (provider-error-message attempt-id e)
-                cooldown-ms (retry-after-ms (some-> e ex-data :headers))
-                health      (record-provider-failure! attempt-id
-                                                     error-text
-                                                     :cooldown-ms cooldown-ms)
-                failure     {:error      e
-                             :retryable? (retryable-llm-error? e)
-                             :delay-ms   (:cooldown-remaining-ms health)
-                             :provider-id attempt-id
-                             :workload   (:workload attempt)}]
+                failure     (if (local-rate-limit-error? e)
+                              {:error       e
+                               :retryable?  false
+                               :delay-ms    nil
+                               :provider-id attempt-id
+                               :workload    (:workload attempt)}
+                              (let [cooldown-ms (retry-after-ms (some-> e ex-data :headers))
+                                    health      (record-provider-failure! attempt-id
+                                                                         error-text
+                                                                         :cooldown-ms cooldown-ms)]
+                                {:error       e
+                                 :retryable?  (retryable-llm-error? e)
+                                 :delay-ms    (:cooldown-remaining-ms health)
+                                 :provider-id attempt-id
+                                 :workload    (:workload attempt)}))]
             (if (seq remaining)
               (do
-                (log/info "LLM provider failed; trying next routed provider"
+                (log/info (if (local-rate-limit-error? e)
+                            "LLM provider hit configured local rate limit; trying next routed provider"
+                            "LLM provider failed; trying next routed provider")
                           {:provider-id attempt-id
                            :workload    (:workload attempt)
                            :remaining   (mapv :provider-id remaining)

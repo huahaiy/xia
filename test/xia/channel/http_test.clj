@@ -1058,7 +1058,8 @@
                         :model    "gpt-5"
                         :workloads #{:assistant :history-compaction}
                         :system-prompt-budget 16000
-                        :history-budget 32000})
+                        :history-budget 32000
+                        :rate-limit-per-minute 75})
   (db/set-default-provider! :openai)
   (db/register-service! {:id          :github
                          :name        "GitHub"
@@ -1130,6 +1131,8 @@
     (is (= ["assistant" "history-compaction"] (get provider "workloads")))
     (is (= 16000 (get provider "system_prompt_budget")))
     (is (= 32000 (get provider "history_budget")))
+    (is (= 75 (get provider "rate_limit_per_minute")))
+    (is (= 75 (get provider "effective_rate_limit_per_minute")))
     (is (= 24 (get conversation-context "recent_history_message_limit")))
     (is (= 182 (get memory-retention "full_resolution_days")))
     (is (= 365 (get memory-retention "decay_half_life_days")))
@@ -1604,6 +1607,7 @@
                                                                               "history-compaction"]
                                                                 "system_prompt_budget" "16000"
                                                                 "history_budget" "32000"
+                                                                "rate_limit_per_minute" "90"
                                                                 "api_key" ""
                                                                 "default" true})})
         body     (response-json response)]
@@ -1614,12 +1618,15 @@
     (is (= ["assistant" "history-compaction"] (get-in body ["provider" "workloads"])))
     (is (= 16000 (get-in body ["provider" "system_prompt_budget"])))
     (is (= 32000 (get-in body ["provider" "history_budget"])))
+    (is (= 90 (get-in body ["provider" "rate_limit_per_minute"])))
+    (is (= 90 (get-in body ["provider" "effective_rate_limit_per_minute"])))
     (is (= "openai-key" (:llm.provider/api-key (db/get-provider :openai))))
     (is (= #{:assistant :history-compaction}
            (set (:llm.provider/workloads (db/get-provider :openai)))))
     (is (= true (:llm.provider/vision? (db/get-provider :openai))))
     (is (= 16000 (:llm.provider/system-prompt-budget (db/get-provider :openai))))
     (is (= 32000 (:llm.provider/history-budget (db/get-provider :openai))))
+    (is (= 90 (:llm.provider/rate-limit-per-minute (db/get-provider :openai))))
     (is (= true (:llm.provider/default? (db/get-provider :openai))))
     (is (= false (:llm.provider/default? (db/get-provider :anthropic))))))
 
@@ -1640,6 +1647,7 @@
                         :model                "gpt-5"
                         :system-prompt-budget 16000
                         :history-budget       32000
+                        :rate-limit-per-minute 90
                         :default?             true})
   (let [response (#'http/router {:uri            "/admin/providers"
                                  :request-method :post
@@ -1651,13 +1659,15 @@
                                                                 "workloads" []
                                                                 "system_prompt_budget" ""
                                                                 "history_budget" ""
+                                                                "rate_limit_per_minute" ""
                                                                 "api_key" ""
                                                                 "default" true})})
         provider (db/get-provider :openai)]
     (is (= 200 (:status response)))
     (is (empty? (or (:llm.provider/workloads provider) [])))
     (is (nil? (:llm.provider/system-prompt-budget provider)))
-    (is (nil? (:llm.provider/history-budget provider)))))
+    (is (nil? (:llm.provider/history-budget provider)))
+    (is (nil? (:llm.provider/rate-limit-per-minute provider)))))
 
 (deftest admin-service-route-preserves-secret-and-clears-unused-header
   (db/register-service! {:id          :github

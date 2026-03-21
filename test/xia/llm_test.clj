@@ -143,6 +143,90 @@
   (is (= (var-get #'llm/provider-health-max-cooldown-ms)
          (#'llm/provider-cooldown-ms 1000))))
 
+(deftest chat-enforces-provider-rate-limit-before-http-request
+  (let [request-count (atom 0)
+        provider-health* (atom {})]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"
+                               :llm.provider/rate-limit-per-minute 2})
+                  xia.llm/provider-rate-limits
+                  (java.util.concurrent.ConcurrentHashMap.)
+                  xia.llm/provider-rate-limit-cleanup
+                  (java.util.concurrent.atomic.AtomicLong. 0)
+                  xia.llm/provider-health
+                  provider-health*
+                  xia.llm/now-ms
+                  (constantly 1000)
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request
+                  (fn [_req]
+                    (swap! request-count inc)
+                    {:status 200
+                     :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})]
+      (is (= "ok"
+             (llm/chat-simple [{"role" "user" "content" "one"}])))
+      (is (= "ok"
+             (llm/chat-simple [{"role" "user" "content" "two"}])))
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo
+            #"Rate limit exceeded for provider default"
+            (llm/chat-simple [{"role" "user" "content" "three"}])))
+      (is (= 2 @request-count))
+      (is (= 0 (get-in @provider-health* [:default :consecutive-failures])))
+      (is (nil? (get-in @provider-health* [:default :last-error]))))))
+
+(deftest chat-enforces-provider-rate-limit-concurrently
+  (let [request-count (atom 0)
+        provider-health* (atom {})
+        start-latch     (java.util.concurrent.CountDownLatch. 1)]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"
+                               :llm.provider/rate-limit-per-minute 2})
+                  xia.llm/provider-rate-limits
+                  (java.util.concurrent.ConcurrentHashMap.)
+                  xia.llm/provider-rate-limit-cleanup
+                  (java.util.concurrent.atomic.AtomicLong. 0)
+                  xia.llm/provider-health
+                  provider-health*
+                  xia.llm/now-ms
+                  (constantly 1000)
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request
+                  (fn [_req]
+                    (swap! request-count inc)
+                    {:status 200
+                     :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})]
+      (let [calls   (doall
+                      (repeatedly 4
+                        (fn []
+                          (future
+                            (.await start-latch)
+                            (try
+                              (llm/chat-simple [{"role" "user" "content" "hello"}])
+                              (catch clojure.lang.ExceptionInfo e
+                                (if (= :llm/rate-limit (:type (ex-data e)))
+                                  :rate-limited
+                                  (throw e))))))))
+            _       (.countDown start-latch)
+            results (mapv deref calls)]
+        (is (= 2 (count (filter #(= "ok" %) results))))
+        (is (= 2 (count (filter #(= :rate-limited %) results))))
+        (is (= 2 @request-count))
+        (is (= 0 (get-in @provider-health* [:default :consecutive-failures])))
+        (is (nil? (get-in @provider-health* [:default :last-error])))))))
+
 (deftest chat-uses-workload-routed-provider
   (with-redefs [xia.db/list-providers
                 (constantly [{:llm.provider/id :router-a
