@@ -1157,7 +1157,7 @@
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
-    (is (= #{"github" "google" "microsoft"}
+    (is (= #{"github" "google" "gmail" "microsoft"}
            (set (map #(get % "id") templates))))
     (is (= "{\"access_type\":\"offline\",\"prompt\":\"consent\"}"
            (get (first (filter #(= "google" (get % "id")) templates)) "auth_params")))

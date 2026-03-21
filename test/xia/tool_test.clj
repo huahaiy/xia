@@ -353,6 +353,9 @@
     (is (= :artifact-search (:tool/id (db/get-tool :artifact-search))))
     (is (= :artifact-read (:tool/id (db/get-tool :artifact-read))))
     (is (= :artifact-delete (:tool/id (db/get-tool :artifact-delete))))
+    (is (= :email-list (:tool/id (db/get-tool :email-list))))
+    (is (= :email-read (:tool/id (db/get-tool :email-read))))
+    (is (= :email-send (:tool/id (db/get-tool :email-send))))
     (is (= :web-search (:tool/id (db/get-tool :web-search))))
     (is (= :browser-runtime-status (:tool/id (db/get-tool :browser-runtime-status))))
     (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
@@ -382,10 +385,72 @@
                    "backend"))
     (is (contains? (get-in (db/get-tool :branch-tasks) [:tool/parameters "properties"])
                    "tasks"))
+    (is (contains? (get-in (db/get-tool :email-send) [:tool/parameters "properties"])
+                   "to"))
     (is (contains? (get-in (db/get-tool :browser-login) [:tool/parameters "properties"])
                    "backend"))
     (is (contains? (get-in (db/get-tool :browser-login-interactive) [:tool/parameters "properties"])
                    "backend"))))
+
+(deftest bundled-email-tools-run-through-approved-service
+  (tool/ensure-bundled-tools!)
+  (doseq [tool-id [:email-list :email-read :email-send]]
+    (tool/load-tool! tool-id))
+  (db/register-service! {:id                   :gmail
+                         :name                 "Gmail"
+                         :base-url             "https://gmail.googleapis.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? true})
+  (let [requests (atom [])]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj req)
+                    (cond
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"messages\":[{\"id\":\"m1\"}],\"resultSizeEstimate\":1}"}
+
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1" (:url req))
+                           (= "metadata" (get-in req [:query-params "format"])))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"snippet\":\"Need a reply\",\"labelIds\":[\"INBOX\"],\"internalDate\":\"1710000000000\",\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"Budget\"},{\"name\":\"From\",\"value\":\"boss@example.com\"}]}}"}
+
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1" (:url req))
+                           (= "full" (get-in req [:query-params "format"])))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"snippet\":\"Need a reply\",\"labelIds\":[\"INBOX\"],\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"Budget\"}],\"parts\":[{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"SGVsbG8\"}}]}}"}
+
+                      (and (= :post (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/send" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"sent-1\",\"threadId\":\"t1\",\"labelIds\":[\"SENT\"]}"}
+
+                      :else
+                      (throw (ex-info "Unexpected Gmail request" {:request req}))))]
+      (let [context {:channel          :scheduler
+                     :autonomous-run?  true
+                     :approval-bypass? true}
+            listed  (tool/execute-tool :email-list {"max_results" 1} context)
+            read    (tool/execute-tool :email-read {"message_id" "m1"} context)
+            sent    (tool/execute-tool :email-send {"to" "boss@example.com"
+                                                    "subject" "Re: Budget"
+                                                    "body" "Done"} context)]
+        (is (= "gmail" (:service-id listed)))
+        (is (= 1 (:returned-count listed)))
+        (is (= "Budget" (get-in listed [:messages 0 :subject])))
+        (is (= "Hello" (:body read)))
+        (is (= :plain (:body-kind read)))
+        (is (= "sent" (:status sent)))
+        (is (= "sent-1" (:id sent)))
+        (is (= "Bearer tok" (get-in (first @requests) [:headers "Authorization"])))))))
 
 (deftest branch-workers-cannot-run-branch-tasks-recursively
   (tool/ensure-bundled-tools!)

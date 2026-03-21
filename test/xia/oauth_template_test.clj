@@ -8,6 +8,7 @@
         github    (oauth-template/get-template :github)]
     (is (contains? ids :github))
     (is (contains? ids :google))
+    (is (contains? ids :gmail))
     (is (contains? ids :microsoft))
     (is (= "https://api.github.com" (:api-base-url github)))
     (is (= "github" (:service-id github)))))

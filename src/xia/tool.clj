@@ -52,6 +52,9 @@
    "tools/artifact-search.edn"
    "tools/artifact-read.edn"
    "tools/artifact-delete.edn"
+   "tools/email-list.edn"
+   "tools/email-read.edn"
+   "tools/email-send.edn"
    "tools/local-doc-search.edn"
    "tools/local-doc-read.edn"
    "tools/schedule-list.edn"
@@ -78,6 +81,10 @@
     :policy :session
     :autonomous-scope :service
     :reason "uses stored service credentials"}
+   {:match "xia.email/"
+    :policy :session
+    :autonomous-scope :service
+    :reason "uses stored email service credentials"}
    {:match "xia.browser/login-interactive"
     :policy :session
     :autonomous-scope nil

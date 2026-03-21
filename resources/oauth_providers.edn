@@ -23,6 +23,19 @@
                 :prompt "consent"}
   :token-params {}
   :notes "Create a Google OAuth client of type Web application and add Xia's /oauth/callback as an authorized redirect URI."}
+ {:id :gmail
+  :name "Gmail"
+  :description "Preset for Gmail send and read access via Google OAuth 2."
+  :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+  :token-url "https://oauth2.googleapis.com/token"
+  :api-base-url "https://gmail.googleapis.com"
+  :service-id "gmail"
+  :service-name "Gmail"
+  :scopes "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send"
+  :auth-params {:access_type "offline"
+                :prompt "consent"}
+  :token-params {}
+  :notes "Create a Google OAuth client of type Web application, enable the Gmail API, and add Xia's /oauth/callback as an authorized redirect URI."}
  {:id :microsoft
   :name "Microsoft"
   :description "Preset for Microsoft identity platform v2 applications."

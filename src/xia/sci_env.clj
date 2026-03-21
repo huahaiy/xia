@@ -20,6 +20,7 @@
             [xia.browser :as browser]
             [xia.config :as cfg]
             [xia.cron :as cron]
+            [xia.email :as email]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.scratch :as scratch]
@@ -129,6 +130,11 @@
 (def ^:private xia-service-ns
   {'request       service/request
    'list-services service/list-services})
+
+(def ^:private xia-email-ns
+  {'list-messages email/list-messages
+   'read-message  email/read-message
+   'send-message  email/send-message})
 
 (def ^:private xia-web-ns
   {'fetch-page   web/fetch-page
@@ -266,6 +272,7 @@
                   'xia.artifact       xia-artifact-ns
                   'xia.cron           xia-cron-ns
                   'xia.service        xia-service-ns
+                  'xia.email          xia-email-ns
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns
                   'xia.agent          xia-agent-ns
