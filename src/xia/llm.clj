@@ -8,7 +8,8 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http])
-  (:import [java.time ZonedDateTime]
+  (:import [java.net URI]
+           [java.time ZonedDateTime]
            [java.time.format DateTimeFormatter]
            [java.util.concurrent TimeoutException]))
 
@@ -42,6 +43,7 @@
     :description "Post-response rating of which retrieved facts were useful."}])
 (defonce ^:private workload-counters (atom {}))
 (defonce ^:private provider-health (atom {}))
+(def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 
 (defn- long-max
   ^long [^long a ^long b]
@@ -91,6 +93,21 @@
   [provider]
   (set (or (:llm.provider/workloads provider)
            (:workloads provider))))
+
+(defn- loopback-base-url?
+  [base-url]
+  (try
+    (contains? loopback-hosts
+               (some-> base-url URI. .getHost str/lower-case))
+    (catch Exception _
+      false)))
+
+(defn- provider-allows-private-network?
+  [provider]
+  (or (:llm.provider/allow-private-network? provider)
+      (:allow-private-network? provider)
+      (loopback-base-url? (or (:llm.provider/base-url provider)
+                              (:base-url provider)))))
 
 (defn vision-capable?
   "True when a provider is configured to accept image input."
@@ -367,7 +384,7 @@
 
 (defn- build-request
   "Build the HTTP request map for a chat completion call."
-  [{:keys [base-url api-key model]} messages {:keys [tools temperature max-tokens]}]
+  [{:keys [base-url api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens]}]
   (let [body (cond-> {:model    model
                       :messages messages}
                tools       (assoc :tools tools)
@@ -378,6 +395,7 @@
      :headers       {"Authorization" (str "Bearer " api-key)
                      "Content-Type"  "application/json"}
      :body          (json/write-json-str body)
+     :allow-private-network? (boolean allow-private-network?)
      :timeout       request-timeout-ms
      :retry-enabled? true
      :request-label "LLM request"}))
@@ -393,7 +411,10 @@
   (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
         api-key   (or (:llm.provider/api-key provider) (:api-key provider))
         model     (or (:llm.provider/model provider) (:model provider))
-        req       (build-request {:base-url base-url :api-key api-key :model model}
+        req       (build-request {:base-url base-url
+                                  :api-key api-key
+                                  :model model
+                                  :allow-private-network? (provider-allows-private-network? provider)}
                                  messages opts)
         _         (log/debug "LLM request via provider" provider-id
                              "to" base-url

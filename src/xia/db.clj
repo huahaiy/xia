@@ -47,6 +47,7 @@
    :llm.provider/workloads {:db/valueType :db.type/keyword
                             :db/cardinality :db.cardinality/many}
    :llm.provider/vision? {:db/valueType :db.type/boolean}
+   :llm.provider/allow-private-network? {:db/valueType :db.type/boolean}
    :llm.provider/system-prompt-budget {:db/valueType :db.type/long}
    :llm.provider/history-budget {:db/valueType :db.type/long}
    :llm.provider/default? {:db/valueType :db.type/boolean}
@@ -322,6 +323,7 @@
    :service/auth-header {:db/valueType :db.type/string}    ; custom header/param name (for :api-key-header / :query-param)
    :service/oauth-account {:db/valueType :db.type/keyword} ; linked OAuth account for :oauth-account auth
    :service/rate-limit-per-minute {:db/valueType :db.type/long}
+   :service/allow-private-network? {:db/valueType :db.type/boolean}
    :service/autonomous-approved? {:db/valueType :db.type/boolean}
    :service/enabled?    {:db/valueType :db.type/boolean}
 
@@ -1042,10 +1044,14 @@
                                          (:history-budget provider))
         vision?                      (or (:llm.provider/vision? provider)
                                          (:vision? provider))
+        allow-private-network?       (or (:llm.provider/allow-private-network? provider)
+                                         (:allow-private-network? provider))
         has-workloads?               (or (contains? provider :llm.provider/workloads)
                                          (contains? provider :workloads))
         has-vision?                  (or (contains? provider :llm.provider/vision?)
                                          (contains? provider :vision?))
+        has-allow-private-network?   (or (contains? provider :llm.provider/allow-private-network?)
+                                         (contains? provider :allow-private-network?))
         has-system-prompt-budget?    (or (contains? provider :llm.provider/system-prompt-budget)
                                          (contains? provider :system-prompt-budget))
         has-history-budget?          (or (contains? provider :llm.provider/history-budget)
@@ -1072,6 +1078,8 @@
                                        (assoc :llm.provider/workloads workloads)
                                        has-vision?
                                        (assoc :llm.provider/vision? (boolean vision?))
+                                       has-allow-private-network?
+                                       (assoc :llm.provider/allow-private-network? (boolean allow-private-network?))
                                        (and has-system-prompt-budget?
                                             (some? system-prompt-budget))
                                        (assoc :llm.provider/system-prompt-budget system-prompt-budget)
@@ -1654,8 +1662,12 @@
         current (when eid (raw-entity eid))
         rate-limit-per-minute (or (:service/rate-limit-per-minute service)
                                   (:rate-limit-per-minute service))
+        allow-private-network? (or (:service/allow-private-network? service)
+                                   (:allow-private-network? service))
         has-rate-limit? (or (contains? service :service/rate-limit-per-minute)
                             (contains? service :rate-limit-per-minute))
+        has-allow-private-network? (or (contains? service :service/allow-private-network?)
+                                       (contains? service :allow-private-network?))
         tx-data (cond-> [{:service/id        id
                           :service/name      (or name (clojure.core/name id))
                           :service/base-url  base-url
@@ -1676,6 +1688,9 @@
                   (and has-rate-limit?
                        (some? rate-limit-per-minute))
                   (update 0 assoc :service/rate-limit-per-minute rate-limit-per-minute)
+
+                  has-allow-private-network?
+                  (update 0 assoc :service/allow-private-network? (boolean allow-private-network?))
 
                   (and eid
                        (nil? auth-header)

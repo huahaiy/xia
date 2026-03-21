@@ -7,7 +7,11 @@
 (deftest request-retries-transient-failures
   (let [attempts (atom 0)
         sleeps   (atom [])]
-    (with-redefs [http-client/send-request! (fn [_]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url _opts]
+                                          {:url url
+                                           :host "api.example.com"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
                                               (case (int (swap! attempts inc))
                                                 1 {:status 503
                                                    :headers {}
@@ -33,7 +37,11 @@
 (deftest request-does-not-retry-non-idempotent-methods-by-default
   (let [attempts (atom 0)
         sleeps   (atom [])]
-    (with-redefs [http-client/send-request! (fn [_]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url _opts]
+                                          {:url url
+                                           :host "api.example.com"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
                                               (swap! attempts inc)
                                               {:status 503
                                                :headers {}
@@ -55,7 +63,11 @@
 (deftest request-can-override-method-based-retry-gating
   (let [attempts (atom 0)
         sleeps   (atom [])]
-    (with-redefs [http-client/send-request! (fn [_]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url _opts]
+                                          {:url url
+                                           :host "api.example.com"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
                                               (case (int (swap! attempts inc))
                                                 1 {:status 503
                                                    :headers {}
@@ -81,7 +93,11 @@
 (deftest request-does-not-retry-permanent-status
   (let [attempts (atom 0)
         sleeps   (atom [])]
-    (with-redefs [http-client/send-request! (fn [_]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url _opts]
+                                          {:url url
+                                           :host "api.example.com"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
                                               (swap! attempts inc)
                                               {:status 400
                                                :headers {"content-type" "application/json"}
@@ -99,6 +115,41 @@
                                    :request-label "test request"})))
       (is (= 1 @attempts))
       (is (empty? @sleeps)))))
+
+(deftest request-validates-ssrf-targets-by-default
+  (let [validated (atom nil)]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url opts]
+                                          (reset! validated {:url url :opts opts})
+                                          {:url url
+                                           :host "api.example.com"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
+                                              {:status 200
+                                               :headers {}
+                                               :body ""})]
+      (is (= 200
+             (:status (http-client/request {:url "https://api.example.com/test"}))))
+      (is (= {:url "https://api.example.com/test"
+              :opts {:allow-private-network? false}}
+             @validated)))))
+
+(deftest request-can-explicitly-allow-private-network-targets
+  (let [validated (atom nil)]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url opts]
+                                          (reset! validated {:url url :opts opts})
+                                          {:url url
+                                           :host "127.0.0.1"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
+                                              {:status 200
+                                               :headers {}
+                                               :body ""})]
+      (is (= 200
+             (:status (http-client/request {:url "http://127.0.0.1/test"
+                                            :allow-private-network? true}))))
+      (is (= {:url "http://127.0.0.1/test"
+              :opts {:allow-private-network? true}}
+             @validated)))))
 
 (deftest request-times-out-on-stalled-response-body
   (let [server (ServerSocket. 0)
@@ -120,6 +171,7 @@
                                      :method        :post
                                      :headers       {"Content-Type" "application/json"}
                                      :body          "{}"
+                                     :allow-private-network? true
                                      :timeout       200
                                      :max-attempts  1
                                      :request-label "timeout test"})

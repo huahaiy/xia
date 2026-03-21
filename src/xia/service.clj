@@ -181,6 +181,7 @@
        :auth-type     auth-type
        :auth-key      (:service/auth-key svc)
        :auth-header   (:service/auth-header svc)
+       :allow-private-network? (boolean (:service/allow-private-network? svc))
        :autonomous-approved? (autonomous/service-autonomous-approved? svc)
        :rate-limit-per-minute (effective-rate-limit-per-minute svc)
        :oauth-account-id (when (= :oauth-account auth-type)
@@ -284,6 +285,7 @@
                   oauth-account (assoc :oauth-account oauth-account))
         req     (cond-> {:url         url
                          :method      method
+                         :allow-private-network? (:allow-private-network? svc)
                          :request-label (str "Service request " (name service-id))}
                   body-str     (assoc :body body-str)
                   body-str     (assoc-in [:headers "Content-Type"] "application/json")

@@ -39,6 +39,15 @@
     (is (= "high"
            (get-in body ["messages" 0 "content" 1 "image_url" "detail"])))))
 
+(deftest build-request-can-allow-private-network-targets
+  (let [req (#'llm/build-request {:base-url "http://127.0.0.1:11434/v1"
+                                  :api-key "sk-test"
+                                  :model "qwen"
+                                  :allow-private-network? true}
+                                 [{"role" "user" "content" "hello"}]
+                                 {})]
+    (is (true? (:allow-private-network? req)))))
+
 (deftest vision-capable-checks-provider-flag
   (is (true? (llm/vision-capable? {:llm.provider/id :vision
                                    :llm.provider/vision? true})))
@@ -150,6 +159,47 @@
     (is (= "ok"
            (llm/chat-simple [{"role" "user" "content" "hello"}]
                             :workload :assistant)))))
+
+(deftest chat-allows-loopback-provider-base-url
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :default
+                             :llm.provider/base-url "http://127.0.0.1:11434/v1"
+                             :llm.provider/api-key ""
+                             :llm.provider/model "qwen"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request
+                (fn [req]
+                  (is (true? (:allow-private-network? req)))
+                  {:status 200
+                   :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})]
+    (is (= "ok"
+           (llm/chat-simple [{"role" "user" "content" "hello"}])))))
+
+(deftest chat-propagates-explicit-private-network-opt-in
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :default
+                             :llm.provider/base-url "http://192.168.1.10:11434/v1"
+                             :llm.provider/api-key ""
+                             :llm.provider/model "qwen"
+                             :llm.provider/allow-private-network? true})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request
+                (fn [req]
+                  (is (true? (:allow-private-network? req)))
+                  {:status 200
+                   :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})]
+    (is (= "ok"
+           (llm/chat-simple [{"role" "user" "content" "hello"}])))))
 
 (deftest chat-fails-over-to-next-provider-and-records-health
   (let [requests (atom [])]

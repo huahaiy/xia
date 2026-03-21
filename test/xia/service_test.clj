@@ -238,6 +238,30 @@
               :cleaned    now}
              @state)))))
 
+(deftest request-blocks-private-base-url-by-default
+  (db/register-service! {:id        :private-svc
+                         :base-url  "http://127.0.0.1:8080"
+                         :auth-type :bearer
+                         :auth-key  "tok"})
+  (with-redefs [xia.http-client/send-request! (fn [_]
+                                                (throw (ex-info "should not send" {})))]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"private/internal network"
+          (service/request :private-svc :get "/status")))))
+
+(deftest request-allows-private-base-url-when-explicitly-configured
+  (db/register-service! {:id                     :private-svc
+                         :base-url               "http://127.0.0.1:8080"
+                         :auth-type              :bearer
+                         :auth-key               "tok"
+                         :allow-private-network? true})
+  (with-redefs [xia.http-client/send-request! (fn [_]
+                                                {:status 200
+                                                 :headers {"content-type" "application/json"}
+                                                 :body "{}"})]
+    (is (= 200
+           (:status (service/request :private-svc :get "/status"))))))
+
 (deftest check-rate-limit-remains-bounded-under-concurrency
   (let [now    60000
         state  (atom {:timestamps []

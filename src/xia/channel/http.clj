@@ -894,6 +894,7 @@
                                  sort
                                  vec)
      :vision                (boolean (:llm.provider/vision? provider))
+     :allow_private_network (boolean (:llm.provider/allow-private-network? provider))
      :system_prompt_budget  (:llm.provider/system-prompt-budget provider)
      :history_budget        (:llm.provider/history-budget provider)
      :health_status         (name (:status health))
@@ -968,6 +969,7 @@
      :oauth_account_autonomous_approved (boolean (and oauth-account
                                                      (autonomous/oauth-account-autonomous-approved? oauth-account)))
      :rate_limit_per_minute  (:service/rate-limit-per-minute service)
+     :allow_private_network  (boolean (:service/allow-private-network? service))
      :effective_rate_limit_per_minute (service-proxy/effective-rate-limit-per-minute service)
      :autonomous_approved    (boolean (autonomous/service-autonomous-approved? service))
      :enabled                (boolean (:service/enabled? service))
@@ -1908,6 +1910,8 @@
           api-key      (nonblank-str (get data "api_key"))
           vision?      (when (contains? data "vision")
                          (true? (get data "vision")))
+          allow-private-network? (when (contains? data "allow_private_network")
+                                   (true? (get data "allow_private_network")))
           workloads    (when (contains? data "workloads")
                          (parse-provider-workloads (get data "workloads")))
           system-prompt-budget (parse-optional-positive-long (get data "system_prompt_budget")
@@ -1928,6 +1932,8 @@
                                     :history-budget history-budget}
                              (contains? data "vision")
                              (assoc :vision? vision?)
+                             (contains? data "allow_private_network")
+                             (assoc :allow-private-network? allow-private-network?)
                              (contains? data "workloads")
                              (assoc :workloads workloads)
                              api-key
@@ -2163,6 +2169,8 @@
           entered-auth-key  (nonblank-str (get data "auth_key"))
           rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
                                                               "rate_limit_per_minute")
+          allow-private-network? (when (contains? data "allow_private_network")
+                                   (true? (get data "allow_private_network")))
           autonomous-approved? (when (contains? data "autonomous_approved")
                                  (true? (get data "autonomous_approved")))
           enabled?          (if (contains? data "enabled")
@@ -2202,6 +2210,7 @@
                          :auth-header auth-header
                          :oauth-account oauth-account-id
                          :rate-limit-per-minute rate-limit-per-minute
+                         :allow-private-network? allow-private-network?
                          :autonomous-approved? autonomous-approved?
                          :enabled?    enabled?})
       (json-response 200 {:service (service->admin-body (db/get-service service-id))}))

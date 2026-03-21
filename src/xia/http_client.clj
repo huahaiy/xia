@@ -2,7 +2,8 @@
   "Shared outbound HTTP helper with bounded request timeouts and retries."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
-            [hato.client :as hc])
+            [hato.client :as hc]
+            [xia.ssrf :as ssrf])
   (:import [java.net URI URLEncoder]
            [java.net.http HttpClient HttpHeaders HttpRequest HttpRequest$BodyPublishers
             HttpResponse HttpResponse$BodyHandler HttpResponse$BodyHandlers]
@@ -71,6 +72,13 @@
              (str/upper-case (name (or method :get)))
              (body-publisher body))
     (.build builder)))
+
+(defn- validate-request-target!
+  [{:keys [allow-private-network? url uri query-params]}]
+  (let [request-url-str (request-url {:url url :uri uri :query-params query-params})]
+    (ssrf/resolve-url! request-url-str
+                      {:allow-private-network? (boolean allow-private-network?)})
+    request-url-str))
 
 (defn- normalize-headers
   [^HttpHeaders headers]
@@ -178,6 +186,7 @@
      :retry-statuses       default #{408 409 425 429 500 502 503 504}
      :retry-methods        methods retried by default, default #{:delete :get :head :options :put :trace}
      :retry-enabled?       override automatic method-based retry gating
+     :allow-private-network? bypass SSRF private-network blocking for explicitly trusted targets
      :request-label        optional log label"
   [{:keys [connect-timeout timeout max-attempts initial-backoff-ms max-backoff-ms retry-statuses request-label]
     :or   {connect-timeout    default-connect-timeout-ms
@@ -190,6 +199,7 @@
   (let [req (assoc req
                    :connect-timeout connect-timeout
                    :timeout timeout)
+        request-url-str (validate-request-target! req)
         label (or request-label "HTTP request")
         can-retry? (retry-enabled? req)]
     (letfn [(retry! [attempt reason]
@@ -200,7 +210,7 @@
                            :attempt attempt
                            :max-attempts max-attempts
                            :delay-ms delay-ms
-                           :url (request-url req)})
+                           :url request-url-str})
                 (sleep-ms! delay-ms)
                 (attempt-request (inc (long attempt)))))
             (attempt-request [attempt]
