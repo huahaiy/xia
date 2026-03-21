@@ -90,3 +90,14 @@
                     "unlock-passphrase")]
       (is (= "unlock-passphrase" (provider {:new? false}))))
     (is (= ["Master passphrase"] @prompts))))
+
+(deftest main-forwards-web-dev-option
+  (let [started (atom nil)]
+    (with-redefs-fn {#'xia.core/start! (fn [options] (reset! started options))
+                     #'xia.logging/configure! (fn [_] nil)
+                     #'xia.core/register-shutdown-hook! (fn [_] ::hook)
+                     #'xia.core/remove-shutdown-hook! (fn [_] nil)
+                     #'xia.core/make-cleanup (fn [_] (fn [] nil))}
+      #(core/-main "--mode" "server" "--web-dev"))
+    (is (= "server" (:mode @started)))
+    (is (= true (:web-dev @started)))))

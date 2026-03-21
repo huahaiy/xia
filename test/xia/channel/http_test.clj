@@ -179,6 +179,34 @@
       (is (instance? byte-array-class (:body response)))
       (is (pos? (alength ^bytes (:body response)))))))
 
+(deftest web-dev-reload-route-disabled-by-default
+  (let [response (#'http/router {:uri "/__dev/web-reload" :request-method :get})]
+    (is (= 404 (:status response)))))
+
+(deftest web-dev-mode-serves-live-web-assets
+  (#'http/configure-web-dev! true)
+  (try
+    (testing "injects live reload client into the root page"
+      (let [response (#'http/router {:uri "/" :request-method :get})]
+        (is (= 200 (:status response)))
+        (is (= "no-store, no-cache, must-revalidate, max-age=0"
+               (get-in response [:headers "Cache-Control"])))
+        (is (re-find #"/__dev/web-reload" (:body response)))
+        (is (re-find #"window\.location\.reload" (:body response)))))
+    (testing "serves the web dev reload endpoint"
+      (let [response (#'http/router {:uri "/__dev/web-reload" :request-method :get})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= true (get body "enabled")))
+        (is (string? (get body "version")))))
+    (testing "disables browser caching for static assets"
+      (let [response (#'http/router {:uri "/app.js" :request-method :get})]
+        (is (= 200 (:status response)))
+        (is (= "no-store, no-cache, must-revalidate, max-age=0"
+               (get-in response [:headers "Cache-Control"])))))
+    (finally
+      (#'http/configure-web-dev! false))))
+
 (deftest create-session-route-returns-session-id
   (let [response (#'http/router {:uri            "/sessions"
                                  :request-method :post

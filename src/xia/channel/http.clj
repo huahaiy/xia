@@ -28,6 +28,7 @@
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
     [java.nio.charset StandardCharsets]
+    [java.nio.file Files LinkOption Path Paths]
     [java.security SecureRandom]
     [java.util Base64 Date]
     [java.util.concurrent Executors ScheduledExecutorService ScheduledFuture TimeUnit]))
@@ -40,6 +41,8 @@
 (defonce ^:private ws-sessions (atom {})) ; channel → session-id
 (defonce ^:private pending-approvals (atom {})) ; session-id string → approval map
 (defonce ^:private session-statuses (atom {})) ; session-id string → latest status map
+(defonce ^:private web-dev-state (atom {:enabled? false
+                                        :root nil}))
 
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
@@ -77,14 +80,14 @@
 ;; Local web UI
 ;; ---------------------------------------------------------------------------
 
-(def ^:private read-resource
+(def ^:private read-bundled-resource
   (memoize
     (fn [path]
       (some-> (str "web/" path)
               io/resource
               slurp))))
 
-(def ^:private read-resource-bytes
+(def ^:private read-bundled-resource-bytes
   (memoize
     (fn [path]
       (when-let [resource (some-> (str "web/" path) io/resource)]
@@ -93,18 +96,151 @@
           (io/copy in out)
           (.toByteArray out))))))
 
+(def ^:private web-dev-poll-interval-ms 1000)
+
+(def ^:private web-dev-no-cache-headers
+  {"Cache-Control" "no-store, no-cache, must-revalidate, max-age=0"
+   "Pragma" "no-cache"
+   "Expires" "0"})
+
+(defn- web-dev-enabled?
+  []
+  (true? (:enabled? @web-dev-state)))
+
+(defn- resolve-web-dev-root
+  []
+  (try
+    (when-let [resource (io/resource "web/index.html")]
+      (when (= "file" (.getProtocol resource))
+        (.getParent (Paths/get (.toURI resource)))))
+    (catch Exception _
+      nil)))
+
+(defn- configure-web-dev!
+  [enabled?]
+  (if-not enabled?
+    (reset! web-dev-state {:enabled? false
+                           :root nil})
+    (if-let [root (resolve-web-dev-root)]
+      (do
+        (reset! web-dev-state {:enabled? true
+                               :root root})
+        (log/info "Web dev mode enabled; serving live web assets from" (str root)))
+      (do
+        (reset! web-dev-state {:enabled? false
+                               :root nil})
+        (log/warn "Web dev mode requested, but web resources are not file-backed; falling back to bundled assets")))))
+
+(defn- web-dev-root
+  []
+  (:root @web-dev-state))
+
+(defn- web-dev-path
+  ^Path [path]
+  (when-let [^Path root (web-dev-root)]
+    (.normalize (.resolve root ^String path))))
+
+(defn- read-web-dev-resource
+  [path]
+  (when-let [^Path p (web-dev-path path)]
+    (when (Files/isRegularFile p (make-array LinkOption 0))
+      (slurp (.toFile p)))))
+
+(defn- read-web-dev-resource-bytes
+  [path]
+  (when-let [^Path p (web-dev-path path)]
+    (when (Files/isRegularFile p (make-array LinkOption 0))
+      (Files/readAllBytes p))))
+
+(defn- read-resource
+  [path]
+  (if (web-dev-enabled?)
+    (or (read-web-dev-resource path)
+        (read-bundled-resource path))
+    (read-bundled-resource path)))
+
+(defn- read-resource-bytes
+  [path]
+  (if (web-dev-enabled?)
+    (or (read-web-dev-resource-bytes path)
+        (read-bundled-resource-bytes path))
+    (read-bundled-resource-bytes path)))
+
+(defn- with-web-dev-headers
+  [response]
+  (if (web-dev-enabled?)
+    (update response :headers #(merge web-dev-no-cache-headers (or % {})))
+    response))
+
+(defn- web-dev-version
+  []
+  (when-let [^Path root (web-dev-root)]
+    (try
+      (with-open [stream (Files/walk root (make-array java.nio.file.FileVisitOption 0))]
+        (let [{:keys [file-count max-modified total-size]}
+              (reduce (fn [{:keys [file-count max-modified total-size]} ^Path path]
+                        (if (Files/isRegularFile path (make-array LinkOption 0))
+                          {:file-count   (unchecked-inc-int (int file-count))
+                           :max-modified (max (long max-modified)
+                                              (.toMillis (Files/getLastModifiedTime path
+                                                                                    (make-array LinkOption 0))))
+                           :total-size   (+ (long total-size) (Files/size path))}
+                          {:file-count file-count
+                           :max-modified max-modified
+                           :total-size total-size}))
+                      {:file-count 0
+                       :max-modified 0
+                       :total-size 0}
+                      (iterator-seq (.iterator stream)))]
+          (str file-count ":" max-modified ":" total-size)))
+      (catch Exception e
+        (log/debug e "Failed to compute web dev version")
+        nil))))
+
+(defn- inject-web-dev-client
+  [html]
+  (if-not (web-dev-enabled?)
+    html
+    (let [version (or (web-dev-version) "0")
+          script  (str "<script>"
+                       "(function(){"
+                       "var currentVersion=" (pr-str version) ";"
+                       "async function poll(){"
+                       "try{"
+                       "var response=await fetch('/__dev/web-reload',{cache:'no-store'});"
+                       "if(!response.ok){return;}"
+                       "var payload=await response.json();"
+                       "if(payload && payload.version && payload.version!==currentVersion){"
+                       "window.location.reload();"
+                       "return;}"
+                       "if(payload && payload.version){currentVersion=payload.version;}"
+                       "}catch(_err){}"
+                       "}"
+                       "window.setInterval(function(){"
+                       "if(document.visibilityState!=='hidden'){poll();}"
+                       "},"
+                       web-dev-poll-interval-ms
+                       ");"
+                       "})();"
+                       "</script>")]
+      (if (str/includes? html "</body>")
+        (str/replace html "</body>" (str script "</body>"))
+        (str html script)))))
+
 (defn- resource-response [path content-type]
   (if-let [content (read-resource path)]
-    {:status  200
-     :headers {"Content-Type" content-type}
-     :body    content}
+    (with-web-dev-headers
+      {:status  200
+       :headers {"Content-Type" content-type}
+       :body    content})
     {:status 404 :body "Not Found"}))
 
 (defn- binary-resource-response [path content-type]
   (if-let [content (read-resource-bytes path)]
-    {:status  200
-     :headers {"Content-Type" content-type}
-     :body    content}
+    (with-web-dev-headers
+      {:status  200
+       :headers {"Content-Type" content-type}
+       :body    content})
     {:status 404 :body "Not Found"}))
 
 (defn- throwable-message
@@ -2557,11 +2693,18 @@
 (defn- handle-health [_req]
   (json-response 200 {:status "ok" :version "0.1.0"}))
 
+(defn- handle-web-dev-reload [_req]
+  (if (web-dev-enabled?)
+    (with-web-dev-headers
+      (json-response 200 {:enabled true
+                          :version (or (web-dev-version) "0")}))
+    (json-response 404 {:error "not found"})))
+
 (defn- handle-home [_req]
   (if-let [html (read-resource "index.html")]
-    (assoc-in (html-response html)
-              [:headers "Set-Cookie"]
-              (session-cookie-header))
+    (-> (html-response (inject-web-dev-client html))
+        (assoc-in [:headers "Set-Cookie"] (session-cookie-header))
+        (with-web-dev-headers))
     {:status 404 :body "Not Found"}))
 
 ;; ---------------------------------------------------------------------------
@@ -2600,6 +2743,9 @@
 
         (and (= method :get) (contains? web-static-assets uri))
         (static-asset-response uri)
+
+        (and (= method :get) (= uri "/__dev/web-reload"))
+        (handle-web-dev-reload req)
 
         (and (= method :get) (= uri "/oauth/callback"))
         (handle-oauth-callback req)
@@ -2799,10 +2945,13 @@
   "Start the HTTP/WebSocket server.
    Defaults to loopback-only binding."
   ([port]
-   (start! "127.0.0.1" port))
+   (start! "127.0.0.1" port nil))
   ([bind-host port]
+   (start! bind-host port nil))
+  ([bind-host port {:keys [web-dev?] :or {web-dev? false}}]
    (when @server-atom
      (log/warn "Server already running"))
+   (configure-web-dev! web-dev?)
    (prompt/register-approval! :http http-approval-handler)
    (prompt/register-approval! :websocket http-approval-handler)
    (prompt/register-status! :http http-status-handler)
@@ -2835,5 +2984,6 @@
     (prompt/register-status! :websocket nil)
     (reset! pending-approvals {})
     (reset! session-statuses {})
+    (configure-web-dev! false)
     (reset! server-atom nil)
     (log/info "Server stopped")))

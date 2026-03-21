@@ -34,6 +34,7 @@
     :parse-fn #(Integer/parseInt %)]
    ["-m" "--mode MODE" "Run mode: terminal, server, both"
     :default "terminal"]
+   [nil "--web-dev" "Enable live-reloading local web assets from resources/web"]
    ["-l" "--log-file PATH" "Write INFO+ logs to this file (or set XIA_LOG_FILE)"]
    ["-h" "--help" "Show help"]])
 
@@ -59,6 +60,7 @@
   (println "  xia pack backup.xia     Create a portable archive at a specific path")
   (println "  xia --mode server       Start HTTP/WebSocket server only")
   (println "  xia --mode both         Start both terminal and server")
+  (println "  xia --mode both --web-dev  Live-reload resources/web during UI work")
   (println "  xia --log-file xia.log  Write logs to a file")
   (println "  xia --bind 0.0.0.0      Expose server beyond localhost")
   (println "  xia --db /path/to/db    Use a specific database"))
@@ -120,7 +122,7 @@
                 (recur))))
           passphrase)))))
 
-(defn- start! [{:keys [db bind port mode crypto-opts]}]
+(defn- start! [{:keys [db bind port mode crypto-opts web-dev]}]
   (ensure-db-dir! db)
   (db/connect! db (merge {:passphrase-provider (startup-passphrase-provider mode)}
                          crypto-opts))
@@ -145,11 +147,11 @@
 
   ;; Start channels based on mode
   (case mode
-    "server"   (do (http/start! bind port)
+    "server"   (do (http/start! bind port {:web-dev? web-dev})
                    (println (str "xia server running on " bind ":" port))
                    (println (str "open " (local-ui-url bind port)))
                    @(promise))
-    "both"     (do (http/start! bind port)
+    "both"     (do (http/start! bind port {:web-dev? web-dev})
                    (println (str "xia server running on " bind ":" port))
                    (println (str "open " (local-ui-url bind port)))
                    (terminal/start!))
