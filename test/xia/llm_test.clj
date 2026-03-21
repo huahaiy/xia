@@ -426,6 +426,113 @@
                                   :function {:name "web-search"}}]
                                 :on-delta (fn [_] nil))))))
 
+(deftest chat-recovers-dropped-stream-with-non-streaming-fallback
+  (let [deltas           (atom [])
+        stream-calls     (atom 0)
+        fallback-calls   (atom 0)
+        provider-health* (atom {})]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  provider-health*
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request-events
+                  (fn [req]
+                    (swap! stream-calls inc)
+                    (is (= true (get (json/read-json (:body req)) "stream")))
+                    ((:on-event req) {:event "message"
+                                      :data "{\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}"})
+                    (throw (java.io.IOException. "stream dropped")))
+                  xia.http-client/request
+                  (fn [req]
+                    (swap! fallback-calls inc)
+                    (is (nil? (get (json/read-json (:body req)) "stream")))
+                    {:status 200
+                     :body "{\"choices\":[{\"message\":{\"content\":\"Hello there.\"}}]}"})]
+      (is (= "Hello there."
+             (llm/chat-simple [{"role" "user" "content" "hello"}]
+                              :on-delta (fn [{:keys [content]}]
+                                          (swap! deltas conj content)))))
+      (is (= 1 @stream-calls))
+      (is (= 1 @fallback-calls))
+      (is (= ["Hel" "Hello there."] @deltas))
+      (is (= 0 (get-in @provider-health* [:default :consecutive-failures])))
+      (is (nil? (get-in @provider-health* [:default :last-error]))))))
+
+(deftest chat-recovers-incomplete-stream-with-non-streaming-fallback
+  (let [deltas         (atom [])
+        fallback-calls (atom 0)]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request-events
+                  (fn [req]
+                    ((:on-event req) {:event "message"
+                                      :data "{\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}"})
+                    {:status 200
+                     :headers {"content-type" "text/event-stream"}
+                     :streamed? true})
+                  xia.http-client/request
+                  (fn [_req]
+                    (swap! fallback-calls inc)
+                    {:status 200
+                     :body "{\"choices\":[{\"message\":{\"content\":\"Hello\"}}]}"})]
+      (is (= "Hello"
+             (llm/chat-simple [{"role" "user" "content" "hello"}]
+                              :on-delta (fn [{:keys [content]}]
+                                          (swap! deltas conj content)))))
+      (is (= 1 @fallback-calls))
+      (is (= ["Hel" "Hello"] @deltas)))))
+
+(deftest chat-with-tools-recovers-dropped-stream-with-non-streaming-fallback
+  (let [fallback-calls (atom 0)]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request-events
+                  (fn [req]
+                    ((:on-event req) {:event "message"
+                                      :data "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web-\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}"})
+                    (throw (java.io.IOException. "stream dropped")))
+                  xia.http-client/request
+                  (fn [req]
+                    (swap! fallback-calls inc)
+                    (is (nil? (get (json/read-json (:body req)) "stream")))
+                    {:status 200
+                     :body "{\"choices\":[{\"message\":{\"content\":\"\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web-search\",\"arguments\":\"{\\\"q\\\":\\\"hi\\\"}\"}}]}}]}"})]
+      (is (= {"content" ""
+              "tool_calls" [{"id" "call_1"
+                             "type" "function"
+                             "function" {"name" "web-search"
+                                         "arguments" "{\"q\":\"hi\"}"}}]}
+             (llm/chat-with-tools [{"role" "user" "content" "hello"}]
+                                  [{:type "function"
+                                    :function {:name "web-search"}}]
+                                  :on-delta (fn [_] nil))))
+      (is (= 1 @fallback-calls)))))
+
 (deftest chat-allows-loopback-provider-base-url
   (with-redefs [xia.db/get-default-provider
                 (constantly {:llm.provider/id :default

@@ -489,6 +489,28 @@
       (str (subs rendered 0 297) "...")
       rendered)))
 
+(defn- maybe-report-recovered-stream-content!
+  [opts provider-id workload partial-content response]
+  (when-let [on-delta (:on-delta opts)]
+    (when-let [full-content (get-in response ["choices" 0 "message" "content"])]
+      (when (string? full-content)
+        (let [partial (or partial-content "")
+              delta   (cond
+                        (= full-content partial)
+                        nil
+
+                        (and (seq partial)
+                             (str/starts-with? full-content partial))
+                        (subs full-content (count partial))
+
+                        :else
+                        full-content)]
+          (when (seq delta)
+            (on-delta {:provider-id provider-id
+                       :workload    workload
+                       :delta       delta
+                       :content     full-content})))))))
+
 (defn- malformed-response-ex
   [message {:keys [provider-id workload response]}]
   (ex-info message
@@ -558,6 +580,22 @@
   [opts]
   (fn? (:on-delta opts)))
 
+(defn- stream-complete?
+  [{:keys [done? finish-reason]}]
+  (or done?
+      (some? finish-reason)))
+
+(defn- incomplete-stream-ex
+  [provider-id workload {:keys [content finish-reason tool-calls]}]
+  (ex-info "LLM streaming response ended before completion"
+           {:type                    :llm/incomplete-stream
+            :provider-id             provider-id
+            :workload                workload
+            :finish-reason           finish-reason
+            :partial-content-preview (when (seq content)
+                                       (response-preview content))
+            :tool-call-count         (count (remove nil? tool-calls))}))
+
 (defn- build-request
   "Build the HTTP request map for a chat completion call."
   [{:keys [base-url api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens] :as opts}]
@@ -582,6 +620,11 @@
   (or (some-> e ex-data :body)
       (.getMessage e)
       (str "provider " provider-id " request failed")))
+
+(defn- recoverable-stream-error?
+  [^Throwable e]
+  (or (= :llm/incomplete-stream (some-> e ex-data :type))
+      (retryable-llm-error? e)))
 
 (defn- local-rate-limit-error?
   [^Throwable e]
@@ -611,44 +654,75 @@
                   :workload    workload
                   :limit       limit})))))
 
+(defn- stream-chat-response
+  [stream-req fallback-req opts provider-id workload]
+  (let [stream-state (volatile! {:role "assistant"
+                                 :content ""
+                                 :tool-calls []
+                                 :done? false})]
+    (try
+      (let [stream-resp (http/request-events
+                          (assoc stream-req
+                                 :on-event
+                                 (fn [{:keys [data]}]
+                                   (cond
+                                     (str/blank? data)
+                                     nil
+
+                                     (= "[DONE]" data)
+                                     (vswap! stream-state assoc :done? true)
+
+                                     :else
+                                     (let [chunk  (parse-response-body data provider-id workload)
+                                           choice (get-in chunk ["choices" 0])]
+                                       (vswap! stream-state merge-choice-delta choice)
+                                       (when-let [content (get-in choice ["delta" "content"])]
+                                         (when-let [on-delta (:on-delta opts)]
+                                           (on-delta {:provider-id provider-id
+                                                      :workload workload
+                                                      :delta content
+                                                      :content (:content @stream-state)}))))))))]
+        (when (and (:streamed? stream-resp)
+                   (not (stream-complete? @stream-state)))
+          (throw (incomplete-stream-ex provider-id workload @stream-state)))
+        (if (:streamed? stream-resp)
+          (assoc stream-resp
+                 :response (finalized-stream-message @stream-state))
+          stream-resp))
+      (catch Exception e
+        (if (recoverable-stream-error? e)
+          (do
+            (log/warn e "LLM streaming request interrupted; retrying once as non-streaming request"
+                      {:provider-id provider-id
+                       :workload workload
+                       :partial-content-preview (some-> @stream-state :content response-preview)
+                       :tool-call-count (count (remove nil? (:tool-calls @stream-state)))})
+            (assoc (http/request fallback-req)
+                   :stream-recovered? true
+                   :stream-partial-content (:content @stream-state)))
+          (throw e))))))
+
 (defn- attempt-chat
   [messages opts {:keys [provider provider-id workload]}]
   (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
         api-key   (or (:llm.provider/api-key provider) (:api-key provider))
         model     (or (:llm.provider/model provider) (:model provider))
+        request-config {:base-url base-url
+                        :api-key api-key
+                        :model model
+                        :allow-private-network? (provider-allows-private-network? provider)}
         _         (check-rate-limit! provider-id provider workload)
-        req       (build-request {:base-url base-url
-                                  :api-key api-key
-                                  :model model
-                                  :allow-private-network? (provider-allows-private-network? provider)}
-                                 messages opts)
+        req       (build-request request-config messages opts)
+        fallback-req (when (streaming-request? opts)
+                       (build-request request-config
+                                      messages
+                                      (dissoc opts :on-delta)))
         _         (log/debug "LLM request via provider" provider-id
                              "to" base-url
                              "model" model
                              (when workload (str "workload " workload)))
         resp      (if (streaming-request? opts)
-                    (let [stream-state (volatile! {:role "assistant"
-                                                  :content ""
-                                                  :tool-calls []})
-                          stream-resp  (http/request-events
-                                         (assoc req
-                                                :on-event
-                                                (fn [{:keys [data]}]
-                                                  (when-not (or (str/blank? data)
-                                                                (= "[DONE]" data))
-                                                    (let [chunk  (parse-response-body data provider-id workload)
-                                                          choice (get-in chunk ["choices" 0])]
-                                                      (vswap! stream-state merge-choice-delta choice)
-                                                      (when-let [content (get-in choice ["delta" "content"])]
-                                                        (when-let [on-delta (:on-delta opts)]
-                                                          (on-delta {:provider-id provider-id
-                                                                     :workload workload
-                                                                     :delta content
-                                                                     :content (:content @stream-state)}))))))))]
-                      (if (:streamed? stream-resp)
-                        (assoc stream-resp
-                               :response (finalized-stream-message @stream-state))
-                        stream-resp))
+                    (stream-chat-response req fallback-req opts provider-id workload)
                     (http/request req))
         status    (:status resp)]
     (when (not= 200 status)
@@ -658,10 +732,17 @@
                        :body        (:body resp)
                        :provider-id provider-id
                         :workload    workload})))
-    (if (:streamed? resp)
-      (or (:response resp)
-          (parse-response-body (:body resp) provider-id workload))
-      (parse-response-body (:body resp) provider-id workload))))
+    (let [response (if (:streamed? resp)
+                     (or (:response resp)
+                         (parse-response-body (:body resp) provider-id workload))
+                     (parse-response-body (:body resp) provider-id workload))]
+      (when (:stream-recovered? resp)
+        (maybe-report-recovered-stream-content! opts
+                                                provider-id
+                                                workload
+                                                (:stream-partial-content resp)
+                                                response))
+      response)))
 
 (defn- attempt-provider-round
   [messages opts attempts]
