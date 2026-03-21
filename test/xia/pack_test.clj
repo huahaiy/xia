@@ -1,13 +1,17 @@
 (ns xia.pack-test
   (:require [clojure.edn :as edn]
             [clojure.test :refer :all]
+            [clojure.java.io :as io]
             [xia.db :as db]
             [xia.pack :as pack]
             [xia.test-helpers :as th])
-  (:import [java.nio.file Files LinkOption Paths]
+  (:import [java.io BufferedOutputStream FileOutputStream]
+           [java.nio.charset StandardCharsets]
+           [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]
-           [java.util.zip ZipFile]))
+           [java.util.zip ZipEntry ZipFile ZipOutputStream]
+           [java.nio.file FileSystemException]))
 
 (defn- temp-dir []
   (str (Files/createTempDirectory "xia-pack-test"
@@ -24,6 +28,16 @@
   (with-open [zip (ZipFile. ^String archive-path)
               in  (.getInputStream zip (.getEntry zip entry-name))]
     (slurp in)))
+
+(defn- write-zip!
+  [archive-path entries]
+  (with-open [fos (FileOutputStream. ^String archive-path)
+              out (-> fos BufferedOutputStream. ZipOutputStream.)]
+    (doseq [[entry-name data] entries]
+      (.putNextEntry out (ZipEntry. ^String entry-name))
+      (when (some? data)
+        (.write out (.getBytes ^String data StandardCharsets/UTF_8)))
+      (.closeEntry out))))
 
 (defn- encode-key [byte-value]
   (.encodeToString (Base64/getEncoder)
@@ -144,3 +158,37 @@
         (is (= "Archive Restore" (db/get-config :user/name)))
         (finally
           (db/close!))))))
+
+(deftest unpack-rejects-symlinked-path-components
+  (let [dir         (temp-dir)
+        archive     (str dir "/backup.xia")
+        dest-root   (str dir "/dest")
+        outside-dir (str dir "/outside")
+        linked-db   (str dest-root "/db")]
+    (Files/createDirectories (path-of dest-root)
+                             (into-array FileAttribute []))
+    (Files/createDirectories (path-of outside-dir)
+                             (into-array FileAttribute []))
+    (write-zip! archive {"db/data.mdb" "evil"
+                         "manifest.edn" "{:format :xia-pack/v1}"})
+    (try
+      (Files/createSymbolicLink (path-of linked-db)
+                                (path-of outside-dir)
+                                (into-array FileAttribute []))
+      (let [ex (try
+                 (pack/unpack! archive dest-root)
+                 nil
+                 (catch clojure.lang.ExceptionInfo e
+                   e))]
+        (is (instance? clojure.lang.ExceptionInfo ex))
+        (is (= "Archive entry resolves through a symbolic link"
+               (.getMessage ^clojure.lang.ExceptionInfo ex)))
+        (is (= "db/data.mdb" (:entry (ex-data ex))))
+        (is (= linked-db (:path (ex-data ex))))
+        (is (not (.exists (io/file (str outside-dir "/data.mdb"))))))
+      (catch UnsupportedOperationException _
+        (testing "symbolic links unsupported on this platform"
+          (is true)))
+      (catch FileSystemException _
+        (testing "symbolic links unavailable in this environment"
+          (is true))))))

@@ -6,7 +6,7 @@
   (:import [java.io BufferedInputStream BufferedOutputStream
             File FileInputStream FileOutputStream]
            [java.nio.charset StandardCharsets]
-           [java.nio.file Files Path Paths]
+           [java.nio.file Files LinkOption OpenOption Path Paths StandardOpenOption]
            [java.time Instant]
            [java.util.zip ZipEntry ZipFile ZipOutputStream]))
 
@@ -201,17 +201,66 @@
                        :root  (.getAbsolutePath ^File root-file)})))
     target))
 
+(defn- path-exists?
+  [^Path path]
+  (Files/exists path (make-array LinkOption 0)))
+
+(defn- nofollow-link-options []
+  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+
+(defn- nofollow-open-options []
+  (into-array OpenOption [StandardOpenOption/CREATE
+                          StandardOpenOption/TRUNCATE_EXISTING
+                          StandardOpenOption/WRITE
+                          LinkOption/NOFOLLOW_LINKS]))
+
+(defn- symlink-path-ex
+  [^File root-file entry-name ^Path path]
+  (ex-info "Archive entry resolves through a symbolic link"
+           {:entry entry-name
+            :root  (.getAbsolutePath ^File root-file)
+            :path  (str path)}))
+
+(defn- ensure-safe-directory-path!
+  [^File root-file ^Path path entry-name]
+  (let [^Path root     (root-path root-file)
+        relative-parts (iterator-seq (.iterator (.relativize root path)))]
+    (when (Files/isSymbolicLink root)
+      (throw (symlink-path-ex root-file entry-name root)))
+    (loop [^Path current root
+           [^Path part & remaining] (seq relative-parts)]
+      (when part
+        (let [^Path next (.resolve current part)]
+          (if (path-exists? next)
+            (do
+              (when (Files/isSymbolicLink next)
+                (throw (symlink-path-ex root-file entry-name next)))
+              (when-not (Files/isDirectory next (nofollow-link-options))
+                (throw (ex-info "Archive entry parent is not a directory"
+                                {:entry entry-name
+                                 :root  (.getAbsolutePath ^File root-file)
+                                 :path  (str next)}))))
+            (Files/createDirectory next (make-array java.nio.file.attribute.FileAttribute 0)))
+          (recur next remaining))))))
+
+(defn- ensure-safe-file-target!
+  [^File root-file ^Path target entry-name]
+  (when (and (path-exists? target)
+             (Files/isSymbolicLink target))
+    (throw (symlink-path-ex root-file entry-name target))))
+
 (defn- extract-entry!
   [^ZipFile zip ^File root-file ^java.util.zip.ZipEntry entry]
   (let [^Path target (safe-target-path root-file (.getName entry))]
     (if (.isDirectory entry)
-      (Files/createDirectories target (make-array java.nio.file.attribute.FileAttribute 0))
+      (ensure-safe-directory-path! root-file target (.getName entry))
       (do
         (when-let [^Path parent (.getParent target)]
-          (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0)))
+          (ensure-safe-directory-path! root-file parent (.getName entry)))
+        (ensure-safe-file-target! root-file target (.getName entry))
         (let [^File target-file (.toFile target)]
           (with-open [in  (.getInputStream zip entry)
-                      out (BufferedOutputStream. (FileOutputStream. target-file))]
+                      out (BufferedOutputStream. (Files/newOutputStream target (nofollow-open-options)))]
             (let [buffer (byte-array buffer-size)]
               (loop []
                 (let [n (.read in buffer)]
