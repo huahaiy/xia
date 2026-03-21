@@ -28,15 +28,20 @@
             [xia.service :as service]
             [xia.skill :as skill]
             [xia.web :as web]
-            [xia.working-memory :as wm]))
+            [xia.working-memory :as wm])
+  (:import [java.util Date]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (def ^:private default-sci-eval-timeout-ms 10000)
 (def ^:private default-sci-handler-timeout-ms 120000)
+(def ^:private default-max-active-sci-workers 32)
 (def ^:private sci-timeout-stop-grace-ms 100)
 (def ^:private sci-timeout-check-interval-mask 127)
 (def ^:private reader-eof (Object.))
 
 (def ^:dynamic *sci-timeout-state* nil)
+(defonce ^:private sci-worker-seq (AtomicLong. 0))
+(defonce ^:private active-sci-workers (atom {}))
 
 (defn- sci-timeout-ex
   [stage timeout-ms]
@@ -282,10 +287,16 @@
   (cfg/positive-long :tool/sci-handler-timeout-ms
                      default-sci-handler-timeout-ms))
 
+(defn- max-active-sci-workers
+  []
+  (cfg/positive-long :tool/max-active-sci-workers
+                     default-max-active-sci-workers))
+
 (def ^:private timeout-check-form
   '(xia.sci-env/check-timeout!))
 
 (declare instrument-timeouts)
+(declare unregister-sci-worker!)
 
 (defn- instrument-body
   [body]
@@ -395,8 +406,67 @@
             (str/join "\n" (map (comp pr-str instrument-timeouts) forms))
             (recur (conj forms form))))))))
 
+(defn- reap-finished-sci-workers!
+  []
+  (swap! active-sci-workers
+         (fn [workers]
+           (reduce-kv (fn [live worker-id {:keys [^Thread thread] :as worker-state}]
+                        (if (and thread (.isAlive thread))
+                          (assoc live worker-id worker-state)
+                          live))
+                      {}
+                      workers))))
+
+(defn- active-worker-summary
+  [workers]
+  {:active-workers (count workers)
+   :timed-out-workers (count (filter :timed-out? (vals workers)))})
+
+(defn- ensure-sci-worker-capacity!
+  []
+  (let [workers (reap-finished-sci-workers!)
+        active-count (long (count workers))
+        max-workers (long (max-active-sci-workers))]
+    (when (>= active-count max-workers)
+      (throw (ex-info (str "SCI worker capacity exceeded; "
+                           active-count
+                           " worker thread(s) still active")
+                      (merge {:type :sci/worker-cap-exceeded
+                              :status 503
+                              :max-active-workers max-workers}
+                             (active-worker-summary workers)))))))
+
+(defn- register-sci-worker!
+  [worker-id stage timeout-ms ^Thread worker]
+  (swap! active-sci-workers
+         assoc
+         worker-id
+         {:worker-id worker-id
+          :thread worker
+          :thread-name (.getName worker)
+          :stage stage
+          :timeout-ms timeout-ms
+          :started-at (Date.)
+          :timed-out? false}))
+
+(defn- unregister-sci-worker!
+  [worker-id]
+  (swap! active-sci-workers dissoc worker-id))
+
+(defn- mark-sci-worker-timed-out!
+  [worker-id]
+  (swap! active-sci-workers
+         (fn [workers]
+           (if-let [worker-state (get workers worker-id)]
+             (assoc workers
+                    worker-id
+                    (assoc worker-state
+                           :timed-out? true
+                           :timed-out-at (Date.)))
+             workers))))
+
 (defn- sci-worker-thread
-  [stage timeout-ms f result*]
+  [worker-id stage timeout-ms f result*]
   (let [runner (bound-fn*
                  (fn []
                    (binding [*sci-timeout-state* {:stage stage
@@ -410,7 +480,9 @@
                                          :value  (f)})
                        (catch Throwable t
                          (deliver result* {:status :error
-                                           :throwable t}))))))]
+                                           :throwable t}))
+                       (finally
+                         (unregister-sci-worker! worker-id))))))]
     (doto (Thread.
             ^Runnable
             (reify Runnable
@@ -420,25 +492,38 @@
       (.setDaemon true))))
 
 (defn- interrupt-sci-worker!
-  [^Thread worker]
+  [worker-id stage timeout-ms ^Thread worker]
   (.interrupt worker)
   (.join worker (long sci-timeout-stop-grace-ms))
   (when (.isAlive worker)
+    (mark-sci-worker-timed-out! worker-id)
     (log/warn "Timed out SCI worker thread ignored interrupt and is still running"
-              {:thread (.getName worker)})
+              (merge {:thread (.getName worker)
+                      :worker-id worker-id
+                      :stage stage
+                      :timeout-ms timeout-ms
+                      :max-active-workers (max-active-sci-workers)}
+                     (active-worker-summary (reap-finished-sci-workers!))))
     false)
   (not (.isAlive worker)))
 
 (defn- call-with-timeout
   [timeout-ms stage f]
-  (let [result*  (promise)
-        ^Thread worker (sci-worker-thread stage timeout-ms f result*)
+  (ensure-sci-worker-capacity!)
+  (let [worker-id (.incrementAndGet ^AtomicLong sci-worker-seq)
+        result*  (promise)
+        ^Thread worker (sci-worker-thread worker-id stage timeout-ms f result*)
         timeout  (Object.)
-        _        (.start worker)
+        _        (register-sci-worker! worker-id stage timeout-ms worker)
+        _        (try
+                   (.start worker)
+                   (catch Throwable t
+                     (unregister-sci-worker! worker-id)
+                     (throw t)))
         result   (deref result* timeout-ms timeout)]
     (if (identical? timeout result)
       (do
-        (interrupt-sci-worker! worker)
+        (interrupt-sci-worker! worker-id stage timeout-ms worker)
         (throw (sci-timeout-ex stage timeout-ms)))
       (case (:status result)
         :ok    (:value result)

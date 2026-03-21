@@ -43,6 +43,33 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest process-message-reports-llm-partial-content
+  (let [session-id (db/create-session! :terminal)
+        statuses   (atom [])]
+    (wm/ensure-wm! session-id)
+    (prompt/register-status! :terminal
+                             (fn [status]
+                               (swap! statuses conj (select-keys status
+                                                                 [:state :phase :message :partial-content]))))
+    (try
+      (with-redefs [xia.tool/tool-definitions (constantly [])
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.llm/chat-simple (fn [_messages & {:keys [on-delta]}]
+                                          (when on-delta
+                                            (on-delta {:delta "Hello"
+                                                       :content "Hello"}))
+                                          "Hello there.")]
+        (is (= "Hello there."
+               (agent/process-message session-id "hello" :channel :terminal))))
+      (is (= {:state :running
+              :phase :llm
+              :message "Calling model"
+              :partial-content "Hello"}
+             (some #(when (:partial-content %) %) @statuses)))
+      (finally
+        (prompt/register-status! :terminal nil)))))
+
 (deftest process-message-propagates-request-trace-to-status-and-checkpoints
   (let [session-id   (db/create-session! :scheduler)
         statuses     (atom [])
@@ -98,7 +125,7 @@
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
                   xia.llm/chat-simple                (fn [_messages & opts]
-                                                       (reset! llm-opts opts)
+                                                       (reset! llm-opts (apply hash-map opts))
                                                        "All set.")]
       (is (= "All set."
              (agent/process-message session-id "hello" :channel :terminal))))
@@ -106,7 +133,8 @@
     (is (= :router-a (:provider-id @build-messages-opts)))
     (is (= :router-a (get-in @build-messages-opts [:provider :llm.provider/id])))
     (is (= :history-compaction (:compaction-workload @build-messages-opts)))
-    (is (= [:provider-id :router-a] @llm-opts))))
+    (is (= :router-a (:provider-id @llm-opts)))
+    (is (fn? (:on-delta @llm-opts)))))
 
 (deftest process-message-passes-execution-context-to-tool-definitions
   (let [session-id    (db/create-session! :scheduler)
@@ -480,11 +508,10 @@
     (is (zero? @llm-calls))
     (is (empty? (db/session-messages session-id)))))
 
-(deftest process-message-serializes-concurrent-turns-per-session
+(deftest process-message-rejects-concurrent-turns-per-session
   (let [session-id         (db/create-session! :http)
         first-llm-started  (promise)
-        release-first-llm  (promise)
-        llm-call-count     (atom 0)]
+        release-first-llm  (promise)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
                   xia.working-memory/update-wm!      (fn [& _] nil)
                   xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
@@ -494,27 +521,32 @@
                                                         :used-fact-eids []})
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)
                   xia.llm/chat-simple                (fn [_messages & _opts]
-                                                       (case (int (swap! llm-call-count inc))
-                                                         1 (do
-                                                             (deliver first-llm-started true)
-                                                             @release-first-llm
-                                                             "reply-1")
-                                                         2 "reply-2"))]
+                                                       (deliver first-llm-started true)
+                                                       @release-first-llm
+                                                       "reply-1")]
       (let [first-turn  (future (agent/process-message session-id "first" :channel :http))
             _           (is (= true (deref first-llm-started 1000 ::timeout)))
-            second-turn (future (agent/process-message session-id "second" :channel :http))]
-        (Thread/sleep 50)
+            second-turn (future
+                          (try
+                            (agent/process-message session-id "second" :channel :http)
+                            (catch clojure.lang.ExceptionInfo e
+                              e)))]
         (is (= [[:user "first"]]
                (->> (db/session-messages session-id)
                     (mapv (fn [{:keys [role content]}]
                             [role content])))))
+        (let [busy-error @second-turn]
+          (is (instance? clojure.lang.ExceptionInfo busy-error))
+          (is (= {:type :session-busy
+                  :status 409
+                  :error "session is busy"
+                  :session-id session-id}
+                 (select-keys (ex-data busy-error)
+                              [:type :status :error :session-id]))))
         (deliver release-first-llm true)
-        (is (= "reply-1" @first-turn))
-        (is (= "reply-2" @second-turn))))
+        (is (= "reply-1" @first-turn))))
     (is (= [[:user "first"]
-            [:assistant "reply-1"]
-            [:user "second"]
-            [:assistant "reply-2"]]
+            [:assistant "reply-1"]]
            (->> (db/session-messages session-id)
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))

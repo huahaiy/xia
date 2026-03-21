@@ -50,14 +50,15 @@
     (#{"y" "yes"} answer)))
 
 (defn- terminal-status
-  [{:keys [session-id state message]}]
+  [{:keys [session-id state message partial-content]}]
   (let [sid  (or (some-> session-id str) :default)
-        next {:state state :message message}]
+        display-message (or partial-content message)
+        next {:state state :message display-message}]
     (cond
       (= :done state)
       (swap! terminal-statuses dissoc sid)
 
-      (str/blank? message)
+      (str/blank? display-message)
       nil
 
       (= next (get @terminal-statuses sid))
@@ -66,7 +67,7 @@
       :else
       (do
         (swap! terminal-statuses assoc sid next)
-        (println (str "xia: " message))
+        (println (str "xia: " display-message))
         (flush)
         (when (= :error state)
           (swap! terminal-statuses dissoc sid))))))

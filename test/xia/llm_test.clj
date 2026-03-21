@@ -21,6 +21,15 @@
     (is (= "gpt-test" (get body "model")))
     (is (= 128 (get body "max_tokens")))))
 
+(deftest build-request-enables-streaming-when-delta-callback-present
+  (let [req  (#'llm/build-request {:base-url "https://api.example.com/v1"
+                                   :api-key  "sk-test"
+                                   :model    "gpt-test"}
+                                  [{"role" "user" "content" "hello"}]
+                                  {:on-delta (fn [_] nil)})
+        body (json/read-json (:body req))]
+    (is (= true (get body "stream")))))
+
 (deftest build-request-preserves-multimodal-message-content
   (let [req  (#'llm/build-request {:base-url "https://api.example.com/v1"
                                    :api-key  "sk-test"
@@ -159,6 +168,71 @@
     (is (= "ok"
            (llm/chat-simple [{"role" "user" "content" "hello"}]
                             :workload :assistant)))))
+
+(deftest chat-streams-deltas-and-reconstructs-final-message
+  (let [deltas (atom [])]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :default
+                               :llm.provider/base-url "https://api.example.com/v1"
+                               :llm.provider/api-key "sk-test"
+                               :llm.provider/model "gpt-test"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request-events
+                  (fn [req]
+                    (is (= true (get (json/read-json (:body req)) "stream")))
+                    ((:on-event req) {:event "message"
+                                      :data "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}"})
+                    ((:on-event req) {:event "message"
+                                      :data "{\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}"})
+                    ((:on-event req) {:event "message"
+                                      :data "{\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}"})
+                    ((:on-event req) {:event "message"
+                                      :data "[DONE]"})
+                    {:status 200
+                     :headers {"content-type" "text/event-stream"}
+                     :streamed? true})]
+      (is (= "Hello"
+             (llm/chat-simple [{"role" "user" "content" "hello"}]
+                              :on-delta (fn [{:keys [content]}]
+                                          (swap! deltas conj content)))))
+      (is (= ["Hel" "Hello"] @deltas)))))
+
+(deftest chat-streams-tool-call-deltas
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :default
+                             :llm.provider/base-url "https://api.example.com/v1"
+                             :llm.provider/api-key "sk-test"
+                             :llm.provider/model "gpt-test"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request-events
+                (fn [req]
+                  ((:on-event req) {:event "message"
+                                    :data "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web-\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}"})
+                  ((:on-event req) {:event "message"
+                                    :data "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"search\",\"arguments\":\"\\\"hi\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}"})
+                  {:status 200
+                   :headers {"content-type" "text/event-stream"}
+                   :streamed? true})]
+    (is (= {"content" ""
+            "role" "assistant"
+            "tool_calls" [{"id" "call_1"
+                           "type" "function"
+                           "function" {"name" "web-search"
+                                       "arguments" "{\"q\":\"hi\"}"}}]}
+           (llm/chat-with-tools [{"role" "user" "content" "hello"}]
+                                [{:type "function"
+                                  :function {:name "web-search"}}]
+                                :on-delta (fn [_] nil))))))
 
 (deftest chat-allows-loopback-provider-base-url
   (with-redefs [xia.db/get-default-provider

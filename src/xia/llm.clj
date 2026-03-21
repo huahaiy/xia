@@ -382,14 +382,106 @@
 ;; Chat completions
 ;; ---------------------------------------------------------------------------
 
+(defn- append-text
+  [existing delta]
+  (if (string? delta)
+    (str (or existing "") delta)
+    existing))
+
+(defn- ensure-tool-call-index
+  [tool-calls index]
+  (let [index         (long index)
+        current-count (long (count tool-calls))]
+    (if (< index current-count)
+      tool-calls
+      (into tool-calls (repeat (inc (- index current-count)) nil)))))
+
+(defn- merge-tool-call-function-delta
+  [existing delta]
+  (let [existing (or existing {})]
+    (cond-> existing
+      (contains? delta "name")
+      (assoc "name" (append-text (get existing "name")
+                                 (get delta "name")))
+
+      (contains? delta "arguments")
+      (assoc "arguments" (append-text (get existing "arguments")
+                                      (get delta "arguments"))))))
+
+(defn- merge-tool-call-delta
+  [tool-calls tool-call-delta]
+  (let [index      (long (or (get tool-call-delta "index") 0))
+        tool-calls (ensure-tool-call-index tool-calls index)
+        existing   (or (nth tool-calls index)
+                       {"type" "function"
+                        "function" {"name" ""
+                                    "arguments" ""}})
+        merged     (cond-> existing
+                     (contains? tool-call-delta "id")
+                     (assoc "id" (get tool-call-delta "id"))
+
+                     (contains? tool-call-delta "type")
+                     (assoc "type" (get tool-call-delta "type"))
+
+                     (map? (get tool-call-delta "function"))
+                     (update "function"
+                             merge-tool-call-function-delta
+                             (get tool-call-delta "function")))]
+    (assoc tool-calls index merged)))
+
+(defn- merge-choice-delta
+  [state choice]
+  (let [delta (get choice "delta")]
+    (cond-> state
+      (contains? delta "role")
+      (assoc :role (get delta "role"))
+
+      (contains? delta "content")
+      (update :content append-text (get delta "content"))
+
+      (seq (get delta "tool_calls"))
+      (update :tool-calls
+              (fn [tool-calls]
+                (reduce merge-tool-call-delta
+                        (or tool-calls [])
+                        (get delta "tool_calls"))))
+
+      (contains? choice "finish_reason")
+      (assoc :finish-reason (get choice "finish_reason")))))
+
+(defn- finalized-stream-message
+  [{:keys [role content tool-calls finish-reason]}]
+  {"choices"
+   [{"finish_reason" finish-reason
+     "message"
+     (cond-> {"role" (or role "assistant")
+              "content" (or content "")}
+       (seq tool-calls)
+       (assoc "tool_calls" (vec (remove nil? tool-calls))))}]})
+
+(defn- parse-response-body
+  [body provider-id workload]
+  (try
+    (json/read-json body)
+    (catch Exception e
+      (throw (ex-info "Failed to parse LLM response body"
+                      {:provider-id provider-id
+                       :workload    workload}
+                      e)))))
+
+(defn- streaming-request?
+  [opts]
+  (fn? (:on-delta opts)))
+
 (defn- build-request
   "Build the HTTP request map for a chat completion call."
-  [{:keys [base-url api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens]}]
+  [{:keys [base-url api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens] :as opts}]
   (let [body (cond-> {:model    model
                       :messages messages}
                tools       (assoc :tools tools)
                temperature (assoc :temperature temperature)
-               max-tokens  (assoc :max_tokens max-tokens))]
+               max-tokens  (assoc :max_tokens max-tokens)
+               (streaming-request? opts) (assoc :stream true))]
     {:url           (str base-url "/chat/completions")
      :method        :post
      :headers       {"Authorization" (str "Bearer " api-key)
@@ -420,7 +512,30 @@
                              "to" base-url
                              "model" model
                              (when workload (str "workload " workload)))
-        resp      (http/request req)
+        resp      (if (streaming-request? opts)
+                    (let [stream-state (volatile! {:role "assistant"
+                                                  :content ""
+                                                  :tool-calls []})
+                          stream-resp  (http/request-events
+                                         (assoc req
+                                                :on-event
+                                                (fn [{:keys [data]}]
+                                                  (when-not (or (str/blank? data)
+                                                                (= "[DONE]" data))
+                                                    (let [chunk  (parse-response-body data provider-id workload)
+                                                          choice (get-in chunk ["choices" 0])]
+                                                      (vswap! stream-state merge-choice-delta choice)
+                                                      (when-let [content (get-in choice ["delta" "content"])]
+                                                        (when-let [on-delta (:on-delta opts)]
+                                                          (on-delta {:provider-id provider-id
+                                                                     :workload workload
+                                                                     :delta content
+                                                                     :content (:content @stream-state)}))))))))]
+                      (if (:streamed? stream-resp)
+                        (assoc stream-resp
+                               :response (finalized-stream-message @stream-state))
+                        stream-resp))
+                    (http/request req))
         status    (:status resp)]
     (when (not= 200 status)
       (throw (ex-info (str "LLM request failed with status " status)
@@ -429,13 +544,10 @@
                        :body        (:body resp)
                        :provider-id provider-id
                         :workload    workload})))
-    (try
-      (json/read-json (:body resp))
-      (catch Exception e
-        (throw (ex-info "Failed to parse LLM response body"
-                        {:provider-id provider-id
-                         :workload    workload}
-                        e))))))
+    (if (:streamed? resp)
+      (or (:response resp)
+          (parse-response-body (:body resp) provider-id workload))
+      (parse-response-body (:body resp) provider-id workload))))
 
 (defn- attempt-provider-round
   [messages opts attempts]

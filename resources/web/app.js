@@ -72,7 +72,8 @@ const state = {
   openclawImportStatus: 'Import a ClawHub zip URL or a local OpenClaw skill path.',
   openclawImportReport: null,
   baseStatus: 'Ready',
-  liveStatus: null
+  liveStatus: null,
+  sendStartedAt: 0
 };
 const statusEl = document.getElementById('status');
 const sessionLabelEl = document.getElementById('session-label');
@@ -291,10 +292,15 @@ function currentStatusText() {
     const s = state.liveStatus;
     const phase = s.phase;
     const tool = s.tool_name || s.tool_id;
+    const elapsedSeconds = state.sendStartedAt
+      ? Math.max(1, Math.floor((Date.now() - state.sendStartedAt) / 1000))
+      : 0;
     
     switch (phase) {
       case 'working-memory': return 'Reading context...';
-      case 'llm':            return 'Thinking...';
+      case 'llm':
+        if (s.partial_content) return s.partial_content;
+        return elapsedSeconds ? `Thinking... ${elapsedSeconds}s` : 'Thinking...';
       case 'tool-plan':     return 'Planning next steps...';
       case 'tool':          return tool ? `Using ${tool}...` : 'Executing action...';
       case 'approval':      return 'Waiting for approval...';
@@ -3073,6 +3079,7 @@ async function sendMessage(text, options) {
     : [];
   state.sending = true;
   state.liveStatus = null;
+  state.sendStartedAt = Date.now();
   updateComposerState();
   syncStatus();
   try {
@@ -3105,6 +3112,7 @@ async function sendMessage(text, options) {
     setStatus('Failed');
   } finally {
     state.sending = false;
+    state.sendStartedAt = 0;
     syncStatus();
     updateComposerState();
   }

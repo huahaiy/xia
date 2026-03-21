@@ -645,6 +645,7 @@
     {:state      (some-> (:state status) name)
      :phase      (some-> (:phase status) name)
      :message    (:message status)
+     :partial_content (:partial-content status)
      :tool_id    (some-> (:tool-id status) name)
      :tool_name  (:tool-name status)
      :round      (:round status)
@@ -1192,7 +1193,6 @@
                   (db/create-session! :http))]
         (wm/ensure-wm! sid)
         (cancel-rest-session-finalizer! sid)
-        (clear-session-status! sid)
         {:session-id sid
          :message    message
          :local-doc-ids local-doc-ids

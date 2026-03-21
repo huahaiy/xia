@@ -17,7 +17,8 @@
             [xia.schedule :as schedule]
             [xia.ssrf :as ssrf]
             [xia.tool :as tool]
-            [xia.working-memory :as wm]))
+            [xia.working-memory :as wm])
+  (:import [java.util.concurrent.locks ReentrantLock]))
 
 (def ^:private default-max-tool-rounds 10)
 (def ^:private default-max-tool-calls-per-round 12)
@@ -30,8 +31,10 @@
 (def ^:private default-branch-task-timeout-ms 300000)
 (def ^:private default-branch-error-stack-frames 12)
 (def ^:private session-turn-lock-count 256)
+(def ^:private default-llm-status-preview-chars 160)
+(def ^:private default-llm-status-update-interval-ms 500)
 (defonce ^:private session-turn-locks
-  (vec (repeatedly session-turn-lock-count #(Object.))))
+  (vec (repeatedly session-turn-lock-count #(ReentrantLock.))))
 
 (def ^:private trace-context-keys
   [:request-id
@@ -42,6 +45,8 @@
    :parent-session-id
    :schedule-id
    :channel])
+
+(declare truncate-summary)
 
 ;; build-messages is now in xia.context
 
@@ -54,9 +59,17 @@
 
 (defn- with-session-turn-lock
   [session-id f]
-  (if-let [lock (session-turn-lock session-id)]
-    (locking lock
-      (f))
+  (if-let [^ReentrantLock lock (session-turn-lock session-id)]
+    (if (.tryLock lock)
+      (try
+        (f)
+        (finally
+          (.unlock lock)))
+      (throw (ex-info "Session is already processing another request"
+                      {:type :session-busy
+                       :status 409
+                       :error "session is busy"
+                       :session-id session-id})))
     (f)))
 
 (defn- max-user-message-chars
@@ -122,6 +135,16 @@
   []
   (cfg/positive-long :agent/branch-task-timeout-ms
                      default-branch-task-timeout-ms))
+
+(defn- llm-status-preview-chars
+  []
+  (cfg/positive-long :agent/llm-status-preview-chars
+                     default-llm-status-preview-chars))
+
+(defn- llm-status-update-interval-ms
+  []
+  (cfg/positive-long :agent/llm-status-update-interval-ms
+                     default-llm-status-update-interval-ms))
 
 (defn- new-request-id
   []
@@ -246,25 +269,49 @@
                        :max-tokens     max-tokens})))))
 
 (defn- call-model
-  [messages tools provider-id]
+  [messages tools provider-id & {:keys [on-delta]}]
   (cond
     (and provider-id (seq tools))
-    (llm/chat-with-tools messages tools :provider-id provider-id)
+    (llm/chat-with-tools messages tools :provider-id provider-id :on-delta on-delta)
 
     provider-id
-    (llm/chat-simple messages :provider-id provider-id)
+    (llm/chat-simple messages :provider-id provider-id :on-delta on-delta)
 
     (seq tools)
-    (llm/chat-with-tools messages tools)
+    (llm/chat-with-tools messages tools :on-delta on-delta)
 
     :else
-    (llm/chat-simple messages)))
+    (llm/chat-simple messages :on-delta on-delta)))
 
 (defn- report-status!
   [message & {:as extra}]
   (prompt/status! (merge {:state :running
                           :message message}
                          extra)))
+
+(defn- llm-preview-text
+  [content]
+  (some-> content
+          str
+          str/trim
+          (truncate-summary (llm-status-preview-chars))))
+
+(defn- make-llm-progress-reporter
+  [round]
+  (let [last-report-ms (volatile! 0)]
+    (fn [{:keys [content]}]
+      (when-let [preview (llm-preview-text content)]
+        (let [now-ms        (long (System/currentTimeMillis))
+              last-ms       (long @last-report-ms)
+              interval-ms   (long (llm-status-update-interval-ms))
+              should-report (or (zero? last-ms)
+                                (>= (- now-ms last-ms) interval-ms))]
+          (when should-report
+            (vreset! last-report-ms now-ms)
+            (report-status! "Calling model"
+                            :phase :llm
+                            :round round
+                            :partial-content preview)))))))
 
 (defn schedule-fact-utility-review!
   [fact-eids user-message assistant-response]
@@ -667,7 +714,10 @@
                                   "Calling model with tool results")
                                 :phase :llm
                                 :round round)
-                (let [response   (call-model messages tools assistant-provider-id)
+                (let [response   (call-model messages
+                                             tools
+                                             assistant-provider-id
+                                             :on-delta (make-llm-progress-reporter round))
                       has-tools? (and (map? response) (seq (get response "tool_calls")))]
                   (if has-tools?
                     (do

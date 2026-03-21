@@ -21,6 +21,14 @@
     (catch Throwable _
       true)))
 
+(defn- sci-thread-count
+  []
+  (->> (keys (Thread/getAllStackTraces))
+       (filter #(.isAlive ^Thread %))
+       (map #(.getName ^Thread %))
+       (filter #(str/starts-with? % "xia-sci-"))
+       count))
+
 (deftest environment-and-reflection-access-are-blocked-in-sci
   (doseq [code ["(System/getenv \"PATH\")"
                 "(System/getProperty \"user.home\")"
@@ -80,19 +88,43 @@
 
 (deftest sci-timeout-does-not-leave-worker-threads-alive
   (xia.db/set-config! :tool/sci-eval-timeout-ms 50)
-  (let [thread-count (fn []
-                       (->> (keys (Thread/getAllStackTraces))
-                            (filter #(.isAlive ^Thread %))
-                            (map #(.getName ^Thread %))
-                            (filter #(str/starts-with? % "xia-sci-"))
-                            count))]
-    (dotimes [_ 3]
-      (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo
-            #"SCI eval timed out"
-            (sci-env/eval-string "(loop [] (recur))"))))
-    (Thread/sleep 50)
-    (is (= 0 (thread-count)))))
+  (dotimes [_ 3]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo
+          #"SCI eval timed out"
+          (sci-env/eval-string "(loop [] (recur))"))))
+  (Thread/sleep 50)
+  (is (= 0 (sci-thread-count))))
+
+(deftest timed-out-sci-workers-count-against-cap-until-they-exit
+  (xia.db/set-config! :tool/sci-handler-timeout-ms 50)
+  (xia.db/set-config! :tool/max-active-sci-workers 1)
+  (let [call-with-timeout @#'xia.sci-env/call-with-timeout
+        slow-fn           (fn []
+                            (let [deadline (+ (System/nanoTime)
+                                              400000000)]
+                              (while (< (System/nanoTime) deadline)
+                                (Thread/interrupted))
+                              :late))]
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo
+          #"SCI handler timed out"
+          (call-with-timeout 50 :handler slow-fn)))
+    (is (= 1 (sci-thread-count)))
+    (let [ex (try
+               (call-with-timeout 50 :handler (constantly :ok))
+               nil
+               (catch clojure.lang.ExceptionInfo e
+                 e))]
+      (is (some? ex))
+      (is (= :sci/worker-cap-exceeded
+             (:type (ex-data ex))))
+      (is (= 1 (:active-workers (ex-data ex))))
+      (is (= 1 (:timed-out-workers (ex-data ex)))))
+    (Thread/sleep 350)
+    (is (= 0 (sci-thread-count)))
+    (is (= :ok
+           (call-with-timeout 50 :handler (constantly :ok))))))
 
 (deftest file-shell-and-source-access-are-blocked-in-sci
   (doseq [code ["(slurp \"/etc/hosts\")"
