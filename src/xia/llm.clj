@@ -469,6 +469,78 @@
                        :workload    workload}
                       e)))))
 
+(defn- response-preview
+  [response]
+  (let [rendered (pr-str response)]
+    (if (> (count rendered) 300)
+      (str (subs rendered 0 297) "...")
+      rendered)))
+
+(defn- malformed-response-ex
+  [message {:keys [provider-id workload response]}]
+  (ex-info message
+           {:type :llm/malformed-response
+            :provider-id provider-id
+            :workload workload
+            :response-preview (response-preview response)}))
+
+(defn- response-message!
+  [response request-info]
+  (cond
+    (not (map? response))
+    (throw (malformed-response-ex
+             "LLM response must be a map"
+             (assoc request-info :response response)))
+
+    (not (sequential? (get response "choices")))
+    (throw (malformed-response-ex
+             "LLM response missing choices"
+             (assoc request-info :response response)))
+
+    (not (map? (first (get response "choices"))))
+    (throw (malformed-response-ex
+             "LLM response missing choices[0]"
+             (assoc request-info :response response)))
+
+    (not (map? (get-in response ["choices" 0 "message"])))
+    (throw (malformed-response-ex
+             "LLM response missing choices[0].message"
+             (assoc request-info :response response)))
+
+    :else
+    (get-in response ["choices" 0 "message"])))
+
+(defn- simple-message-content!
+  [response request-info]
+  (let [message (response-message! response request-info)
+        content (get message "content")]
+    (if (string? content)
+      content
+      (throw (malformed-response-ex
+               "LLM response missing string choices[0].message.content"
+               (assoc request-info :response response))))))
+
+(defn- tool-message!
+  [response request-info]
+  (let [message    (response-message! response request-info)
+        content    (get message "content")
+        tool-calls (get message "tool_calls")]
+    (when-not (or (string? content) (nil? content))
+      (throw (malformed-response-ex
+               "LLM response has non-string choices[0].message.content"
+               (assoc request-info :response response))))
+    (when (and (contains? message "tool_calls")
+               (not (sequential? tool-calls)))
+      (throw (malformed-response-ex
+               "LLM response has invalid choices[0].message.tool_calls"
+               (assoc request-info :response response))))
+    (when (and (nil? content) (not (seq tool-calls)))
+      (throw (malformed-response-ex
+               "LLM response message has neither content nor tool_calls"
+               (assoc request-info :response response))))
+    (cond-> message
+      (nil? content) (assoc "content" ""))))
+
 (defn- streaming-request?
   [opts]
   (fn? (:on-delta opts)))
@@ -574,10 +646,16 @@
                        {:ok? false
                         :error e}))]
         (if (:ok? result)
-          (let [response (:response result)]
+          (let [response  (:response result)
+                response* (if (instance? clojure.lang.IObj response)
+                            (with-meta response
+                              (merge (meta response)
+                                     {:provider-id (:provider-id attempt)
+                                      :workload (:workload attempt)}))
+                            response)]
             (record-provider-success! (:provider-id attempt))
             {:status :ok
-             :response response})
+             :response response*})
           (let [e           (:error result)
                 attempt-id  (:provider-id attempt)
                 error-text  (provider-error-message attempt-id e)
@@ -692,11 +770,15 @@
 (defn chat-simple
   "Convenience: send messages, return the assistant's text content."
   [messages & opts]
-  (let [resp (apply chat messages opts)]
-    (get-in resp ["choices" 0 "message" "content"])))
+  (let [resp         (apply chat messages opts)
+        request-info (merge (apply hash-map opts)
+                            (select-keys (meta resp) [:provider-id :workload]))]
+    (simple-message-content! resp request-info)))
 
 (defn chat-with-tools
   "Send messages with tools. Returns the full message (may contain tool_calls)."
   [messages tools & opts]
-  (let [resp (apply chat messages (concat [:tools tools] opts))]
-    (get-in resp ["choices" 0 "message"])))
+  (let [resp         (apply chat messages (concat [:tools tools] opts))
+        request-info (merge (apply hash-map opts)
+                            (select-keys (meta resp) [:provider-id :workload]))]
+    (tool-message! resp request-info)))
