@@ -13,6 +13,7 @@
             [xia.db :as db]
             [xia.hippocampus :as hippo]
             [xia.local-doc :as local-doc]
+            [xia.local-ocr :as local-ocr]
             [xia.llm :as llm]
             [xia.llm-provider-template :as llm-provider-template]
             [xia.memory :as memory]
@@ -1170,6 +1171,10 @@
    :chunk_summary_max_tokens  (summarizer/chunk-summary-max-tokens)
    :doc_summary_max_tokens    (summarizer/document-summary-max-tokens)})
 
+(defn- local-doc-ocr->admin-body
+  []
+  (local-ocr/admin-body))
+
 (defn- database-backup->admin-body
   []
   (let [settings (backup/admin-body)]
@@ -1761,6 +1766,7 @@
    :size-bytes (get entry "size_bytes")
    :source     (get entry "source")
    :bytes-base64 (get entry "bytes_base64")
+   :ocr-mode   (get entry "ocr_mode")
    :text       (get entry "text")})
 
 (defn- json-local-doc-upload-entries
@@ -1879,6 +1885,7 @@
                                       :source     (:source upload)
                                       :bytes      (:bytes upload)
                                       :bytes-base64 (:bytes-base64 upload)
+                                      :ocr-mode   (:ocr-mode upload)
                                       :text       (:text upload)})))
                           (catch clojure.lang.ExceptionInfo e
                             (let [failed-doc (try
@@ -1890,6 +1897,7 @@
                                                   :source     (:source upload)
                                                   :bytes      (:bytes upload)
                                                   :bytes-base64 (:bytes-base64 upload)
+                                                  :ocr-mode   (:ocr-mode upload)
                                                   :text       (:text upload)}
                                                  e)
                                                (catch Exception _
@@ -2146,6 +2154,7 @@
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
      :local_doc_summarization (local-doc-summarization->admin-body)
+     :local_doc_ocr (local-doc-ocr->admin-body)
      :database_backup (database-backup->admin-body)
      :llm_workloads (into [] (map (fn [{:keys [id label description]}]
                                     {:id          (name id)
@@ -2398,6 +2407,60 @@
         (save-config-override! :local-doc/doc-summary-max-tokens
                                doc-summary-max-tokens))
       (json-response 200 {:local_doc_summarization (local-doc-summarization->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-save-local-doc-ocr [req]
+  (try
+    (let [data                 (or (read-body req) {})
+          enabled?             (when (contains? data "enabled")
+                                 (true? (get data "enabled")))
+          model-backend        (when (contains? data "model_backend")
+                                 (parse-summary-backend (get data "model_backend")
+                                                        "model_backend"))
+          provider-id          (when (contains? data "external_provider_id")
+                                 (parse-optional-provider-id (get data "external_provider_id")
+                                                             "external_provider_id"))
+          command              (when (contains? data "command")
+                                 (nonblank-str (get data "command")))
+          model-path           (when (contains? data "model_path")
+                                 (nonblank-str (get data "model_path")))
+          mmproj-path          (when (contains? data "mmproj_path")
+                                 (nonblank-str (get data "mmproj_path")))
+          spotting-mmproj-path (when (contains? data "spotting_mmproj_path")
+                                 (nonblank-str (get data "spotting_mmproj_path")))
+          timeout-ms           (when (contains? data "timeout_ms")
+                                 (parse-optional-positive-long (get data "timeout_ms")
+                                                               "timeout_ms"))
+          max-tokens           (when (contains? data "max_tokens")
+                                 (parse-optional-positive-long (get data "max_tokens")
+                                                               "max_tokens"))
+          _                    (when (and provider-id
+                                          (not (llm/vision-capable? provider-id)))
+                                 (throw (ex-info "'external_provider_id' must reference a vision-capable provider"
+                                                 {:field "external_provider_id"
+                                                  :value (name provider-id)})))]
+      (when (contains? data "enabled")
+        (save-config-override! :local-doc/ocr-enabled? enabled?))
+      (when (contains? data "model_backend")
+        (save-config-override! :local-doc/ocr-backend
+                               (some-> model-backend name)))
+      (when (contains? data "external_provider_id")
+        (save-config-override! :local-doc/ocr-provider-id
+                               (some-> provider-id name)))
+      (when (contains? data "command")
+        (save-config-override! :local-doc/ocr-command command))
+      (when (contains? data "model_path")
+        (save-config-override! :local-doc/ocr-model-path model-path))
+      (when (contains? data "mmproj_path")
+        (save-config-override! :local-doc/ocr-mmproj-path mmproj-path))
+      (when (contains? data "spotting_mmproj_path")
+        (save-config-override! :local-doc/ocr-spotting-mmproj-path spotting-mmproj-path))
+      (when (contains? data "timeout_ms")
+        (save-config-override! :local-doc/ocr-timeout-ms timeout-ms))
+      (when (contains? data "max_tokens")
+        (save-config-override! :local-doc/ocr-max-tokens max-tokens))
+      (json-response 200 {:local_doc_ocr (local-doc-ocr->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -2957,6 +3020,9 @@
 
         (and (= method :post) (= uri "/admin/local-doc-summarization"))
         (protected-route-response req #(handle-save-local-doc-summarization req))
+
+        (and (= method :post) (= uri "/admin/local-doc-ocr"))
+        (protected-route-response req #(handle-save-local-doc-ocr req))
 
         (and (= method :post) (= uri "/admin/database-backup"))
         (protected-route-response req #(handle-save-database-backup req))

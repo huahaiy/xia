@@ -28,6 +28,7 @@ const state = {
     memoryRetention: null,
     knowledgeDecay: null,
     localDocSummarization: null,
+    localDocOcr: null,
     databaseBackup: null,
     llmWorkloads: [],
     oauthProviderTemplates: [],
@@ -68,6 +69,7 @@ const state = {
   retentionSaving: false,
   knowledgeDecaySaving: false,
   localDocSummarizationSaving: false,
+  localDocOcrSaving: false,
   databaseBackupSaving: false,
   oauthSaving: false,
   serviceSaving: false,
@@ -75,6 +77,7 @@ const state = {
   remoteBridgeSaving: false,
   remotePairing: false,
   localDocSummarizationStatus: 'Loading local document summarization settings...',
+  localDocOcrStatus: 'Loading local OCR settings...',
   contextStatus: 'Loading conversation context settings...',
   databaseBackupStatus: 'Loading database backup settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
@@ -172,6 +175,17 @@ const localDocChunkSummaryMaxTokensEl = document.getElementById('local-doc-chunk
 const localDocDocSummaryMaxTokensEl = document.getElementById('local-doc-doc-summary-max-tokens');
 const localDocSummarizationStatusEl = document.getElementById('local-doc-summarization-status');
 const saveLocalDocSummarizationEl = document.getElementById('save-local-doc-summarization');
+const localDocOcrEnabledEl = document.getElementById('local-doc-ocr-enabled');
+const localDocOcrModelBackendEl = document.getElementById('local-doc-ocr-model-backend');
+const localDocOcrExternalProviderIdEl = document.getElementById('local-doc-ocr-external-provider-id');
+const localDocOcrCommandEl = document.getElementById('local-doc-ocr-command');
+const localDocOcrTimeoutMsEl = document.getElementById('local-doc-ocr-timeout-ms');
+const localDocOcrModelPathEl = document.getElementById('local-doc-ocr-model-path');
+const localDocOcrMmprojPathEl = document.getElementById('local-doc-ocr-mmproj-path');
+const localDocOcrSpottingMmprojPathEl = document.getElementById('local-doc-ocr-spotting-mmproj-path');
+const localDocOcrMaxTokensEl = document.getElementById('local-doc-ocr-max-tokens');
+const localDocOcrStatusEl = document.getElementById('local-doc-ocr-status');
+const saveLocalDocOcrEl = document.getElementById('save-local-doc-ocr');
 const databaseBackupEnabledEl = document.getElementById('database-backup-enabled');
 const databaseBackupDirectoryEl = document.getElementById('database-backup-directory');
 const databaseBackupIntervalHoursEl = document.getElementById('database-backup-interval-hours');
@@ -1720,6 +1734,17 @@ function updateAdminButtons() {
   localDocChunkSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
   localDocDocSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
   saveLocalDocSummarizationEl.disabled = state.localDocSummarizationSaving;
+  localDocOcrEnabledEl.disabled = state.localDocOcrSaving;
+  localDocOcrModelBackendEl.disabled = state.localDocOcrSaving;
+  localDocOcrExternalProviderIdEl.disabled = state.localDocOcrSaving
+    || localDocOcrModelBackendEl.value !== 'external';
+  localDocOcrCommandEl.disabled = state.localDocOcrSaving;
+  localDocOcrTimeoutMsEl.disabled = state.localDocOcrSaving;
+  localDocOcrModelPathEl.disabled = state.localDocOcrSaving;
+  localDocOcrMmprojPathEl.disabled = state.localDocOcrSaving;
+  localDocOcrSpottingMmprojPathEl.disabled = state.localDocOcrSaving;
+  localDocOcrMaxTokensEl.disabled = state.localDocOcrSaving;
+  saveLocalDocOcrEl.disabled = state.localDocOcrSaving;
   databaseBackupEnabledEl.disabled = state.databaseBackupSaving;
   databaseBackupDirectoryEl.disabled = state.databaseBackupSaving;
   databaseBackupIntervalHoursEl.disabled = state.databaseBackupSaving;
@@ -1984,6 +2009,65 @@ function renderLocalDocSummarizationSettings() {
   localDocModelSummaryProviderIdEl.disabled = state.localDocSummarizationSaving
     || localDocModelSummaryBackendEl.value !== 'external';
   localDocSummarizationStatusEl.textContent = state.localDocSummarizationStatus || defaultLocalDocSummarizationStatus();
+  updateAdminButtons();
+}
+
+function defaultLocalDocOcrStatus() {
+  const settings = state.admin.localDocOcr || {};
+  const bits = [];
+  bits.push(settings.enabled ? 'Local OCR enabled' : 'Local OCR disabled');
+  bits.push('Model backend: ' + firstNonEmpty(settings.model_backend, 'local'));
+  if (settings.model_backend === 'external') {
+    bits.push('Provider: ' + firstNonEmpty(settings.resolved_external_provider_id, settings.external_provider_id, 'default'));
+    if (settings.external_provider_vision) bits.push('Vision-capable');
+  } else {
+    bits.push('Runtime: ' + firstNonEmpty(settings.backend, 'llama.cpp-cli'));
+    if (settings.command) bits.push('Command: ' + settings.command);
+    if (settings.managed_install) bits.push('Managed model install available');
+    if (settings.resolved_model_path) bits.push('Model: ' + settings.resolved_model_path);
+    if (settings.resolved_mmproj_path) bits.push('mmproj: ' + settings.resolved_mmproj_path);
+  }
+  if (settings.configured) bits.push('Configured');
+  else bits.push(settings.model_backend === 'external'
+    ? 'Needs a vision-capable external provider'
+    : 'Needs a llama.cpp command plus managed or explicit OCR assets');
+  if (settings.default_mode) bits.push('Default mode: ' + settings.default_mode);
+  return bits.join(' • ');
+}
+
+function renderLocalDocOcrProviderOptions() {
+  const selected = localDocOcrExternalProviderIdEl.value;
+  localDocOcrExternalProviderIdEl.replaceChildren();
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = 'Default provider';
+  localDocOcrExternalProviderIdEl.appendChild(blank);
+  state.admin.providers
+    .filter((provider) => !!provider.vision)
+    .forEach((provider) => {
+      const option = document.createElement('option');
+      option.value = provider.id || '';
+      option.textContent = firstNonEmpty(provider.name, provider.id);
+      localDocOcrExternalProviderIdEl.appendChild(option);
+    });
+  localDocOcrExternalProviderIdEl.value = selected || '';
+}
+
+function renderLocalDocOcrSettings() {
+  const settings = state.admin.localDocOcr || {};
+  localDocOcrEnabledEl.checked = !!settings.enabled;
+  localDocOcrModelBackendEl.value = firstNonEmpty(settings.model_backend, 'local');
+  renderLocalDocOcrProviderOptions();
+  localDocOcrExternalProviderIdEl.value = settings.external_provider_id || '';
+  localDocOcrCommandEl.value = settings.command || '';
+  localDocOcrTimeoutMsEl.value = settings.timeout_ms || '';
+  localDocOcrModelPathEl.value = settings.model_path || '';
+  localDocOcrMmprojPathEl.value = settings.mmproj_path || '';
+  localDocOcrSpottingMmprojPathEl.value = settings.spotting_mmproj_path || '';
+  localDocOcrMaxTokensEl.value = settings.max_tokens || '';
+  localDocOcrExternalProviderIdEl.disabled = state.localDocOcrSaving
+    || localDocOcrModelBackendEl.value !== 'external';
+  localDocOcrStatusEl.textContent = state.localDocOcrStatus || defaultLocalDocOcrStatus();
   updateAdminButtons();
 }
 
@@ -2456,6 +2540,7 @@ async function loadAdminConfigImpl() {
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.localDocSummarization = data.local_doc_summarization || null;
+    state.admin.localDocOcr = data.local_doc_ocr || null;
     state.admin.databaseBackup = data.database_backup || null;
     state.admin.llmWorkloads = Array.isArray(data.llm_workloads) ? data.llm_workloads : [];
     state.admin.oauthProviderTemplates = Array.isArray(data.oauth_provider_templates) ? data.oauth_provider_templates : [];
@@ -2470,6 +2555,7 @@ async function loadAdminConfigImpl() {
     state.admin.remoteSnapshot = data.remote_snapshot || null;
     state.contextStatus = defaultConversationContextStatus();
     state.localDocSummarizationStatus = defaultLocalDocSummarizationStatus();
+    state.localDocOcrStatus = defaultLocalDocOcrStatus();
     state.databaseBackupStatus = defaultDatabaseBackupStatus();
     state.remoteBridgeStatus = defaultRemoteBridgeStatus();
     state.remotePairStatus = defaultRemotePairStatus();
@@ -2487,6 +2573,7 @@ async function loadAdminConfigImpl() {
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
     renderLocalDocSummarizationSettings();
+    renderLocalDocOcrSettings();
     renderDatabaseBackupSettings();
     if (state.providerDraft) {
       restoreProviderDraft(state.providerDraft);
@@ -2845,6 +2932,41 @@ async function saveLocalDocSummarization() {
     renderLocalDocSummarizationSettings();
   } finally {
     state.localDocSummarizationSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveLocalDocOcr() {
+  if (state.localDocOcrSaving) return;
+  state.localDocOcrSaving = true;
+  state.localDocOcrStatus = 'Saving...';
+  renderLocalDocOcrSettings();
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/local-doc-ocr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: localDocOcrEnabledEl.checked,
+        model_backend: localDocOcrModelBackendEl.value,
+        external_provider_id: localDocOcrExternalProviderIdEl.value,
+        command: localDocOcrCommandEl.value,
+        model_path: localDocOcrModelPathEl.value,
+        mmproj_path: localDocOcrMmprojPathEl.value,
+        spotting_mmproj_path: localDocOcrSpottingMmprojPathEl.value,
+        timeout_ms: localDocOcrTimeoutMsEl.value,
+        max_tokens: localDocOcrMaxTokensEl.value
+      })
+    });
+    state.admin.localDocOcr = data.local_doc_ocr || state.admin.localDocOcr;
+    state.localDocOcrStatus = 'Local OCR settings saved.';
+    renderLocalDocOcrSettings();
+    setStatus('Local OCR settings saved');
+  } catch (err) {
+    state.localDocOcrStatus = err.message || 'Failed to save local OCR settings.';
+    renderLocalDocOcrSettings();
+  } finally {
+    state.localDocOcrSaving = false;
     updateAdminButtons();
   }
 }
@@ -4254,6 +4376,8 @@ saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
 localDocModelSummaryBackendEl.addEventListener('change', () => updateAdminButtons());
+saveLocalDocOcrEl.addEventListener('click', () => saveLocalDocOcr());
+localDocOcrModelBackendEl.addEventListener('change', () => renderLocalDocOcrSettings());
 saveDatabaseBackupEl.addEventListener('click', () => saveDatabaseBackup());
 
 newOauthAccountEl.addEventListener('click', () => {
@@ -4375,6 +4499,7 @@ resetProviderForm('Loading...');
 resetConversationContextForm('Loading...');
 resetMemoryRetentionForm('Loading...');
 renderLocalDocSummarizationSettings();
+renderLocalDocOcrSettings();
 renderDatabaseBackupSettings();
 resetOauthAccountForm('Loading...');
 resetServiceForm('Loading...');

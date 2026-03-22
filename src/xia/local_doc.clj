@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [xia.db :as db]
             [xia.extractive-summary :as extractive-summary]
+            [xia.local-ocr :as local-ocr]
             [xia.memory :as memory]
             [xia.summarizer :as summarizer]
             [xia.working-memory :as wm]
@@ -32,6 +33,9 @@
 (def ^:private docx-media-type "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 (def ^:private xlsx-media-type "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 (def ^:private pptx-media-type "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+(def ^:private jpeg-media-type "image/jpeg")
+(def ^:private png-media-type "image/png")
+(def ^:private webp-media-type "image/webp")
 (def ^:private extension->media-type
   {"c" "text/x-c"
    "cc" "text/x-c++"
@@ -44,6 +48,8 @@
    "edn" "application/edn"
    "htm" "text/html"
    "html" "text/html"
+   "jpeg" jpeg-media-type
+   "jpg" jpeg-media-type
    "java" "text/x-java"
    "js" "text/javascript"
    "json" "application/json"
@@ -51,6 +57,7 @@
    "md" "text/markdown"
    "markdown" "text/markdown"
    "pptx" pptx-media-type
+   "png" png-media-type
    "py" "text/x-python"
    "rb" "text/x-ruby"
    "sh" "text/x-shellscript"
@@ -59,6 +66,7 @@
    "ts" "text/typescript"
    "tsv" "text/tab-separated-values"
    "txt" "text/plain"
+   "webp" webp-media-type
    "xlsx" xlsx-media-type
    "xml" "application/xml"
    "yaml" "application/yaml"
@@ -68,6 +76,8 @@
   #{"application/edn"
     "application/json"
     docx-media-type
+    jpeg-media-type
+    png-media-type
     pptx-media-type
     "application/xml"
     "application/yaml"
@@ -86,12 +96,18 @@
     "text/x-ruby"
     "text/x-shellscript"
     "text/x-sql"
+    webp-media-type
     xlsx-media-type})
 
 (def ^:private office-media-types
   #{docx-media-type
     xlsx-media-type
     pptx-media-type})
+
+(def ^:private image-media-types
+  #{jpeg-media-type
+    png-media-type
+    webp-media-type})
 
 (defn- long-max
   ^long [^long a ^long b]
@@ -179,6 +195,13 @@
             :name name
             :media-type media-type}))
 
+(defn- image-bytes-required-ex
+  [name media-type]
+  (ex-info "Image uploads require file bytes"
+           {:type :local-doc/image-bytes-required
+            :name name
+            :media-type media-type}))
+
 (defn- unsupported-format-ex
   [name media-type]
   (ex-info "Unsupported local document format"
@@ -223,10 +246,15 @@
   [media-type]
   (contains? office-media-types media-type))
 
+(defn- image-media-type?
+  [media-type]
+  (contains? image-media-types media-type))
+
 (defn- previewable-binary-media-type?
   [media-type]
   (and media-type
        (not= media-type pdf-media-type)
+       (not (image-media-type? media-type))
        (not (office-media-type? media-type))))
 
 (defn- utf8-bytes
@@ -789,7 +817,7 @@
     (extract-pptx-text name media-type office-bytes)))
 
 (defn- upload-source
-  [{:keys [name media-type text bytes bytes-base64]}]
+  [{:keys [name media-type text bytes bytes-base64 ocr-mode]}]
   (let [name*       (normalize-name name)
         media-type* (normalize-media-type name* media-type)]
     (cond
@@ -810,6 +838,21 @@
            :source-bytes source-bytes
            :text         (extract-office-text name* media-type* source-bytes)})
         (throw (office-bytes-required-ex name* media-type*)))
+
+      (image-media-type? media-type*)
+      (if-let [source-bytes (or bytes
+                                (some-> bytes-base64 str str/trim not-empty decode-base64))]
+        (let [source-bytes ^bytes source-bytes
+              ocr-mode*    (:id (local-ocr/normalize-ocr-mode ocr-mode))]
+          {:media-type   media-type*
+           :source-bytes source-bytes
+           :text         (normalize-text
+                           (local-ocr/ocr-image-bytes source-bytes
+                                                      {:name name*
+                                                       :media-type media-type*
+                                                       :ocr-mode ocr-mode*}))
+           :dedupe?      false})
+        (throw (image-bytes-required-ex name* media-type*)))
 
       (some? bytes)
       (let [source-bytes ^bytes bytes]
@@ -1206,18 +1249,20 @@
                     :max-chars max-chars))
 
 (defn save-upload!
-  [{:keys [session-id name media-type size-bytes source text bytes bytes-base64]}]
+  [{:keys [session-id name media-type size-bytes source text bytes bytes-base64 ocr-mode]}]
   (let [session-id*  (normalize-session-id session-id)
         session-eid* (session-eid session-id*)]
     (when-not session-eid*
       (throw (session-not-found-ex session-id*)))
     (let [name*       (normalize-name name)
-          {:keys [media-type source-bytes text]}
+          {:keys [media-type source-bytes text dedupe?]
+           :or {dedupe? true}}
           (upload-source {:name name*
                           :media-type media-type
                           :text text
                           :bytes bytes
-                          :bytes-base64 bytes-base64})
+                          :bytes-base64 bytes-base64
+                          :ocr-mode ocr-mode})
           text*       text
           chunks      (chunk-document-text text*)
           {:keys [summary summary-source summarized-at]}
@@ -1225,7 +1270,8 @@
           chunk-count (long (count chunks))
           sha256      (sha256-hex source-bytes)
           size-bytes* (normalize-size-bytes size-bytes (byte-array-length source-bytes))
-          existing    (existing-doc-eid session-eid* sha256)
+          existing    (when dedupe?
+                        (existing-doc-eid session-eid* sha256))
           doc-id      (or (some-> existing db/entity :local.doc/id) (random-uuid))
           preview     (preview-text text*)
           channel     (session-channel session-eid*)]

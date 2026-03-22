@@ -9,6 +9,7 @@
             [xia.channel.http :as http]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
+            [xia.local-ocr :as local-ocr]
             [xia.remote-bridge :as remote-bridge]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
@@ -912,6 +913,27 @@
     (is (= "ready" (get-in get-body ["document" "status"])))
     (is (.contains ^String (get-in get-body ["document" "text"]) "Hello multipart PDF"))))
 
+(deftest local-document-create-route-supports-image-ocr-mode
+  (let [sid   (str (db/create-session! :http))
+        calls (atom [])]
+    (with-redefs [local-ocr/ocr-image-bytes (fn [_bytes opts]
+                                              (swap! calls conj opts)
+                                              "<table><tr><td>A</td></tr></table>")]
+      (let [response (#'http/router {:uri            (str "/sessions/" sid "/local-documents")
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"documents" [{"name" "sheet.png"
+                                                                                  "media_type" "image/png"
+                                                                                  "ocr_mode" "table"
+                                                                                  "bytes_base64" (.encodeToString (Base64/getEncoder)
+                                                                                                                   (.getBytes "fake-image"
+                                                                                                                              StandardCharsets/UTF_8))}]})})
+            body     (response-json response)]
+        (is (= 201 (:status response)))
+        (is (= "<table><tr><td>A</td></tr></table>"
+               (get-in body ["documents" 0 "summary"])))
+        (is (= :table (:ocr-mode (first @calls))))))))
+
 (deftest local-document-multipart-route-reports-partial-upload-errors
   (let [sid      (str (db/create-session! :http))
         response (#'http/router
@@ -1204,6 +1226,7 @@
         memory-retention (get body "memory_retention")
         knowledge-decay (get body "knowledge_decay")
         local-doc-summarization (get body "local_doc_summarization")
+        local-doc-ocr (get body "local_doc_ocr")
         database-backup (get body "database_backup")
         llm-workloads (get body "llm_workloads")
         templates (get body "oauth_provider_templates")
@@ -1242,6 +1265,23 @@
     (is (nil? (get local-doc-summarization "model_summary_provider_id")))
     (is (= 96 (get local-doc-summarization "chunk_summary_max_tokens")))
     (is (= 160 (get local-doc-summarization "doc_summary_max_tokens")))
+    (is (= false (get local-doc-ocr "enabled")))
+    (is (= "llama.cpp-cli" (get local-doc-ocr "backend")))
+    (is (= "local" (get local-doc-ocr "model_backend")))
+    (is (nil? (get local-doc-ocr "external_provider_id")))
+    (is (= "openai" (get local-doc-ocr "resolved_external_provider_id")))
+    (is (= false (get local-doc-ocr "external_provider_vision")))
+    (is (= true (get local-doc-ocr "managed_install")))
+    (is (= "llama-cli" (get local-doc-ocr "command")))
+    (is (= true (get local-doc-ocr "configured")))
+    (is (nil? (get local-doc-ocr "model_path")))
+    (is (nil? (get local-doc-ocr "mmproj_path")))
+    (is (string? (get local-doc-ocr "resolved_model_path")))
+    (is (string? (get local-doc-ocr "resolved_mmproj_path")))
+    (is (= "ocr" (get local-doc-ocr "default_mode")))
+    (is (= 1605632 (get local-doc-ocr "spotting_image_max_pixels")))
+    (is (= #{"ocr" "formula" "table" "chart" "seal" "spotting"}
+           (set (map #(get % "id") (get local-doc-ocr "supported_modes")))))
     (is (= false (get database-backup "enabled")))
     (is (= (backup/backup-directory) (get database-backup "directory")))
     (is (= 24 (get database-backup "interval_hours")))
@@ -1389,6 +1429,100 @@
     (is (nil? (db/get-config :local-doc/model-summary-provider-id)))
     (is (nil? (db/get-config :local-doc/chunk-summary-max-tokens)))
     (is (nil? (db/get-config :local-doc/doc-summary-max-tokens)))))
+
+(deftest admin-local-doc-ocr-route-saves-and-clears-settings
+  (let [save-response (#'http/router {:uri            "/admin/local-doc-ocr"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"enabled" true
+                                                                     "model_backend" "local"
+                                                                     "external_provider_id" ""
+                                                                     "command" "/usr/local/bin/llama-cli"
+                                                                     "model_path" "/models/PaddleOCR-VL-1.5.gguf"
+                                                                     "mmproj_path" "/models/PaddleOCR-VL-1.5-mmproj.gguf"
+                                                                     "spotting_mmproj_path" "/models/PaddleOCR-VL-1.5-mmproj-spotting.gguf"
+                                                                     "timeout_ms" "180000"
+                                                                     "max_tokens" "1024"})})
+        save-body     (response-json save-response)]
+    (is (= 200 (:status save-response)))
+    (is (= true (get-in save-body ["local_doc_ocr" "enabled"])))
+    (is (= "local" (get-in save-body ["local_doc_ocr" "model_backend"])))
+    (is (nil? (get-in save-body ["local_doc_ocr" "external_provider_id"])))
+    (is (= "/usr/local/bin/llama-cli" (get-in save-body ["local_doc_ocr" "command"])))
+    (is (= "/models/PaddleOCR-VL-1.5.gguf" (get-in save-body ["local_doc_ocr" "model_path"])))
+    (is (= "/models/PaddleOCR-VL-1.5-mmproj.gguf" (get-in save-body ["local_doc_ocr" "mmproj_path"])))
+    (is (= "/models/PaddleOCR-VL-1.5-mmproj-spotting.gguf"
+           (get-in save-body ["local_doc_ocr" "spotting_mmproj_path"])))
+    (is (= 180000 (get-in save-body ["local_doc_ocr" "timeout_ms"])))
+    (is (= 1024 (get-in save-body ["local_doc_ocr" "max_tokens"])))
+    (is (= "true" (str (db/get-config :local-doc/ocr-enabled?))))
+    (is (= "local" (db/get-config :local-doc/ocr-backend)))
+    (is (nil? (db/get-config :local-doc/ocr-provider-id)))
+    (is (= "/usr/local/bin/llama-cli" (db/get-config :local-doc/ocr-command)))
+    (is (= "/models/PaddleOCR-VL-1.5.gguf" (db/get-config :local-doc/ocr-model-path)))
+    (is (= "/models/PaddleOCR-VL-1.5-mmproj.gguf" (db/get-config :local-doc/ocr-mmproj-path)))
+    (is (= "/models/PaddleOCR-VL-1.5-mmproj-spotting.gguf"
+           (db/get-config :local-doc/ocr-spotting-mmproj-path)))
+    (is (= "180000" (db/get-config :local-doc/ocr-timeout-ms)))
+    (is (= "1024" (db/get-config :local-doc/ocr-max-tokens))))
+  (let [clear-response (#'http/router {:uri            "/admin/local-doc-ocr"
+                                       :request-method :post
+                                       :headers        (ui-headers)
+                                       :body           (request-body {"enabled" false
+                                                                      "model_backend" ""
+                                                                      "external_provider_id" ""
+                                                                      "command" ""
+                                                                      "model_path" ""
+                                                                      "mmproj_path" ""
+                                                                      "spotting_mmproj_path" ""
+                                                                      "timeout_ms" ""
+                                                                      "max_tokens" ""})})
+        clear-body     (response-json clear-response)]
+    (is (= 200 (:status clear-response)))
+    (is (= false (get-in clear-body ["local_doc_ocr" "enabled"])))
+    (is (= "local" (get-in clear-body ["local_doc_ocr" "model_backend"])))
+    (is (nil? (get-in clear-body ["local_doc_ocr" "external_provider_id"])))
+    (is (= "llama-cli" (get-in clear-body ["local_doc_ocr" "command"])))
+    (is (nil? (get-in clear-body ["local_doc_ocr" "model_path"])))
+    (is (nil? (get-in clear-body ["local_doc_ocr" "mmproj_path"])))
+    (is (nil? (get-in clear-body ["local_doc_ocr" "spotting_mmproj_path"])))
+    (is (= true (get-in clear-body ["local_doc_ocr" "managed_install"])))
+    (is (= true (get-in clear-body ["local_doc_ocr" "configured"])))
+    (is (string? (get-in clear-body ["local_doc_ocr" "resolved_model_path"])))
+    (is (string? (get-in clear-body ["local_doc_ocr" "resolved_mmproj_path"])))
+    (is (= 120000 (get-in clear-body ["local_doc_ocr" "timeout_ms"])))
+    (is (= 2048 (get-in clear-body ["local_doc_ocr" "max_tokens"])))
+    (is (= "false" (str (db/get-config :local-doc/ocr-enabled?))))
+    (is (nil? (db/get-config :local-doc/ocr-backend)))
+    (is (nil? (db/get-config :local-doc/ocr-provider-id)))
+    (is (nil? (db/get-config :local-doc/ocr-command)))
+    (is (nil? (db/get-config :local-doc/ocr-model-path)))
+    (is (nil? (db/get-config :local-doc/ocr-mmproj-path)))
+    (is (nil? (db/get-config :local-doc/ocr-spotting-mmproj-path)))
+    (is (nil? (db/get-config :local-doc/ocr-timeout-ms)))
+    (is (nil? (db/get-config :local-doc/ocr-max-tokens)))))
+
+(deftest admin-local-doc-ocr-route-saves-external-provider-selection
+  (db/upsert-provider! {:id :vision
+                        :name "Vision"
+                        :base-url "https://api.example.com/v1"
+                        :model "gpt-4.1-mini"
+                        :vision? true})
+  (let [response (#'http/router {:uri            "/admin/local-doc-ocr"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"enabled" true
+                                                                "model_backend" "external"
+                                                                "external_provider_id" "vision"})})
+        body     (response-json response)]
+    (is (= 200 (:status response)))
+    (is (= "external" (get-in body ["local_doc_ocr" "model_backend"])))
+    (is (= "vision" (get-in body ["local_doc_ocr" "external_provider_id"])))
+    (is (= "vision" (get-in body ["local_doc_ocr" "resolved_external_provider_id"])))
+    (is (= true (get-in body ["local_doc_ocr" "external_provider_vision"])))
+    (is (= true (get-in body ["local_doc_ocr" "configured"])))
+    (is (= "external" (db/get-config :local-doc/ocr-backend)))
+    (is (= "vision" (db/get-config :local-doc/ocr-provider-id)))))
 
 (deftest admin-database-backup-route-saves-and-clears-settings
   (let [save-response (#'http/router {:uri            "/admin/database-backup"

@@ -5,6 +5,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.local-doc :as local-doc]
+            [xia.local-ocr :as local-ocr]
             [xia.memory :as memory]
             [xia.test-helpers :refer [minimal-pdf-base64 office-fixture-base64 test-llm-provider with-test-db]]
             [xia.working-memory :as wm])
@@ -123,6 +124,57 @@
     (is (.contains ^String (:text saved) "vehicle testing"))
     (binding [wm/*session-id* sid]
       (is (= "deck.pptx" (:name (first (local-doc/search-docs "roadmap"))))))))
+
+(deftest image-uploads-use-local-ocr
+  (let [sid   (db/create-session! :http)
+        calls (atom [])]
+    (with-redefs [local-ocr/ocr-image-bytes (fn [_bytes opts]
+                                              (swap! calls conj opts)
+                                              "Invoice 42\nTotal due")]
+      (let [saved (local-doc/save-upload! {:session-id sid
+                                           :name "invoice.png"
+                                           :media-type "image/png"
+                                           :bytes (.getBytes "fake-image" StandardCharsets/UTF_8)})]
+        (is (= "image/png" (:media-type saved)))
+        (is (= "Invoice 42\nTotal due" (:text saved)))
+        (is (.contains ^String (:summary saved) "Invoice 42"))
+        (is (.contains ^String (:preview saved) "Total due"))
+        (is (= :ocr (:ocr-mode (first @calls))))
+        (is (= "image/png" (:media-type (first @calls))))))))
+
+(deftest image-uploads-support-explicit-ocr-modes
+  (let [sid   (db/create-session! :http)
+        calls (atom [])]
+    (with-redefs [local-ocr/ocr-image-bytes (fn [_bytes opts]
+                                              (swap! calls conj opts)
+                                              "x = y + z")]
+      (let [saved (local-doc/save-upload! {:session-id sid
+                                           :name "formula.jpg"
+                                           :media-type "image/jpeg"
+                                           :ocr-mode "formula"
+                                           :bytes (.getBytes "formula-image" StandardCharsets/UTF_8)})]
+        (is (= "x = y + z" (:text saved)))
+        (is (= :formula (:ocr-mode (first @calls))))))))
+
+(deftest image-uploads-do-not-dedupe-by-source-bytes
+  (let [sid   (db/create-session! :http)
+        bytes (.getBytes "shared-image" StandardCharsets/UTF_8)
+        calls (atom 0)]
+    (with-redefs [local-ocr/ocr-image-bytes (fn [_ opts]
+                                              (swap! calls inc)
+                                              (str "OCR run " @calls " " (name (:ocr-mode opts))))]
+      (let [first-doc  (local-doc/save-upload! {:session-id sid
+                                                :name "scan-a.png"
+                                                :media-type "image/png"
+                                                :bytes bytes})
+            second-doc (local-doc/save-upload! {:session-id sid
+                                                :name "scan-b.png"
+                                                :media-type "image/png"
+                                                :ocr-mode :table
+                                                :bytes bytes})]
+        (is (not= (:id first-doc) (:id second-doc)))
+        (is (= 2 (count (local-doc/list-docs sid))))
+        (is (= 2 @calls))))))
 
 (deftest large-local-docs-are-chunked-and-return-matched-chunks
   (let [sid   (db/create-session! :http)

@@ -1,17 +1,38 @@
 (ns xia.local-ocr
-  "Local OCR helpers for image uploads backed by a local llama.cpp CLI runtime."
+  "OCR helpers for image uploads, using either a local managed llama.cpp runtime
+   or an external vision-capable model provider."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.config :as cfg])
-  (:import [java.io File]
-           [java.nio.charset StandardCharsets]
+            [xia.config :as cfg]
+            [xia.db :as db]
+            [xia.llm :as llm])
+  (:import [java.io File InputStream]
+           [java.net URI]
+           [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
+           [java.nio.file Files Path Paths StandardCopyOption]
+           [java.nio.file.attribute FileAttribute]
+           [java.time Duration]
+           [java.util Base64]
            [java.util.concurrent TimeUnit]))
 
 (def ^:private default-command "llama-cli")
 (def ^:private default-timeout-ms 120000)
 (def ^:private default-max-tokens 2048)
+(def ^:private default-model-backend :local)
 (def ^:private spotting-image-max-pixels 1605632)
+(def ^:private default-model-file "PaddleOCR-VL-1.5.gguf")
+(def ^:private default-mmproj-file "PaddleOCR-VL-1.5-mmproj.gguf")
+(def ^:private default-model-url
+  (str "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5-GGUF/resolve/main/"
+       default-model-file
+       "?download=true"))
+(def ^:private default-mmproj-url
+  (str "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5-GGUF/resolve/main/"
+       default-mmproj-file
+       "?download=true"))
+(def ^:private managed-asset-lock (Object.))
+(def ^:private supported-backends #{:local :external})
 
 (def ^:private ocr-mode-definitions
   {:ocr {:id :ocr
@@ -34,9 +55,6 @@
               :prompt "Spotting:"
               :requires-spotting-mmproj? true
               :image-max-pixels spotting-image-max-pixels}})
-
-(def ^:private supported-ocr-mode-set
-  (set (keys ocr-mode-definitions)))
 
 (defn supported-modes
   []
@@ -68,6 +86,17 @@
   []
   (cfg/boolean-option :local-doc/ocr-enabled? false))
 
+(defn model-backend
+  []
+  (cfg/keyword-option :local-doc/ocr-backend
+                      default-model-backend
+                      supported-backends))
+
+(defn external-provider-id
+  []
+  (some-> (cfg/string-option :local-doc/ocr-provider-id nil)
+          keyword))
+
 (defn- command-path
   []
   (cfg/string-option :local-doc/ocr-command default-command))
@@ -93,37 +122,112 @@
   (cfg/positive-long :local-doc/ocr-max-tokens default-max-tokens))
 
 (defn- configured?
-  []
+  [resolved-model-path resolved-mmproj-path]
   (and (seq (command-path))
-       (seq (model-path))
-       (seq (mmproj-path))))
+       (seq resolved-model-path)
+       (seq resolved-mmproj-path)))
+
+(defn- resolved-external-provider
+  []
+  (let [provider-id (external-provider-id)]
+    (cond
+      provider-id
+      {:provider-id provider-id
+       :provider    (db/get-provider provider-id)
+       :default?    false}
+
+      :else
+      (when-let [provider (db/get-default-provider)]
+        {:provider-id (:llm.provider/id provider)
+         :provider    provider
+         :default?    true}))))
+
+(defn- external-provider-ready?
+  []
+  (let [{:keys [provider]} (resolved-external-provider)]
+    (boolean (and provider
+                  (llm/vision-capable? provider)))))
+
+(defn- current-db-path
+  []
+  (db/current-db-path))
+
+(defn- managed-ocr-dir
+  []
+  (when-let [db-path (current-db-path)]
+    (str db-path File/separator "ocr")))
+
+(defn- managed-model-path
+  []
+  (some-> (managed-ocr-dir)
+          (str File/separator default-model-file)))
+
+(defn- managed-mmproj-path
+  []
+  (some-> (managed-ocr-dir)
+          (str File/separator default-mmproj-file)))
+
+(defn- resolved-model-path
+  []
+  (or (model-path)
+      (managed-model-path)))
+
+(defn- resolved-mmproj-path
+  []
+  (or (mmproj-path)
+      (managed-mmproj-path)))
 
 (defn settings
   []
-  {:enabled               (enabled?)
-   :backend               :llama.cpp-cli
-   :configured            (boolean (configured?))
-   :command               (command-path)
-   :model-path            (model-path)
-   :mmproj-path           (mmproj-path)
-   :spotting-mmproj-path  (spotting-mmproj-path)
-   :timeout-ms            (timeout-ms)
-   :max-tokens            (max-tokens)
-   :default-mode          :ocr
-   :spotting-image-max-pixels spotting-image-max-pixels
-   :supported-modes       (supported-modes)})
+  (let [resolved-model-path*  (resolved-model-path)
+        resolved-mmproj-path* (resolved-mmproj-path)
+        model-backend*        (model-backend)
+        {:keys [provider-id provider]} (resolved-external-provider)]
+    {:enabled               (enabled?)
+     :backend               :llama.cpp-cli
+     :model-backend         model-backend*
+     :external-provider-id  (external-provider-id)
+     :resolved-external-provider-id provider-id
+     :external-provider-vision? (boolean (and provider
+                                             (llm/vision-capable? provider)))
+     :managed-install       (boolean (managed-ocr-dir))
+     :configured            (boolean (case model-backend*
+                                       :external (external-provider-ready?)
+                                       (configured? resolved-model-path*
+                                                    resolved-mmproj-path*)))
+     :command               (command-path)
+     :model-path            (model-path)
+     :mmproj-path           (mmproj-path)
+     :resolved-model-path   resolved-model-path*
+     :resolved-mmproj-path  resolved-mmproj-path*
+     :spotting-mmproj-path  (spotting-mmproj-path)
+     :timeout-ms            (timeout-ms)
+     :max-tokens            (max-tokens)
+     :default-mode          :ocr
+     :spotting-image-max-pixels spotting-image-max-pixels
+     :supported-modes       (supported-modes)}))
 
 (defn admin-body
   []
   (let [{:keys [enabled configured command model-path mmproj-path spotting-mmproj-path
+                resolved-model-path resolved-mmproj-path managed-install
+                model-backend external-provider-id resolved-external-provider-id
+                external-provider-vision?
                 timeout-ms max-tokens default-mode spotting-image-max-pixels supported-modes]}
         (settings)]
     {:enabled                     (boolean enabled)
      :backend                     "llama.cpp-cli"
+     :model_backend               (name model-backend)
+     :external_provider_id        (some-> external-provider-id name)
+     :resolved_external_provider_id (some-> resolved-external-provider-id name)
+     :external_provider_vision    (boolean external-provider-vision?)
+     :managed_install             (boolean managed-install)
      :configured                  (boolean configured)
      :command                     command
      :model_path                  model-path
      :mmproj_path                 mmproj-path
+     :resolved_model_path         resolved-model-path
+     :resolved_mmproj_path        resolved-mmproj-path
      :spotting_mmproj_path        spotting-mmproj-path
      :timeout_ms                  timeout-ms
      :max_tokens                  max-tokens
@@ -145,33 +249,129 @@
         missing  (cond-> []
                    (not (seq (:command settings)))
                    (conj :command)
-                   (not (seq (:model-path settings)))
+                   (not (seq (:resolved-model-path settings)))
                    (conj :model-path)
-                   (not (seq (:mmproj-path settings)))
+                   (not (seq (:resolved-mmproj-path settings)))
                    (conj :mmproj-path))]
-    (ex-info "Local OCR is not configured. Set the llama.cpp command, model path, and mmproj path first."
+    (ex-info "Local OCR is not configured. Xia needs a llama.cpp command plus either explicit model/mmproj paths or an open DB for managed OCR assets."
              {:type :local-doc/ocr-not-configured
               :missing-config missing})))
 
-(defn- spotting-mmproj-required-ex
+(defn- external-provider-required-ex
   []
-  (ex-info (str "Spotting OCR requires a mmproj file patched with "
-                "clip.vision.image_max_pixels="
-                spotting-image-max-pixels
-                ". Configure local-doc/ocr-spotting-mmproj-path.")
-           {:type :local-doc/ocr-spotting-mmproj-required
-            :image-max-pixels spotting-image-max-pixels}))
+  (ex-info "External OCR requires a vision-capable provider or default provider."
+           {:type :local-doc/ocr-provider-required}))
+
+(defn- external-provider-not-vision-ex
+  [provider-id]
+  (ex-info "Selected OCR provider is not vision-capable."
+           {:type :local-doc/ocr-provider-not-vision
+            :provider-id provider-id}))
 
 (defn- ensure-ready!
   [mode]
   (when-not (enabled?)
     (throw (ex-info "Local OCR is disabled."
                     {:type :local-doc/ocr-disabled})))
-  (when-not (configured?)
-    (throw (missing-config-ex)))
-  (when (and (= (:id mode) :spotting)
-             (not (seq (spotting-mmproj-path))))
-    (throw (spotting-mmproj-required-ex))))
+  (case (model-backend)
+    :external
+    (let [{:keys [provider-id provider]} (resolved-external-provider)]
+      (cond
+        (nil? provider)
+        (throw (external-provider-required-ex))
+
+        (not (llm/vision-capable? provider))
+        (throw (external-provider-not-vision-ex provider-id))
+
+        :else nil))
+
+    (when-not (configured? (resolved-model-path) (resolved-mmproj-path))
+      (throw (missing-config-ex)))))
+
+(defn- create-http-client
+  []
+  (-> (HttpClient/newBuilder)
+      (.connectTimeout (Duration/ofSeconds 20))
+      (.followRedirects HttpClient$Redirect/NORMAL)
+      (.build)))
+
+(defn- move-file!
+  [^Path source ^Path target]
+  (try
+    (Files/move source target
+                (into-array java.nio.file.CopyOption
+                            [StandardCopyOption/ATOMIC_MOVE
+                             StandardCopyOption/REPLACE_EXISTING]))
+    (catch Exception _
+      (Files/move source target
+                  (into-array java.nio.file.CopyOption
+                              [StandardCopyOption/REPLACE_EXISTING])))))
+
+(defn- download-file!
+  [url target-path]
+  (let [^Path target  (Paths/get target-path (make-array String 0))
+        ^Path parent  (.getParent target)
+        tmp-dir       (or parent (Paths/get "." (make-array String 0)))
+        _             (when parent
+                        (Files/createDirectories parent (make-array FileAttribute 0)))
+        prefix        (str (.getFileName target) ".part-")
+        suffix        ".tmp"
+        tmp           (Files/createTempFile tmp-dir prefix suffix
+                                            (make-array FileAttribute 0))
+        ^HttpClient client (create-http-client)
+        ^HttpRequest req   (-> (HttpRequest/newBuilder (URI/create url))
+                               (.header "User-Agent" "xia")
+                               (.header "Accept" "application/octet-stream")
+                               (.timeout (Duration/ofMinutes 30))
+                               (.GET)
+                               (.build))
+        ^"[Ljava.nio.file.CopyOption;" copy-opts
+        (into-array java.nio.file.CopyOption
+                    [StandardCopyOption/REPLACE_EXISTING])]
+    (try
+      (let [resp   (.send client req (HttpResponse$BodyHandlers/ofInputStream))
+            status (.statusCode resp)]
+        (when-not (= 200 status)
+          (throw (ex-info "Failed to download managed OCR asset"
+                          {:url url :status status :target target-path})))
+        (with-open [^InputStream in (.body resp)]
+          (Files/copy in ^Path tmp copy-opts))
+        (move-file! tmp target)
+        target-path)
+      (finally
+        (when (Files/exists tmp (make-array java.nio.file.LinkOption 0))
+          (try
+            (Files/deleteIfExists tmp)
+            (catch Exception _)))))))
+
+(defn- announce-managed-download!
+  [label target-path]
+  (let [message (str "Downloading Xia managed OCR "
+                     label
+                     " to "
+                     target-path
+                     ". This may take a few minutes the first time.")]
+    (log/info message)
+    (println message)
+    (flush)))
+
+(defn- ensure-managed-asset!
+  [target-path url label]
+  (when (and (seq target-path)
+             (seq url)
+             (not (.exists (io/file target-path))))
+    (locking managed-asset-lock
+      (when-not (.exists (io/file target-path))
+        (announce-managed-download! label target-path)
+        (download-file! url target-path))))
+  target-path)
+
+(defn- ensure-managed-runtime-assets!
+  []
+  (when-not (model-path)
+    (ensure-managed-asset! (managed-model-path) default-model-url "model"))
+  (when-not (mmproj-path)
+    (ensure-managed-asset! (managed-mmproj-path) default-mmproj-url "mmproj")))
 
 (defn- image-suffix
   [{:keys [name media-type]}]
@@ -190,13 +390,24 @@
   [image-bytes opts]
   (let [suffix (image-suffix opts)
         ^File tmp (File/createTempFile "xia-local-ocr-" suffix)]
-    (spit tmp image-bytes :binary true)
+    (with-open [out (io/output-stream tmp)]
+      (.write out ^bytes image-bytes))
     tmp))
 
 (defn- read-stream!
   [stream]
-  (with-open [reader (io/reader stream :encoding "UTF-8")]
+    (with-open [reader (io/reader stream :encoding "UTF-8")]
     (slurp reader)))
+
+(defn- create-spotting-metadata-file!
+  []
+  (let [^File tmp (File/createTempFile "xia-local-ocr-spotting-" ".json")]
+    (spit tmp
+          (str "{\"clip.vision.image_max_pixels\":"
+               spotting-image-max-pixels
+               "}")
+          :encoding "UTF-8")
+    tmp))
 
 (defn- process-result
   [^Process process timeout-ms]
@@ -213,17 +424,20 @@
                          :timeout-ms timeout-ms})))))) 
 
 (defn- run-llama-cli!
-  [{:keys [prompt image-path mode]}]
-  (let [mmproj (if (= (:id mode) :spotting)
-                 (spotting-mmproj-path)
-                 (mmproj-path))
+  [{:keys [prompt image-path mode metadata-path]}]
+  (let [mmproj (or (when (= (:id mode) :spotting)
+                     (spotting-mmproj-path))
+                   (resolved-mmproj-path))
         command [(command-path)
-                 "-m" (model-path)
+                 "-m" (resolved-model-path)
                  "--mmproj" mmproj
                  "--temp" "0"
                  "-n" (str (max-tokens))
                  "-p" prompt
                  "--image" image-path]
+        command (cond-> command
+                  (seq metadata-path)
+                  (into ["--metadata" metadata-path]))
         process (.start (ProcessBuilder. ^java.util.List command))
         {:keys [exit stdout stderr]} (process-result process (timeout-ms))]
     (when-not (zero? (long exit))
@@ -240,7 +454,9 @@
 
 (defn- normalize-output
   [text prompt]
-  (let [value (some-> text str/replace "\u0000" "" str/trim)]
+  (let [value (some-> text
+                      (#(str/replace % "\u0000" ""))
+                      str/trim)]
     (cond
       (str/blank? value)
       ""
@@ -253,28 +469,72 @@
       :else
       value)))
 
+(defn- bytes->data-url
+  [mime-type ^bytes data]
+  (str "data:" mime-type ";base64,"
+       (.encodeToString (Base64/getEncoder) data)))
+
+(defn- run-external-ocr!
+  [image-bytes {:keys [media-type mode]}]
+  (let [{:keys [provider-id default?]} (resolved-external-provider)
+        messages [{"role" "user"
+                   "content" [{"type" "text"
+                               "text" (:prompt mode)}
+                              {"type" "image_url"
+                               "image_url" {"url" (bytes->data-url media-type image-bytes)
+                                            "detail" "high"}}]}]
+        opts (cond-> [:max-tokens (long (max-tokens))
+                      :temperature 0]
+               (and provider-id (not default?))
+               (into [:provider-id provider-id]))]
+    (apply llm/chat-simple messages opts)))
+
+(defn- run-local-ocr!
+  [image-bytes {:keys [name media-type mode]}]
+  (ensure-managed-runtime-assets!)
+  (let [prompt        (:prompt mode)
+        tmp           (create-temp-image-file! image-bytes {:name name :media-type media-type})
+        metadata-file (when (and (= (:id mode) :spotting)
+                                 (not (seq (spotting-mmproj-path))))
+                        (create-spotting-metadata-file!))]
+    (try
+      (-> (run-llama-cli! {:prompt prompt
+                           :image-path (.getAbsolutePath tmp)
+                           :mode mode
+                           :metadata-path (some-> metadata-file .getAbsolutePath)})
+          (normalize-output prompt))
+      (finally
+        (when (.exists tmp)
+          (when-not (.delete tmp)
+            (log/debug "Failed to delete temp OCR image file"
+                       {:path (.getAbsolutePath tmp)})))
+        (when (and metadata-file
+                   (.exists ^File metadata-file))
+          (when-not (.delete ^File metadata-file)
+            (log/debug "Failed to delete temp OCR metadata file"
+                       {:path (.getAbsolutePath ^File metadata-file)})))))))
+
 (defn ocr-image-bytes
   [image-bytes {:keys [name media-type ocr-mode] :as opts}]
   (let [mode (normalize-ocr-mode ocr-mode)]
     (ensure-ready! mode)
-    (let [prompt (:prompt mode)
-          tmp    (create-temp-image-file! image-bytes {:name name :media-type media-type})]
-      (try
-        (-> (run-llama-cli! {:prompt prompt
-                             :image-path (.getAbsolutePath tmp)
-                             :mode mode})
-            (normalize-output prompt))
-        (catch Exception e
-          (throw (if (= :local-doc/ocr-failed (some-> e ex-data :type))
-                   e
-                   (ex-info "Local OCR failed."
-                            (merge {:type :local-doc/ocr-failed
-                                    :ocr-mode (:id mode)}
-                                   (select-keys (ex-data e)
-                                                [:timeout-ms :image-max-pixels]))
-                            e))))
-        (finally
-          (when (.exists tmp)
-            (when-not (.delete tmp)
-              (log/debug "Failed to delete temp OCR image file"
-                         {:path (.getAbsolutePath tmp)}))))))))
+    (try
+      (case (model-backend)
+        :external
+        (-> (run-external-ocr! image-bytes {:media-type media-type
+                                            :mode mode})
+            (normalize-output (:prompt mode)))
+
+        (run-local-ocr! image-bytes {:name name
+                                     :media-type media-type
+                                     :mode mode}))
+      (catch Exception e
+        (throw (if (= :local-doc/ocr-failed (some-> e ex-data :type))
+                 e
+                 (ex-info "Local OCR failed."
+                          (merge {:type :local-doc/ocr-failed
+                                  :ocr-mode (:id mode)
+                                  :model-backend (model-backend)}
+                                 (select-keys (ex-data e)
+                                              [:timeout-ms :image-max-pixels :provider-id]))
+                          e)))))))
