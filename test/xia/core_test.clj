@@ -147,6 +147,28 @@
             [:http/start "0.0.0.0" 4011 {:web-dev? true}]]
            @calls))))
 
+(deftest start-server-runtime-skips-interactive-setup-on-first-run
+  (let [calls   (atom [])
+        options {:db "/tmp/xia-dev-repl"
+                 :bind "127.0.0.1"
+                 :port 4011}]
+    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [_] nil)
+                     #'xia.db/connect! (fn [_ _] nil)
+                     #'xia.crypto/current-key-source (fn [] :passphrase)
+                     #'xia.setup/needs-setup? (constantly true)
+                     #'xia.setup/run-setup! (fn [] (swap! calls conj :setup/run))
+                     #'xia.identity/init-identity! (fn [] nil)
+                     #'xia.tool/ensure-bundled-tools! (fn [] 0)
+                     #'xia.tool/reset-runtime! (fn [] nil)
+                     #'xia.tool/load-all-tools! (fn [] nil)
+                     #'xia.tool/registered-tools (fn [] [])
+                     #'xia.skill/all-enabled-skills (fn [] [])
+                     #'xia.scheduler/start! (fn [] nil)
+                     #'xia.channel.http/start! (fn [_ _ _] nil)
+                     #'xia.core/local-ui-url (fn [_ _] "http://localhost:4011/")}
+      #(core/start-server-runtime! options))
+    (is (empty? @calls))))
+
 (deftest connect-passes-built-in-embedding-provider-ids-to-datalevin
   (let [captured (atom nil)]
     (with-redefs-fn {#'datalevin.core/get-conn

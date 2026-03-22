@@ -8,6 +8,7 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http]
+            [xia.oauth :as oauth]
             [xia.rate-limit :as rate-limit])
   (:import [java.net URI]
            [java.time ZonedDateTime]
@@ -598,8 +599,11 @@
 
 (defn- build-request
   "Build the HTTP request map for a chat completion call."
-  [{:keys [base-url api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens] :as opts}]
-  (let [body (cond-> {:model    model
+  [{:keys [base-url auth-header api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens] :as opts}]
+  (let [auth-header (or auth-header
+                        (when-let [api-key (some-> api-key str/trim not-empty)]
+                          (str "Bearer " api-key)))
+        body (cond-> {:model    model
                       :messages messages}
                tools       (assoc :tools tools)
                temperature (assoc :temperature temperature)
@@ -607,13 +611,47 @@
                (streaming-request? opts) (assoc :stream true))]
     {:url           (str base-url "/chat/completions")
      :method        :post
-     :headers       {"Authorization" (str "Bearer " api-key)
-                     "Content-Type"  "application/json"}
+     :headers       (cond-> {"Content-Type" "application/json"}
+                      (some? auth-header)
+                      (assoc "Authorization" auth-header))
      :body          (json/write-json-str body)
      :allow-private-network? (boolean allow-private-network?)
      :timeout       request-timeout-ms
      :retry-enabled? true
      :request-label "LLM request"}))
+
+(defn- provider-auth-type
+  [provider]
+  (let [auth-type (or (:llm.provider/auth-type provider)
+                      (:auth-type provider))]
+    (cond
+      (keyword? auth-type) auth-type
+      (string? auth-type)  (keyword auth-type)
+      (some? (or (:llm.provider/oauth-account provider)
+                 (:oauth-account provider))) :oauth-account
+      (seq (or (:llm.provider/api-key provider)
+               (:api-key provider))) :api-key
+      :else :none)))
+
+(defn- provider-auth-header
+  [provider]
+  (case (provider-auth-type provider)
+    :none
+    nil
+
+    :api-key
+    (when-let [api-key (some-> (or (:llm.provider/api-key provider)
+                                   (:api-key provider))
+                               str/trim
+                               not-empty)]
+      (str "Bearer " api-key))
+
+    :oauth-account
+    (when-let [account-id (or (:llm.provider/oauth-account provider)
+                              (:oauth-account provider))]
+      (oauth/oauth-header (oauth/ensure-account-ready! account-id)))
+
+    nil))
 
 (defn- provider-error-message
   [provider-id ^Throwable e]
@@ -705,10 +743,10 @@
 (defn- attempt-chat
   [messages opts {:keys [provider provider-id workload]}]
   (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
-        api-key   (or (:llm.provider/api-key provider) (:api-key provider))
         model     (or (:llm.provider/model provider) (:model provider))
+        auth-header (provider-auth-header provider)
         request-config {:base-url base-url
-                        :api-key api-key
+                        :auth-header auth-header
                         :model model
                         :allow-private-network? (provider-allows-private-network? provider)}
         _         (check-rate-limit! provider-id provider workload)

@@ -57,6 +57,21 @@
                                  {})]
     (is (true? (:allow-private-network? req)))))
 
+(deftest build-request-omits-authorization-header-when-not-needed
+  (let [req (#'llm/build-request {:base-url "http://127.0.0.1:11434/v1"
+                                  :model "qwen"}
+                                 [{"role" "user" "content" "hello"}]
+                                 {})]
+    (is (nil? (get-in req [:headers "Authorization"])))))
+
+(deftest provider-auth-header-can-use-linked-oauth-account
+  (with-redefs [xia.oauth/ensure-account-ready! (constantly {:oauth.account/access-token "oauth-token"
+                                                             :oauth.account/token-type "Bearer"})
+                xia.oauth/oauth-header (constantly "Bearer oauth-token")]
+    (is (= "Bearer oauth-token"
+           (#'llm/provider-auth-header {:llm.provider/auth-type :oauth-account
+                                        :llm.provider/oauth-account :openai-login})))))
+
 (deftest vision-capable-checks-provider-flag
   (is (true? (llm/vision-capable? {:llm.provider/id :vision
                                    :llm.provider/vision? true})))

@@ -44,6 +44,9 @@
    :llm.provider/name     {:db/valueType :db.type/string}
    :llm.provider/base-url {:db/valueType :db.type/string}
    :llm.provider/api-key  {:db/valueType :db.type/string}
+   :llm.provider/template {:db/valueType :db.type/keyword}
+   :llm.provider/auth-type {:db/valueType :db.type/keyword}
+   :llm.provider/oauth-account {:db/valueType :db.type/keyword}
    :llm.provider/model    {:db/valueType :db.type/string}
    :llm.provider/workloads {:db/valueType :db.type/keyword
                             :db/cardinality :db.cardinality/many}
@@ -1078,6 +1081,12 @@
         provider-eid                 (ffirst (q '[:find ?e :in $ ?id
                                                   :where [?e :llm.provider/id ?id]]
                                                 provider-id))
+        template-id                  (or (:llm.provider/template provider)
+                                         (:template provider))
+        auth-type                    (or (:llm.provider/auth-type provider)
+                                         (:auth-type provider))
+        oauth-account                (or (:llm.provider/oauth-account provider)
+                                         (:oauth-account provider))
         workloads                    (some-> (or (:llm.provider/workloads provider)
                                                 (:workloads provider))
                                              set)
@@ -1093,6 +1102,12 @@
                                          (:allow-private-network? provider))
         has-workloads?               (or (contains? provider :llm.provider/workloads)
                                          (contains? provider :workloads))
+        has-template?                (or (contains? provider :llm.provider/template)
+                                         (contains? provider :template))
+        has-auth-type?               (or (contains? provider :llm.provider/auth-type)
+                                         (contains? provider :auth-type))
+        has-oauth-account?           (or (contains? provider :llm.provider/oauth-account)
+                                         (contains? provider :oauth-account))
         has-vision?                  (or (contains? provider :llm.provider/vision?)
                                          (contains? provider :vision?))
         has-allow-private-network?   (or (contains? provider :llm.provider/allow-private-network?)
@@ -1116,6 +1131,15 @@
                                        (assoc :llm.provider/api-key (:llm.provider/api-key provider))
                                        (contains? provider :api-key)
                                        (assoc :llm.provider/api-key (:api-key provider))
+                                       (and has-template?
+                                            (some? template-id))
+                                       (assoc :llm.provider/template template-id)
+                                       (and has-auth-type?
+                                            (some? auth-type))
+                                       (assoc :llm.provider/auth-type auth-type)
+                                       (and has-oauth-account?
+                                            (some? oauth-account))
+                                       (assoc :llm.provider/oauth-account oauth-account)
                                        (contains? provider :llm.provider/model)
                                        (assoc :llm.provider/model (:llm.provider/model provider))
                                        (contains? provider :model)
@@ -1149,6 +1173,21 @@
                                                       workload])
                                                    (or (:llm.provider/workloads (raw-entity provider-eid))
                                                        [])))
+                                       (and provider-eid
+                                            has-template?
+                                            (nil? template-id))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/template])
+                                       (and provider-eid
+                                            has-auth-type?
+                                            (nil? auth-type))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/auth-type])
+                                       (and provider-eid
+                                            has-oauth-account?
+                                            (nil? oauth-account))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/oauth-account])
                                        (and provider-eid
                                             has-system-prompt-budget?
                                             (nil? system-prompt-budget))
@@ -1945,7 +1984,8 @@
     (ffirst
       (q '[:find ?e :in $ ?id
            :where
-           [?e :service/oauth-account ?id]]
+           (or [?e :service/oauth-account ?id]
+               [?e :llm.provider/oauth-account ?id])]
          account-id))))
 
 ;; ---------------------------------------------------------------------------

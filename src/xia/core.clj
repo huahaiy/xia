@@ -141,7 +141,11 @@
 
   ;; First-run setup if needed
   (when (setup/needs-setup?)
-    (setup/run-setup!))
+    (if (= "terminal" mode)
+      (setup/run-setup!)
+      (log/info "Skipping interactive first-run setup in"
+                mode
+                "mode; complete provider onboarding in the local web UI.")))
 
   ;; Initialize identity and load skills + tools
   (identity/init-identity!)

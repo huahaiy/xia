@@ -23,6 +23,7 @@ const state = {
   scratchSaving: false,
   admin: {
     providers: [],
+    llmProviderTemplates: [],
     conversationContext: null,
     memoryRetention: null,
     knowledgeDecay: null,
@@ -40,6 +41,7 @@ const state = {
     remoteEvents: [],
     remoteSnapshot: null
   },
+  setupRequired: false,
   history: {
     sessions: [],
     schedules: [],
@@ -55,6 +57,8 @@ const state = {
   knowledgeSearching: false,
   knowledgeLoadingFacts: false,
   knowledgeForgettingFactId: '',
+  providerDraft: null,
+  pendingProviderOauthFlow: null,
   activeProviderId: '',
   activeOauthAccountId: '',
   activeServiceId: '',
@@ -118,11 +122,23 @@ const searchKnowledgeEl = document.getElementById('search-knowledge');
 const knowledgeNodeListEl = document.getElementById('knowledge-node-list');
 const knowledgeFactListEl = document.getElementById('knowledge-fact-list');
 const knowledgeStatusEl = document.getElementById('knowledge-status');
+const providerOnboardingEl = document.getElementById('provider-onboarding');
+const providerTemplateListEl = document.getElementById('provider-template-list');
+const providerOnboardingStatusEl = document.getElementById('provider-onboarding-status');
+const providerCardEl = document.getElementById('provider-card');
 const providerListEl = document.getElementById('provider-list');
 const providerIdEl = document.getElementById('provider-id');
 const providerNameEl = document.getElementById('provider-name');
+const providerTemplateEl = document.getElementById('provider-template');
+const providerTemplateNoteEl = document.getElementById('provider-template-note');
 const providerBaseUrlEl = document.getElementById('provider-base-url');
 const providerModelEl = document.getElementById('provider-model');
+const providerAuthTypeEl = document.getElementById('provider-auth-type');
+const providerOauthAccountEl = document.getElementById('provider-oauth-account');
+const providerOauthAccountNoteEl = document.getElementById('provider-oauth-account-note');
+const providerConfigureOauthEl = document.getElementById('provider-configure-oauth');
+const providerOpenAccountEl = document.getElementById('provider-open-account');
+const providerOpenDocsEl = document.getElementById('provider-open-docs');
 const providerWorkloadsEl = document.getElementById('provider-workloads');
 const providerWorkloadsNoteEl = document.getElementById('provider-workloads-note');
 const providerSystemPromptBudgetEl = document.getElementById('provider-system-prompt-budget');
@@ -164,6 +180,7 @@ const databaseBackupLastSuccessEl = document.getElementById('database-backup-las
 const databaseBackupLastArchiveEl = document.getElementById('database-backup-last-archive');
 const databaseBackupStatusEl = document.getElementById('database-backup-status');
 const saveDatabaseBackupEl = document.getElementById('save-database-backup');
+const oauthAccountCardEl = document.getElementById('oauth-account-card');
 const oauthAccountListEl = document.getElementById('oauth-account-list');
 const oauthTemplateEl = document.getElementById('oauth-template');
 const oauthTemplateNoteEl = document.getElementById('oauth-template-note');
@@ -762,11 +779,50 @@ function renderRemoteBridge() {
   renderRemoteSnapshot();
 }
 
+function providerTemplateById(templateId) {
+  return (state.admin.llmProviderTemplates || []).find((template) => template.id === templateId) || null;
+}
+
+function providerAuthTypeLabel(authType) {
+  if (authType === 'none') return 'No sign-in';
+  if (authType === 'api-key') return 'API key';
+  if (authType === 'oauth-account') return 'Linked sign-in';
+  return 'Not set';
+}
+
+function providerTemplateAuthTypes(template) {
+  const authTypes = Array.isArray(template && template.auth_types) ? template.auth_types.filter(Boolean) : [];
+  return authTypes.length ? authTypes : ['api-key'];
+}
+
+function defaultProviderTemplateId() {
+  const templates = Array.isArray(state.admin.llmProviderTemplates) ? state.admin.llmProviderTemplates : [];
+  if (!templates.length) return '';
+  return (templates.find((template) => template.id === 'ollama')
+    || templates.find((template) => template.id === 'openai')
+    || templates[0]).id || '';
+}
+
+function defaultProviderAuthType(template) {
+  const authTypes = providerTemplateAuthTypes(template);
+  if (authTypes.includes('api-key')) return 'api-key';
+  if (authTypes.includes('none')) return 'none';
+  return authTypes[0] || 'api-key';
+}
+
 function providerMeta(provider) {
   const bits = [];
+  const template = providerTemplateById(provider.template);
+  if (template) bits.push(template.name);
   if (provider.model) bits.push(provider.model);
   if (Array.isArray(provider.workloads) && provider.workloads.length) {
     bits.push('Workloads: ' + provider.workloads.join(', '));
+  }
+  if (provider.auth_type) bits.push(providerAuthTypeLabel(provider.auth_type));
+  if (provider.oauth_account_name) {
+    bits.push(provider.oauth_account_connected
+      ? ('Signed in: ' + provider.oauth_account_name)
+      : ('Sign-in pending: ' + provider.oauth_account_name));
   }
   if (provider.effective_rate_limit_per_minute) {
     bits.push('Rate ' + provider.effective_rate_limit_per_minute + '/min');
@@ -782,8 +838,415 @@ function providerMeta(provider) {
   }
   if (provider.vision) bits.push('Vision');
   if (provider.default) bits.push('Default');
-  bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
+  if (provider.auth_type === 'api-key' || (!provider.auth_type && provider.api_key_configured)) {
+    bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
+  }
   return bits.join(' • ');
+}
+
+function llmProviderTemplateMeta(template) {
+  const bits = [];
+  if (template.category) bits.push(template.category);
+  if (template.base_url) bits.push(template.base_url);
+  if (template.model_suggestion) bits.push('Suggested model: ' + template.model_suggestion);
+  return bits.join(' • ');
+}
+
+function providerSignInOptionLabel(option) {
+  switch (option) {
+    case 'google': return 'Google login';
+    case 'github': return 'GitHub login';
+    case 'apple': return 'Apple login';
+    case 'microsoft': return 'Microsoft login';
+    default: return option;
+  }
+}
+
+function providerPrimaryAction(template, authType) {
+  if (!template) return null;
+  if (authType === 'oauth-account') {
+    return {
+      kind: 'oauth',
+      label: 'Set Up Sign-In'
+    };
+  }
+  if (authType === 'api-key') {
+    if (template.api_key_url) {
+      return {
+        kind: 'external',
+        label: 'Open API Keys',
+        url: template.api_key_url
+      };
+    }
+    if (template.account_url) {
+      return {
+        kind: 'external',
+        label: 'Open Provider Site',
+        url: template.account_url
+      };
+    }
+    if (template.docs_url) {
+      return {
+        kind: 'external',
+        label: 'Open Setup Guide',
+        url: template.docs_url
+      };
+    }
+    return null;
+  }
+  if (authType === 'none') {
+    if (template.install_url) {
+      return {
+        kind: 'external',
+        label: 'Open Local Setup',
+        url: template.install_url
+      };
+    }
+    if (template.docs_url) {
+      return {
+        kind: 'external',
+        label: 'Open Setup Guide',
+        url: template.docs_url
+      };
+    }
+  }
+  return null;
+}
+
+function providerActionByKind(template, kind) {
+  if (!template) return null;
+  switch (kind) {
+    case 'account':
+      return template.account_url
+        ? { kind: 'external', label: 'Open Account', url: template.account_url }
+        : null;
+    case 'docs':
+      return template.docs_url
+        ? { kind: 'external', label: 'Open Docs', url: template.docs_url }
+        : null;
+    case 'install':
+      return template.install_url
+        ? { kind: 'external', label: 'Open Local Setup', url: template.install_url }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function providerVisibleActions(template, authType) {
+  const actions = [];
+  const seen = new Set();
+  const pushAction = (action) => {
+    if (!action) return;
+    const key = action.kind === 'external'
+      ? ['external', action.url || ''].join('|')
+      : [action.kind || '', action.label || ''].join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    actions.push(action);
+  };
+
+  pushAction(providerPrimaryAction(template, authType));
+  if (authType === 'none') {
+    pushAction(providerActionByKind(template, 'docs'));
+  } else {
+    pushAction(providerActionByKind(template, 'account'));
+    pushAction(providerActionByKind(template, 'docs'));
+  }
+  return actions;
+}
+
+function currentProviderPrimaryAction() {
+  return providerPrimaryAction(providerTemplateById(providerTemplateEl.value), providerAuthTypeEl.value);
+}
+
+function openProviderPrimaryAction(action, options = {}) {
+  if (!action) return;
+  if (action.kind === 'oauth') {
+    beginProviderOauthSetup();
+    return;
+  }
+  if (action.kind === 'external' && action.url) {
+    const popup = window.open(action.url, '_blank', 'noopener,noreferrer');
+    if (popup && typeof popup.focus === 'function') {
+      popup.focus();
+    }
+    if (options.statusEl) {
+      options.statusEl.textContent = options.statusText || ('Opened ' + action.url);
+    }
+    if (options.globalStatus) {
+      setStatus(options.globalStatus);
+    }
+  }
+}
+
+function providerTemplateNote(template) {
+  if (!template) {
+    return 'Choose a provider template to prefill common settings.';
+  }
+  const bits = [];
+  if (template.description) bits.push(template.description);
+  const authTypes = providerTemplateAuthTypes(template).map(providerAuthTypeLabel);
+  if (authTypes.length) bits.push('Connection methods: ' + authTypes.join(', '));
+  if (providerTemplateAuthTypes(template).includes('api-key')) {
+    bits.push('For this preset, sign in on the provider site if needed, then generate an API key for Xia.');
+  }
+  if (Array.isArray(template.sign_in_options) && template.sign_in_options.length) {
+    bits.push('Dashboard sign-in options may include: '
+      + template.sign_in_options.map(providerSignInOptionLabel).join(', '));
+  }
+  if (providerTemplateAuthTypes(template).includes('oauth-account')) {
+    bits.push('OAuth setup uses a provider-specific OAuth client; use Set Up Sign-In to configure or link one.');
+  }
+  if (template.notes) bits.push(template.notes);
+  return bits.join(' • ');
+}
+
+function renderProviderTemplateOptions() {
+  const selected = providerTemplateEl.value || defaultProviderTemplateId();
+  providerTemplateEl.replaceChildren();
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = 'Choose a template';
+  providerTemplateEl.appendChild(blank);
+  (state.admin.llmProviderTemplates || []).forEach((template) => {
+    const option = document.createElement('option');
+    option.value = template.id || '';
+    option.textContent = template.name || template.id || 'Template';
+    providerTemplateEl.appendChild(option);
+  });
+  providerTemplateEl.value = selected || '';
+  providerTemplateNoteEl.textContent = providerTemplateNote(providerTemplateById(providerTemplateEl.value));
+}
+
+function renderProviderAuthTypeOptions() {
+  const template = providerTemplateById(providerTemplateEl.value);
+  const authTypes = template
+    ? providerTemplateAuthTypes(template)
+    : ['none', 'api-key', 'oauth-account'];
+  const previous = providerAuthTypeEl.value;
+  providerAuthTypeEl.replaceChildren();
+  authTypes.forEach((authType) => {
+    const option = document.createElement('option');
+    option.value = authType;
+    option.textContent = providerAuthTypeLabel(authType);
+    providerAuthTypeEl.appendChild(option);
+  });
+  providerAuthTypeEl.value = authTypes.includes(previous)
+    ? previous
+    : defaultProviderAuthType(template);
+}
+
+function renderProviderOauthAccountOptions() {
+  const previous = providerOauthAccountEl.value;
+  providerOauthAccountEl.replaceChildren();
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = 'Choose a linked sign-in';
+  providerOauthAccountEl.appendChild(blank);
+  (state.admin.oauthAccounts || []).forEach((account) => {
+    const option = document.createElement('option');
+    option.value = account.id || '';
+    option.textContent = firstNonEmpty(account.name, account.id)
+      + (account.connected ? ' (connected)' : ' (not connected)');
+    providerOauthAccountEl.appendChild(option);
+  });
+  providerOauthAccountEl.value = previous || '';
+}
+
+function providerOauthAccountStatusNote() {
+  if (providerAuthTypeEl.value !== 'oauth-account') {
+    return 'Choose "Linked sign-in" to route model requests through a saved OAuth connection.';
+  }
+  if (!(state.admin.oauthAccounts || []).length) {
+    return 'Use Set Up Sign-In to create a provider-specific OAuth connection, then link it here.';
+  }
+  if (!providerOauthAccountEl.value) {
+    return 'Choose a connected OAuth account for this provider, or use Set Up Sign-In to make one.';
+  }
+  const account = (state.admin.oauthAccounts || []).find((entry) => entry.id === providerOauthAccountEl.value);
+  if (!account) {
+    return 'Choose a connected OAuth account for this provider, or use Set Up Sign-In to make one.';
+  }
+  return account.connected
+    ? 'This provider will use the linked OAuth access token.'
+    : 'The linked OAuth account still needs to be connected.';
+}
+
+function syncProviderAuthInputs() {
+  const authType = providerAuthTypeEl.value;
+  const providerSaving = state.providerSaving;
+  const template = providerTemplateById(providerTemplateEl.value);
+  const actions = providerVisibleActions(template, authType);
+  const primaryAction = actions[0] || null;
+  const accountAction = actions.find((action) => action.label === 'Open Account') || null;
+  const docsAction = actions.find((action) => action.label === 'Open Docs') || null;
+  providerAuthTypeEl.disabled = providerSaving;
+  providerTemplateEl.disabled = providerSaving;
+  providerOauthAccountEl.disabled = providerSaving || authType !== 'oauth-account';
+  providerApiKeyEl.disabled = providerSaving || authType !== 'api-key';
+  providerConfigureOauthEl.hidden = !primaryAction;
+  providerConfigureOauthEl.textContent = primaryAction ? primaryAction.label : 'Open Setup';
+  providerConfigureOauthEl.disabled = providerSaving || state.oauthSaving || !primaryAction;
+  providerOpenAccountEl.hidden = !accountAction;
+  providerOpenAccountEl.disabled = providerSaving || state.oauthSaving || !accountAction;
+  providerOpenDocsEl.hidden = !docsAction;
+  providerOpenDocsEl.disabled = providerSaving || state.oauthSaving || !docsAction;
+  providerOauthAccountNoteEl.textContent = providerOauthAccountStatusNote();
+}
+
+function applyProviderTemplate(templateId, options = {}) {
+  const template = providerTemplateById(templateId);
+  if (!template) return;
+  const preserveId = Object.prototype.hasOwnProperty.call(options, 'preserveId')
+    ? options.preserveId
+    : !!state.activeProviderId;
+  providerTemplateEl.value = template.id || '';
+  if (!options.preserveName || !providerNameEl.value.trim()) {
+    providerNameEl.value = template.name || '';
+  }
+  if (!options.preserveBaseUrl || !providerBaseUrlEl.value.trim()) {
+    providerBaseUrlEl.value = template.base_url || '';
+  }
+  if (!options.preserveModel || !providerModelEl.value.trim()) {
+    providerModelEl.value = template.model_suggestion || '';
+  }
+  if (!preserveId || !providerIdEl.value.trim()) {
+    providerIdEl.value = template.id || '';
+  }
+  renderProviderTemplateOptions();
+  renderProviderAuthTypeOptions();
+  if (!options.preserveAuthType) {
+    providerAuthTypeEl.value = defaultProviderAuthType(template);
+  }
+  renderProviderOauthAccountOptions();
+  providerStatusEl.textContent = options.statusText || ('Prefilled from ' + firstNonEmpty(template.name, template.id) + '.');
+  providerOnboardingStatusEl.textContent = 'Selected ' + firstNonEmpty(template.name, template.id) + '. Review the model details below.';
+  syncProviderAuthInputs();
+  updateAdminButtons();
+  if (options.focusTarget === 'api-key') {
+    providerApiKeyEl.focus();
+  } else if (options.focusTarget === 'oauth-account') {
+    providerOauthAccountEl.focus();
+  } else if (providerModelEl.value) {
+    providerModelEl.focus();
+  } else {
+    providerNameEl.focus();
+  }
+}
+
+function buildProviderTemplateCard(template) {
+  const card = document.createElement('article');
+  card.className = 'template-card';
+
+  const head = document.createElement('div');
+  head.className = 'template-card-head';
+  const title = document.createElement('div');
+  title.className = 'template-card-title';
+  title.textContent = firstNonEmpty(template.name, template.id);
+  const meta = document.createElement('div');
+  meta.className = 'template-card-meta';
+  meta.textContent = [llmProviderTemplateMeta(template), template.description].filter(Boolean).join(' • ');
+  head.appendChild(title);
+  head.appendChild(meta);
+  card.appendChild(head);
+
+  const tags = document.createElement('div');
+  tags.className = 'template-card-tags';
+  providerTemplateAuthTypes(template).forEach((authType) => {
+    const badge = document.createElement('span');
+    badge.className = 'template-badge';
+    badge.textContent = providerAuthTypeLabel(authType);
+    tags.appendChild(badge);
+  });
+  (template.sign_in_options || []).forEach((option) => {
+    const badge = document.createElement('span');
+    badge.className = 'template-badge';
+    badge.textContent = providerSignInOptionLabel(option);
+    tags.appendChild(badge);
+  });
+  if (tags.childNodes.length) {
+    card.appendChild(tags);
+  }
+
+  const note = document.createElement('div');
+  note.className = 'template-card-meta';
+  note.textContent = template.notes || 'Use this template to prefill the model settings.';
+  card.appendChild(note);
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const useButton = document.createElement('button');
+  useButton.type = 'button';
+  useButton.className = 'secondary';
+  useButton.textContent = 'Use Template';
+  useButton.disabled = state.providerSaving;
+  useButton.addEventListener('click', () => {
+    switchTab('settings-tab');
+    if (!state.activeProviderId) {
+      resetProviderForm('Create a model from a template.');
+    }
+    applyProviderTemplate(template.id, {
+      preserveId: false,
+      preserveName: false,
+      preserveBaseUrl: false,
+      preserveModel: false,
+      statusText: 'Template applied. Save the model when ready.'
+    });
+  });
+  actions.appendChild(useButton);
+  providerVisibleActions(template, defaultProviderAuthType(template)).forEach((action) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'secondary';
+    button.textContent = action.label;
+    button.disabled = state.providerSaving || state.oauthSaving;
+    button.addEventListener('click', () => {
+      if (action.kind === 'oauth') {
+        switchTab('settings-tab');
+        if (!state.activeProviderId) {
+          resetProviderForm('Create a model from a template.');
+        }
+        applyProviderTemplate(template.id, {
+          preserveId: false,
+          preserveName: false,
+          preserveBaseUrl: false,
+          preserveModel: false,
+          statusText: 'Template applied. Finish setting up sign-in, then save the model.'
+        });
+      }
+      openProviderPrimaryAction(action, {
+        statusEl: providerOnboardingStatusEl,
+        statusText: 'Opened setup for ' + firstNonEmpty(template.name, template.id) + '.',
+        globalStatus: 'Opened provider setup'
+      });
+    });
+    actions.appendChild(button);
+  });
+  card.appendChild(actions);
+
+  return card;
+}
+
+function renderProviderOnboarding() {
+  const needsOnboarding = !!state.setupRequired;
+  providerOnboardingEl.hidden = !needsOnboarding;
+  providerTemplateListEl.replaceChildren();
+  if (!needsOnboarding) {
+    return;
+  }
+  const templates = state.admin.llmProviderTemplates || [];
+  if (!templates.length) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = 'No provider templates are available yet.';
+    providerTemplateListEl.appendChild(empty);
+    providerOnboardingStatusEl.textContent = 'Add a model manually below.';
+    return;
+  }
+  templates.forEach((template) => {
+    providerTemplateListEl.appendChild(buildProviderTemplateCard(template));
+  });
 }
 
 function providerWorkloadIds() {
@@ -804,6 +1267,158 @@ function parseProviderWorkloadsInput() {
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function normalizeProviderIdSegment(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function ensureProviderId() {
+  const current = providerIdEl.value.trim();
+  if (current) return current;
+  const templateId = normalizeProviderIdSegment(providerTemplateEl.value);
+  const nameId = normalizeProviderIdSegment(providerNameEl.value);
+  const base = nameId || templateId || 'provider';
+  const usedIds = new Set((state.admin.providers || []).map((provider) => provider.id).filter(Boolean));
+  let candidate = base;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = base + '-' + suffix;
+    suffix += 1;
+  }
+  providerIdEl.value = candidate;
+  return candidate;
+}
+
+function scrollCardIntoView(cardEl) {
+  if (!cardEl || typeof cardEl.scrollIntoView !== 'function') return;
+  cardEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function captureProviderDraft() {
+  return {
+    id: providerIdEl.value.trim(),
+    name: providerNameEl.value,
+    template: providerTemplateEl.value,
+    baseUrl: providerBaseUrlEl.value,
+    model: providerModelEl.value,
+    authType: providerAuthTypeEl.value,
+    oauthAccount: providerOauthAccountEl.value,
+    workloads: parseProviderWorkloadsInput(),
+    systemPromptBudget: providerSystemPromptBudgetEl.value,
+    historyBudget: providerHistoryBudgetEl.value,
+    rateLimitPerMinute: providerRateLimitEl.value,
+    vision: providerVisionEl.checked,
+    apiKey: providerApiKeyEl.value,
+    default: providerDefaultEl.checked
+  };
+}
+
+function restoreProviderDraft(draft, options = {}) {
+  if (!draft) return false;
+  state.activeProviderId = '';
+  providerIdEl.value = draft.id || '';
+  providerNameEl.value = draft.name || '';
+  providerTemplateEl.value = draft.template || defaultProviderTemplateId();
+  providerBaseUrlEl.value = draft.baseUrl || '';
+  providerModelEl.value = draft.model || '';
+  renderProviderTemplateOptions();
+  providerTemplateEl.value = draft.template || providerTemplateEl.value || defaultProviderTemplateId();
+  renderProviderAuthTypeOptions();
+  providerAuthTypeEl.value = draft.authType || defaultProviderAuthType(providerTemplateById(providerTemplateEl.value));
+  renderProviderOauthAccountOptions();
+  providerOauthAccountEl.value = draft.oauthAccount || '';
+  providerWorkloadsEl.value = Array.isArray(draft.workloads) ? draft.workloads.join(', ') : '';
+  providerSystemPromptBudgetEl.value = draft.systemPromptBudget || '';
+  providerHistoryBudgetEl.value = draft.historyBudget || '';
+  providerRateLimitEl.value = draft.rateLimitPerMinute || '';
+  providerVisionEl.checked = !!draft.vision;
+  providerApiKeyEl.value = draft.apiKey || '';
+  providerDefaultEl.checked = !!draft.default;
+  providerStatusEl.textContent = options.statusText || 'Continue configuring the model.';
+  renderProviderWorkloadNote();
+  renderProviderList();
+  syncProviderAuthInputs();
+  updateAdminButtons();
+  if (options.scroll) {
+    scrollCardIntoView(providerCardEl);
+  }
+  return true;
+}
+
+function suggestedProviderOauthTemplateIds(template) {
+  if (!template) return [];
+  const explicit = Array.isArray(template.oauth_provider_templates)
+    ? template.oauth_provider_templates.filter(Boolean)
+    : [];
+  if (explicit.length) return explicit;
+  return state.admin.oauthProviderTemplates.some((entry) => entry.id === template.id)
+    ? [template.id]
+    : [];
+}
+
+function suggestedProviderOauthAccountId(draft) {
+  const base = normalizeProviderIdSegment(draft.id || draft.name || draft.template || 'provider');
+  return (base || 'provider') + '-oauth';
+}
+
+function syncPendingProviderOauthDraft(accountId) {
+  if (!state.providerDraft) return;
+  state.providerDraft = Object.assign({}, state.providerDraft, {
+    authType: 'oauth-account',
+    oauthAccount: accountId || ''
+  });
+  if (state.pendingProviderOauthFlow) {
+    state.pendingProviderOauthFlow = Object.assign({}, state.pendingProviderOauthFlow, {
+      accountId: accountId || ''
+    });
+  }
+}
+
+function beginProviderOauthSetup() {
+  if (providerAuthTypeEl.value !== 'oauth-account') {
+    providerAuthTypeEl.value = 'oauth-account';
+    syncProviderAuthInputs();
+  }
+  const draft = captureProviderDraft();
+  const template = providerTemplateById(draft.template);
+  const linkedAccount = (state.admin.oauthAccounts || []).find((account) => account.id === draft.oauthAccount);
+  state.providerDraft = draft;
+  state.pendingProviderOauthFlow = {
+    accountId: linkedAccount ? linkedAccount.id : '',
+    providerName: firstNonEmpty(draft.name, template && template.name, draft.template, 'provider')
+  };
+
+  if (linkedAccount) {
+    selectOauthAccount(linkedAccount);
+    oauthAccountStatusEl.textContent = linkedAccount.connected
+      ? 'Review or refresh this linked sign-in.'
+      : 'Finish connecting this linked sign-in, then return to the model form.';
+  } else {
+    const oauthTemplateId = suggestedProviderOauthTemplateIds(template)[0] || '';
+    resetOauthAccountForm('Configure a linked sign-in for ' + firstNonEmpty(draft.name, template && template.name, 'this provider') + '.');
+    if (oauthTemplateId) {
+      oauthTemplateEl.value = oauthTemplateId;
+      applyOauthTemplate();
+    }
+    oauthAccountIdEl.value = oauthAccountIdEl.value.trim() || suggestedProviderOauthAccountId(draft);
+    oauthAccountNameEl.value = firstNonEmpty(draft.name, template && template.name, 'Provider') + ' Sign-In';
+    oauthAccountStatusEl.textContent = oauthTemplateId
+      ? 'Preset applied. Enter the client credentials, save, then connect.'
+      : 'Enter the provider-specific OAuth URLs and client credentials, save, then connect.';
+    updateAdminButtons();
+    if (oauthTemplateId) {
+      oauthClientIdEl.focus();
+    } else {
+      oauthAuthorizeUrlEl.focus();
+    }
+  }
+
+  scrollCardIntoView(oauthAccountCardEl);
 }
 
 function oauthAccountMeta(account) {
@@ -1088,8 +1703,12 @@ function updateAdminButtons() {
   knowledgeQueryEl.disabled = state.knowledgeSearching;
   searchKnowledgeEl.disabled = state.knowledgeSearching || !knowledgeQueryEl.value.trim();
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
+  providerTemplateEl.disabled = state.providerSaving;
   saveProviderEl.disabled = state.providerSaving;
   newProviderEl.disabled = state.providerSaving;
+  providerConfigureOauthEl.disabled = state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction();
+  providerOpenAccountEl.disabled = state.providerSaving || state.oauthSaving || !providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account');
+  providerOpenDocsEl.disabled = state.providerSaving || state.oauthSaving || !providerActionByKind(providerTemplateById(providerTemplateEl.value), 'docs');
   contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;
   saveContextEl.disabled = state.contextSaving;
   saveRetentionEl.disabled = state.retentionSaving;
@@ -1131,6 +1750,7 @@ function updateAdminButtons() {
   openclawImportSourceEl.disabled = state.openclawImporting;
   openclawImportStrictEl.disabled = state.openclawImporting;
   openclawImportButtonEl.disabled = state.openclawImporting || !openclawImportSourceEl.value.trim();
+  syncProviderAuthInputs();
 }
 
 function renderProviderList() {
@@ -1244,10 +1864,15 @@ function renderCapabilities() {
 
 function resetProviderForm(statusText) {
   state.activeProviderId = '';
+  state.providerDraft = null;
+  state.pendingProviderOauthFlow = null;
   providerIdEl.value = '';
   providerNameEl.value = '';
+  providerTemplateEl.value = defaultProviderTemplateId();
   providerBaseUrlEl.value = '';
   providerModelEl.value = '';
+  providerAuthTypeEl.value = '';
+  providerOauthAccountEl.value = '';
   providerWorkloadsEl.value = '';
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
@@ -1255,7 +1880,21 @@ function resetProviderForm(statusText) {
   providerVisionEl.checked = false;
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !state.admin.providers.some((provider) => provider.default);
-  providerStatusEl.textContent = statusText || 'Create a model or select an existing one.';
+  renderProviderTemplateOptions();
+  renderProviderAuthTypeOptions();
+  renderProviderOauthAccountOptions();
+  const templateId = providerTemplateEl.value;
+  if (templateId) {
+    applyProviderTemplate(templateId, {
+      preserveId: false,
+      preserveName: false,
+      preserveBaseUrl: false,
+      preserveModel: false,
+      statusText: statusText || 'Choose a model template, review the fields, then save it.'
+    });
+  } else {
+    providerStatusEl.textContent = statusText || 'Create a model or select an existing one.';
+  }
   renderProviderWorkloadNote();
   renderProviderList();
   updateAdminButtons();
@@ -1436,10 +2075,18 @@ function resetSiteForm(statusText) {
 
 function selectProvider(provider) {
   state.activeProviderId = provider.id || '';
+  state.providerDraft = null;
+  state.pendingProviderOauthFlow = null;
   providerIdEl.value = provider.id || '';
   providerNameEl.value = provider.name || '';
+  providerTemplateEl.value = provider.template || '';
   providerBaseUrlEl.value = provider.base_url || '';
   providerModelEl.value = provider.model || '';
+  renderProviderTemplateOptions();
+  renderProviderAuthTypeOptions();
+  providerAuthTypeEl.value = provider.auth_type || defaultProviderAuthType(providerTemplateById(provider.template));
+  renderProviderOauthAccountOptions();
+  providerOauthAccountEl.value = provider.oauth_account || '';
   providerWorkloadsEl.value = Array.isArray(provider.workloads) ? provider.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
@@ -1458,6 +2105,9 @@ function selectProvider(provider) {
     if (provider.health_last_error) {
       providerStatusEl.textContent += ' Last error: ' + provider.health_last_error;
     }
+  }
+  if (provider.auth_type === 'oauth-account' && provider.oauth_account_name) {
+    providerStatusEl.textContent += ' Linked sign-in: ' + provider.oauth_account_name + '.';
   }
   renderProviderWorkloadNote();
   renderProviderList();
@@ -1799,7 +2449,9 @@ async function loadAdminConfig() {
 async function loadAdminConfigImpl() {
   try {
     const data = await fetchJson('/admin/config');
+    state.setupRequired = !!data.setup_required;
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
+    state.admin.llmProviderTemplates = Array.isArray(data.llm_provider_templates) ? data.llm_provider_templates : [];
     state.admin.conversationContext = data.conversation_context || null;
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
@@ -1827,13 +2479,18 @@ async function loadAdminConfigImpl() {
     const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
+    renderProviderTemplateOptions();
+    renderProviderAuthTypeOptions();
+    renderProviderOauthAccountOptions();
     renderProviderWorkloadNote();
     renderConversationContextSettings();
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
     renderLocalDocSummarizationSettings();
     renderDatabaseBackupSettings();
-    if (provider) {
+    if (state.providerDraft) {
+      restoreProviderDraft(state.providerDraft);
+    } else if (provider) {
       selectProvider(provider);
     } else if (!state.activeProviderId) {
       resetProviderForm('Create a model or select an existing one.');
@@ -1853,7 +2510,12 @@ async function loadAdminConfigImpl() {
     } else if (!state.activeSiteId) {
       resetSiteForm('Create a site login or select an existing one.');
     }
+    renderProviderOnboarding();
     renderCapabilities();
+    if (state.setupRequired && !state.admin.providers.length) {
+      switchTab('settings-tab');
+      setStatus('Connect a model to start chatting');
+    }
   } catch (err) {
     console.error(err);
   }
@@ -2036,14 +2698,18 @@ async function saveProvider() {
   providerStatusEl.textContent = 'Saving...';
   updateAdminButtons();
   try {
+    const providerId = ensureProviderId();
     const data = await fetchJson('/admin/providers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: providerIdEl.value,
+        id: providerId,
         name: providerNameEl.value,
+        template: providerTemplateEl.value,
         base_url: providerBaseUrlEl.value,
         model: providerModelEl.value,
+        auth_type: providerAuthTypeEl.value,
+        oauth_account: providerOauthAccountEl.value,
         workloads: parseProviderWorkloadsInput(),
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
@@ -2055,6 +2721,8 @@ async function saveProvider() {
     });
     const provider = data.provider || null;
     state.activeProviderId = provider && provider.id ? provider.id : state.activeProviderId;
+    state.providerDraft = null;
+    state.pendingProviderOauthFlow = null;
     providerApiKeyEl.value = '';
     providerStatusEl.textContent = 'Model saved.';
     await loadAdminConfig();
@@ -2213,6 +2881,9 @@ async function saveDatabaseBackup() {
 
 async function saveOauthAccount() {
   if (state.oauthSaving) return;
+  if (state.pendingProviderOauthFlow && state.providerDraft) {
+    state.providerDraft = captureProviderDraft();
+  }
   state.oauthSaving = true;
   oauthAccountStatusEl.textContent = 'Saving...';
   updateAdminButtons();
@@ -2237,9 +2908,17 @@ async function saveOauthAccount() {
     });
     const account = data.oauth_account || null;
     state.activeOauthAccountId = account && account.id ? account.id : state.activeOauthAccountId;
+    if (account && state.pendingProviderOauthFlow) {
+      syncPendingProviderOauthDraft(account.id || '');
+    }
     oauthClientSecretEl.value = '';
     oauthAccountStatusEl.textContent = 'Connection saved.';
     await loadAdminConfig();
+    if (account && state.pendingProviderOauthFlow) {
+      restoreProviderDraft(state.providerDraft, {
+        statusText: 'Linked sign-in saved. Connect it, then save the model.'
+      });
+    }
     setStatus('Connection saved');
   } catch (err) {
     oauthAccountStatusEl.textContent = err.message || 'Failed to save.';
@@ -2253,6 +2932,12 @@ async function connectOauthAccount() {
   if (!state.activeOauthAccountId || state.oauthSaving) {
     oauthAccountStatusEl.textContent = 'Save the details first, then connect.';
     return;
+  }
+  if (state.pendingProviderOauthFlow && state.providerDraft) {
+    state.providerDraft = captureProviderDraft();
+    state.pendingProviderOauthFlow = Object.assign({}, state.pendingProviderOauthFlow, {
+      accountId: state.activeOauthAccountId
+    });
   }
   state.oauthSaving = true;
   oauthAccountStatusEl.textContent = 'Opening consent flow...';
@@ -2276,6 +2961,9 @@ async function connectOauthAccount() {
 
 async function refreshOauthAccount() {
   if (!state.activeOauthAccountId || state.oauthSaving) return;
+  if (state.pendingProviderOauthFlow && state.providerDraft) {
+    state.providerDraft = captureProviderDraft();
+  }
   state.oauthSaving = true;
   oauthAccountStatusEl.textContent = 'Refreshing...';
   updateAdminButtons();
@@ -2295,6 +2983,9 @@ async function refreshOauthAccount() {
 async function deleteOauthAccount() {
   if (!state.activeOauthAccountId || state.oauthSaving) return;
   if (!window.confirm('Delete this connection?')) return;
+  if (state.pendingProviderOauthFlow && state.providerDraft) {
+    state.providerDraft = captureProviderDraft();
+  }
   state.oauthSaving = true;
   oauthAccountStatusEl.textContent = 'Deleting...';
   updateAdminButtons();
@@ -3497,9 +4188,66 @@ knowledgeQueryEl.addEventListener('keydown', (event) => {
 
 newProviderEl.addEventListener('click', () => {
   resetProviderForm('Create a model.');
-  providerIdEl.focus();
+  providerNameEl.focus();
 });
 
+providerTemplateEl.addEventListener('change', () => {
+  renderProviderTemplateOptions();
+  renderProviderAuthTypeOptions();
+  renderProviderOauthAccountOptions();
+  const template = providerTemplateById(providerTemplateEl.value);
+  if (template) {
+    applyProviderTemplate(template.id, {
+      preserveId: false,
+      preserveName: false,
+      preserveBaseUrl: false,
+      preserveModel: false,
+      preserveAuthType: false,
+      statusText: 'Template applied. Review the details, then save the model.'
+    });
+  } else {
+    syncProviderAuthInputs();
+    updateAdminButtons();
+  }
+});
+providerAuthTypeEl.addEventListener('change', () => {
+  if (providerAuthTypeEl.value !== 'oauth-account') {
+    state.pendingProviderOauthFlow = null;
+  }
+  syncProviderAuthInputs();
+  updateAdminButtons();
+});
+providerOauthAccountEl.addEventListener('change', () => {
+  if (state.pendingProviderOauthFlow && providerOauthAccountEl.value) {
+    syncPendingProviderOauthDraft(providerOauthAccountEl.value);
+  }
+  syncProviderAuthInputs();
+  updateAdminButtons();
+});
+providerConfigureOauthEl.addEventListener('click', () => {
+  const action = currentProviderPrimaryAction();
+  openProviderPrimaryAction(action, {
+    statusEl: providerStatusEl,
+    statusText: action && action.kind === 'external'
+      ? 'Opened setup in a new tab.'
+      : undefined,
+    globalStatus: action && action.kind === 'external' ? 'Opened provider setup' : undefined
+  });
+});
+providerOpenAccountEl.addEventListener('click', () => {
+  openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account'), {
+    statusEl: providerStatusEl,
+    statusText: 'Opened provider account in a new tab.',
+    globalStatus: 'Opened provider account'
+  });
+});
+providerOpenDocsEl.addEventListener('click', () => {
+  openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'docs'), {
+    statusEl: providerStatusEl,
+    statusText: 'Opened provider docs in a new tab.',
+    globalStatus: 'Opened provider docs'
+  });
+});
 saveProviderEl.addEventListener('click', () => saveProvider());
 saveContextEl.addEventListener('click', () => saveConversationContext());
 saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
@@ -3594,7 +4342,22 @@ window.addEventListener('message', (event) => {
   if (!event || event.origin !== window.location.origin) return;
   const data = event.data || {};
   if (data.type === 'xia-oauth-complete') {
-    loadAdminConfig();
+    const completedPendingFlow = state.pendingProviderOauthFlow
+      && data.account_id
+      && state.pendingProviderOauthFlow.accountId === data.account_id;
+    loadAdminConfig().then(() => {
+      if (completedPendingFlow && state.providerDraft) {
+        restoreProviderDraft(state.providerDraft, {
+          statusText: data.status === 'ok'
+            ? 'Linked sign-in connected. Save the model to finish.'
+            : 'Linked sign-in failed. Check the connection details and try again.',
+          scroll: true
+        });
+        if (data.status === 'ok') {
+          state.pendingProviderOauthFlow = null;
+        }
+      }
+    });
     oauthAccountStatusEl.textContent = data.status === 'ok' ? 'Connected.' : 'Failed.';
     setStatus(data.status === 'ok' ? 'Connected' : 'Failed');
   }

@@ -14,6 +14,7 @@
             [xia.hippocampus :as hippo]
             [xia.local-doc :as local-doc]
             [xia.llm :as llm]
+            [xia.llm-provider-template :as llm-provider-template]
             [xia.memory :as memory]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
@@ -23,6 +24,7 @@
             [xia.schedule :as schedule]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
+            [xia.setup :as setup]
             [xia.summarizer :as summarizer]
             [xia.skill.openclaw :as openclaw-skill]
             [xia.working-memory :as wm])
@@ -51,6 +53,7 @@
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
+(def ^:private provider-auth-types #{:none :api-key :oauth-account})
 (def ^:private ms-per-day (* 24 60 60 1000))
 (def ^:private byte-array-class (class (byte-array 0)))
 (defn- long-max
@@ -1066,6 +1069,15 @@
                        :value value})))
     auth-type))
 
+(defn- parse-provider-auth-type
+  [value]
+  (let [auth-type (some-> value nonblank-str keyword)]
+    (when-not (contains? provider-auth-types auth-type)
+      (throw (ex-info "invalid auth_type"
+                      {:field "auth_type"
+                       :value value})))
+    auth-type))
+
 (defn- sort-by-name
   [entries]
   (->> entries
@@ -1075,10 +1087,16 @@
 
 (defn- provider->admin-body
   [provider]
-  (let [provider-id (some-> (:llm.provider/id provider) name)
-        health      (llm/provider-health-summary (:llm.provider/id provider))]
+  (let [provider-id     (some-> (:llm.provider/id provider) name)
+        oauth-account   (some-> (:llm.provider/oauth-account provider) db/get-oauth-account)
+        health          (llm/provider-health-summary (:llm.provider/id provider))]
     {:id                    provider-id
      :name                  (:llm.provider/name provider)
+     :template              (some-> (:llm.provider/template provider) name)
+     :auth_type             (some-> (:llm.provider/auth-type provider) name)
+     :oauth_account         (some-> (:llm.provider/oauth-account provider) name)
+     :oauth_account_name    (:oauth.account/name oauth-account)
+     :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
      :base_url              (:llm.provider/base-url provider)
      :model                 (:llm.provider/model provider)
      :workloads             (->> (:llm.provider/workloads provider)
@@ -1097,6 +1115,30 @@
      :health_last_error     (:last-error health)
      :default               (boolean (:llm.provider/default? provider))
      :api_key_configured    (boolean (nonblank-str (:llm.provider/api-key provider)))}))
+
+(defn- llm-provider-template->admin-body
+  [template]
+  {:id                (some-> (:id template) name)
+   :name              (:name template)
+   :description       (:description template)
+   :category          (some-> (:category template) name)
+   :base_url          (:base-url template)
+   :model_suggestion  (:model-suggestion template)
+   :account_url       (:account-url template)
+   :api_key_url       (:api-key-url template)
+   :docs_url          (:docs-url template)
+   :install_url       (:install-url template)
+   :auth_types        (->> (or (:auth-types template) [])
+                           (map name)
+                           vec)
+   :oauth_provider_templates (->> (or (:oauth-provider-templates template) [])
+                                  (map name)
+                                  vec)
+   :oauth_setup_note  (:oauth-setup-note template)
+   :sign_in_options   (->> (or (:sign-in-options template) [])
+                           (map name)
+                           vec)
+   :notes             (:notes template)})
 
 (defn- memory-retention->admin-body
   []
@@ -2088,11 +2130,18 @@
     (json-response 400 {:error "invalid fact id"})))
 
 (defn- handle-admin-config [_req]
+  (let [providers        (db/list-providers)
+        setup-required?  (or (empty? providers)
+                             (nil? (db/get-default-provider)))]
   (json-response
     200
-    {:providers (->> (db/list-providers)
+    {:setup_required setup-required?
+     :providers (->> providers
                      (into [] (map provider->admin-body))
                      sort-by-name)
+     :llm_provider_templates (->> (llm-provider-template/list-templates)
+                                  (into [] (map llm-provider-template->admin-body))
+                                  sort-by-name)
      :conversation_context (conversation-context->admin-body)
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
@@ -2124,7 +2173,7 @@
      :remote_bridge   (remote-bridge->admin-body (remote-bridge/bridge-config))
      :remote_devices  (into [] (map remote-device->admin-body) (remote-bridge/list-devices))
      :remote_events   (into [] (map remote-event->admin-body) (remote-bridge/list-events 20))
-     :remote_snapshot (remote-snapshot->admin-body (remote-bridge/status-snapshot))}))
+     :remote_snapshot (remote-snapshot->admin-body (remote-bridge/status-snapshot))})))
 
 (defn- handle-save-provider [req]
   (try
@@ -2135,6 +2184,15 @@
           name         (or (nonblank-str (get data "name"))
                            (name provider-id))
           api-key      (nonblank-str (get data "api_key"))
+          template-id  (if (contains? data "template")
+                         (some-> (get data "template") nonblank-str keyword)
+                         nil)
+          auth-type    (if (contains? data "auth_type")
+                         (parse-provider-auth-type (get data "auth_type"))
+                         nil)
+          oauth-account-id (if (contains? data "oauth_account")
+                             (some-> (get data "oauth_account") nonblank-str keyword)
+                             nil)
           vision?      (when (contains? data "vision")
                          (true? (get data "vision")))
           allow-private-network? (when (contains? data "allow_private_network")
@@ -2153,6 +2211,20 @@
         (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
       (when-not model
         (throw (ex-info "missing 'model' field" {:field "model"})))
+      (when (and template-id
+                 (nil? (llm-provider-template/get-template template-id)))
+        (throw (ex-info "unknown template"
+                        {:field "template"
+                         :value (name template-id)})))
+      (when (and (= auth-type :oauth-account)
+                 (nil? oauth-account-id))
+        (throw (ex-info "oauth_account is required for oauth-account auth_type"
+                        {:field "oauth_account"})))
+      (when (and oauth-account-id
+                 (nil? (db/get-oauth-account oauth-account-id)))
+        (throw (ex-info "unknown oauth_account"
+                        {:field "oauth_account"
+                         :value (name oauth-account-id)})))
       (db/upsert-provider! (cond-> {:id       provider-id
                                     :name     name
                                     :base-url base-url
@@ -2160,6 +2232,12 @@
                                     :system-prompt-budget system-prompt-budget
                                     :history-budget history-budget
                                     :rate-limit-per-minute rate-limit-per-minute}
+                             (contains? data "template")
+                             (assoc :template template-id)
+                             (contains? data "auth_type")
+                             (assoc :auth-type auth-type)
+                             (contains? data "oauth_account")
+                             (assoc :oauth-account oauth-account-id)
                              (contains? data "vision")
                              (assoc :vision? vision?)
                              (contains? data "allow_private_network")
@@ -2170,6 +2248,8 @@
                              (assoc :api-key api-key)))
       (when (or make-default (not has-default?))
         (db/set-default-provider! provider-id))
+      (when (setup/needs-setup?)
+        (db/set-config! :setup/complete "true"))
       (json-response 200 {:provider (provider->admin-body (db/get-provider provider-id))}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
@@ -2510,7 +2590,7 @@
         (json-response 404 {:error "oauth account not found"})
 
         (db/oauth-account-in-use? oauth-id)
-        (json-response 409 {:error "oauth account is still referenced by a service"})
+        (json-response 409 {:error "oauth account is still referenced by a provider or service"})
 
         :else
         (do

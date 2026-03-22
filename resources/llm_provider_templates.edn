@@ -1,0 +1,89 @@
+[{:id :ollama
+  :name "Ollama"
+  :description "Run a model on this computer without a cloud account."
+  :category :local
+  :base-url "http://localhost:11434/v1"
+  :model-suggestion "qwen2.5:7b"
+  :auth-types [:none]
+  :install-url "https://ollama.com/download"
+  :docs-url "https://ollama.com/download"
+  :sign-in-options []
+  :notes "Install Ollama, pull a model, and keep the Ollama server running locally."}
+ {:id :openai
+  :name "OpenAI"
+  :description "Connect Xia to OpenAI's OpenAI-compatible API."
+  :category :cloud
+  :base-url "https://api.openai.com/v1"
+  :model-suggestion "gpt-5"
+  :auth-types [:api-key]
+  :account-url "https://platform.openai.com/"
+  :api-key-url "https://platform.openai.com/api-keys"
+  :docs-url "https://help.openai.com/en/articles/4936850-where-do-i-find-my-api-key"
+  :sign-in-options [:google :microsoft :apple]
+  :notes "Sign in on OpenAI's site, then create an API key. Xia authenticates to the API with that key."}
+ {:id :qwen
+  :name "Qwen"
+  :description "Connect through Alibaba Cloud's Qwen-compatible endpoint."
+  :category :cloud
+  :base-url "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  :model-suggestion "qwen-max"
+  :auth-types [:api-key]
+  :account-url "https://bailian.console.aliyun.com/"
+  :api-key-url "https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key"
+  :docs-url "https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api"
+  :sign-in-options []
+  :notes "Use a DashScope API key. Beijing uses the default base URL; Singapore uses https://dashscope-intl.aliyuncs.com/compatible-mode/v1."}
+ {:id :claude
+  :name "Claude"
+  :description "Connect Claude through a compatible gateway or proxy."
+  :category :cloud
+  :base-url ""
+  :model-suggestion "claude-sonnet-4-5"
+  :auth-types [:api-key]
+  :account-url "https://console.anthropic.com/"
+  :docs-url "https://docs.anthropic.com/en/api/getting-started"
+  :sign-in-options []
+  :notes "Anthropic's native API uses x-api-key, so Xia currently needs an Anthropic-compatible gateway or proxy instead of the raw Anthropic endpoint."}
+ {:id :deepseek
+  :name "DeepSeek"
+  :description "Connect Xia to DeepSeek-hosted models."
+  :category :cloud
+  :base-url "https://api.deepseek.com/v1"
+  :model-suggestion "deepseek-chat"
+  :auth-types [:api-key]
+  :account-url "https://platform.deepseek.com/"
+  :docs-url "https://api-docs.deepseek.com/"
+  :sign-in-options [:google]
+  :notes "DeepSeek's public API is OpenAI-compatible and uses bearer API keys."}
+ {:id :glm
+  :name "Z.ai / GLM"
+  :description "Connect Xia to GLM-hosted models through Zhipu's OpenAI-compatible endpoint."
+  :category :cloud
+  :base-url "https://open.bigmodel.cn/api/paas/v4"
+  :model-suggestion "glm-4.5"
+  :auth-types [:api-key]
+  :account-url "https://open.bigmodel.cn/"
+  :docs-url "https://docs.bigmodel.cn/cn/api/introduction"
+  :sign-in-options []
+  :notes "Zhipu's standard endpoint supports bearer API keys. Coding-plan users may need the alternate OpenAI-compatible base URL https://open.bigmodel.cn/api/coding/paas/v4."}
+ {:id :minimax
+  :name "MiniMax"
+  :description "Connect Xia to MiniMax-hosted models."
+  :category :cloud
+  :base-url "https://api.minimax.io/v1"
+  :model-suggestion "MiniMax-M2.5"
+  :auth-types [:api-key]
+  :account-url "https://platform.minimax.io/"
+  :docs-url "https://platform.minimax.io/docs/guides/quickstart-preparation"
+  :sign-in-options []
+  :notes "MiniMax's global OpenAI-compatible endpoint is https://api.minimax.io/v1. China deployments may use https://api.minimaxi.com/v1 instead."}
+ {:id :custom
+  :name "Custom Compatible API"
+  :description "Use any OpenAI-compatible endpoint, gateway, or proxy."
+  :category :custom
+  :base-url ""
+  :model-suggestion ""
+  :auth-types [:api-key :oauth-account :none]
+  :docs-url ""
+  :sign-in-options []
+  :notes "Use this for LM Studio, vLLM, hosted gateways, or other compatible services."}]

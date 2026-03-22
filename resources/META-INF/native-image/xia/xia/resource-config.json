@@ -5,6 +5,9 @@
         "pattern": "\\Qoauth_providers.edn\\E"
       },
       {
+        "pattern": "\\Qllm_provider_templates.edn\\E"
+      },
+      {
         "pattern": "\\Qexample-tool.edn\\E"
       },
       {

@@ -20,6 +20,7 @@
 
 (def ^:private common-resource-patterns
  ["oauth_providers.edn"
+   "llm_provider_templates.edn"
    "example-tool.edn"
    "example-skill.md"
    "eval/"

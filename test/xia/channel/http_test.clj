@@ -1142,9 +1142,11 @@
 (deftest admin-config-route-returns-safe-summaries
   (db/upsert-provider! {:id       :openai
                         :name     "OpenAI"
+                        :template :openai
                         :base-url "https://api.openai.com/v1"
                         :api-key  "sk-secret"
                         :model    "gpt-5"
+                        :auth-type :api-key
                         :workloads #{:assistant :history-compaction}
                         :system-prompt-budget 16000
                         :history-budget 32000
@@ -1197,6 +1199,7 @@
                                  :headers        (ui-headers)})
         body     (response-json response)
         provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+        openai-template (first (filter #(= "openai" (get % "id")) (get body "llm_provider_templates")))
         conversation-context (get body "conversation_context")
         memory-retention (get body "memory_retention")
         knowledge-decay (get body "knowledge_decay")
@@ -1214,8 +1217,11 @@
         remote-events (get body "remote_events")
         remote-snapshot (get body "remote_snapshot")]
     (is (= 200 (:status response)))
+    (is (= false (get body "setup_required")))
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
+    (is (= "openai" (get provider "template")))
+    (is (= "api-key" (get provider "auth_type")))
     (is (= true (get provider "default")))
     (is (= ["assistant" "history-compaction"] (get provider "workloads")))
     (is (= 16000 (get provider "system_prompt_budget")))
@@ -1246,6 +1252,14 @@
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
+    (is (= #{"claude" "custom" "deepseek" "glm" "minimax" "ollama" "openai" "qwen"}
+           (set (map #(get % "id") (get body "llm_provider_templates")))))
+    (is (= ["api-key"] (get openai-template "auth_types")))
+    (is (= "https://platform.openai.com/" (get openai-template "account_url")))
+    (is (= "https://platform.openai.com/api-keys" (get openai-template "api_key_url")))
+    (is (= "https://help.openai.com/en/articles/4936850-where-do-i-find-my-api-key"
+           (get openai-template "docs_url")))
+    (is (= ["google" "microsoft" "apple"] (get openai-template "sign_in_options")))
     (is (= #{"github" "google" "gmail" "microsoft"}
            (set (map #(get % "id") templates))))
     (is (= "{\"access_type\":\"offline\",\"prompt\":\"consent\"}"
@@ -1286,6 +1300,15 @@
     (is (= [] remote-events))
     (is (= [] (get remote-snapshot "attention")))
     (is (= "disabled" (get-in remote-snapshot ["connectivity" "connection_state"])))))
+
+(deftest admin-config-route-flags-first-run-onboarding-when-no-providers
+  (let [response (#'http/router {:uri            "/admin/config"
+                                 :request-method :get
+                                 :headers        (ui-headers)})
+        body     (response-json response)]
+    (is (= 200 (:status response)))
+    (is (= true (get body "setup_required")))
+    (is (seq (get body "llm_provider_templates")))))
 
 (deftest admin-context-route-saves-and-clears-settings
   (let [save-response (#'http/router {:uri            "/admin/context"
@@ -1602,7 +1625,29 @@
                                         :headers        (ui-headers)})
         delete-body     (response-json delete-response)]
     (is (= 409 (:status delete-response)))
-    (is (= "oauth account is still referenced by a service" (get delete-body "error")))))
+    (is (= "oauth account is still referenced by a provider or service" (get delete-body "error")))))
+
+(deftest admin-oauth-account-delete-blocks-when-provider-linked
+  (db/register-oauth-account! {:id            :openai-login
+                               :name          "OpenAI Login"
+                               :authorize-url "https://example.com/oauth/authorize"
+                               :token-url     "https://example.com/oauth/token"
+                               :client-id     "client-id"
+                               :client-secret "client-secret"})
+  (db/upsert-provider! {:id            :openai
+                        :name          "OpenAI"
+                        :template      :openai
+                        :base-url      "https://api.openai.com/v1"
+                        :model         "gpt-5"
+                        :auth-type     :oauth-account
+                        :oauth-account :openai-login})
+  (let [response (#'http/router {:uri            "/admin/oauth-accounts/openai-login"
+                                 :request-method :delete
+                                 :headers        (ui-headers)})
+        body     (response-json response)]
+    (is (= 409 (:status response)))
+    (is (= "oauth account is still referenced by a provider or service"
+           (get body "error")))))
 
 (deftest admin-resource-routes-default-autonomous-approval-to-true
   (let [oauth-response (#'http/router {:uri            "/admin/oauth-accounts"
@@ -1757,6 +1802,36 @@
     (is (nil? (:llm.provider/system-prompt-budget provider)))
     (is (nil? (:llm.provider/history-budget provider)))
     (is (nil? (:llm.provider/rate-limit-per-minute provider)))))
+
+(deftest admin-provider-route-links-oauth-account
+  (db/register-oauth-account! {:id            :openai-login
+                               :name          "OpenAI Login"
+                               :authorize-url "https://example.com/oauth/authorize"
+                               :token-url     "https://example.com/oauth/token"
+                               :client-id     "client-id"
+                               :client-secret "client-secret"
+                               :access-token  "access-token"})
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "openai"
+                                                                "name" "OpenAI"
+                                                                "template" "openai"
+                                                                "base_url" "https://api.openai.com/v1"
+                                                                "model" "gpt-5"
+                                                                "auth_type" "oauth-account"
+                                                                "oauth_account" "openai-login"
+                                                                "default" true})})
+        body     (response-json response)
+        provider (db/get-provider :openai)]
+    (is (= 200 (:status response)))
+    (is (= "openai" (get-in body ["provider" "template"])))
+    (is (= "oauth-account" (get-in body ["provider" "auth_type"])))
+    (is (= "openai-login" (get-in body ["provider" "oauth_account"])))
+    (is (= "OpenAI Login" (get-in body ["provider" "oauth_account_name"])))
+    (is (= :openai (:llm.provider/template provider)))
+    (is (= :oauth-account (:llm.provider/auth-type provider)))
+    (is (= :openai-login (:llm.provider/oauth-account provider)))))
 
 (deftest admin-service-route-preserves-secret-and-clears-unused-header
   (db/register-service! {:id          :github

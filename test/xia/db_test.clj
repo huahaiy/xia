@@ -99,6 +99,26 @@
                         :rate-limit-per-minute nil})
   (is (nil? (:llm.provider/rate-limit-per-minute (db/get-provider :openai)))))
 
+(deftest providers-persist-template-and-auth-settings
+  (db/register-oauth-account! {:id            :openai-login
+                               :name          "OpenAI Login"
+                               :authorize-url "https://example.com/oauth/authorize"
+                               :token-url     "https://example.com/oauth/token"
+                               :client-id     "client-id"
+                               :client-secret "client-secret"
+                               :access-token  "access-token"})
+  (db/upsert-provider! {:id            :openai
+                        :name          "OpenAI"
+                        :template      :openai
+                        :base-url      "https://api.openai.com/v1"
+                        :model         "gpt-5"
+                        :auth-type     :oauth-account
+                        :oauth-account :openai-login})
+  (let [provider (db/get-provider :openai)]
+    (is (= :openai (:llm.provider/template provider)))
+    (is (= :oauth-account (:llm.provider/auth-type provider)))
+    (is (= :openai-login (:llm.provider/oauth-account provider)))))
+
 (deftest worker-sessions-are-hidden-by-default
   (let [parent (db/create-session! :terminal)
         child  (db/create-session! :branch {:parent-session-id parent

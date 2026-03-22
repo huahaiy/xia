@@ -258,14 +258,30 @@
             </div>
           </div>
 
-          <div class="admin-grid">
-            <div class="admin-card">
+          <div class="admin-card admin-card-wide" id="provider-onboarding" hidden>
+            <div class="panel-header">
+              <div>
+                <h3 class="panel-title">Connect Your First Model</h3>
+                <p class="panel-note">Choose how Xia should talk to an AI model. The first connected model becomes the default, and you can add more later.</p>
+              </div>
+            </div>
+            <div class="template-grid" id="provider-template-list"></div>
+            <div class="admin-status" id="provider-onboarding-status">Choose a provider template to prefill the model form below.</div>
+          </div>
+
+	            <div class="admin-grid">
+	              <div class="admin-card" id="provider-card">
               <div class="panel-header">
                 <h3 class="panel-title">AI Models</h3>
                 <button type="button" class="secondary" id="new-provider">New model</button>
               </div>
               <div class="admin-list" id="provider-list"></div>
               <div class="field-grid">
+                <div class="field full">
+                  <label class="field-label">Template</label>
+                  <select id="provider-template" class="text-input"></select>
+                  <p class="secret-note" id="provider-template-note"></p>
+                </div>
                 <div class="field advanced-only">
                   <label class="field-label">ID</label>
                   <input type="text" id="provider-id" class="text-input" placeholder="openai">
@@ -282,6 +298,20 @@
                   <label class="field-label">Model Name</label>
                   <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o">
                 </div>
+                <div class="field">
+                  <label class="field-label">Connection Method</label>
+                  <select id="provider-auth-type" class="text-input"></select>
+                </div>
+	                <div class="field">
+		                  <label class="field-label">Linked Sign-In</label>
+		                  <select id="provider-oauth-account" class="text-input"></select>
+		                  <p class="secret-note" id="provider-oauth-account-note"></p>
+		                  <div class="actions" style="margin-top:8px">
+		                    <button type="button" class="secondary" id="provider-configure-oauth">Open Setup</button>
+		                    <button type="button" class="secondary" id="provider-open-account" hidden>Open Account</button>
+		                    <button type="button" class="secondary" id="provider-open-docs" hidden>Open Docs</button>
+		                  </div>
+		                </div>
                 <div class="field full advanced-only">
                   <label class="field-label">Workloads</label>
                   <input type="text" id="provider-workloads" class="text-input" placeholder="assistant, history-compaction">
@@ -380,7 +410,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+	            <div class="admin-card" id="oauth-account-card">
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">Conversation Context</h3>
