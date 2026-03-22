@@ -1,45 +1,66 @@
 [{:id :ollama
   :name "Ollama"
   :description "Run a model on this computer without a cloud account."
-  :category :local
+ :category :local
   :base-url "http://localhost:11434/v1"
   :model-suggestion "qwen2.5:7b"
-  :auth-types [:none]
+  :access-modes [{:id :local
+                  :label "Local model"
+                  :description "Use a model running on this computer."
+                  :credential-sources [:none]
+                  :default? true}]
   :install-url "https://ollama.com/download"
   :docs-url "https://ollama.com/download"
   :sign-in-options []
   :notes "Install Ollama, pull a model, and keep the Ollama server running locally."}
  {:id :openai
   :name "OpenAI"
-  :description "Connect Xia to OpenAI's OpenAI-compatible API."
+  :description "Connect Xia to OpenAI models."
   :category :cloud
   :base-url "https://api.openai.com/v1"
   :model-suggestion "gpt-5"
-  :auth-types [:api-key]
+  :access-modes [{:id :account
+                  :label "Web account session"
+                  :description "Use a connected ChatGPT account in Xia's managed browser."
+                  :credential-sources [:browser-session]
+                  :default? true}
+                 {:id :api
+                  :label "API credential"
+                  :description "Use metered API access with an API key."
+                  :credential-sources [:api-key]}]
+  :account-connector :openai-browser
   :account-url "https://platform.openai.com/"
   :api-key-url "https://platform.openai.com/api-keys"
   :docs-url "https://help.openai.com/en/articles/4936850-where-do-i-find-my-api-key"
   :sign-in-options [:google :microsoft :apple]
-  :notes "Sign in on OpenAI's site, then create an API key. Xia authenticates to the API with that key."}
+  :notes "For personal use, start with your ChatGPT subscription account. Xia opens a dedicated managed browser for sign-in, then reuses that saved web account session for later requests. API access is billed separately."}
  {:id :qwen
   :name "Qwen"
   :description "Connect through Alibaba Cloud's Qwen-compatible endpoint."
   :category :cloud
   :base-url "https://dashscope.aliyuncs.com/compatible-mode/v1"
   :model-suggestion "qwen-max"
-  :auth-types [:api-key]
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a provider API credential, either by API sign-in or API key."
+                  :credential-sources [:oauth-account :api-key]
+                  :default? true}]
   :account-url "https://bailian.console.aliyun.com/"
   :api-key-url "https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key"
   :docs-url "https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api"
   :sign-in-options []
-  :notes "Use a DashScope API key. Beijing uses the default base URL; Singapore uses https://dashscope-intl.aliyuncs.com/compatible-mode/v1."}
+  :notes "Use API sign-in when the provider issues a usable API token. Otherwise use an API key. Beijing uses the default base URL; Singapore uses https://dashscope-intl.aliyuncs.com/compatible-mode/v1."}
  {:id :claude
   :name "Claude"
   :description "Connect Claude through a compatible gateway or proxy."
   :category :cloud
   :base-url ""
   :model-suggestion "claude-sonnet-4-5"
-  :auth-types [:api-key]
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a provider API credential, either by API sign-in or API key."
+                  :credential-sources [:oauth-account :api-key]
+                  :default? true}]
   :account-url "https://console.anthropic.com/"
   :docs-url "https://docs.anthropic.com/en/api/getting-started"
   :sign-in-options []
@@ -50,40 +71,60 @@
   :category :cloud
   :base-url "https://api.deepseek.com/v1"
   :model-suggestion "deepseek-chat"
-  :auth-types [:api-key]
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a provider API credential, either by API sign-in or API key."
+                  :credential-sources [:oauth-account :api-key]
+                  :default? true}]
   :account-url "https://platform.deepseek.com/"
   :docs-url "https://api-docs.deepseek.com/"
   :sign-in-options [:google]
-  :notes "DeepSeek's public API is OpenAI-compatible and uses bearer API keys."}
+  :notes "Use API sign-in when the provider issues a usable API token. Otherwise use an API key."}
  {:id :glm
   :name "Z.ai / GLM"
-  :description "Connect Xia to GLM-hosted models through Zhipu's OpenAI-compatible endpoint."
+  :description "Connect Xia to GLM-hosted models through Zhipu's compatible endpoint."
   :category :cloud
   :base-url "https://open.bigmodel.cn/api/paas/v4"
   :model-suggestion "glm-4.5"
-  :auth-types [:api-key]
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a provider API credential, either by API sign-in or API key."
+                  :credential-sources [:oauth-account :api-key]
+                  :default? true}]
   :account-url "https://open.bigmodel.cn/"
   :docs-url "https://docs.bigmodel.cn/cn/api/introduction"
   :sign-in-options []
-  :notes "Zhipu's standard endpoint supports bearer API keys. Coding-plan users may need the alternate OpenAI-compatible base URL https://open.bigmodel.cn/api/coding/paas/v4."}
+  :notes "Zhipu's standard endpoint supports bearer API keys. Coding-plan users may need the alternate compatible base URL https://open.bigmodel.cn/api/coding/paas/v4."}
  {:id :minimax
   :name "MiniMax"
   :description "Connect Xia to MiniMax-hosted models."
   :category :cloud
   :base-url "https://api.minimax.io/v1"
   :model-suggestion "MiniMax-M2.5"
-  :auth-types [:api-key]
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a provider API credential, either by API sign-in or API key."
+                  :credential-sources [:oauth-account :api-key]
+                  :default? true}]
   :account-url "https://platform.minimax.io/"
   :docs-url "https://platform.minimax.io/docs/guides/quickstart-preparation"
   :sign-in-options []
-  :notes "MiniMax's global OpenAI-compatible endpoint is https://api.minimax.io/v1. China deployments may use https://api.minimaxi.com/v1 instead."}
+  :notes "MiniMax's global compatible endpoint is https://api.minimax.io/v1. China deployments may use https://api.minimaxi.com/v1 instead."}
  {:id :custom
   :name "Custom Compatible API"
-  :description "Use any OpenAI-compatible endpoint, gateway, or proxy."
+  :description "Use any compatible endpoint, gateway, or proxy."
   :category :custom
   :base-url ""
   :model-suggestion ""
-  :auth-types [:api-key :oauth-account :none]
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a compatible API credential, either by API sign-in or API key."
+                  :credential-sources [:oauth-account :api-key]
+                  :default? true}
+                 {:id :local
+                  :label "Local model"
+                  :description "Use an unauthenticated compatible endpoint."
+                  :credential-sources [:none]}]
   :docs-url ""
   :sign-in-options []
   :notes "Use this for LM Studio, vLLM, hosted gateways, or other compatible services."}]

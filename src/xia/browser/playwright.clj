@@ -287,11 +287,13 @@
                                     :install-output output})))))))))
 
 (defn- launch-browser
-  [^Playwright playwright]
-  (.launch (.chromium playwright)
-           (doto (BrowserType$LaunchOptions.)
-             (.setHeadless (headless?))
-             (.setTimeout (double (timeout-ms))))))
+  ([^Playwright playwright]
+   (launch-browser playwright (headless?)))
+  ([^Playwright playwright headless-override]
+   (.launch (.chromium playwright)
+            (doto (BrowserType$LaunchOptions.)
+              (.setHeadless (boolean headless-override))
+              (.setTimeout (double (timeout-ms)))))))
 
 (defn- stop-runtime!
   []
@@ -330,6 +332,7 @@
        :ready? false
        :running? false
        :bootstrapped? false
+       :headless? (headless?)
        :browser browser-name
        :browser-installed? false
        :browser-executable nil
@@ -342,6 +345,7 @@
        :ready? true
        :running? true
        :bootstrapped? true
+       :headless? (headless?)
        :browser browser-name
        :browser-installed? (boolean browser-installed?)
        :browser-executable browser-executable
@@ -354,6 +358,7 @@
        :ready? true
        :running? false
        :bootstrapped? true
+       :headless? (headless?)
        :browser browser-name
        :browser-installed? (boolean browser-installed?)
        :browser-executable browser-executable
@@ -370,6 +375,7 @@
            :ready? false
            :running? false
            :bootstrapped? false
+           :headless? (headless?)
            :browser browser-name
            :browser-installed? false
            :browser-executable nil
@@ -383,6 +389,7 @@
            :ready? false
            :running? false
            :bootstrapped? false
+           :headless? (headless?)
            :browser browser-name
            :browser-installed? true
            :browser-executable executable
@@ -395,6 +402,7 @@
            :ready? false
            :running? false
            :bootstrapped? false
+           :headless? (headless?)
            :browser browser-name
            :browser-installed? false
            :browser-executable executable
@@ -726,6 +734,10 @@
     (try
       (.close ^BrowserContext (:context @sess))
       (catch Exception _))
+    (when (:owned-browser? @sess)
+      (try
+        (.close ^Browser (:browser @sess))
+        (catch Exception _)))
     true))
 
 (defn- close-live-session!
@@ -798,8 +810,16 @@
     (.setDefaultNavigationTimeout context (double (timeout-ms)))
     (install-request-guard! ops context)))
 
+(defn- session-browser
+  [runtime* headless-override]
+  (let [configured-headless (headless?)]
+    (if (or (nil? headless-override)
+            (= (boolean headless-override) configured-headless))
+      [(:browser runtime*) false]
+      [(launch-browser ^Playwright (:playwright runtime*) headless-override) true])))
+
 (defn- create-session!
-  [ops session-id url js-enabled storage-state created-at-ms]
+  [ops session-id url js-enabled storage-state created-at-ms headless-override]
   (evict-expired! ops)
   (when (>= (.size sessions) (long (or (:max-sessions ops) 5)))
     (throw (ex-info (str "Too many browser sessions (max " (or (:max-sessions ops) 5)
@@ -807,9 +827,12 @@
                     {:active (.size sessions)})))
   ((:validate-url! ops) url)
   (let [runtime* (ensure-runtime!)
-        context (new-context ops runtime* js-enabled storage-state)
+        [browser owned-browser?] (session-browser runtime* headless-override)
+        context (new-context ops {:browser browser} js-enabled storage-state)
         page (.newPage ^BrowserContext context)
         sess (atom {:context context
+                    :browser browser
+                    :owned-browser? owned-browser?
                     :page page
                     :last-access (now-ms)
                     :created-at-ms (long (or created-at-ms (now-ms)))
@@ -848,7 +871,8 @@
                                     true)
                                   (get snapshot "browser_state")
                                   (or (get snapshot "created_at_ms")
-                                      (now-ms)))]
+                                      (now-ms))
+                                  nil)]
         (persist-session! ops session-id)
         sess))))
 
@@ -1012,9 +1036,9 @@
         (runtime-status))))
   (install-browser-deps!* [_ opts]
     (install-browser-deps! opts))
-  (open-session* [_ url {:keys [js]}]
+  (open-session* [_ url {:keys [js storage-state headless]}]
     (let [session-id (str (random-uuid))
-          _sess (create-session! ops session-id url (if (nil? js) true js) nil nil)
+          _sess (create-session! ops session-id url (if (nil? js) true js) storage-state nil headless)
           session-atom (.get sessions session-id)]
       (session-page-result session-id (current-page-or-throw session-id session-atom))))
   (navigate* [_ session-id url]
@@ -1039,6 +1063,17 @@
         (swap! session-atom assoc :page page*)
         (persist-session! ops session-id)
         (session-page-result session-id page*))))
+  (fill-selector* [_ session-id selector value _opts]
+    (let [_sess (get-session ops session-id)
+          session-atom (.get sessions session-id)
+          page (current-page-or-throw session-id session-atom)
+          locator (.locator ^Page page selector)]
+      (when (zero? (.count ^Locator locator))
+        (throw (ex-info (str "No element matches selector: " selector)
+                        {:selector selector})))
+      (fill-locator! (.first ^Locator locator) value)
+      (persist-session! ops session-id)
+      (session-page-result session-id page)))
   (fill-form* [_ session-id fields {:keys [form-selector submit]}]
     (let [_sess (get-session ops session-id)
           session-atom (.get sessions session-id)
@@ -1133,9 +1168,7 @@
     {:status "closed" :session-id session-id})
   (close-all-sessions!* [_]
     (doseq [[session-id sess] sessions]
-      (try
-        (.close ^BrowserContext (:context @sess))
-        (catch Exception _))
+      (close-session-value! sess)
       (.remove sessions session-id))
     (doseq [[session-id _snapshot] (backend-snapshots ops)]
       ((:delete-snapshot! ops) session-id))

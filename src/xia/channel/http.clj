@@ -15,6 +15,7 @@
             [xia.local-doc :as local-doc]
             [xia.local-ocr :as local-ocr]
             [xia.llm :as llm]
+            [xia.llm-account-connector :as llm-account-connector]
             [xia.llm-provider-template :as llm-provider-template]
             [xia.memory :as memory]
             [xia.oauth :as oauth]
@@ -54,7 +55,9 @@
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
-(def ^:private provider-auth-types #{:none :api-key :oauth-account})
+(def ^:private provider-access-modes #{:local :api :account})
+(def ^:private provider-credential-sources #{:none :api-key :oauth-account :browser-session})
+(def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
 (def ^:private ms-per-day (* 24 60 60 1000))
 (def ^:private byte-array-class (class (byte-array 0)))
 (defn- long-max
@@ -257,6 +260,24 @@
     (instance? Date value) (str (.toInstant ^Date value))
     (instance? java.time.Instant value) (str value)
     :else nil))
+
+(defn- parse-iso-instant
+  [value field]
+  (when-let [text (some-> value str str/trim not-empty)]
+    (try
+      (Date/from (java.time.Instant/parse text))
+      (catch Exception _
+        (throw (ex-info (str "invalid '" field "' field")
+                        {:field field}))))))
+
+(defn- oauth-account-connection-mode
+  [account]
+  (or (:oauth.account/connection-mode account)
+      (if (or (some-> (:oauth.account/authorize-url account) str str/trim not-empty)
+              (some-> (:oauth.account/token-url account) str str/trim not-empty)
+              (some-> (:oauth.account/client-id account) str str/trim not-empty))
+        :oauth-flow
+        :manual-token)))
 
 (defn- date->millis
   [value]
@@ -1070,12 +1091,21 @@
                        :value value})))
     auth-type))
 
-(defn- parse-provider-auth-type
+(defn- parse-provider-access-mode
+  [value]
+  (let [access-mode (some-> value nonblank-str keyword)]
+    (when-not (contains? provider-access-modes access-mode)
+      (throw (ex-info "invalid access_mode"
+                      {:field "access_mode"
+                       :value value})))
+    access-mode))
+
+(defn- parse-provider-credential-source
   [value]
   (let [auth-type (some-> value nonblank-str keyword)]
-    (when-not (contains? provider-auth-types auth-type)
-      (throw (ex-info "invalid auth_type"
-                      {:field "auth_type"
+    (when-not (contains? provider-credential-sources auth-type)
+      (throw (ex-info "invalid credential_source"
+                      {:field "credential_source"
                        :value value})))
     auth-type))
 
@@ -1089,15 +1119,23 @@
 (defn- provider->admin-body
   [provider]
   (let [provider-id     (some-> (:llm.provider/id provider) name)
+        access-mode     (llm/provider-access-mode provider)
+        credential-source (llm/provider-credential-source provider)
         oauth-account   (some-> (:llm.provider/oauth-account provider) db/get-oauth-account)
+        browser-session (some-> (:llm.provider/browser-session provider) str)
         health          (llm/provider-health-summary (:llm.provider/id provider))]
     {:id                    provider-id
      :name                  (:llm.provider/name provider)
      :template              (some-> (:llm.provider/template provider) name)
-     :auth_type             (some-> (:llm.provider/auth-type provider) name)
+     :access_mode           (some-> access-mode name)
+     :credential_source     (some-> credential-source name)
+     :auth_type             (some-> credential-source name)
      :oauth_account         (some-> (:llm.provider/oauth-account provider) name)
      :oauth_account_name    (:oauth.account/name oauth-account)
      :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
+     :browser_session       browser-session
+     :browser_session_connected (boolean (and browser-session
+                                              (llm-account-connector/browser-session-connected? browser-session)))
      :base_url              (:llm.provider/base-url provider)
      :model                 (:llm.provider/model provider)
      :workloads             (->> (:llm.provider/workloads provider)
@@ -1119,27 +1157,40 @@
 
 (defn- llm-provider-template->admin-body
   [template]
-  {:id                (some-> (:id template) name)
-   :name              (:name template)
-   :description       (:description template)
-   :category          (some-> (:category template) name)
-   :base_url          (:base-url template)
-   :model_suggestion  (:model-suggestion template)
-   :account_url       (:account-url template)
-   :api_key_url       (:api-key-url template)
-   :docs_url          (:docs-url template)
-   :install_url       (:install-url template)
-   :auth_types        (->> (or (:auth-types template) [])
-                           (map name)
-                           vec)
-   :oauth_provider_templates (->> (or (:oauth-provider-templates template) [])
-                                  (map name)
-                                  vec)
-   :oauth_setup_note  (:oauth-setup-note template)
-   :sign_in_options   (->> (or (:sign-in-options template) [])
-                           (map name)
-                           vec)
-   :notes             (:notes template)})
+  (let [access-modes (->> (or (:access-modes template) [])
+                          (mapv (fn [mode]
+                                  {:id                 (some-> (:id mode) name)
+                                   :label              (:label mode)
+                                   :description        (:description mode)
+                                   :credential_sources (->> (or (:credential-sources mode) [])
+                                                            (map name)
+                                                            vec)
+                                   :default            (boolean (:default? mode))})))
+        auth-types   (->> access-modes
+                          (mapcat :credential_sources)
+                          distinct
+                          vec)]
+    {:id                (some-> (:id template) name)
+     :name              (:name template)
+     :description       (:description template)
+     :category          (some-> (:category template) name)
+     :base_url          (:base-url template)
+     :model_suggestion  (:model-suggestion template)
+     :account_url       (:account-url template)
+     :api_key_url       (:api-key-url template)
+     :docs_url          (:docs-url template)
+     :install_url       (:install-url template)
+     :account_connector  (some-> (:account-connector template) name)
+     :access_modes      access-modes
+     :auth_types        auth-types
+     :oauth_provider_templates (->> (or (:oauth-provider-templates template) [])
+                                    (map name)
+                                    vec)
+     :oauth_setup_note  (:oauth-setup-note template)
+     :sign_in_options   (->> (or (:sign-in-options template) [])
+                             (map name)
+                             vec)
+     :notes             (:notes template)}))
 
 (defn- memory-retention->admin-body
   []
@@ -1220,6 +1271,7 @@
   [account]
   {:id                       (some-> (:oauth.account/id account) name)
    :name                     (:oauth.account/name account)
+   :connection_mode          (some-> (oauth-account-connection-mode account) name)
    :authorize_url            (:oauth.account/authorize-url account)
    :token_url                (:oauth.account/token-url account)
    :client_id                (:oauth.account/client-id account)
@@ -1231,10 +1283,19 @@
    :client_secret_configured (boolean (nonblank-str (:oauth.account/client-secret account)))
    :access_token_configured  (boolean (nonblank-str (:oauth.account/access-token account)))
    :refresh_token_configured (boolean (nonblank-str (:oauth.account/refresh-token account)))
+   :token_type               (:oauth.account/token-type account)
    :autonomous_approved      (boolean (autonomous/oauth-account-autonomous-approved? account))
    :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
    :expires_at               (instant->str (:oauth.account/expires-at account))
    :connected_at             (instant->str (:oauth.account/connected-at account))})
+
+(defn- provider-account-connection->admin-body
+  [connection]
+  {:connector  (some-> (:connector connection) name)
+   :session_id (:session-id connection)
+   :login_url  (:login-url connection)
+   :connected  (boolean (:connected connection))
+   :message    (:message connection)})
 
 (defn- oauth-template->admin-body
   [template]
@@ -2196,12 +2257,24 @@
           template-id  (if (contains? data "template")
                          (some-> (get data "template") nonblank-str keyword)
                          nil)
-          auth-type    (if (contains? data "auth_type")
-                         (parse-provider-auth-type (get data "auth_type"))
+          access-mode  (if (contains? data "access_mode")
+                         (parse-provider-access-mode (get data "access_mode"))
                          nil)
+          credential-source (cond
+                              (contains? data "credential_source")
+                              (parse-provider-credential-source (get data "credential_source"))
+
+                              (contains? data "auth_type")
+                              (parse-provider-credential-source (get data "auth_type"))
+
+                              :else
+                              nil)
           oauth-account-id (if (contains? data "oauth_account")
                              (some-> (get data "oauth_account") nonblank-str keyword)
                              nil)
+          browser-session-id (if (contains? data "browser_session")
+                               (some-> (get data "browser_session") nonblank-str)
+                               nil)
           vision?      (when (contains? data "vision")
                          (true? (get data "vision")))
           allow-private-network? (when (contains? data "allow_private_network")
@@ -2215,7 +2288,14 @@
           rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
                                                               "rate_limit_per_minute")
           make-default (true? (get data "default"))
-          has-default? (some? (db/get-default-provider))]
+          has-default? (some? (db/get-default-provider))
+          normalized-access-mode (llm/provider-access-mode {:access-mode access-mode
+                                                            :credential-source credential-source
+                                                            :template template-id
+                                                            :base-url base-url
+                                                            :oauth-account oauth-account-id
+                                                            :browser-session browser-session-id
+                                                            :api-key api-key})]
       (when-not base-url
         (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
       (when-not model
@@ -2225,15 +2305,24 @@
         (throw (ex-info "unknown template"
                         {:field "template"
                          :value (name template-id)})))
-      (when (and (= auth-type :oauth-account)
+      (when (and (= credential-source :oauth-account)
                  (nil? oauth-account-id))
-        (throw (ex-info "oauth_account is required for oauth-account auth_type"
+        (throw (ex-info "oauth_account is required for oauth-account credential_source"
                         {:field "oauth_account"})))
+      (when (and (= credential-source :browser-session)
+                 (nil? browser-session-id))
+        (throw (ex-info "browser_session is required for browser-session credential_source"
+                        {:field "browser_session"})))
       (when (and oauth-account-id
                  (nil? (db/get-oauth-account oauth-account-id)))
         (throw (ex-info "unknown oauth_account"
                         {:field "oauth_account"
                          :value (name oauth-account-id)})))
+      (when (and browser-session-id
+                 (not (llm-account-connector/browser-session-connected? browser-session-id)))
+        (throw (ex-info "unknown or expired browser_session"
+                        {:field "browser_session"
+                         :value browser-session-id})))
       (db/upsert-provider! (cond-> {:id       provider-id
                                     :name     name
                                     :base-url base-url
@@ -2243,10 +2332,16 @@
                                     :rate-limit-per-minute rate-limit-per-minute}
                              (contains? data "template")
                              (assoc :template template-id)
-                             (contains? data "auth_type")
-                             (assoc :auth-type auth-type)
+                             (contains? data "access_mode")
+                             (assoc :access-mode normalized-access-mode)
+                             (or (contains? data "credential_source")
+                                 (contains? data "auth_type"))
+                             (assoc :credential-source credential-source
+                                    :auth-type credential-source)
                              (contains? data "oauth_account")
                              (assoc :oauth-account oauth-account-id)
+                             (contains? data "browser_session")
+                             (assoc :browser-session browser-session-id)
                              (contains? data "vision")
                              (assoc :vision? vision?)
                              (contains? data "allow_private_network")
@@ -2597,12 +2692,36 @@
           existing       (db/get-oauth-account account-id)
           name           (or (nonblank-str (get data "name"))
                              (name account-id))
+          connection-mode (let [parsed (if (contains? data "connection_mode")
+                                         (some-> (get data "connection_mode") nonblank-str keyword)
+                                         (when existing
+                                           (oauth-account-connection-mode existing)))]
+                            (when (and parsed
+                                       (not (oauth-account-connection-modes parsed)))
+                              (throw (ex-info "unknown connection_mode"
+                                              {:field "connection_mode"
+                                               :value (name parsed)})))
+                            (or parsed :oauth-flow))
           authorize-url  (nonblank-str (get data "authorize_url"))
           token-url      (nonblank-str (get data "token_url"))
           client-id      (nonblank-str (get data "client_id"))
           client-secret  (or (nonblank-str (get data "client_secret"))
                              (:oauth.account/client-secret existing)
                              "")
+          access-token   (or (nonblank-str (get data "access_token"))
+                             (:oauth.account/access-token existing))
+          refresh-token  (or (nonblank-str (get data "refresh_token"))
+                             (:oauth.account/refresh-token existing))
+          token-type     (or (nonblank-str (get data "token_type"))
+                             (:oauth.account/token-type existing)
+                             "Bearer")
+          expires-at     (if (contains? data "expires_at")
+                           (parse-iso-instant (get data "expires_at") "expires_at")
+                           (:oauth.account/expires-at existing))
+          connected-at   (cond
+                           (nonblank-str (get data "access_token")) (Date.)
+                           access-token (:oauth.account/connected-at existing)
+                           :else nil)
           provider-template-id (if (contains? data "provider_template")
                                  (some-> (get data "provider_template") nonblank-str keyword)
                                  (:oauth.account/provider-template existing))
@@ -2612,12 +2731,17 @@
           token-params   (parse-json-object-string (get data "token_params") "token_params")
           autonomous-approved? (when (contains? data "autonomous_approved")
                                  (true? (get data "autonomous_approved")))]
-      (when-not authorize-url
-        (throw (ex-info "missing 'authorize_url' field" {:field "authorize_url"})))
-      (when-not token-url
-        (throw (ex-info "missing 'token_url' field" {:field "token_url"})))
-      (when-not client-id
-        (throw (ex-info "missing 'client_id' field" {:field "client_id"})))
+      (when (= connection-mode :oauth-flow)
+        (when-not authorize-url
+          (throw (ex-info "missing 'authorize_url' field" {:field "authorize_url"})))
+        (when-not token-url
+          (throw (ex-info "missing 'token_url' field" {:field "token_url"})))
+        (when-not client-id
+          (throw (ex-info "missing 'client_id' field" {:field "client_id"}))))
+      (when (= connection-mode :manual-token)
+        (when-not access-token
+          (throw (ex-info "missing 'access_token' field"
+                          {:field "access_token"}))))
       (when (and provider-template-id
                  (nil? (oauth-template/get-template provider-template-id)))
         (throw (ex-info "unknown provider_template"
@@ -2625,9 +2749,10 @@
                          :value (name provider-template-id)})))
       (db/save-oauth-account! {:id            account-id
                                :name          name
-                               :authorize-url authorize-url
-                               :token-url     token-url
-                               :client-id     client-id
+                               :connection-mode connection-mode
+                               :authorize-url (when (= connection-mode :oauth-flow) authorize-url)
+                               :token-url     (when (= connection-mode :oauth-flow) token-url)
+                               :client-id     (when (= connection-mode :oauth-flow) client-id)
                                :client-secret client-secret
                                :provider-template provider-template-id
                                :scopes        scopes
@@ -2635,11 +2760,11 @@
                                :auth-params   auth-params
                                :token-params  token-params
                                :autonomous-approved? autonomous-approved?
-                               :access-token  (:oauth.account/access-token existing)
-                               :refresh-token (:oauth.account/refresh-token existing)
-                               :token-type    (:oauth.account/token-type existing)
-                               :expires-at    (:oauth.account/expires-at existing)
-                               :connected-at  (:oauth.account/connected-at existing)})
+                               :access-token  access-token
+                               :refresh-token refresh-token
+                               :token-type    token-type
+                               :expires-at    expires-at
+                               :connected-at  connected-at})
       (json-response 200 {:oauth_account (oauth-account->admin-body
                                            (db/get-oauth-account account-id))}))
     (catch clojure.lang.ExceptionInfo e
@@ -2666,10 +2791,17 @@
 (defn- handle-start-oauth-connect [account-id req]
   (try
     (let [oauth-id    (parse-keyword-id account-id "oauth_account_id")
+          account     (or (db/get-oauth-account oauth-id)
+                          (throw (ex-info "unknown oauth_account"
+                                          {:field "oauth_account_id"
+                                           :value (name oauth-id)})))
           callback-url (str (or (request-base-url req)
                                 (throw (ex-info "cannot determine callback base URL"
                                                 {:field "host"})))
                             "/oauth/callback")
+          _           (when (= :manual-token (oauth-account-connection-mode account))
+                        (throw (ex-info "manual-token connections do not support Connect Now"
+                                        {:field "connection_mode"})))
           started     (oauth/start-authorization! oauth-id callback-url)]
       (json-response 200 {:oauth_account_id (name oauth-id)
                           :authorization_url (:authorization-url started)
@@ -2679,9 +2811,19 @@
 
 (defn- handle-refresh-oauth-account [account-id]
   (try
-    (let [oauth-id (parse-keyword-id account-id "oauth_account_id")
-          account  (oauth/refresh-account! oauth-id)]
-      (json-response 200 {:oauth_account (oauth-account->admin-body account)}))
+    (let [oauth-id       (parse-keyword-id account-id "oauth_account_id")
+          current-account (or (db/get-oauth-account oauth-id)
+                              (throw (ex-info "unknown oauth_account"
+                                              {:field "oauth_account_id"
+                                               :value (name oauth-id)})))
+          _             (when-not (nonblank-str (:oauth.account/refresh-token current-account))
+                     (throw (ex-info "refresh token is not configured for this connection"
+                                     {:field "refresh_token"})))
+          _             (when (= :manual-token (oauth-account-connection-mode current-account))
+                     (throw (ex-info "manual-token connections do not support Refresh"
+                                     {:field "connection_mode"})))
+          refreshed-account (oauth/refresh-account! oauth-id)]
+      (json-response 200 {:oauth_account (oauth-account->admin-body refreshed-account)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -2745,6 +2887,29 @@
                                               "OAuth failed"
                                               (.getMessage e)
                                               pending-account-id)))))))
+
+(defn- handle-start-provider-account-connector [connector-id]
+  (try
+    (let [connector-key (parse-keyword-id connector-id "connector_id")]
+      (json-response 200
+                     {:connection (provider-account-connection->admin-body
+                                   (llm-account-connector/start-connection! connector-key))}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-complete-provider-account-connector [connector-id req]
+  (try
+    (let [connector-key  (parse-keyword-id connector-id "connector_id")
+          data           (or (read-body req) {})
+          browser-session (nonblank-str (get data "browser_session"))]
+      (when-not browser-session
+        (throw (ex-info "missing 'browser_session' field"
+                        {:field "browser_session"})))
+      (json-response 200
+                     {:connection (provider-account-connection->admin-body
+                                   (llm-account-connector/complete-connection! connector-key browser-session))}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
 
 (defn- handle-save-site [req]
   (try
@@ -2877,6 +3042,8 @@
           knowledge-fact-match (re-matches #"/knowledge/facts/([^/]+)" uri)
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
+          admin-provider-account-start-match (re-matches #"/admin/provider-account-connectors/([^/]+)/start" uri)
+          admin-provider-account-complete-match (re-matches #"/admin/provider-account-connectors/([^/]+)/complete" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
           admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
           admin-oauth-refresh-match (re-matches #"/admin/oauth-accounts/([^/]+)/refresh" uri)]
@@ -3008,6 +3175,12 @@
 
         (and (= method :post) (= uri "/admin/providers"))
         (protected-route-response req #(handle-save-provider req))
+
+        (and (= method :post) admin-provider-account-start-match)
+        (protected-route-response req #(handle-start-provider-account-connector (second admin-provider-account-start-match)))
+
+        (and (= method :post) admin-provider-account-complete-match)
+        (protected-route-response req #(handle-complete-provider-account-connector (second admin-provider-account-complete-match) req))
 
         (and (= method :post) (= uri "/admin/memory-retention"))
         (protected-route-response req #(handle-save-memory-retention req))

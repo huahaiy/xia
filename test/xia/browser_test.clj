@@ -497,6 +497,7 @@
             (throw (ex-info "Playwright launch failed." {:backend :playwright})))
           (navigate* [_ _session-id _url] nil)
           (click* [_ _session-id _selector] nil)
+          (fill-selector* [_ _session-id _selector _value _opts] nil)
           (fill-form* [_ _session-id _fields _opts] nil)
           (read-page* [_ _session-id] nil)
           (query-elements* [_ _session-id _opts] nil)

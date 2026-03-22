@@ -60,11 +60,13 @@ const state = {
   knowledgeForgettingFactId: '',
   providerDraft: null,
   pendingProviderOauthFlow: null,
+  pendingProviderBrowserSessionFlow: null,
   activeProviderId: '',
   activeOauthAccountId: '',
   activeServiceId: '',
   activeSiteId: '',
   providerSaving: false,
+  providerAccountConnecting: false,
   contextSaving: false,
   retentionSaving: false,
   knowledgeDecaySaving: false,
@@ -136,9 +138,12 @@ const providerTemplateEl = document.getElementById('provider-template');
 const providerTemplateNoteEl = document.getElementById('provider-template-note');
 const providerBaseUrlEl = document.getElementById('provider-base-url');
 const providerModelEl = document.getElementById('provider-model');
-const providerAuthTypeEl = document.getElementById('provider-auth-type');
+const providerAccessModeEl = document.getElementById('provider-access-mode');
+const providerCredentialSourceEl = document.getElementById('provider-credential-source');
 const providerOauthAccountEl = document.getElementById('provider-oauth-account');
 const providerOauthAccountNoteEl = document.getElementById('provider-oauth-account-note');
+const providerBrowserSessionEl = document.getElementById('provider-browser-session');
+const providerBrowserSessionNoteEl = document.getElementById('provider-browser-session-note');
 const providerConfigureOauthEl = document.getElementById('provider-configure-oauth');
 const providerOpenAccountEl = document.getElementById('provider-open-account');
 const providerOpenDocsEl = document.getElementById('provider-open-docs');
@@ -201,13 +206,28 @@ const oauthTemplateNoteEl = document.getElementById('oauth-template-note');
 const applyOauthTemplateEl = document.getElementById('apply-oauth-template');
 const oauthAccountIdEl = document.getElementById('oauth-account-id');
 const oauthAccountNameEl = document.getElementById('oauth-account-name');
+const oauthConnectionModeEl = document.getElementById('oauth-connection-mode');
+const oauthAccessTokenFieldEl = document.getElementById('oauth-access-token-field');
+const oauthAccessTokenEl = document.getElementById('oauth-access-token');
+const oauthTokenTypeFieldEl = document.getElementById('oauth-token-type-field');
+const oauthTokenTypeEl = document.getElementById('oauth-token-type');
+const oauthExpiresAtFieldEl = document.getElementById('oauth-expires-at-field');
+const oauthExpiresAtEl = document.getElementById('oauth-expires-at');
+const oauthAuthorizeUrlFieldEl = document.getElementById('oauth-authorize-url-field');
 const oauthAuthorizeUrlEl = document.getElementById('oauth-authorize-url');
+const oauthTokenUrlFieldEl = document.getElementById('oauth-token-url-field');
 const oauthTokenUrlEl = document.getElementById('oauth-token-url');
+const oauthClientIdFieldEl = document.getElementById('oauth-client-id-field');
 const oauthClientIdEl = document.getElementById('oauth-client-id');
+const oauthClientSecretFieldEl = document.getElementById('oauth-client-secret-field');
 const oauthClientSecretEl = document.getElementById('oauth-client-secret');
+const oauthScopesFieldEl = document.getElementById('oauth-scopes-field');
 const oauthScopesEl = document.getElementById('oauth-scopes');
+const oauthRedirectUriFieldEl = document.getElementById('oauth-redirect-uri-field');
 const oauthRedirectUriEl = document.getElementById('oauth-redirect-uri');
+const oauthAuthParamsFieldEl = document.getElementById('oauth-auth-params-field');
 const oauthAuthParamsEl = document.getElementById('oauth-auth-params');
+const oauthTokenParamsFieldEl = document.getElementById('oauth-token-params-field');
 const oauthTokenParamsEl = document.getElementById('oauth-token-params');
 const oauthAccountAutonomousApprovedEl = document.getElementById('oauth-account-autonomous-approved');
 const oauthAccountStatusEl = document.getElementById('oauth-account-status');
@@ -797,46 +817,150 @@ function providerTemplateById(templateId) {
   return (state.admin.llmProviderTemplates || []).find((template) => template.id === templateId) || null;
 }
 
-function providerAuthTypeLabel(authType) {
-  if (authType === 'none') return 'No sign-in';
-  if (authType === 'api-key') return 'API key';
-  if (authType === 'oauth-account') return 'Linked sign-in';
+function providerAccessModeLabel(accessMode) {
+  if (accessMode === 'local') return 'Local model';
+  if (accessMode === 'account') return 'Web account session';
+  if (accessMode === 'api') return 'API credential';
   return 'Not set';
 }
 
-function providerTemplateAuthTypes(template) {
+function providerCredentialSourceLabel(credentialSource) {
+  if (credentialSource === 'none') return 'No credential';
+  if (credentialSource === 'api-key') return 'API key';
+  if (credentialSource === 'oauth-account') return 'API sign-in';
+  if (credentialSource === 'browser-session') return 'Web account session';
+  return 'Not set';
+}
+
+function providerTemplateAccessModes(template) {
+  const accessModes = Array.isArray(template && template.access_modes)
+    ? template.access_modes.filter(Boolean)
+    : [];
+  if (accessModes.length) return accessModes;
   const authTypes = Array.isArray(template && template.auth_types) ? template.auth_types.filter(Boolean) : [];
-  return authTypes.length ? authTypes : ['api-key'];
+  const inferred = [];
+  if (authTypes.includes('oauth-account')) {
+    inferred.push({
+      id: 'api',
+      label: 'API credential',
+      credential_sources: ['oauth-account'],
+      default: true
+    });
+  }
+  if (authTypes.includes('browser-session')) {
+    inferred.push({
+      id: 'account',
+      label: 'Web account session',
+      credential_sources: ['browser-session'],
+      default: !inferred.length
+    });
+  }
+  if (authTypes.includes('api-key')) {
+    inferred.push({
+      id: 'api',
+      label: 'API credential',
+      credential_sources: ['api-key'],
+      default: !inferred.length
+    });
+  }
+  if (authTypes.includes('none')) {
+    inferred.push({
+      id: 'local',
+      label: 'Local model',
+      credential_sources: ['none'],
+      default: !inferred.length
+    });
+  }
+  return inferred.length
+    ? inferred
+    : [{
+        id: 'api',
+        label: 'API credential',
+        credential_sources: ['api-key'],
+        default: true
+      }];
+}
+
+function providerTemplateAccessMode(template, accessMode) {
+  return providerTemplateAccessModes(template).find((mode) => mode.id === accessMode) || null;
+}
+
+function providerCredentialSourcesForAccessMode(template, accessMode) {
+  const mode = providerTemplateAccessMode(template, accessMode);
+  const credentialSources = Array.isArray(mode && mode.credential_sources)
+    ? mode.credential_sources.filter(Boolean)
+    : [];
+  return credentialSources.length ? credentialSources : ['api-key'];
 }
 
 function defaultProviderTemplateId() {
   const templates = Array.isArray(state.admin.llmProviderTemplates) ? state.admin.llmProviderTemplates : [];
   if (!templates.length) return '';
-  return (templates.find((template) => template.id === 'ollama')
+  return (templates.find((template) => defaultProviderAccessMode(template) === 'account')
     || templates.find((template) => template.id === 'openai')
+    || templates.find((template) => template.id === 'ollama')
     || templates[0]).id || '';
 }
 
-function defaultProviderAuthType(template) {
-  const authTypes = providerTemplateAuthTypes(template);
-  if (authTypes.includes('api-key')) return 'api-key';
-  if (authTypes.includes('none')) return 'none';
-  return authTypes[0] || 'api-key';
+function defaultProviderAccessMode(template) {
+  const accessModes = providerTemplateAccessModes(template);
+  const explicit = accessModes.find((mode) => !!mode.default);
+  if (explicit && explicit.id) return explicit.id;
+  return (accessModes.find((mode) => mode.id === 'account')
+    || accessModes.find((mode) => mode.id === 'api')
+    || accessModes[0]
+    || {}).id || 'api';
+}
+
+function defaultProviderCredentialSource(template, accessMode) {
+  const credentialSources = providerCredentialSourcesForAccessMode(template, accessMode);
+  if (credentialSources.includes('browser-session')) return 'browser-session';
+  if (credentialSources.includes('oauth-account')) return 'oauth-account';
+  if (credentialSources.includes('api-key')) return 'api-key';
+  if (credentialSources.includes('none')) return 'none';
+  return credentialSources[0] || 'api-key';
+}
+
+function providerCredentialSource(provider) {
+  if (provider && provider.credential_source) return provider.credential_source;
+  if (provider && provider.auth_type) return provider.auth_type;
+  if (provider && provider.browser_session) return 'browser-session';
+  if (provider && provider.oauth_account) return 'oauth-account';
+  if (provider && provider.api_key_configured) return 'api-key';
+  return 'none';
+}
+
+function providerAccessMode(provider) {
+  if (provider && provider.access_mode) return provider.access_mode;
+  const credentialSource = providerCredentialSource(provider);
+  if (credentialSource === 'browser-session') return 'account';
+  if (credentialSource === 'oauth-account') return 'api';
+  if (credentialSource === 'api-key') return 'api';
+  if (provider && provider.template === 'ollama') return 'local';
+  return 'api';
 }
 
 function providerMeta(provider) {
   const bits = [];
   const template = providerTemplateById(provider.template);
+  const accessMode = providerAccessMode(provider);
+  const credentialSource = providerCredentialSource(provider);
   if (template) bits.push(template.name);
   if (provider.model) bits.push(provider.model);
   if (Array.isArray(provider.workloads) && provider.workloads.length) {
     bits.push('Workloads: ' + provider.workloads.join(', '));
   }
-  if (provider.auth_type) bits.push(providerAuthTypeLabel(provider.auth_type));
+  if (accessMode) bits.push(providerAccessModeLabel(accessMode));
+  if (credentialSource) bits.push(providerCredentialSourceLabel(credentialSource));
+  if (provider.browser_session_connected) {
+    bits.push('Web account connected');
+  } else if (credentialSource === 'browser-session') {
+    bits.push(provider.browser_session ? 'Web account needs reconnect' : 'Web account not connected');
+  }
   if (provider.oauth_account_name) {
     bits.push(provider.oauth_account_connected
-      ? ('Signed in: ' + provider.oauth_account_name)
-      : ('Sign-in pending: ' + provider.oauth_account_name));
+      ? ('API sign-in: ' + provider.oauth_account_name)
+      : ('API sign-in pending: ' + provider.oauth_account_name));
   }
   if (provider.effective_rate_limit_per_minute) {
     bits.push('Rate ' + provider.effective_rate_limit_per_minute + '/min');
@@ -852,7 +976,7 @@ function providerMeta(provider) {
   }
   if (provider.vision) bits.push('Vision');
   if (provider.default) bits.push('Default');
-  if (provider.auth_type === 'api-key' || (!provider.auth_type && provider.api_key_configured)) {
+  if (credentialSource === 'api-key' || ((credentialSource !== 'oauth-account' && credentialSource !== 'browser-session') && provider.api_key_configured)) {
     bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
   }
   return bits.join(' • ');
@@ -863,6 +987,8 @@ function llmProviderTemplateMeta(template) {
   if (template.category) bits.push(template.category);
   if (template.base_url) bits.push(template.base_url);
   if (template.model_suggestion) bits.push('Suggested model: ' + template.model_suggestion);
+  const defaultMode = defaultProviderAccessMode(template);
+  if (defaultMode) bits.push('Default: ' + providerAccessModeLabel(defaultMode));
   return bits.join(' • ');
 }
 
@@ -876,15 +1002,24 @@ function providerSignInOptionLabel(option) {
   }
 }
 
-function providerPrimaryAction(template, authType) {
+function providerPrimaryAction(template, accessMode, credentialSource) {
   if (!template) return null;
-  if (authType === 'oauth-account') {
+  if (credentialSource === 'browser-session' && template.account_connector) {
+    const pending = state.pendingProviderBrowserSessionFlow
+      && state.pendingProviderBrowserSessionFlow.connectorId === template.account_connector;
     return {
-      kind: 'oauth',
-      label: 'Set Up Sign-In'
+      kind: 'browser-session',
+      label: pending ? 'Finish Sign-In' : 'Start Sign-In',
+      connectorId: template.account_connector
     };
   }
-  if (authType === 'api-key') {
+  if (credentialSource === 'oauth-account' || (accessMode === 'account' && !template.account_connector)) {
+    return {
+      kind: 'oauth',
+      label: 'Set Up API Sign-In'
+    };
+  }
+  if (credentialSource === 'api-key') {
     if (template.api_key_url) {
       return {
         kind: 'external',
@@ -908,7 +1043,7 @@ function providerPrimaryAction(template, authType) {
     }
     return null;
   }
-  if (authType === 'none') {
+  if (credentialSource === 'none' || accessMode === 'local') {
     if (template.install_url) {
       return {
         kind: 'external',
@@ -947,7 +1082,7 @@ function providerActionByKind(template, kind) {
   }
 }
 
-function providerVisibleActions(template, authType) {
+function providerVisibleActions(template, accessMode, credentialSource) {
   const actions = [];
   const seen = new Set();
   const pushAction = (action) => {
@@ -960,8 +1095,8 @@ function providerVisibleActions(template, authType) {
     actions.push(action);
   };
 
-  pushAction(providerPrimaryAction(template, authType));
-  if (authType === 'none') {
+  pushAction(providerPrimaryAction(template, accessMode, credentialSource));
+  if (credentialSource === 'none' || accessMode === 'local') {
     pushAction(providerActionByKind(template, 'docs'));
   } else {
     pushAction(providerActionByKind(template, 'account'));
@@ -971,13 +1106,19 @@ function providerVisibleActions(template, authType) {
 }
 
 function currentProviderPrimaryAction() {
-  return providerPrimaryAction(providerTemplateById(providerTemplateEl.value), providerAuthTypeEl.value);
+  return providerPrimaryAction(providerTemplateById(providerTemplateEl.value),
+    providerAccessModeEl.value,
+    providerCredentialSourceEl.value);
 }
 
-function openProviderPrimaryAction(action, options = {}) {
+async function openProviderPrimaryAction(action, options = {}) {
   if (!action) return;
   if (action.kind === 'oauth') {
     beginProviderOauthSetup();
+    return;
+  }
+  if (action.kind === 'browser-session' && action.connectorId) {
+    await beginProviderBrowserSessionSetup(action.connectorId, options);
     return;
   }
   if (action.kind === 'external' && action.url) {
@@ -1000,17 +1141,26 @@ function providerTemplateNote(template) {
   }
   const bits = [];
   if (template.description) bits.push(template.description);
-  const authTypes = providerTemplateAuthTypes(template).map(providerAuthTypeLabel);
-  if (authTypes.length) bits.push('Connection methods: ' + authTypes.join(', '));
-  if (providerTemplateAuthTypes(template).includes('api-key')) {
-    bits.push('For this preset, sign in on the provider site if needed, then generate an API key for Xia.');
+  const accessModes = providerTemplateAccessModes(template);
+  if (accessModes.length) {
+    bits.push('Access modes: ' + accessModes.map((mode) => firstNonEmpty(mode.label, providerAccessModeLabel(mode.id))).join(', '));
+  }
+  if (defaultProviderAccessMode(template) === 'account') {
+    bits.push('Default path: connect a web account session first. API credential access is the fallback.');
+  }
+  const allCredentialSources = accessModes.flatMap((mode) => Array.isArray(mode.credential_sources) ? mode.credential_sources : []);
+  if (allCredentialSources.includes('api-key')) {
+    bits.push('If you use API key access, create an API key for Xia on the provider site.');
   }
   if (Array.isArray(template.sign_in_options) && template.sign_in_options.length) {
     bits.push('Dashboard sign-in options may include: '
       + template.sign_in_options.map(providerSignInOptionLabel).join(', '));
   }
-  if (providerTemplateAuthTypes(template).includes('oauth-account')) {
-    bits.push('OAuth setup uses a provider-specific OAuth client; use Set Up Sign-In to configure or link one.');
+  if (allCredentialSources.includes('oauth-account')) {
+    bits.push('API sign-in uses a saved OAuth account to call the provider API. Use Set Up API Sign-In to create or link one.');
+  }
+  if (allCredentialSources.includes('browser-session')) {
+    bits.push('Web account session opens a dedicated Xia browser so you can log in once and let Xia reuse that saved web session later.');
   }
   if (template.notes) bits.push(template.notes);
   return bits.join(' • ');
@@ -1033,22 +1183,39 @@ function renderProviderTemplateOptions() {
   providerTemplateNoteEl.textContent = providerTemplateNote(providerTemplateById(providerTemplateEl.value));
 }
 
-function renderProviderAuthTypeOptions() {
+function renderProviderAccessModeOptions() {
   const template = providerTemplateById(providerTemplateEl.value);
-  const authTypes = template
-    ? providerTemplateAuthTypes(template)
-    : ['none', 'api-key', 'oauth-account'];
-  const previous = providerAuthTypeEl.value;
-  providerAuthTypeEl.replaceChildren();
-  authTypes.forEach((authType) => {
+  const accessModes = providerTemplateAccessModes(template);
+  const previous = providerAccessModeEl.value;
+  providerAccessModeEl.replaceChildren();
+  accessModes.forEach((accessMode) => {
     const option = document.createElement('option');
-    option.value = authType;
-    option.textContent = providerAuthTypeLabel(authType);
-    providerAuthTypeEl.appendChild(option);
+    option.value = accessMode.id;
+    option.textContent = firstNonEmpty(accessMode.label, providerAccessModeLabel(accessMode.id));
+    providerAccessModeEl.appendChild(option);
   });
-  providerAuthTypeEl.value = authTypes.includes(previous)
+  providerAccessModeEl.value = accessModes.some((mode) => mode.id === previous)
     ? previous
-    : defaultProviderAuthType(template);
+    : defaultProviderAccessMode(template);
+}
+
+function renderProviderCredentialSourceOptions() {
+  const template = providerTemplateById(providerTemplateEl.value);
+  const accessMode = providerAccessModeEl.value || defaultProviderAccessMode(template);
+  const credentialSources = template
+    ? providerCredentialSourcesForAccessMode(template, accessMode)
+    : ['none', 'api-key', 'oauth-account', 'browser-session'];
+  const previous = providerCredentialSourceEl.value;
+  providerCredentialSourceEl.replaceChildren();
+  credentialSources.forEach((credentialSource) => {
+    const option = document.createElement('option');
+    option.value = credentialSource;
+    option.textContent = providerCredentialSourceLabel(credentialSource);
+    providerCredentialSourceEl.appendChild(option);
+  });
+  providerCredentialSourceEl.value = credentialSources.includes(previous)
+    ? previous
+    : defaultProviderCredentialSource(template, accessMode);
 }
 
 function renderProviderOauthAccountOptions() {
@@ -1056,7 +1223,7 @@ function renderProviderOauthAccountOptions() {
   providerOauthAccountEl.replaceChildren();
   const blank = document.createElement('option');
   blank.value = '';
-  blank.textContent = 'Choose a linked sign-in';
+  blank.textContent = 'Choose an API sign-in';
   providerOauthAccountEl.appendChild(blank);
   (state.admin.oauthAccounts || []).forEach((account) => {
     const option = document.createElement('option');
@@ -1069,44 +1236,61 @@ function renderProviderOauthAccountOptions() {
 }
 
 function providerOauthAccountStatusNote() {
-  if (providerAuthTypeEl.value !== 'oauth-account') {
-    return 'Choose "Linked sign-in" to route model requests through a saved OAuth connection.';
+  if (providerCredentialSourceEl.value !== 'oauth-account') {
+    return '';
   }
   if (!(state.admin.oauthAccounts || []).length) {
-    return 'Use Set Up Sign-In to create a provider-specific OAuth connection, then link it here.';
+    return 'Use Set Up API Sign-In to create a saved OAuth API sign-in, then link it here.';
   }
   if (!providerOauthAccountEl.value) {
-    return 'Choose a connected OAuth account for this provider, or use Set Up Sign-In to make one.';
+    return 'Choose a connected API sign-in for this provider, or use Set Up API Sign-In to make one.';
   }
   const account = (state.admin.oauthAccounts || []).find((entry) => entry.id === providerOauthAccountEl.value);
   if (!account) {
-    return 'Choose a connected OAuth account for this provider, or use Set Up Sign-In to make one.';
+    return 'Choose a connected API sign-in for this provider, or use Set Up API Sign-In to make one.';
   }
   return account.connected
-    ? 'This provider will use the linked OAuth access token.'
-    : 'The linked OAuth account still needs to be connected.';
+    ? 'This provider will use the linked OAuth API credential.'
+    : 'The linked OAuth API sign-in still needs to be connected.';
+}
+
+function providerBrowserSessionStatusNote() {
+  if (providerCredentialSourceEl.value !== 'browser-session') {
+    return '';
+  }
+  if (providerBrowserSessionEl.value) {
+    return state.pendingProviderBrowserSessionFlow
+      ? 'Finish sign-in after the provider page has loaded in the Xia-managed browser.'
+      : 'A saved web account session is ready for this provider.';
+  }
+  return 'Use Start Sign-In to open a Xia-managed browser, complete the provider login there, then finish the connection.';
 }
 
 function syncProviderAuthInputs() {
-  const authType = providerAuthTypeEl.value;
+  const accessMode = providerAccessModeEl.value;
+  const credentialSource = providerCredentialSourceEl.value;
   const providerSaving = state.providerSaving;
   const template = providerTemplateById(providerTemplateEl.value);
-  const actions = providerVisibleActions(template, authType);
+  const actions = providerVisibleActions(template, accessMode, credentialSource);
   const primaryAction = actions[0] || null;
   const accountAction = actions.find((action) => action.label === 'Open Account') || null;
   const docsAction = actions.find((action) => action.label === 'Open Docs') || null;
-  providerAuthTypeEl.disabled = providerSaving;
   providerTemplateEl.disabled = providerSaving;
-  providerOauthAccountEl.disabled = providerSaving || authType !== 'oauth-account';
-  providerApiKeyEl.disabled = providerSaving || authType !== 'api-key';
+  providerAccessModeEl.disabled = providerSaving;
+  providerCredentialSourceEl.disabled = providerSaving;
+  providerOauthAccountEl.hidden = credentialSource !== 'oauth-account';
+  providerOauthAccountEl.disabled = providerSaving || credentialSource !== 'oauth-account';
+  providerApiKeyEl.disabled = providerSaving || credentialSource !== 'api-key';
+  providerBrowserSessionNoteEl.hidden = credentialSource !== 'browser-session';
   providerConfigureOauthEl.hidden = !primaryAction;
   providerConfigureOauthEl.textContent = primaryAction ? primaryAction.label : 'Open Setup';
-  providerConfigureOauthEl.disabled = providerSaving || state.oauthSaving || !primaryAction;
+  providerConfigureOauthEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !primaryAction;
   providerOpenAccountEl.hidden = !accountAction;
-  providerOpenAccountEl.disabled = providerSaving || state.oauthSaving || !accountAction;
+  providerOpenAccountEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !accountAction;
   providerOpenDocsEl.hidden = !docsAction;
-  providerOpenDocsEl.disabled = providerSaving || state.oauthSaving || !docsAction;
+  providerOpenDocsEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !docsAction;
   providerOauthAccountNoteEl.textContent = providerOauthAccountStatusNote();
+  providerBrowserSessionNoteEl.textContent = providerBrowserSessionStatusNote();
 }
 
 function applyProviderTemplate(templateId, options = {}) {
@@ -1129,9 +1313,15 @@ function applyProviderTemplate(templateId, options = {}) {
     providerIdEl.value = template.id || '';
   }
   renderProviderTemplateOptions();
-  renderProviderAuthTypeOptions();
-  if (!options.preserveAuthType) {
-    providerAuthTypeEl.value = defaultProviderAuthType(template);
+  renderProviderAccessModeOptions();
+  if (!options.preserveAccessMode) {
+    providerAccessModeEl.value = defaultProviderAccessMode(template);
+  }
+  renderProviderCredentialSourceOptions();
+  if (!options.preserveCredentialSource) {
+    providerCredentialSourceEl.value = defaultProviderCredentialSource(template, providerAccessModeEl.value);
+    providerOauthAccountEl.value = '';
+    providerBrowserSessionEl.value = '';
   }
   renderProviderOauthAccountOptions();
   providerStatusEl.textContent = options.statusText || ('Prefilled from ' + firstNonEmpty(template.name, template.id) + '.');
@@ -1141,6 +1331,8 @@ function applyProviderTemplate(templateId, options = {}) {
   if (options.focusTarget === 'api-key') {
     providerApiKeyEl.focus();
   } else if (options.focusTarget === 'oauth-account') {
+    providerOauthAccountEl.focus();
+  } else if (providerCredentialSourceEl.value === 'oauth-account') {
     providerOauthAccountEl.focus();
   } else if (providerModelEl.value) {
     providerModelEl.focus();
@@ -1167,10 +1359,10 @@ function buildProviderTemplateCard(template) {
 
   const tags = document.createElement('div');
   tags.className = 'template-card-tags';
-  providerTemplateAuthTypes(template).forEach((authType) => {
+  providerTemplateAccessModes(template).forEach((accessMode) => {
     const badge = document.createElement('span');
     badge.className = 'template-badge';
-    badge.textContent = providerAuthTypeLabel(authType);
+    badge.textContent = firstNonEmpty(accessMode.label, providerAccessModeLabel(accessMode.id));
     tags.appendChild(badge);
   });
   (template.sign_in_options || []).forEach((option) => {
@@ -1209,13 +1401,15 @@ function buildProviderTemplateCard(template) {
     });
   });
   actions.appendChild(useButton);
-  providerVisibleActions(template, defaultProviderAuthType(template)).forEach((action) => {
+  providerVisibleActions(template,
+    defaultProviderAccessMode(template),
+    defaultProviderCredentialSource(template, defaultProviderAccessMode(template))).forEach((action) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'secondary';
     button.textContent = action.label;
     button.disabled = state.providerSaving || state.oauthSaving;
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       if (action.kind === 'oauth') {
         switchTab('settings-tab');
         if (!state.activeProviderId) {
@@ -1229,7 +1423,7 @@ function buildProviderTemplateCard(template) {
           statusText: 'Template applied. Finish setting up sign-in, then save the model.'
         });
       }
-      openProviderPrimaryAction(action, {
+      await openProviderPrimaryAction(action, {
         statusEl: providerOnboardingStatusEl,
         statusText: 'Opened setup for ' + firstNonEmpty(template.name, template.id) + '.',
         globalStatus: 'Opened provider setup'
@@ -1320,8 +1514,10 @@ function captureProviderDraft() {
     template: providerTemplateEl.value,
     baseUrl: providerBaseUrlEl.value,
     model: providerModelEl.value,
-    authType: providerAuthTypeEl.value,
+    accessMode: providerAccessModeEl.value,
+    credentialSource: providerCredentialSourceEl.value,
     oauthAccount: providerOauthAccountEl.value,
+    browserSession: providerBrowserSessionEl.value,
     workloads: parseProviderWorkloadsInput(),
     systemPromptBudget: providerSystemPromptBudgetEl.value,
     historyBudget: providerHistoryBudgetEl.value,
@@ -1342,10 +1538,14 @@ function restoreProviderDraft(draft, options = {}) {
   providerModelEl.value = draft.model || '';
   renderProviderTemplateOptions();
   providerTemplateEl.value = draft.template || providerTemplateEl.value || defaultProviderTemplateId();
-  renderProviderAuthTypeOptions();
-  providerAuthTypeEl.value = draft.authType || defaultProviderAuthType(providerTemplateById(providerTemplateEl.value));
+  renderProviderAccessModeOptions();
+  providerAccessModeEl.value = draft.accessMode || defaultProviderAccessMode(providerTemplateById(providerTemplateEl.value));
+  renderProviderCredentialSourceOptions();
+  providerCredentialSourceEl.value = draft.credentialSource
+    || defaultProviderCredentialSource(providerTemplateById(providerTemplateEl.value), providerAccessModeEl.value);
   renderProviderOauthAccountOptions();
   providerOauthAccountEl.value = draft.oauthAccount || '';
+  providerBrowserSessionEl.value = draft.browserSession || '';
   providerWorkloadsEl.value = Array.isArray(draft.workloads) ? draft.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = draft.systemPromptBudget || '';
   providerHistoryBudgetEl.value = draft.historyBudget || '';
@@ -1383,8 +1583,10 @@ function suggestedProviderOauthAccountId(draft) {
 function syncPendingProviderOauthDraft(accountId) {
   if (!state.providerDraft) return;
   state.providerDraft = Object.assign({}, state.providerDraft, {
-    authType: 'oauth-account',
-    oauthAccount: accountId || ''
+    accessMode: 'account',
+    credentialSource: 'oauth-account',
+    oauthAccount: accountId || '',
+    browserSession: ''
   });
   if (state.pendingProviderOauthFlow) {
     state.pendingProviderOauthFlow = Object.assign({}, state.pendingProviderOauthFlow, {
@@ -1393,11 +1595,101 @@ function syncPendingProviderOauthDraft(accountId) {
   }
 }
 
-function beginProviderOauthSetup() {
-  if (providerAuthTypeEl.value !== 'oauth-account') {
-    providerAuthTypeEl.value = 'oauth-account';
-    syncProviderAuthInputs();
+function syncPendingProviderBrowserSessionDraft(sessionId, connectorId) {
+  if (!state.providerDraft) return;
+  state.providerDraft = Object.assign({}, state.providerDraft, {
+    accessMode: 'account',
+    credentialSource: 'browser-session',
+    oauthAccount: '',
+    browserSession: sessionId || ''
+  });
+  if (state.pendingProviderBrowserSessionFlow) {
+    state.pendingProviderBrowserSessionFlow = Object.assign({}, state.pendingProviderBrowserSessionFlow, {
+      connectorId: connectorId || state.pendingProviderBrowserSessionFlow.connectorId || '',
+      sessionId: sessionId || ''
+    });
   }
+}
+
+async function beginProviderBrowserSessionSetup(connectorId, options = {}) {
+  const template = providerTemplateById(providerTemplateEl.value);
+  const reconnecting = !!providerBrowserSessionEl.value && !state.pendingProviderBrowserSessionFlow;
+  if (providerAccessModeEl.value !== 'account') {
+    providerAccessModeEl.value = 'account';
+    renderProviderCredentialSourceOptions();
+  }
+  if (providerCredentialSourceEl.value !== 'browser-session') {
+    providerCredentialSourceEl.value = 'browser-session';
+  }
+  syncProviderAuthInputs();
+  state.providerDraft = captureProviderDraft();
+  if (!state.pendingProviderBrowserSessionFlow || reconnecting) {
+    state.pendingProviderBrowserSessionFlow = {
+      connectorId: connectorId || (template && template.account_connector) || '',
+      sessionId: '',
+      providerName: firstNonEmpty(providerNameEl.value, template && template.name, providerTemplateEl.value, 'provider')
+    };
+  }
+  const pending = state.pendingProviderBrowserSessionFlow || {};
+
+  state.providerAccountConnecting = true;
+  providerBrowserSessionNoteEl.textContent = pending.sessionId
+    ? 'Checking the local browser sign-in...'
+    : 'Opening a Xia-managed browser...';
+  updateAdminButtons();
+  try {
+    if (pending.sessionId) {
+      const data = await fetchJson('/admin/provider-account-connectors/' + encodeURIComponent(pending.connectorId || connectorId) + '/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          browser_session: pending.sessionId
+        })
+      });
+      const connection = data.connection || {};
+      providerBrowserSessionEl.value = connection.session_id || pending.sessionId || '';
+      state.pendingProviderBrowserSessionFlow = null;
+      syncPendingProviderBrowserSessionDraft(providerBrowserSessionEl.value, connectorId);
+      providerStatusEl.textContent = 'Web account session is ready. Save the model when you are done.';
+      providerBrowserSessionNoteEl.textContent = connection.message || 'Web account session is ready.';
+      if (options.globalStatus) setStatus(options.globalStatus);
+    } else {
+      const data = await fetchJson('/admin/provider-account-connectors/' + encodeURIComponent(connectorId) + '/start', {
+        method: 'POST'
+      });
+      const connection = data.connection || {};
+      providerBrowserSessionEl.value = connection.session_id || '';
+      state.pendingProviderBrowserSessionFlow = {
+        connectorId: connection.connector || connectorId,
+        sessionId: connection.session_id || '',
+        providerName: pending.providerName || firstNonEmpty(providerNameEl.value, template && template.name, 'provider')
+      };
+      syncPendingProviderBrowserSessionDraft(providerBrowserSessionEl.value, connection.connector || connectorId);
+      providerStatusEl.textContent = connection.message || 'Finish the provider sign-in in the browser window, then click Finish Sign-In.';
+      providerBrowserSessionNoteEl.textContent = connection.message || 'Finish the provider sign-in in the browser window, then click Finish Sign-In.';
+      if (options.globalStatus) setStatus(options.globalStatus);
+    }
+  } catch (err) {
+    providerStatusEl.textContent = err.message || 'Failed to start account sign-in.';
+    providerBrowserSessionNoteEl.textContent = err.message || 'Failed to start account sign-in.';
+  } finally {
+    state.providerAccountConnecting = false;
+    syncProviderAuthInputs();
+    updateAdminButtons();
+  }
+}
+
+function beginProviderOauthSetup() {
+  if (providerAccessModeEl.value !== 'account') {
+    providerAccessModeEl.value = 'account';
+    renderProviderCredentialSourceOptions();
+  }
+  if (providerCredentialSourceEl.value !== 'oauth-account') {
+    providerCredentialSourceEl.value = 'oauth-account';
+  }
+  providerBrowserSessionEl.value = '';
+  state.pendingProviderBrowserSessionFlow = null;
+  syncProviderAuthInputs();
   const draft = captureProviderDraft();
   const template = providerTemplateById(draft.template);
   const linkedAccount = (state.admin.oauthAccounts || []).find((account) => account.id === draft.oauthAccount);
@@ -1437,11 +1729,42 @@ function beginProviderOauthSetup() {
 
 function oauthAccountMeta(account) {
   const bits = [];
+  if (account.connection_mode === 'manual-token') bits.push('Manual token');
+  if (account.connection_mode === 'oauth-flow') bits.push('OAuth flow');
   bits.push(account.connected ? 'Connected' : 'Not connected');
   if (account.refresh_token_configured) bits.push('Refresh token stored');
   if (account.autonomous_approved) bits.push('Autonomous approved');
   if (account.expires_at) bits.push('Expires ' + formatStamp(account.expires_at));
   return bits.join(' • ');
+}
+
+function currentOauthConnectionMode() {
+  return oauthConnectionModeEl.value === 'manual-token' ? 'manual-token' : 'oauth-flow';
+}
+
+function syncOauthAccountInputs() {
+  const manualToken = currentOauthConnectionMode() === 'manual-token';
+  oauthAccessTokenFieldEl.hidden = false;
+  oauthTokenTypeFieldEl.hidden = false;
+  oauthExpiresAtFieldEl.hidden = false;
+  oauthAuthorizeUrlFieldEl.hidden = manualToken;
+  oauthTokenUrlFieldEl.hidden = manualToken;
+  oauthClientIdFieldEl.hidden = manualToken;
+  oauthClientSecretFieldEl.hidden = manualToken;
+  oauthScopesFieldEl.hidden = manualToken;
+  oauthRedirectUriFieldEl.hidden = manualToken;
+  oauthAuthParamsFieldEl.hidden = manualToken;
+  oauthTokenParamsFieldEl.hidden = manualToken;
+  oauthTemplateEl.disabled = state.oauthSaving || manualToken;
+  applyOauthTemplateEl.disabled = state.oauthSaving || manualToken;
+  if (manualToken) {
+    oauthTemplateNoteEl.textContent = 'Store a durable provider token directly. Xia will use it as an API credential without an OAuth browser flow.';
+  } else {
+    const current = state.admin.oauthProviderTemplates.find((template) => template.id === oauthTemplateEl.value);
+    oauthTemplateNoteEl.textContent = current
+      ? ((current.description || 'OAuth provider preset.') + (current.notes ? ' ' + current.notes : ''))
+      : 'Choose a preset for common providers, then fill in your client id and client secret.';
+  }
 }
 
 function oauthTemplateMeta(template) {
@@ -1714,6 +2037,8 @@ function renderHistoryScheduleRuns() {
 }
 
 function updateAdminButtons() {
+  const activeOauthAccount = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId) || null;
+  const manualOauthToken = currentOauthConnectionMode() === 'manual-token';
   knowledgeQueryEl.disabled = state.knowledgeSearching;
   searchKnowledgeEl.disabled = state.knowledgeSearching || !knowledgeQueryEl.value.trim();
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
@@ -1751,13 +2076,24 @@ function updateAdminButtons() {
   databaseBackupRetainCountEl.disabled = state.databaseBackupSaving;
   saveDatabaseBackupEl.disabled = state.databaseBackupSaving;
   oauthAccountIdEl.disabled = state.oauthSaving || !!state.activeOauthAccountId;
+  oauthAccountNameEl.disabled = state.oauthSaving;
+  oauthConnectionModeEl.disabled = state.oauthSaving;
+  oauthAccessTokenEl.disabled = state.oauthSaving;
+  oauthTokenTypeEl.disabled = state.oauthSaving;
+  oauthExpiresAtEl.disabled = state.oauthSaving;
+  oauthAuthorizeUrlEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthTokenUrlEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthClientIdEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthClientSecretEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthScopesEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthRedirectUriEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthAuthParamsEl.disabled = state.oauthSaving || manualOauthToken;
+  oauthTokenParamsEl.disabled = state.oauthSaving || manualOauthToken;
   saveOauthAccountEl.disabled = state.oauthSaving;
   newOauthAccountEl.disabled = state.oauthSaving;
-  oauthTemplateEl.disabled = state.oauthSaving;
-  applyOauthTemplateEl.disabled = state.oauthSaving;
   oauthAccountCreateServiceEl.disabled = state.oauthSaving || !state.activeOauthAccountId;
-  connectOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;
-  refreshOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;
+  connectOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId || manualOauthToken;
+  refreshOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId || manualOauthToken || !(activeOauthAccount && activeOauthAccount.refresh_token_configured);
   deleteOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;
   serviceIdEl.disabled = state.serviceSaving || !!state.activeServiceId;
   saveServiceEl.disabled = state.serviceSaving;
@@ -1775,6 +2111,7 @@ function updateAdminButtons() {
   openclawImportSourceEl.disabled = state.openclawImporting;
   openclawImportStrictEl.disabled = state.openclawImporting;
   openclawImportButtonEl.disabled = state.openclawImporting || !openclawImportSourceEl.value.trim();
+  syncOauthAccountInputs();
   syncProviderAuthInputs();
 }
 
@@ -1795,7 +2132,7 @@ function renderOauthAccountList() {
     oauthAccountListEl,
     state.admin.oauthAccounts,
     state.activeOauthAccountId,
-    'No connections configured yet. Add one for APIs that need a real OAuth flow.',
+    'No connections configured yet. Add one for APIs that use OAuth or a durable manual token.',
     (account) => firstNonEmpty(account.name, account.id),
     oauthAccountMeta,
     selectOauthAccount
@@ -1816,10 +2153,7 @@ function renderOauthTemplateOptions() {
     oauthTemplateEl.appendChild(option);
   });
   oauthTemplateEl.value = selected || '';
-  const current = state.admin.oauthProviderTemplates.find((template) => template.id === oauthTemplateEl.value);
-  oauthTemplateNoteEl.textContent = current
-    ? ((current.description || 'OAuth provider preset.') + (current.notes ? ' ' + current.notes : ''))
-    : 'Choose a preset for common providers, then fill in your client id and client secret.';
+  syncOauthAccountInputs();
 }
 
 function renderOauthAccountOptions() {
@@ -1891,13 +2225,16 @@ function resetProviderForm(statusText) {
   state.activeProviderId = '';
   state.providerDraft = null;
   state.pendingProviderOauthFlow = null;
+  state.pendingProviderBrowserSessionFlow = null;
   providerIdEl.value = '';
   providerNameEl.value = '';
   providerTemplateEl.value = defaultProviderTemplateId();
   providerBaseUrlEl.value = '';
   providerModelEl.value = '';
-  providerAuthTypeEl.value = '';
+  providerAccessModeEl.value = '';
+  providerCredentialSourceEl.value = '';
   providerOauthAccountEl.value = '';
+  providerBrowserSessionEl.value = '';
   providerWorkloadsEl.value = '';
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
@@ -1906,7 +2243,8 @@ function resetProviderForm(statusText) {
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !state.admin.providers.some((provider) => provider.default);
   renderProviderTemplateOptions();
-  renderProviderAuthTypeOptions();
+  renderProviderAccessModeOptions();
+  renderProviderCredentialSourceOptions();
   renderProviderOauthAccountOptions();
   const templateId = providerTemplateEl.value;
   if (templateId) {
@@ -2106,6 +2444,10 @@ function resetOauthAccountForm(statusText) {
   state.activeOauthAccountId = '';
   oauthAccountIdEl.value = '';
   oauthAccountNameEl.value = '';
+  oauthConnectionModeEl.value = 'oauth-flow';
+  oauthAccessTokenEl.value = '';
+  oauthTokenTypeEl.value = 'Bearer';
+  oauthExpiresAtEl.value = '';
   oauthAuthorizeUrlEl.value = '';
   oauthTokenUrlEl.value = '';
   oauthClientIdEl.value = '';
@@ -2161,16 +2503,20 @@ function selectProvider(provider) {
   state.activeProviderId = provider.id || '';
   state.providerDraft = null;
   state.pendingProviderOauthFlow = null;
+  state.pendingProviderBrowserSessionFlow = null;
   providerIdEl.value = provider.id || '';
   providerNameEl.value = provider.name || '';
   providerTemplateEl.value = provider.template || '';
   providerBaseUrlEl.value = provider.base_url || '';
   providerModelEl.value = provider.model || '';
   renderProviderTemplateOptions();
-  renderProviderAuthTypeOptions();
-  providerAuthTypeEl.value = provider.auth_type || defaultProviderAuthType(providerTemplateById(provider.template));
+  renderProviderAccessModeOptions();
+  providerAccessModeEl.value = provider.access_mode || providerAccessMode(provider);
+  renderProviderCredentialSourceOptions();
+  providerCredentialSourceEl.value = provider.credential_source || providerCredentialSource(provider);
   renderProviderOauthAccountOptions();
   providerOauthAccountEl.value = provider.oauth_account || '';
+  providerBrowserSessionEl.value = provider.browser_session || '';
   providerWorkloadsEl.value = Array.isArray(provider.workloads) ? provider.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
@@ -2178,9 +2524,21 @@ function selectProvider(provider) {
   providerVisionEl.checked = !!provider.vision;
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !!provider.default;
-  providerStatusEl.textContent = provider.api_key_configured
-    ? 'API key stored. Enter a new one to replace it.'
-    : 'No API key stored yet.';
+  if (providerCredentialSource(provider) === 'oauth-account') {
+    providerStatusEl.textContent = provider.oauth_account_connected
+      ? 'API sign-in connected.'
+      : 'API sign-in still needs to be connected.';
+  } else if (providerCredentialSource(provider) === 'browser-session') {
+    providerStatusEl.textContent = provider.browser_session_connected
+      ? 'Web account session is ready.'
+      : 'Web account session needs to be reconnected.';
+  } else if (providerCredentialSource(provider) === 'api-key') {
+    providerStatusEl.textContent = provider.api_key_configured
+      ? 'API key stored. Enter a new one to replace it.'
+      : 'No API key stored yet.';
+  } else {
+    providerStatusEl.textContent = 'No credential required.';
+  }
   if (provider.effective_rate_limit_per_minute) {
     providerStatusEl.textContent += ' Rate limit: ' + provider.effective_rate_limit_per_minute + '/min.';
   }
@@ -2190,8 +2548,8 @@ function selectProvider(provider) {
       providerStatusEl.textContent += ' Last error: ' + provider.health_last_error;
     }
   }
-  if (provider.auth_type === 'oauth-account' && provider.oauth_account_name) {
-    providerStatusEl.textContent += ' Linked sign-in: ' + provider.oauth_account_name + '.';
+  if (providerCredentialSource(provider) === 'oauth-account' && provider.oauth_account_name) {
+    providerStatusEl.textContent += ' API sign-in: ' + provider.oauth_account_name + '.';
   }
   renderProviderWorkloadNote();
   renderProviderList();
@@ -2202,6 +2560,10 @@ function selectOauthAccount(account) {
   state.activeOauthAccountId = account.id || '';
   oauthAccountIdEl.value = account.id || '';
   oauthAccountNameEl.value = account.name || '';
+  oauthConnectionModeEl.value = account.connection_mode || 'oauth-flow';
+  oauthAccessTokenEl.value = '';
+  oauthTokenTypeEl.value = account.token_type || 'Bearer';
+  oauthExpiresAtEl.value = account.expires_at || '';
   oauthAuthorizeUrlEl.value = account.authorize_url || '';
   oauthTokenUrlEl.value = account.token_url || '';
   oauthClientIdEl.value = account.client_id || '';
@@ -2214,7 +2576,8 @@ function selectOauthAccount(account) {
   oauthTemplateEl.value = account.provider_template || '';
   renderOauthTemplateOptions();
   oauthAccountStatusEl.textContent = [
-    account.client_secret_configured ? 'Secret stored.' : 'No secret stored.',
+    account.connection_mode === 'manual-token' ? 'Manual token connection.' : (account.client_secret_configured ? 'Secret stored.' : 'No secret stored.'),
+    account.access_token_configured ? 'Access token stored.' : 'No access token stored.',
     account.connected ? 'Connected.' : 'Not connected.',
     account.refresh_token_configured ? 'Refresh token stored.' : ''
   ].filter(Boolean).join(' ');
@@ -2566,7 +2929,8 @@ async function loadAdminConfigImpl() {
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
     renderProviderTemplateOptions();
-    renderProviderAuthTypeOptions();
+    renderProviderAccessModeOptions();
+    renderProviderCredentialSourceOptions();
     renderProviderOauthAccountOptions();
     renderProviderWorkloadNote();
     renderConversationContextSettings();
@@ -2738,6 +3102,10 @@ function applyOauthTemplate() {
     state.activeOauthAccountId = '';
   }
   renderOauthAccountList();
+  oauthConnectionModeEl.value = 'oauth-flow';
+  oauthAccessTokenEl.value = '';
+  oauthTokenTypeEl.value = 'Bearer';
+  oauthExpiresAtEl.value = '';
   oauthAccountIdEl.value = oauthAccountIdEl.value.trim() || template.id || '';
   oauthAccountNameEl.value = template.name || '';
   oauthAuthorizeUrlEl.value = template.authorize_url || '';
@@ -2748,6 +3116,7 @@ function applyOauthTemplate() {
   oauthTokenParamsEl.value = template.token_params || '';
   oauthTemplateEl.value = template.id || '';
   oauthAccountStatusEl.textContent = 'Preset applied. Enter your Client ID and Secret.';
+  syncOauthAccountInputs();
   updateAdminButtons();
   oauthClientIdEl.focus();
 }
@@ -2795,8 +3164,10 @@ async function saveProvider() {
         template: providerTemplateEl.value,
         base_url: providerBaseUrlEl.value,
         model: providerModelEl.value,
-        auth_type: providerAuthTypeEl.value,
+        access_mode: providerAccessModeEl.value,
+        credential_source: providerCredentialSourceEl.value,
         oauth_account: providerOauthAccountEl.value,
+        browser_session: providerBrowserSessionEl.value,
         workloads: parseProviderWorkloadsInput(),
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
@@ -2810,6 +3181,7 @@ async function saveProvider() {
     state.activeProviderId = provider && provider.id ? provider.id : state.activeProviderId;
     state.providerDraft = null;
     state.pendingProviderOauthFlow = null;
+    state.pendingProviderBrowserSessionFlow = null;
     providerApiKeyEl.value = '';
     providerStatusEl.textContent = 'Model saved.';
     await loadAdminConfig();
@@ -3016,6 +3388,10 @@ async function saveOauthAccount() {
       body: JSON.stringify({
         id: oauthAccountIdEl.value,
         name: oauthAccountNameEl.value,
+        connection_mode: oauthConnectionModeEl.value,
+        access_token: oauthAccessTokenEl.value,
+        token_type: oauthTokenTypeEl.value,
+        expires_at: oauthExpiresAtEl.value,
         authorize_url: oauthAuthorizeUrlEl.value,
         token_url: oauthTokenUrlEl.value,
         client_id: oauthClientIdEl.value,
@@ -3033,12 +3409,13 @@ async function saveOauthAccount() {
     if (account && state.pendingProviderOauthFlow) {
       syncPendingProviderOauthDraft(account.id || '');
     }
+    oauthAccessTokenEl.value = '';
     oauthClientSecretEl.value = '';
     oauthAccountStatusEl.textContent = 'Connection saved.';
     await loadAdminConfig();
     if (account && state.pendingProviderOauthFlow) {
       restoreProviderDraft(state.providerDraft, {
-        statusText: 'Linked sign-in saved. Connect it, then save the model.'
+        statusText: 'API sign-in saved. Connect it, then save the model.'
       });
     }
     setStatus('Connection saved');
@@ -3053,6 +3430,10 @@ async function saveOauthAccount() {
 async function connectOauthAccount() {
   if (!state.activeOauthAccountId || state.oauthSaving) {
     oauthAccountStatusEl.textContent = 'Save the details first, then connect.';
+    return;
+  }
+  if (currentOauthConnectionMode() === 'manual-token') {
+    oauthAccountStatusEl.textContent = 'Manual token connections do not use Connect Now.';
     return;
   }
   if (state.pendingProviderOauthFlow && state.providerDraft) {
@@ -3083,6 +3464,15 @@ async function connectOauthAccount() {
 
 async function refreshOauthAccount() {
   if (!state.activeOauthAccountId || state.oauthSaving) return;
+  const account = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);
+  if (currentOauthConnectionMode() === 'manual-token') {
+    oauthAccountStatusEl.textContent = 'Manual token connections do not use Refresh.';
+    return;
+  }
+  if (account && !account.refresh_token_configured) {
+    oauthAccountStatusEl.textContent = 'This connection has no refresh token.';
+    return;
+  }
   if (state.pendingProviderOauthFlow && state.providerDraft) {
     state.providerDraft = captureProviderDraft();
   }
@@ -4315,7 +4705,8 @@ newProviderEl.addEventListener('click', () => {
 
 providerTemplateEl.addEventListener('change', () => {
   renderProviderTemplateOptions();
-  renderProviderAuthTypeOptions();
+  renderProviderAccessModeOptions();
+  renderProviderCredentialSourceOptions();
   renderProviderOauthAccountOptions();
   const template = providerTemplateById(providerTemplateEl.value);
   if (template) {
@@ -4324,7 +4715,8 @@ providerTemplateEl.addEventListener('change', () => {
       preserveName: false,
       preserveBaseUrl: false,
       preserveModel: false,
-      preserveAuthType: false,
+      preserveAccessMode: false,
+      preserveCredentialSource: false,
       statusText: 'Template applied. Review the details, then save the model.'
     });
   } else {
@@ -4332,9 +4724,23 @@ providerTemplateEl.addEventListener('change', () => {
     updateAdminButtons();
   }
 });
-providerAuthTypeEl.addEventListener('change', () => {
-  if (providerAuthTypeEl.value !== 'oauth-account') {
+providerAccessModeEl.addEventListener('change', () => {
+  if (providerAccessModeEl.value !== 'account') {
     state.pendingProviderOauthFlow = null;
+    state.pendingProviderBrowserSessionFlow = null;
+    providerBrowserSessionEl.value = '';
+  }
+  renderProviderCredentialSourceOptions();
+  syncProviderAuthInputs();
+  updateAdminButtons();
+});
+providerCredentialSourceEl.addEventListener('change', () => {
+  if (providerCredentialSourceEl.value !== 'oauth-account') {
+    state.pendingProviderOauthFlow = null;
+  }
+  if (providerCredentialSourceEl.value !== 'browser-session') {
+    state.pendingProviderBrowserSessionFlow = null;
+    providerBrowserSessionEl.value = '';
   }
   syncProviderAuthInputs();
   updateAdminButtons();
@@ -4346,9 +4752,9 @@ providerOauthAccountEl.addEventListener('change', () => {
   syncProviderAuthInputs();
   updateAdminButtons();
 });
-providerConfigureOauthEl.addEventListener('click', () => {
+providerConfigureOauthEl.addEventListener('click', async () => {
   const action = currentProviderPrimaryAction();
-  openProviderPrimaryAction(action, {
+  await openProviderPrimaryAction(action, {
     statusEl: providerStatusEl,
     statusText: action && action.kind === 'external'
       ? 'Opened setup in a new tab.'
@@ -4356,15 +4762,15 @@ providerConfigureOauthEl.addEventListener('click', () => {
     globalStatus: action && action.kind === 'external' ? 'Opened provider setup' : undefined
   });
 });
-providerOpenAccountEl.addEventListener('click', () => {
-  openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account'), {
+providerOpenAccountEl.addEventListener('click', async () => {
+  await openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account'), {
     statusEl: providerStatusEl,
     statusText: 'Opened provider account in a new tab.',
     globalStatus: 'Opened provider account'
   });
 });
-providerOpenDocsEl.addEventListener('click', () => {
-  openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'docs'), {
+providerOpenDocsEl.addEventListener('click', async () => {
+  await openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'docs'), {
     statusEl: providerStatusEl,
     statusText: 'Opened provider docs in a new tab.',
     globalStatus: 'Opened provider docs'
@@ -4385,6 +4791,10 @@ newOauthAccountEl.addEventListener('click', () => {
   oauthAccountIdEl.focus();
 });
 
+oauthConnectionModeEl.addEventListener('change', () => {
+  syncOauthAccountInputs();
+  updateAdminButtons();
+});
 oauthTemplateEl.addEventListener('change', () => renderOauthTemplateOptions());
 applyOauthTemplateEl.addEventListener('click', () => applyOauthTemplate());
 saveOauthAccountEl.addEventListener('click', () => saveOauthAccount());
@@ -4473,8 +4883,8 @@ window.addEventListener('message', (event) => {
       if (completedPendingFlow && state.providerDraft) {
         restoreProviderDraft(state.providerDraft, {
           statusText: data.status === 'ok'
-            ? 'Linked sign-in connected. Save the model to finish.'
-            : 'Linked sign-in failed. Check the connection details and try again.',
+            ? 'API sign-in connected. Save the model to finish.'
+            : 'API sign-in failed. Check the connection details and try again.',
           scroll: true
         });
         if (data.status === 'ok') {

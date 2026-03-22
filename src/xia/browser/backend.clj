@@ -11,11 +11,13 @@
   (install-browser-deps!* [this opts]
     "Install or preview browser system dependencies for this backend.")
   (open-session* [this url opts]
-    "Open a new browser session.")
+    "Open a new browser session. Backends may honor :js, :storage-state, and backend-specific options such as :headless in opts.")
   (navigate* [this session-id url]
     "Navigate an existing session to a new URL.")
   (click* [this session-id selector]
     "Click an element in an existing session.")
+  (fill-selector* [this session-id selector value opts]
+    "Fill an element matching a CSS selector.")
   (fill-form* [this session-id fields opts]
     "Fill and optionally submit a form in an existing session.")
   (read-page* [this session-id]

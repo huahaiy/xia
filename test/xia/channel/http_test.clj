@@ -1168,7 +1168,8 @@
                         :base-url "https://api.openai.com/v1"
                         :api-key  "sk-secret"
                         :model    "gpt-5"
-                        :auth-type :api-key
+                        :access-mode :api
+                        :credential-source :api-key
                         :workloads #{:assistant :history-compaction}
                         :system-prompt-budget 16000
                         :history-budget 32000
@@ -1244,6 +1245,8 @@
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
     (is (= "openai" (get provider "template")))
+    (is (= "api" (get provider "access_mode")))
+    (is (= "api-key" (get provider "credential_source")))
     (is (= "api-key" (get provider "auth_type")))
     (is (= true (get provider "default")))
     (is (= ["assistant" "history-compaction"] (get provider "workloads")))
@@ -1294,7 +1297,11 @@
            (set (map #(get % "id") llm-workloads))))
     (is (= #{"claude" "custom" "deepseek" "glm" "minimax" "ollama" "openai" "qwen"}
            (set (map #(get % "id") (get body "llm_provider_templates")))))
-    (is (= ["api-key"] (get openai-template "auth_types")))
+    (is (= #{"browser-session" "api-key"} (set (get openai-template "auth_types"))))
+    (is (= "account" (get-in openai-template ["access_modes" 0 "id"])))
+    (is (= true (get-in openai-template ["access_modes" 0 "default"])))
+    (is (= "browser-session" (get-in openai-template ["access_modes" 0 "credential_sources" 0])))
+    (is (= "openai-browser" (get openai-template "account_connector")))
     (is (= "https://platform.openai.com/" (get openai-template "account_url")))
     (is (= "https://platform.openai.com/api-keys" (get openai-template "api_key_url")))
     (is (= "https://help.openai.com/en/articles/4936850-where-do-i-find-my-api-key"
@@ -1707,6 +1714,7 @@
 (deftest admin-oauth-account-routes-save-connect-and-delete
   (db/register-oauth-account! {:id            :google
                                :name          "Google"
+                               :connection-mode :oauth-flow
                                :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
                                :token-url     "https://oauth2.googleapis.com/token"
                                :client-id     "client-id"
@@ -1730,10 +1738,12 @@
         account       (db/get-oauth-account :google)]
     (is (= 200 (:status save-response)))
     (is (= "Google Workspace" (get-in save-body ["oauth_account" "name"])))
+    (is (= "oauth-flow" (get-in save-body ["oauth_account" "connection_mode"])))
     (is (= "google" (get-in save-body ["oauth_account" "provider_template"])))
     (is (= true (get-in save-body ["oauth_account" "autonomous_approved"])))
     (is (= "client-secret" (:oauth.account/client-secret account)))
     (is (= true (:oauth.account/autonomous-approved? account)))
+    (is (= :oauth-flow (:oauth.account/connection-mode account)))
     (is (= :google (:oauth.account/provider-template account)))
     (is (= "{\"access_type\":\"offline\"}" (:oauth.account/auth-params account))))
   (with-redefs [xia.oauth/start-authorization!
@@ -1782,6 +1792,38 @@
     (is (= 409 (:status response)))
     (is (= "oauth account is still referenced by a provider or service"
            (get body "error")))))
+
+(deftest admin-oauth-account-route-supports-manual-token-connections
+  (let [save-response (#'http/router {:uri            "/admin/oauth-accounts"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"id" "claude-token"
+                                                                     "name" "Claude Token"
+                                                                     "connection_mode" "manual-token"
+                                                                     "provider_template" ""
+                                                                     "access_token" "token-123"
+                                                                     "token_type" "Bearer"
+                                                                     "expires_at" "2027-03-22T00:00:00Z"
+                                                                     "autonomous_approved" true})})
+        save-body     (response-json save-response)
+        account       (db/get-oauth-account :claude-token)]
+    (is (= 200 (:status save-response)))
+    (is (= "manual-token" (get-in save-body ["oauth_account" "connection_mode"])))
+    (is (= true (get-in save-body ["oauth_account" "access_token_configured"])))
+    (is (= true (get-in save-body ["oauth_account" "connected"])))
+    (is (= "Bearer" (get-in save-body ["oauth_account" "token_type"])))
+    (is (= :manual-token (:oauth.account/connection-mode account)))
+    (is (= "token-123" (:oauth.account/access-token account)))
+    (is (= "Bearer" (:oauth.account/token-type account)))
+    (is (= "2027-03-22T00:00:00Z" (str (.toInstant ^java.util.Date (:oauth.account/expires-at account)))))
+    (is (nil? (:oauth.account/authorize-url account))))
+  (let [connect-response (#'http/router {:uri            "/admin/oauth-accounts/claude-token/connect"
+                                         :request-method :post
+                                         :headers        (ui-headers)})
+        connect-body     (response-json connect-response)]
+    (is (= 400 (:status connect-response)))
+    (is (= "manual-token connections do not support Connect Now"
+           (get connect-body "error")))))
 
 (deftest admin-resource-routes-default-autonomous-approval-to-true
   (let [oauth-response (#'http/router {:uri            "/admin/oauth-accounts"
@@ -1950,22 +1992,85 @@
                                  :headers        (ui-headers)
                                  :body           (request-body {"id" "openai"
                                                                 "name" "OpenAI"
-                                                                "template" "openai"
+                                                                "template" "custom"
                                                                 "base_url" "https://api.openai.com/v1"
                                                                 "model" "gpt-5"
-                                                                "auth_type" "oauth-account"
+                                                                "access_mode" "account"
+                                                                "credential_source" "oauth-account"
                                                                 "oauth_account" "openai-login"
                                                                 "default" true})})
         body     (response-json response)
         provider (db/get-provider :openai)]
     (is (= 200 (:status response)))
-    (is (= "openai" (get-in body ["provider" "template"])))
+    (is (= "custom" (get-in body ["provider" "template"])))
+    (is (= "api" (get-in body ["provider" "access_mode"])))
+    (is (= "oauth-account" (get-in body ["provider" "credential_source"])))
     (is (= "oauth-account" (get-in body ["provider" "auth_type"])))
     (is (= "openai-login" (get-in body ["provider" "oauth_account"])))
     (is (= "OpenAI Login" (get-in body ["provider" "oauth_account_name"])))
-    (is (= :openai (:llm.provider/template provider)))
+    (is (= :custom (:llm.provider/template provider)))
+    (is (= :api (:llm.provider/access-mode provider)))
+    (is (= :oauth-account (:llm.provider/credential-source provider)))
     (is (= :oauth-account (:llm.provider/auth-type provider)))
     (is (= :openai-login (:llm.provider/oauth-account provider)))))
+
+(deftest admin-provider-route-links-browser-session-account
+  (with-redefs [xia.llm-account-connector/browser-session-connected? (constantly true)]
+    (let [response (#'http/router {:uri            "/admin/providers"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"id" "openai-account"
+                                                                  "name" "OpenAI Account"
+                                                                  "template" "openai"
+                                                                  "base_url" "https://api.openai.com/v1"
+                                                                  "model" "gpt-5"
+                                                                  "access_mode" "account"
+                                                                  "credential_source" "browser-session"
+                                                                  "browser_session" "browser-session-1"
+                                                                  "default" true})})
+          body     (response-json response)
+          provider (db/get-provider :openai-account)]
+      (is (= 200 (:status response)))
+      (is (= "browser-session" (get-in body ["provider" "credential_source"])))
+      (is (= "browser-session" (get-in body ["provider" "auth_type"])))
+      (is (= "browser-session-1" (get-in body ["provider" "browser_session"])))
+      (is (= true (get-in body ["provider" "browser_session_connected"])))
+      (is (= :account (:llm.provider/access-mode provider)))
+      (is (= :browser-session (:llm.provider/credential-source provider)))
+      (is (= :browser-session (:llm.provider/auth-type provider)))
+      (is (= "browser-session-1" (:llm.provider/browser-session provider))))))
+
+(deftest admin-provider-account-connector-routes-start-and-complete
+  (with-redefs [xia.llm-account-connector/start-connection!
+                (fn [connector]
+                  (is (= :openai-browser connector))
+                  {:connector  :openai-browser
+                   :session-id "browser-session-1"
+                   :login-url  "https://chatgpt.com/"
+                   :message    "Start sign-in"})
+                xia.llm-account-connector/complete-connection!
+                (fn [connector session-id]
+                  (is (= :openai-browser connector))
+                  (is (= "browser-session-1" session-id))
+                  {:connector  :openai-browser
+                   :session-id session-id
+                   :connected  true
+                   :message    "Connected"})]
+    (let [start-response (#'http/router {:uri            "/admin/provider-account-connectors/openai-browser/start"
+                                         :request-method :post
+                                         :headers        (ui-headers)})
+          start-body     (response-json start-response)
+          complete-response (#'http/router {:uri            "/admin/provider-account-connectors/openai-browser/complete"
+                                            :request-method :post
+                                            :headers        (ui-headers)
+                                            :body           (request-body {"browser_session" "browser-session-1"})})
+          complete-body     (response-json complete-response)]
+      (is (= 200 (:status start-response)))
+      (is (= "openai-browser" (get-in start-body ["connection" "connector"])))
+      (is (= "browser-session-1" (get-in start-body ["connection" "session_id"])))
+      (is (= 200 (:status complete-response)))
+      (is (= true (get-in complete-body ["connection" "connected"])))
+      (is (= "Connected" (get-in complete-body ["connection" "message"]))))))
 
 (deftest admin-service-route-preserves-secret-and-clears-unused-header
   (db/register-service! {:id          :github

@@ -1,6 +1,7 @@
 (ns xia.llm-test
   (:require [clojure.test :refer :all]
             [charred.api :as json]
+            [xia.llm-account-connector :as llm-account-connector]
             [xia.llm :as llm]))
 
 (deftest build-request-sets-request-timeout
@@ -69,8 +70,53 @@
                                                              :oauth.account/token-type "Bearer"})
                 xia.oauth/oauth-header (constantly "Bearer oauth-token")]
     (is (= "Bearer oauth-token"
-           (#'llm/provider-auth-header {:llm.provider/auth-type :oauth-account
+           (#'llm/provider-auth-header {:llm.provider/credential-source :oauth-account
                                         :llm.provider/oauth-account :openai-login})))))
+
+(deftest provider-access-mode-normalizes-runtime-model
+  (is (= :api
+         (llm/provider-access-mode {:llm.provider/access-mode :account
+                                    :llm.provider/credential-source :oauth-account})))
+  (is (= :account
+         (llm/provider-access-mode {:llm.provider/access-mode :api
+                                    :llm.provider/credential-source :browser-session}))))
+
+(deftest chat-simple-can-use-browser-session-account-connector
+  (let [calls (atom [])]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :openai-account
+                               :llm.provider/template :openai
+                               :llm.provider/access-mode :account
+                               :llm.provider/credential-source :browser-session
+                               :llm.provider/browser-session "browser-session-1"
+                               :llm.provider/model "gpt-5"})
+                  xia.config/positive-long
+                  (fn [_ default-value] default-value)
+                  xia.llm-account-connector/request-chat
+                  (fn [provider messages opts]
+                    (swap! calls conj {:provider provider
+                                       :messages messages
+                                       :opts opts})
+                    {"choices" [{"message" {"content" "browser-account-response"}}]})]
+      (is (= "browser-account-response"
+             (llm/chat-simple [{"role" "user" "content" "hello"}])))
+      (is (= 1 (count @calls)))
+      (is (= "browser-session-1"
+             (get-in (first @calls) [:provider :llm.provider/browser-session]))))))
+
+(deftest openai-account-connector-starts-visible-managed-browser
+  (let [calls (atom [])]
+    (with-redefs [xia.browser/open-session
+                  (fn [url & {:as opts}]
+                    (swap! calls conj {:url url :opts opts})
+                    {:session-id "browser-session-1"})]
+      (let [result (llm-account-connector/start-connection! :openai-browser)]
+        (is (= :openai-browser (:connector result)))
+        (is (= "browser-session-1" (:session-id result)))
+        (is (= {:url "https://chatgpt.com/"
+                :opts {:backend :playwright
+                       :headless false}}
+               (first @calls)))))))
 
 (deftest vision-capable-checks-provider-flag
   (is (true? (llm/vision-capable? {:llm.provider/id :vision

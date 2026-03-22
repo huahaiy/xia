@@ -5,6 +5,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.llm-account-connector :as account-connector]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http]
@@ -620,22 +621,59 @@
      :retry-enabled? true
      :request-label "LLM request"}))
 
-(defn- provider-auth-type
+(defn provider-credential-source
+  "Return the normalized credential source for a provider."
   [provider]
-  (let [auth-type (or (:llm.provider/auth-type provider)
+  (let [auth-type (or (:llm.provider/credential-source provider)
+                      (:credential-source provider)
+                      (:llm.provider/auth-type provider)
                       (:auth-type provider))]
     (cond
       (keyword? auth-type) auth-type
       (string? auth-type)  (keyword auth-type)
+      (some? (or (:llm.provider/browser-session provider)
+                 (:browser-session provider))) :browser-session
       (some? (or (:llm.provider/oauth-account provider)
                  (:oauth-account provider))) :oauth-account
       (seq (or (:llm.provider/api-key provider)
                (:api-key provider))) :api-key
       :else :none)))
 
+(defn provider-access-mode
+  "Return the normalized access mode for a provider.
+
+   :local   = built-in/local runtime access
+   :account = web account session access
+   :api     = programmatic API credential access"
+  [provider]
+  (let [access-mode (or (:llm.provider/access-mode provider)
+                        (:access-mode provider))
+        credential-source (provider-credential-source provider)
+        template-id (or (:llm.provider/template provider)
+                        (:template provider))
+        base-url    (or (:llm.provider/base-url provider)
+                        (:base-url provider))]
+    (cond
+      (= :browser-session credential-source)
+      :account
+
+      (or (= :oauth-account credential-source)
+          (= :api-key credential-source))
+      :api
+
+      (keyword? access-mode) access-mode
+      (string? access-mode)  (keyword access-mode)
+
+      (or (= template-id :ollama)
+          (loopback-base-url? base-url))
+      :local
+
+      :else
+      :api)))
+
 (defn- provider-auth-header
   [provider]
-  (case (provider-auth-type provider)
+  (case (provider-credential-source provider)
     :none
     nil
 
@@ -650,6 +688,9 @@
     (when-let [account-id (or (:llm.provider/oauth-account provider)
                               (:oauth-account provider))]
       (oauth/oauth-header (oauth/ensure-account-ready! account-id)))
+
+    :browser-session
+    nil
 
     nil))
 
@@ -742,45 +783,49 @@
 
 (defn- attempt-chat
   [messages opts {:keys [provider provider-id workload]}]
-  (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
-        model     (or (:llm.provider/model provider) (:model provider))
-        auth-header (provider-auth-header provider)
-        request-config {:base-url base-url
-                        :auth-header auth-header
-                        :model model
-                        :allow-private-network? (provider-allows-private-network? provider)}
-        _         (check-rate-limit! provider-id provider workload)
-        req       (build-request request-config messages opts)
-        fallback-req (when (streaming-request? opts)
-                       (build-request request-config
-                                      messages
-                                      (dissoc opts :on-delta)))
-        _         (log/debug "LLM request via provider" provider-id
-                             "to" base-url
-                             "model" model
-                             (when workload (str "workload " workload)))
-        resp      (if (streaming-request? opts)
-                    (stream-chat-response req fallback-req opts provider-id workload)
-                    (http/request req))
-        status    (:status resp)]
-    (when (not= 200 status)
-      (throw (ex-info (str "LLM request failed with status " status)
-                      {:status      status
-                       :headers     (:headers resp)
-                       :body        (:body resp)
-                       :provider-id provider-id
-                        :workload    workload})))
-    (let [response (if (:streamed? resp)
-                     (or (:response resp)
-                         (parse-response-body (:body resp) provider-id workload))
-                     (parse-response-body (:body resp) provider-id workload))]
-      (when (:stream-recovered? resp)
-        (maybe-report-recovered-stream-content! opts
-                                                provider-id
-                                                workload
-                                                (:stream-partial-content resp)
-                                                response))
-      response)))
+  (if (account-connector/connector-id provider)
+    (do
+      (check-rate-limit! provider-id provider workload)
+      (account-connector/request-chat provider messages opts))
+    (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
+          model     (or (:llm.provider/model provider) (:model provider))
+          auth-header (provider-auth-header provider)
+          request-config {:base-url base-url
+                          :auth-header auth-header
+                          :model model
+                          :allow-private-network? (provider-allows-private-network? provider)}
+          _         (check-rate-limit! provider-id provider workload)
+          req       (build-request request-config messages opts)
+          fallback-req (when (streaming-request? opts)
+                         (build-request request-config
+                                        messages
+                                        (dissoc opts :on-delta)))
+          _         (log/debug "LLM request via provider" provider-id
+                               "to" base-url
+                               "model" model
+                               (when workload (str "workload " workload)))
+          resp      (if (streaming-request? opts)
+                      (stream-chat-response req fallback-req opts provider-id workload)
+                      (http/request req))
+          status    (:status resp)]
+      (when (not= 200 status)
+        (throw (ex-info (str "LLM request failed with status " status)
+                        {:status      status
+                         :headers     (:headers resp)
+                         :body        (:body resp)
+                         :provider-id provider-id
+                          :workload    workload})))
+      (let [response (if (:streamed? resp)
+                       (or (:response resp)
+                           (parse-response-body (:body resp) provider-id workload))
+                       (parse-response-body (:body resp) provider-id workload))]
+        (when (:stream-recovered? resp)
+          (maybe-report-recovered-stream-content! opts
+                                                  provider-id
+                                                  workload
+                                                  (:stream-partial-content resp)
+                                                  response))
+        response))))
 
 (defn- attempt-provider-round
   [messages opts attempts]

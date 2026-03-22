@@ -17,30 +17,18 @@
   <div class="shell">
     <div class="frame">
       <header class="hero">
-        <div class="hero-copy">
-          <div class="hero-brand">
-            <img src="favicon/android-chrome-192x192.png" alt="Xia logo" class="hero-logo">
-            <div class="hero-brand-copy">
-              <div class="eyebrow">Personal Assistant</div>
-              <h1>Xia</h1>
-            </div>
+        <div class="hero-brand">
+          <img src="favicon/android-chrome-192x192.png" alt="Xia logo" class="hero-logo">
+          <div class="hero-brand-copy">
+            <div class="eyebrow">Personal Assistant</div>
+            <h1>Xia</h1>
           </div>
-          <p class="tagline">“There is an old story about the Snail Maiden, a gentle spirit who appears each day to care for a home before anyone returns. Xia is a modern echo of that tale.”</p>
-          <p class="lead">Xia is an online-first assistant for research, memory, automation, and the quiet tending that accumulates around digital life. Anything Xia cannot read from disk can be provided through these tools.</p>
         </div>
-        <aside class="hero-meta">
-          <div class="meta-row">
-            <h2 class="meta-label">Status</h2>
-            <div class="status-pill" id="status">Ready</div>
-          </div>
-          <div class="meta-row">
-            <h2 class="meta-label">Current Session</h2>
-            <div class="meta-value" id="session-label">New local session</div>
-          </div>
-          <div class="actions">
-            <button type="button" class="secondary" id="new-chat">New session</button>
-          </div>
-        </aside>
+        <div class="hero-status">
+          <div class="status-pill" id="status">Ready</div>
+          <span class="meta-value" id="session-label">New local session</span>
+          <button type="button" class="secondary" id="new-chat">New session</button>
+        </div>
       </header>
 
       <nav class="tabs">
@@ -299,19 +287,25 @@
                   <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o">
                 </div>
                 <div class="field">
-                  <label class="field-label">Connection Method</label>
-                  <select id="provider-auth-type" class="text-input"></select>
+                  <label class="field-label">Connection Model</label>
+                  <select id="provider-access-mode" class="text-input"></select>
                 </div>
-	                <div class="field">
-		                  <label class="field-label">Linked Sign-In</label>
-		                  <select id="provider-oauth-account" class="text-input"></select>
-		                  <p class="secret-note" id="provider-oauth-account-note"></p>
-		                  <div class="actions" style="margin-top:8px">
-		                    <button type="button" class="secondary" id="provider-configure-oauth">Open Setup</button>
-		                    <button type="button" class="secondary" id="provider-open-account" hidden>Open Account</button>
-		                    <button type="button" class="secondary" id="provider-open-docs" hidden>Open Docs</button>
-		                  </div>
-		                </div>
+                <div class="field">
+                  <label class="field-label">Credential Type</label>
+                  <select id="provider-credential-source" class="text-input"></select>
+                </div>
+                <div class="field">
+                  <label class="field-label">Saved Sign-In</label>
+                  <select id="provider-oauth-account" class="text-input"></select>
+                  <p class="secret-note" id="provider-oauth-account-note"></p>
+                  <input type="hidden" id="provider-browser-session">
+                  <p class="secret-note" id="provider-browser-session-note"></p>
+                  <div class="actions" style="margin-top:8px">
+                    <button type="button" class="secondary" id="provider-configure-oauth">Open Setup</button>
+                    <button type="button" class="secondary" id="provider-open-account" hidden>Open Account</button>
+                    <button type="button" class="secondary" id="provider-open-docs" hidden>Open Docs</button>
+                  </div>
+                </div>
                 <div class="field full advanced-only">
                   <label class="field-label">Workloads</label>
                   <input type="text" id="provider-workloads" class="text-input" placeholder="assistant, history-compaction">
@@ -452,35 +446,54 @@
                   <label class="field-label">Display Name</label>
                   <input type="text" id="oauth-account-name" class="text-input" placeholder="GitHub">
                 </div>
-                <div class="field full advanced-only">
+                <div class="field">
+                  <label class="field-label">Connection Type</label>
+                  <select id="oauth-connection-mode" class="text-input">
+                    <option value="oauth-flow">OAuth flow</option>
+                    <option value="manual-token">Manual API token</option>
+                  </select>
+                </div>
+                <div class="field full" id="oauth-access-token-field">
+                  <label class="field-label">Access Token</label>
+                  <input type="password" id="oauth-access-token" class="text-input" placeholder="Paste a durable provider token">
+                </div>
+                <div class="field" id="oauth-token-type-field">
+                  <label class="field-label">Token Type</label>
+                  <input type="text" id="oauth-token-type" class="text-input" placeholder="Bearer">
+                </div>
+                <div class="field" id="oauth-expires-at-field">
+                  <label class="field-label">Expires At (Optional)</label>
+                  <input type="text" id="oauth-expires-at" class="text-input" placeholder="2027-03-22T00:00:00Z">
+                </div>
+                <div class="field full advanced-only" id="oauth-authorize-url-field">
                   <label class="field-label">Authorize URL</label>
                   <input type="text" id="oauth-authorize-url" class="text-input">
                 </div>
-                <div class="field full advanced-only">
+                <div class="field full advanced-only" id="oauth-token-url-field">
                   <label class="field-label">Token URL</label>
                   <input type="text" id="oauth-token-url" class="text-input">
                 </div>
-                <div class="field">
+                <div class="field" id="oauth-client-id-field">
                   <label class="field-label">Client ID</label>
                   <input type="text" id="oauth-client-id" class="text-input">
                 </div>
-                <div class="field">
+                <div class="field" id="oauth-client-secret-field">
                   <label class="field-label">Client Secret</label>
                   <input type="password" id="oauth-client-secret" class="text-input">
                 </div>
-                <div class="field full advanced-only">
+                <div class="field full advanced-only" id="oauth-scopes-field">
                   <label class="field-label">Scopes</label>
                   <input type="text" id="oauth-scopes" class="text-input">
                 </div>
-                <div class="field full advanced-only">
+                <div class="field full advanced-only" id="oauth-redirect-uri-field">
                   <label class="field-label">Redirect URI (Optional)</label>
                   <input type="text" id="oauth-redirect-uri" class="text-input" placeholder="Leave blank for default">
                 </div>
-                <div class="field advanced-only">
+                <div class="field advanced-only" id="oauth-auth-params-field">
                   <label class="field-label">Auth Params (JSON)</label>
                   <input type="text" id="oauth-auth-params" class="text-input" placeholder="{}">
                 </div>
-                <div class="field advanced-only">
+                <div class="field advanced-only" id="oauth-token-params-field">
                   <label class="field-label">Token Params (JSON)</label>
                   <input type="text" id="oauth-token-params" class="text-input" placeholder="{}">
                 </div>
@@ -879,6 +892,11 @@
 
       <footer class="hero footer">
         <p class="lead">Xia v0.1.0 • Built for local work with online power.</p>
+        <div class="footer-links">
+          <a href="https://github.com/huahaiy/xia" target="_blank" rel="noopener">GitHub</a>
+          <span>•</span>
+          <a href="https://github.com/sponsors/huahaiy" target="_blank" rel="noopener">Sponsor</a>
+        </div>
       </footer>
     </div>
   </div>

@@ -45,8 +45,11 @@
    :llm.provider/base-url {:db/valueType :db.type/string}
    :llm.provider/api-key  {:db/valueType :db.type/string}
    :llm.provider/template {:db/valueType :db.type/keyword}
+   :llm.provider/access-mode {:db/valueType :db.type/keyword}
+   :llm.provider/credential-source {:db/valueType :db.type/keyword}
    :llm.provider/auth-type {:db/valueType :db.type/keyword}
    :llm.provider/oauth-account {:db/valueType :db.type/keyword}
+   :llm.provider/browser-session {:db/valueType :db.type/string}
    :llm.provider/model    {:db/valueType :db.type/string}
    :llm.provider/workloads {:db/valueType :db.type/keyword
                             :db/cardinality :db.cardinality/many}
@@ -335,6 +338,7 @@
    ;; --- OAuth Accounts (authorization-code + PKCE / refresh-token auth) ---
    :oauth.account/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :oauth.account/name          {:db/valueType :db.type/string}
+   :oauth.account/connection-mode {:db/valueType :db.type/keyword}
    :oauth.account/authorize-url {:db/valueType :db.type/string}
    :oauth.account/token-url     {:db/valueType :db.type/string}
    :oauth.account/client-id     {:db/valueType :db.type/string}
@@ -1083,10 +1087,18 @@
                                                 provider-id))
         template-id                  (or (:llm.provider/template provider)
                                          (:template provider))
+        access-mode                  (or (:llm.provider/access-mode provider)
+                                         (:access-mode provider))
+        credential-source            (or (:llm.provider/credential-source provider)
+                                         (:credential-source provider)
+                                         (:llm.provider/auth-type provider)
+                                         (:auth-type provider))
         auth-type                    (or (:llm.provider/auth-type provider)
                                          (:auth-type provider))
         oauth-account                (or (:llm.provider/oauth-account provider)
                                          (:oauth-account provider))
+        browser-session              (or (:llm.provider/browser-session provider)
+                                         (:browser-session provider))
         workloads                    (some-> (or (:llm.provider/workloads provider)
                                                 (:workloads provider))
                                              set)
@@ -1104,10 +1116,16 @@
                                          (contains? provider :workloads))
         has-template?                (or (contains? provider :llm.provider/template)
                                          (contains? provider :template))
-        has-auth-type?               (or (contains? provider :llm.provider/auth-type)
+        has-access-mode?             (or (contains? provider :llm.provider/access-mode)
+                                         (contains? provider :access-mode))
+        has-credential-source?       (or (contains? provider :llm.provider/credential-source)
+                                         (contains? provider :credential-source)
+                                         (contains? provider :llm.provider/auth-type)
                                          (contains? provider :auth-type))
         has-oauth-account?           (or (contains? provider :llm.provider/oauth-account)
                                          (contains? provider :oauth-account))
+        has-browser-session?         (or (contains? provider :llm.provider/browser-session)
+                                         (contains? provider :browser-session))
         has-vision?                  (or (contains? provider :llm.provider/vision?)
                                          (contains? provider :vision?))
         has-allow-private-network?   (or (contains? provider :llm.provider/allow-private-network?)
@@ -1134,12 +1152,21 @@
                                        (and has-template?
                                             (some? template-id))
                                        (assoc :llm.provider/template template-id)
-                                       (and has-auth-type?
-                                            (some? auth-type))
-                                       (assoc :llm.provider/auth-type auth-type)
+                                       (and has-access-mode?
+                                            (some? access-mode))
+                                       (assoc :llm.provider/access-mode access-mode)
+                                       (and has-credential-source?
+                                            (some? credential-source))
+                                       (assoc :llm.provider/credential-source credential-source)
+                                       (and has-credential-source?
+                                            (some? credential-source))
+                                       (assoc :llm.provider/auth-type credential-source)
                                        (and has-oauth-account?
                                             (some? oauth-account))
                                        (assoc :llm.provider/oauth-account oauth-account)
+                                       (and has-browser-session?
+                                            (some? browser-session))
+                                       (assoc :llm.provider/browser-session browser-session)
                                        (contains? provider :llm.provider/model)
                                        (assoc :llm.provider/model (:llm.provider/model provider))
                                        (contains? provider :model)
@@ -1179,8 +1206,18 @@
                                        (conj [:db/retract provider-eid
                                               :llm.provider/template])
                                        (and provider-eid
-                                            has-auth-type?
-                                            (nil? auth-type))
+                                            has-access-mode?
+                                            (nil? access-mode))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/access-mode])
+                                       (and provider-eid
+                                            has-credential-source?
+                                            (nil? credential-source))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/credential-source])
+                                       (and provider-eid
+                                            has-credential-source?
+                                            (nil? credential-source))
                                        (conj [:db/retract provider-eid
                                               :llm.provider/auth-type])
                                        (and provider-eid
@@ -1188,6 +1225,11 @@
                                             (nil? oauth-account))
                                        (conj [:db/retract provider-eid
                                               :llm.provider/oauth-account])
+                                       (and provider-eid
+                                            has-browser-session?
+                                            (nil? browser-session))
+                                       (conj [:db/retract provider-eid
+                                              :llm.provider/browser-session])
                                        (and provider-eid
                                             has-system-prompt-budget?
                                             (nil? system-prompt-budget))
@@ -1850,7 +1892,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn save-oauth-account!
-  [{:keys [id name authorize-url token-url client-id client-secret scopes
+  [{:keys [id name connection-mode authorize-url token-url client-id client-secret scopes
            provider-template redirect-uri auth-params token-params access-token refresh-token
            token-type expires-at connected-at autonomous-approved?]}]
   (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] id))
@@ -1858,9 +1900,6 @@
         now     (java.util.Date.)
         tx-data (cond-> [{:oauth.account/id            id
                           :oauth.account/name          (or name (clojure.core/name id))
-                          :oauth.account/authorize-url authorize-url
-                          :oauth.account/token-url     token-url
-                          :oauth.account/client-id     client-id
                           :oauth.account/scopes        (or scopes "")
                           :oauth.account/autonomous-approved? (if (some? autonomous-approved?)
                                                                 autonomous-approved?
@@ -1868,6 +1907,18 @@
                                                                   (:oauth.account/autonomous-approved? current)
                                                                   true))
                           :oauth.account/updated-at    now}]
+                  connection-mode
+                  (update 0 assoc :oauth.account/connection-mode connection-mode)
+
+                  authorize-url
+                  (update 0 assoc :oauth.account/authorize-url authorize-url)
+
+                  token-url
+                  (update 0 assoc :oauth.account/token-url token-url)
+
+                  client-id
+                  (update 0 assoc :oauth.account/client-id client-id)
+
                   (some? client-secret)
                   (update 0 assoc :oauth.account/client-secret (or client-secret ""))
 
@@ -1897,6 +1948,34 @@
 
                   connected-at
                   (update 0 assoc :oauth.account/connected-at connected-at)
+
+                  (and eid
+                       (nil? connection-mode)
+                       (contains? current :oauth.account/connection-mode))
+                  (conj [:db/retract eid
+                         :oauth.account/connection-mode
+                         (:oauth.account/connection-mode current)])
+
+                  (and eid
+                       (nil? authorize-url)
+                       (contains? current :oauth.account/authorize-url))
+                  (conj [:db/retract eid
+                         :oauth.account/authorize-url
+                         (:oauth.account/authorize-url current)])
+
+                  (and eid
+                       (nil? token-url)
+                       (contains? current :oauth.account/token-url))
+                  (conj [:db/retract eid
+                         :oauth.account/token-url
+                         (:oauth.account/token-url current)])
+
+                  (and eid
+                       (nil? client-id)
+                       (contains? current :oauth.account/client-id))
+                  (conj [:db/retract eid
+                         :oauth.account/client-id
+                         (:oauth.account/client-id current)])
 
                   (and eid
                        (nil? provider-template)

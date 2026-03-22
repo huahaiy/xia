@@ -109,15 +109,34 @@
                                :access-token  "access-token"})
   (db/upsert-provider! {:id            :openai
                         :name          "OpenAI"
-                        :template      :openai
+                        :template      :custom
                         :base-url      "https://api.openai.com/v1"
                         :model         "gpt-5"
-                        :auth-type     :oauth-account
+                        :access-mode   :account
+                        :credential-source :oauth-account
                         :oauth-account :openai-login})
   (let [provider (db/get-provider :openai)]
-    (is (= :openai (:llm.provider/template provider)))
+    (is (= :custom (:llm.provider/template provider)))
+    (is (= :account (:llm.provider/access-mode provider)))
+    (is (= :oauth-account (:llm.provider/credential-source provider)))
     (is (= :oauth-account (:llm.provider/auth-type provider)))
     (is (= :openai-login (:llm.provider/oauth-account provider)))))
+
+(deftest providers-persist-browser-session-account-connector-settings
+  (db/upsert-provider! {:id                :openai-account
+                        :name              "OpenAI Account"
+                        :template          :openai
+                        :base-url          "https://api.openai.com/v1"
+                        :model             "gpt-5"
+                        :access-mode       :account
+                        :credential-source :browser-session
+                        :browser-session   "browser-session-1"})
+  (let [provider (db/get-provider :openai-account)]
+    (is (= :openai (:llm.provider/template provider)))
+    (is (= :account (:llm.provider/access-mode provider)))
+    (is (= :browser-session (:llm.provider/credential-source provider)))
+    (is (= :browser-session (:llm.provider/auth-type provider)))
+    (is (= "browser-session-1" (:llm.provider/browser-session provider)))))
 
 (deftest worker-sessions-are-hidden-by-default
   (let [parent (db/create-session! :terminal)

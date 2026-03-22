@@ -212,11 +212,15 @@
 
   Options:
      :js — enable JavaScript (default true)
-     :backend — browser backend keyword/string (default :auto)"
-  [url & {:keys [js backend] :or {js true}}]
+     :backend — browser backend keyword/string (default :auto)
+     :storage-state — optional backend-specific serialized storage state
+     :headless — optional backend-specific headless override"
+  [url & {:keys [js backend storage-state headless] :or {js true}}]
   (browser.backend/open-session* (backend-by-id (resolve-open-backend-id backend))
                                  url
-                                 {:js js}))
+                                 {:js js
+                                  :storage-state storage-state
+                                  :headless headless}))
 
 (defn navigate
   "Navigate to a new URL in an existing session.
@@ -233,6 +237,15 @@
   (browser.backend/click* (backend-by-id (session-backend-id session-id))
                           session-id
                           selector))
+
+(defn fill-selector
+  "Fill a visible field-like element matching a CSS selector."
+  [session-id selector value]
+  (browser.backend/fill-selector* (backend-by-id (session-backend-id session-id))
+                                  session-id
+                                  selector
+                                  value
+                                  {}))
 
 (defn fill-form
   "Fill form fields and optionally submit.
@@ -346,6 +359,28 @@
                   (map browser.backend/runtime-status*)
                   (sort-by :backend)
                   vec)})
+
+(defn clone-session
+  "Open a new browser session using the serialized storage state from an
+   existing resumable session. Useful for provider-backed account connectors
+   that need a fresh browser context without re-running login."
+  [session-id & {:keys [url js]}]
+  (let [snapshot (or (read-session-snapshot session-id)
+                     (throw (ex-info "No resumable browser session snapshot found"
+                                     {:session-id session-id})))
+        target-url (or url
+                       (get snapshot "current_url")
+                       (throw (ex-info "Browser session snapshot has no current URL"
+                                       {:session-id session-id})))
+        js-enabled (if (nil? js)
+                     (if (contains? snapshot "js_enabled")
+                       (boolean (get snapshot "js_enabled"))
+                       true)
+                     js)]
+    (browser.backend/open-session* (backend-by-id (session-backend-id session-id))
+                                   target-url
+                                   {:js js-enabled
+                                    :storage-state (get snapshot "browser_state")})))
 
 (defn bootstrap-browser-runtime!
   "Prepare one backend runtime, or all backends when backend is :auto."
