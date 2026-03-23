@@ -229,6 +229,25 @@
               </div>
               <div class="admin-status" id="knowledge-status">Search for a person, project, or topic to inspect stored facts.</div>
             </div>
+
+            <div class="admin-card admin-card-wide">
+              <div class="panel-header">
+                <div>
+                  <h3 class="panel-title">LLM Call Log</h3>
+                  <p class="panel-note">Inspect prompts, responses, token usage, and latency for every LLM call.</p>
+                </div>
+                <button type="button" class="secondary" id="refresh-llm-calls">Refresh</button>
+              </div>
+              <div class="llm-log-grid">
+                <div class="admin-list" id="llm-call-list">
+                  <div class="admin-list-empty">LLM calls will appear here once Xia starts making requests.</div>
+                </div>
+                <div class="llm-call-detail" id="llm-call-detail">
+                  <div class="admin-list-empty">Select a call to inspect its prompt and response.</div>
+                </div>
+              </div>
+              <div class="admin-status" id="llm-call-status">Loading LLM call log...</div>
+            </div>
           </div>
         </section>
       </div>
@@ -411,11 +430,9 @@
                   <p class="panel-note">Control how many recent messages stay verbatim in the prompt before older chat history is folded into the rolling recap.</p>
                 </div>
               </div>
-              <div class="field-grid">
-                <div class="field">
-                  <label class="field-label" for="context-recent-history-message-limit">Recent History Window (Messages)</label>
-                  <input type="number" id="context-recent-history-message-limit" class="text-input" min="4" step="1" placeholder="24">
-                </div>
+              <div class="field" style="max-width:240px">
+                <label class="field-label" for="context-recent-history-message-limit">Recent History Window (Messages)</label>
+                <input type="number" id="context-recent-history-message-limit" class="text-input" min="4" step="1" placeholder="24">
               </div>
               <div class="composer-foot">
                 <div class="admin-status" id="context-status">Loading conversation context settings...</div>

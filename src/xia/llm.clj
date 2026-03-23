@@ -845,12 +845,43 @@
            :workload (:workload last-failure)})
         {:status :error
          :error (ex-info "No LLM provider available for request" {})})
-      (let [result (try
+      (let [t0     (now-ms)
+            result (try
                      {:ok? true
                       :response (attempt-chat messages opts attempt)}
                      (catch Exception e
                        {:ok? false
-                        :error e}))]
+                        :error e}))
+            dur-ms (- (now-ms) t0)]
+        (try
+          (let [provider-id (:provider-id attempt)
+                model       (or (:llm.provider/model (:provider attempt))
+                                (:model (:provider attempt)))
+                usage       (when (:ok? result)
+                              (get (:response result) "usage"))
+                log-entry   (cond-> {:provider-id provider-id
+                                     :model       model
+                                     :workload    (:workload attempt)
+                                     :duration-ms dur-ms
+                                     :messages    (json/write-json-str messages)
+                                     :created-at  (java.util.Date.)}
+                              (:ok? result)
+                              (assoc :status   :ok
+                                     :response (json/write-json-str (:response result)))
+                              (not (:ok? result))
+                              (assoc :status :error
+                                     :error  (str (:error result)))
+                              (some? (:tools opts))
+                              (assoc :tools (json/write-json-str (:tools opts)))
+                              (get usage "prompt_tokens")
+                              (assoc :prompt-tokens (get usage "prompt_tokens"))
+                              (get usage "completion_tokens")
+                              (assoc :completion-tokens (get usage "completion_tokens")))]
+            (future (try (db/log-llm-call! log-entry)
+                         (catch Exception e
+                           (log/debug e "Failed to write LLM call log")))))
+          (catch Exception e
+            (log/debug e "Failed to build LLM call log entry")))
         (if (:ok? result)
           (let [response  (:response result)
                 response* (if (instance? clojure.lang.IObj response)

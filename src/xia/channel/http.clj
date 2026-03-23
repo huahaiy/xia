@@ -1669,6 +1669,41 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
+(defn- llm-call-summary->body [entry]
+  (cond-> {:id          (str (:id entry))
+           :provider_id (some-> (:provider-id entry) name)
+           :model       (:model entry)
+           :workload    (some-> (:workload entry) name)
+           :status      (some-> (:status entry) name)
+           :duration_ms (:duration-ms entry)
+           :created_at  (instant->str (:created-at entry))}
+    (:prompt-tokens entry)     (assoc :prompt_tokens (:prompt-tokens entry))
+    (:completion-tokens entry) (assoc :completion_tokens (:completion-tokens entry))
+    (:error entry)             (assoc :error (:error entry))))
+
+(defn- llm-call-detail->body [entry]
+  (cond-> (llm-call-summary->body entry)
+    (:messages entry) (assoc :messages (:messages entry))
+    (:tools entry)    (assoc :tools (:tools entry))
+    (:response entry) (assoc :response (:response entry))))
+
+(defn- handle-list-llm-calls [req]
+  (let [params (parse-query-string (:query-string req))
+        limit  (or (some-> (get params "limit") parse-long) 50)]
+    (json-response 200
+                   {:calls (into [] (map llm-call-summary->body)
+                                 (db/list-llm-calls (min limit 200)))})))
+
+(defn- handle-get-llm-call [call-id]
+  (try
+    (let [uuid (java.util.UUID/fromString call-id)
+          entry (db/get-llm-call uuid)]
+      (if entry
+        (json-response 200 {:call (llm-call-detail->body entry)})
+        (json-response 404 {:error "call not found"})))
+    (catch IllegalArgumentException _
+      (json-response 400 {:error "invalid call id"}))))
+
 (defn- handle-list-scratch-pads [session-id]
   (cond
     (nil? (parse-session-id session-id))
@@ -3042,6 +3077,7 @@
           knowledge-fact-match (re-matches #"/knowledge/facts/([^/]+)" uri)
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
+          llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
           admin-provider-account-start-match (re-matches #"/admin/provider-account-connectors/([^/]+)/start" uri)
           admin-provider-account-complete-match (re-matches #"/admin/provider-account-connectors/([^/]+)/complete" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
@@ -3094,6 +3130,12 @@
 
         (and (= method :get) history-schedule-match)
         (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
+
+        (and (= method :get) (= uri "/llm-calls"))
+        (protected-route-response req #(handle-list-llm-calls req))
+
+        (and (= method :get) llm-call-match)
+        (protected-route-response req #(handle-get-llm-call (second llm-call-match)))
 
         (and (= method :get) scratch-list-match)
         (protected-route-response req #(handle-list-scratch-pads (second scratch-list-match)))

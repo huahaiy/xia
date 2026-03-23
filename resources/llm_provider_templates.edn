@@ -110,6 +110,22 @@
   :docs-url "https://platform.minimax.io/docs/guides/quickstart-preparation"
   :sign-in-options []
   :notes "MiniMax's global compatible endpoint is https://api.minimax.io/v1. China deployments may use https://api.minimaxi.com/v1 instead."}
+ {:id :openrouter
+  :name "OpenRouter"
+  :description "Access hundreds of models through a single API key."
+  :category :cloud
+  :base-url "https://openrouter.ai/api/v1"
+  :model-suggestion "anthropic/claude-sonnet-4"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use an OpenRouter API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://openrouter.ai/"
+  :api-key-url "https://openrouter.ai/keys"
+  :docs-url "https://openrouter.ai/docs"
+  :sign-in-options [:google]
+  :notes "One API key, many models. Create separate entries for different models (e.g. a cheap model for history compaction, a stronger one for assistant)."}
  {:id :custom
   :name "Custom Compatible API"
   :description "Use any compatible endpoint, gateway, or proxy."

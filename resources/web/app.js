@@ -51,6 +51,10 @@ const state = {
     sessionMessages: [],
     scheduleRuns: []
   },
+  llmCalls: [],
+  activeLlmCallId: '',
+  activeLlmCall: null,
+  llmCallsLoading: false,
   knowledgeQuery: '',
   knowledgeNodes: [],
   activeKnowledgeNodeId: '',
@@ -122,6 +126,10 @@ const historyScheduleStatusEl = document.getElementById('history-schedule-status
 const historyScheduleRunsEl = document.getElementById('history-schedule-runs');
 const refreshHistorySessionsEl = document.getElementById('refresh-history-sessions');
 const refreshHistorySchedulesEl = document.getElementById('refresh-history-schedules');
+const llmCallListEl = document.getElementById('llm-call-list');
+const llmCallDetailEl = document.getElementById('llm-call-detail');
+const llmCallStatusEl = document.getElementById('llm-call-status');
+const refreshLlmCallsEl = document.getElementById('refresh-llm-calls');
 const knowledgeQueryEl = document.getElementById('knowledge-query');
 const searchKnowledgeEl = document.getElementById('search-knowledge');
 const knowledgeNodeListEl = document.getElementById('knowledge-node-list');
@@ -2769,6 +2777,141 @@ async function loadHistorySchedulesImpl() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// LLM Call Log
+// ---------------------------------------------------------------------------
+
+function renderLlmCallList() {
+  llmCallListEl.innerHTML = '';
+  if (!state.llmCalls.length) {
+    llmCallListEl.innerHTML = '<div class="admin-list-empty">No LLM calls recorded yet.</div>';
+    return;
+  }
+  state.llmCalls.forEach(function (call) {
+    const button = document.createElement('button');
+    button.className = 'admin-item' + (call.id === state.activeLlmCallId ? ' active' : '');
+    const title = document.createElement('div');
+    title.className = 'admin-item-title';
+    title.textContent = (call.provider_id || '?') + ' / ' + (call.model || '?');
+    const meta = document.createElement('div');
+    meta.className = 'admin-item-meta';
+    const parts = [];
+    if (call.workload) parts.push(call.workload);
+    if (call.status) parts.push(call.status);
+    if (call.duration_ms != null) parts.push(call.duration_ms + 'ms');
+    if (call.prompt_tokens != null || call.completion_tokens != null)
+      parts.push((call.prompt_tokens || 0) + '→' + (call.completion_tokens || 0) + ' tok');
+    if (call.created_at) parts.push(formatStamp(call.created_at));
+    meta.textContent = parts.join(' · ');
+    button.appendChild(title);
+    button.appendChild(meta);
+    button.addEventListener('click', function () { loadLlmCallDetail(call.id); });
+    llmCallListEl.appendChild(button);
+  });
+}
+
+function renderLlmCallDetail() {
+  llmCallDetailEl.innerHTML = '';
+  const call = state.activeLlmCall;
+  if (!call) {
+    llmCallDetailEl.innerHTML = '<div class="admin-list-empty">Select a call to inspect its prompt and response.</div>';
+    return;
+  }
+  // Meta row
+  const metaDiv = document.createElement('div');
+  metaDiv.className = 'llm-call-meta';
+  const metaParts = [call.provider_id, call.model, call.workload, call.status,
+    call.duration_ms != null ? call.duration_ms + 'ms' : null,
+    (call.prompt_tokens != null || call.completion_tokens != null)
+      ? (call.prompt_tokens || 0) + '→' + (call.completion_tokens || 0) + ' tok' : null,
+    call.created_at ? formatStamp(call.created_at) : null].filter(Boolean);
+  metaDiv.textContent = metaParts.join(' · ');
+  llmCallDetailEl.appendChild(metaDiv);
+
+  if (call.error) {
+    const errLabel = document.createElement('div');
+    errLabel.className = 'history-block-label';
+    errLabel.textContent = 'Error';
+    llmCallDetailEl.appendChild(errLabel);
+    const errPre = document.createElement('pre');
+    errPre.textContent = call.error;
+    llmCallDetailEl.appendChild(errPre);
+  }
+  // Messages
+  if (call.messages) {
+    const msgLabel = document.createElement('div');
+    msgLabel.className = 'history-block-label';
+    msgLabel.textContent = 'Messages (prompt)';
+    llmCallDetailEl.appendChild(msgLabel);
+    const msgPre = document.createElement('pre');
+    try { msgPre.textContent = JSON.stringify(JSON.parse(call.messages), null, 2); }
+    catch (_) { msgPre.textContent = call.messages; }
+    llmCallDetailEl.appendChild(msgPre);
+  }
+  // Tools
+  if (call.tools) {
+    const toolLabel = document.createElement('div');
+    toolLabel.className = 'history-block-label';
+    toolLabel.textContent = 'Tools';
+    llmCallDetailEl.appendChild(toolLabel);
+    const toolPre = document.createElement('pre');
+    try { toolPre.textContent = JSON.stringify(JSON.parse(call.tools), null, 2); }
+    catch (_) { toolPre.textContent = call.tools; }
+    llmCallDetailEl.appendChild(toolPre);
+  }
+  // Response
+  if (call.response) {
+    const respLabel = document.createElement('div');
+    respLabel.className = 'history-block-label';
+    respLabel.textContent = 'Response';
+    llmCallDetailEl.appendChild(respLabel);
+    const respPre = document.createElement('pre');
+    try { respPre.textContent = JSON.stringify(JSON.parse(call.response), null, 2); }
+    catch (_) { respPre.textContent = call.response; }
+    llmCallDetailEl.appendChild(respPre);
+  }
+}
+
+async function loadLlmCalls() {
+  state.llmCallsLoading = true;
+  llmCallStatusEl.textContent = 'Loading LLM call log...';
+  try {
+    const data = await fetchJson('/llm-calls?limit=100');
+    state.llmCalls = Array.isArray(data.calls) ? data.calls : [];
+    renderLlmCallList();
+    if (!state.llmCalls.length) {
+      llmCallStatusEl.textContent = 'No LLM calls recorded yet.';
+    } else {
+      llmCallStatusEl.textContent = state.llmCalls.length + (state.llmCalls.length === 1 ? ' call.' : ' calls.');
+      if (!state.activeLlmCallId && state.llmCalls.length) {
+        await loadLlmCallDetail(state.llmCalls[0].id);
+      }
+    }
+  } catch (err) {
+    state.llmCalls = [];
+    renderLlmCallList();
+    llmCallStatusEl.textContent = err.message || 'Failed to load LLM call log.';
+  } finally {
+    state.llmCallsLoading = false;
+  }
+}
+
+async function loadLlmCallDetail(callId) {
+  state.activeLlmCallId = callId;
+  state.activeLlmCall = null;
+  renderLlmCallList();
+  renderLlmCallDetail();
+  if (!callId) return;
+  try {
+    const data = await fetchJson('/llm-calls/' + encodeURIComponent(callId));
+    if (state.activeLlmCallId !== callId) return;
+    state.activeLlmCall = data.call || null;
+    renderLlmCallDetail();
+  } catch (err) {
+    llmCallStatusEl.textContent = err.message || 'Failed to load call detail.';
+  }
+}
+
 async function selectKnowledgeNode(node) {
   const nodeId = (node && node.id) || '';
   state.activeKnowledgeNodeId = nodeId;
@@ -4656,6 +4799,8 @@ clearInputEl.addEventListener('click', () => {
   composerEl.focus();
 });
 
+scratchTitleEl.parentElement.addEventListener('click', () => { if (scratchTitleEl.disabled && !state.activePad) createScratchPad(); });
+scratchEditorEl.parentElement.addEventListener('click', () => { if (scratchEditorEl.disabled && !state.activePad) createScratchPad(); });
 scratchTitleEl.addEventListener('input', trackScratchInput);
 scratchEditorEl.addEventListener('input', trackScratchInput);
 
@@ -4689,6 +4834,7 @@ artifactDownloadEl.addEventListener('click', () => downloadArtifact());
 artifactDeleteEl.addEventListener('click', () => deleteArtifact());
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
+refreshLlmCallsEl.addEventListener('click', () => loadLlmCalls());
 searchKnowledgeEl.addEventListener('click', () => searchKnowledgeNodes());
 knowledgeQueryEl.addEventListener('input', () => updateAdminButtons());
 knowledgeQueryEl.addEventListener('keydown', (event) => {
@@ -4925,7 +5071,8 @@ Promise.all([
   loadScratchPads(),
   loadAdminConfig(),
   loadHistorySessions(),
-  loadHistorySchedules()
+  loadHistorySchedules(),
+  loadLlmCalls()
 ]).catch(() => {
   setStatus('Some data failed to load — check your connection');
 });

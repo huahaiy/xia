@@ -396,6 +396,22 @@
    :schedule-run/error       {:db/valueType :db.type/string}
    :schedule-run/actions     {:db/valueType :db.type/idoc :db/domain "schedule-run-actions"}
 
+   ;; --- LLM Call Log (debug/observability for every LLM request) ---
+   :llm.log/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :llm.log/session-id  {:db/valueType :db.type/uuid}
+   :llm.log/provider-id {:db/valueType :db.type/keyword}
+   :llm.log/model       {:db/valueType :db.type/string}
+   :llm.log/workload    {:db/valueType :db.type/keyword}
+   :llm.log/messages    {:db/valueType :db.type/string}   ; JSON — input messages array
+   :llm.log/tools       {:db/valueType :db.type/string}   ; JSON — tool definitions (if any)
+   :llm.log/response    {:db/valueType :db.type/string}   ; JSON — full response body
+   :llm.log/status      {:db/valueType :db.type/keyword}  ; :ok :error
+   :llm.log/error       {:db/valueType :db.type/string}
+   :llm.log/duration-ms {:db/valueType :db.type/long}
+   :llm.log/prompt-tokens   {:db/valueType :db.type/long}
+   :llm.log/completion-tokens {:db/valueType :db.type/long}
+   :llm.log/created-at  {:db/valueType :db.type/instant}
+
    ;; --- Tool (executable code the LLM can call via function-calling) ---
    :tool/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :tool/name          {:db/valueType :db.type/string}
@@ -2116,3 +2132,86 @@
 
 (defn enable-tool! [tool-id enabled?]
   (transact! [{:tool/id tool-id :tool/enabled? enabled?}]))
+
+;; ---------------------------------------------------------------------------
+;; LLM Call Log
+;; ---------------------------------------------------------------------------
+
+(def ^:private llm-log-retention-ms (* 30 24 60 60 1000)) ; 30 days
+
+(defn- prune-llm-log!
+  "Delete entries older than 30 days."
+  []
+  (let [cutoff (java.util.Date. (- (.getTime (java.util.Date.)) llm-log-retention-ms))
+        old    (q '[:find ?e :in $ ?cutoff
+                    :where
+                    [?e :llm.log/id _]
+                    [?e :llm.log/created-at ?t]
+                    [(< ?t ?cutoff)]]
+                  cutoff)]
+    (when (seq old)
+      (transact! (mapv (fn [[eid]] [:db/retractEntity eid]) old)))))
+
+(defn log-llm-call!
+  "Write an LLM call log entry. `entry` is a map with keys matching :llm.log/* attrs.
+   Automatically prunes entries beyond the retention limit."
+  [entry]
+  (transact! [(merge {:llm.log/id         (or (:id entry) (random-uuid))
+                      :llm.log/created-at (or (:created-at entry) (java.util.Date.))}
+                     (when-let [v (:session-id entry)]  {:llm.log/session-id v})
+                     (when-let [v (:provider-id entry)] {:llm.log/provider-id v})
+                     (when-let [v (:model entry)]       {:llm.log/model v})
+                     (when-let [v (:workload entry)]    {:llm.log/workload v})
+                     (when-let [v (:messages entry)]    {:llm.log/messages v})
+                     (when-let [v (:tools entry)]       {:llm.log/tools v})
+                     (when-let [v (:response entry)]    {:llm.log/response v})
+                     (when-let [v (:status entry)]      {:llm.log/status v})
+                     (when-let [v (:error entry)]       {:llm.log/error v})
+                     (when-let [v (:duration-ms entry)] {:llm.log/duration-ms v})
+                     (when-let [v (:prompt-tokens entry)]     {:llm.log/prompt-tokens v})
+                     (when-let [v (:completion-tokens entry)] {:llm.log/completion-tokens v}))])
+  (prune-llm-log!))
+
+(defn list-llm-calls
+  "Return recent LLM call log entries, newest first. `limit` defaults to 50."
+  ([] (list-llm-calls 50))
+  ([limit]
+   (->> (q '[:find ?e ?t
+             :where
+             [?e :llm.log/id _]
+             [?e :llm.log/created-at ?t]])
+        (sort-by second #(compare %2 %1))
+        (take limit)
+        (mapv (fn [[eid _]]
+                (let [e (raw-entity eid)]
+                  {:id               (:llm.log/id e)
+                   :session-id       (:llm.log/session-id e)
+                   :provider-id      (:llm.log/provider-id e)
+                   :model            (:llm.log/model e)
+                   :workload         (:llm.log/workload e)
+                   :status           (:llm.log/status e)
+                   :error            (:llm.log/error e)
+                   :duration-ms      (:llm.log/duration-ms e)
+                   :prompt-tokens    (:llm.log/prompt-tokens e)
+                   :completion-tokens (:llm.log/completion-tokens e)
+                   :created-at       (:llm.log/created-at e)}))))))
+
+(defn get-llm-call
+  "Return a single LLM call log entry with full messages/response."
+  [call-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))]
+    (let [e (raw-entity eid)]
+      {:id               (:llm.log/id e)
+       :session-id       (:llm.log/session-id e)
+       :provider-id      (:llm.log/provider-id e)
+       :model            (:llm.log/model e)
+       :workload         (:llm.log/workload e)
+       :messages         (:llm.log/messages e)
+       :tools            (:llm.log/tools e)
+       :response         (:llm.log/response e)
+       :status           (:llm.log/status e)
+       :error            (:llm.log/error e)
+       :duration-ms      (:llm.log/duration-ms e)
+       :prompt-tokens    (:llm.log/prompt-tokens e)
+       :completion-tokens (:llm.log/completion-tokens e)
+       :created-at       (:llm.log/created-at e)})))
