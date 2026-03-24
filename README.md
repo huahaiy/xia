@@ -134,3 +134,7 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 ## More Documentation
 
 - Technical and implementation details: [doc/impl.md](doc/impl.md)
+
+## Links
+
+[![Hypercommit](https://img.shields.io/badge/Hypercommit-DB2475)](https://hypercommit.com/xia)
