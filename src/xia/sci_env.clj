@@ -115,14 +115,20 @@
 
 (def ^:private xia-local-doc-ns
   {'list-docs   local-doc/list-docs
+   'list-visible-docs local-doc/list-visible-docs
    'search-docs local-doc/search-docs
-   'read-doc    local-doc/read-doc})
+   'search-visible-docs local-doc/search-visible-docs
+   'read-doc    local-doc/read-doc
+   'read-visible-doc local-doc/read-visible-doc})
 
 (def ^:private xia-artifact-ns
   {'list-artifacts                 artifact/list-artifacts
+   'list-visible-artifacts         artifact/list-visible-artifacts
    'search-artifacts               artifact/search-artifacts
+   'search-visible-artifacts       artifact/search-visible-artifacts
    'get-artifact                   artifact/get-artifact
    'read-artifact                  artifact/read-artifact
+   'read-visible-artifact          artifact/read-visible-artifact
    'create-artifact!               artifact/create-artifact!
    'create-scratch-pad-from-artifact! artifact/create-scratch-pad-from-artifact!
    'delete-artifact!               artifact/delete-artifact!})

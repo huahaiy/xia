@@ -1,0 +1,34 @@
+;; Summarize recent work across sessions so Xia can resume without forcing the user to restate context.
+;; Import with: /import-tool resources/tools/recent-work.edn
+
+{:id             :recent-work
+ :name           "recent-work"
+ :description    "Inspect recent work across current and prior sessions. Use this when the user asks to continue last session's work, pick up where you left off, resume previous work, or refers to 'last time' without enough detail."
+ :tags           #{:resume :session :history :retrieval}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"episode_limit" {"type"        "integer"
+                                                "description" "How many recent episodes to return (default 5)."}
+                                "artifact_limit" {"type"        "integer"
+                                                  "description" "How many recent artifacts to return (default 5)."}
+                                "document_limit" {"type"        "integer"
+                                                  "description" "How many recent local documents to return (default 5)."}
+                                "browser_limit" {"type"        "integer"
+                                                 "description" "How many browser sessions to return (default 5)."}}
+                  "required"   []}
+ :handler        "(fn [args]
+                    (let [episode-limit  (or (get args \"episode_limit\") 5)
+                          artifact-limit (or (get args \"artifact_limit\") 5)
+                          document-limit (or (get args \"document_limit\") 5)
+                          browser-limit  (or (get args \"browser_limit\") 5)]
+                      {:recent_episodes (xia.memory/recent-episodes episode-limit)
+                       :browser_sessions (->> (xia.browser/list-sessions)
+                                              (sort-by (fn [session]
+                                                         [(long (or (:age-seconds session) 0))
+                                                          (str (:session-id session))]))
+                                              (take browser-limit)
+                                              vec)
+                       :artifacts (mapv #(dissoc % :text :sha256 :meta)
+                                        (xia.artifact/list-visible-artifacts :top artifact-limit))
+                       :local_documents (mapv #(dissoc % :text :sha256)
+                                              (xia.local-doc/list-visible-docs :top document-limit))}))"}

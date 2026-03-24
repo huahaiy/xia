@@ -749,114 +749,144 @@
 
 (defn- local-doc-doc-fulltext-hits
   [session-id query & {:keys [top] :or {top 10}}]
-  (if (or (nil? session-id) (str/blank? query))
+  (if (str/blank? query)
     []
     (let [opts {:domains [db/local-doc-domain]
                 :top top
                 :display :refs+scores}]
       (try
-        (->> (db/q '[:find ?e ?a ?v ?score
-                     :in $ ?sid ?query ?opts
-                     :where
-                     [?session :session/id ?sid]
-                     [?e :local.doc/session ?session]
-                     [?e :local.doc/status :ready]
-                     [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
-                   session-id query opts)
+        (->> (if session-id
+               (db/q '[:find ?e ?a ?v ?score
+                       :in $ ?sid ?query ?opts
+                       :where
+                       [?session :session/id ?sid]
+                       [?e :local.doc/session ?session]
+                       [?e :local.doc/status :ready]
+                       [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
+                     session-id query opts)
+               (db/q '[:find ?e ?a ?v ?score
+                       :in $ ?query ?opts
+                       :where
+                       [?e :local.doc/status :ready]
+                       [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
+                     query opts))
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-	               (fn [idx [eid attr value score]]
-	                 {:eid       eid
-	                  :attr      attr
-	                  :value     value
-	                  :lex-score (double score)
-	                  :lex-rank  (indexed-rank idx)}))
+               (fn [idx [eid attr value score]]
+                 {:eid       eid
+                  :attr      attr
+                  :value     value
+                  :lex-score (double score)
+                  :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
 
 (defn- local-doc-doc-embedding-hits
   [session-id query & {:keys [top] :or {top 10}}]
-  (if (or (nil? session-id) (str/blank? query))
+  (if (str/blank? query)
     []
     (let [opts {:domains [db/local-doc-domain]
                 :top top
                 :display :refs+dists}]
       (try
-        (->> (db/q '[:find ?e ?a ?v ?dist
-                     :in $ ?sid ?query ?opts
-                     :where
-                     [?session :session/id ?sid]
-                     [?e :local.doc/session ?session]
-                     [?e :local.doc/status :ready]
-                     [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
-                   session-id query opts)
+        (->> (if session-id
+               (db/q '[:find ?e ?a ?v ?dist
+                       :in $ ?sid ?query ?opts
+                       :where
+                       [?session :session/id ?sid]
+                       [?e :local.doc/session ?session]
+                       [?e :local.doc/status :ready]
+                       [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
+                     session-id query opts)
+               (db/q '[:find ?e ?a ?v ?dist
+                       :in $ ?query ?opts
+                       :where
+                       [?e :local.doc/status :ready]
+                       [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
+                     query opts))
              (sort-by #(double (nth % 3)))
              (map-indexed
-	               (fn [idx [eid attr value distance]]
-	                 {:eid          eid
-	                  :attr         attr
-	                  :value        value
-	                  :sem-distance (double distance)
-	                  :sem-rank     (indexed-rank idx)}))
+               (fn [idx [eid attr value distance]]
+                 {:eid          eid
+                  :attr         attr
+                  :value        value
+                  :sem-distance (double distance)
+                  :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
 
 (defn- local-doc-chunk-fulltext-hits
   [session-id query & {:keys [top] :or {top 10}}]
-  (if (or (nil? session-id) (str/blank? query))
+  (if (str/blank? query)
     []
     (let [opts {:domains [db/local-doc-chunk-domain]
                 :top top
                 :display :refs+scores}]
       (try
-        (->> (db/q '[:find ?chunk ?a ?v ?score
-                     :in $ ?sid ?query ?opts
-                     :where
-                     [?session :session/id ?sid]
-                     [?chunk :local.doc.chunk/session ?session]
-                     [?chunk :local.doc.chunk/doc ?doc]
-                     [?doc :local.doc/status :ready]
-                     [(fulltext $ ?query ?opts) [[?chunk ?a ?v ?score]]]]
-                   session-id query opts)
+        (->> (if session-id
+               (db/q '[:find ?chunk ?a ?v ?score
+                       :in $ ?sid ?query ?opts
+                       :where
+                       [?session :session/id ?sid]
+                       [?chunk :local.doc.chunk/session ?session]
+                       [?chunk :local.doc.chunk/doc ?doc]
+                       [?doc :local.doc/status :ready]
+                       [(fulltext $ ?query ?opts) [[?chunk ?a ?v ?score]]]]
+                     session-id query opts)
+               (db/q '[:find ?chunk ?a ?v ?score
+                       :in $ ?query ?opts
+                       :where
+                       [?chunk :local.doc.chunk/doc ?doc]
+                       [?doc :local.doc/status :ready]
+                       [(fulltext $ ?query ?opts) [[?chunk ?a ?v ?score]]]]
+                     query opts))
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-	               (fn [idx [eid attr value score]]
-	                 {:eid       eid
-	                  :attr      attr
-	                  :value     value
-	                  :lex-score (double score)
-	                  :lex-rank  (indexed-rank idx)}))
+               (fn [idx [eid attr value score]]
+                 {:eid       eid
+                  :attr      attr
+                  :value     value
+                  :lex-score (double score)
+                  :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
 
 (defn- local-doc-chunk-embedding-hits
   [session-id query & {:keys [top] :or {top 10}}]
-  (if (or (nil? session-id) (str/blank? query))
+  (if (str/blank? query)
     []
     (let [opts {:domains [db/local-doc-chunk-domain]
                 :top top
                 :display :refs+dists}]
       (try
-        (->> (db/q '[:find ?chunk ?a ?v ?dist
-                     :in $ ?sid ?query ?opts
-                     :where
-                     [?session :session/id ?sid]
-                     [?chunk :local.doc.chunk/session ?session]
-                     [?chunk :local.doc.chunk/doc ?doc]
-                     [?doc :local.doc/status :ready]
-                     [(embedding-neighbors $ ?query ?opts) [[?chunk ?a ?v ?dist]]]]
-                   session-id query opts)
+        (->> (if session-id
+               (db/q '[:find ?chunk ?a ?v ?dist
+                       :in $ ?sid ?query ?opts
+                       :where
+                       [?session :session/id ?sid]
+                       [?chunk :local.doc.chunk/session ?session]
+                       [?chunk :local.doc.chunk/doc ?doc]
+                       [?doc :local.doc/status :ready]
+                       [(embedding-neighbors $ ?query ?opts) [[?chunk ?a ?v ?dist]]]]
+                     session-id query opts)
+               (db/q '[:find ?chunk ?a ?v ?dist
+                       :in $ ?query ?opts
+                       :where
+                       [?chunk :local.doc.chunk/doc ?doc]
+                       [?doc :local.doc/status :ready]
+                       [(embedding-neighbors $ ?query ?opts) [[?chunk ?a ?v ?dist]]]]
+                     query opts))
              (sort-by #(double (nth % 3)))
              (map-indexed
-	               (fn [idx [eid attr value distance]]
-	                 {:eid          eid
-	                  :attr         attr
-	                  :value        value
-	                  :sem-distance (double distance)
-	                  :sem-rank     (indexed-rank idx)}))
+               (fn [idx [eid attr value distance]]
+                 {:eid          eid
+                  :attr         attr
+                  :value        value
+                  :sem-distance (double distance)
+                  :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -999,56 +1029,70 @@
 
 (defn- artifact-fulltext-hits
   [session-id query & {:keys [top] :or {top 10}}]
-  (if (or (nil? session-id) (str/blank? query))
+  (if (str/blank? query)
     []
     (let [opts {:domains [db/artifact-domain]
                 :top top
                 :display :refs+scores}]
       (try
-        (->> (db/q '[:find ?e ?a ?v ?score
-                     :in $ ?sid ?query ?opts
-                     :where
-                     [?session :session/id ?sid]
-                     [?e :artifact/session ?session]
-                     [?e :artifact/status :ready]
-                     [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
-                   session-id query opts)
+        (->> (if session-id
+               (db/q '[:find ?e ?a ?v ?score
+                       :in $ ?sid ?query ?opts
+                       :where
+                       [?session :session/id ?sid]
+                       [?e :artifact/session ?session]
+                       [?e :artifact/status :ready]
+                       [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
+                     session-id query opts)
+               (db/q '[:find ?e ?a ?v ?score
+                       :in $ ?query ?opts
+                       :where
+                       [?e :artifact/status :ready]
+                       [(fulltext $ ?query ?opts) [[?e ?a ?v ?score]]]]
+                     query opts))
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-	               (fn [idx [eid attr value score]]
-	                 {:eid       eid
-	                  :attr      attr
-	                  :value     value
-	                  :lex-score (double score)
-	                  :lex-rank  (indexed-rank idx)}))
+               (fn [idx [eid attr value score]]
+                 {:eid       eid
+                  :attr      attr
+                  :value     value
+                  :lex-score (double score)
+                  :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
 
 (defn- artifact-embedding-hits
   [session-id query & {:keys [top] :or {top 10}}]
-  (if (or (nil? session-id) (str/blank? query))
+  (if (str/blank? query)
     []
     (let [opts {:domains [db/artifact-domain]
                 :top top
                 :display :refs+dists}]
       (try
-        (->> (db/q '[:find ?e ?a ?v ?dist
-                     :in $ ?sid ?query ?opts
-                     :where
-                     [?session :session/id ?sid]
-                     [?e :artifact/session ?session]
-                     [?e :artifact/status :ready]
-                     [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
-                   session-id query opts)
+        (->> (if session-id
+               (db/q '[:find ?e ?a ?v ?dist
+                       :in $ ?sid ?query ?opts
+                       :where
+                       [?session :session/id ?sid]
+                       [?e :artifact/session ?session]
+                       [?e :artifact/status :ready]
+                       [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
+                     session-id query opts)
+               (db/q '[:find ?e ?a ?v ?dist
+                       :in $ ?query ?opts
+                       :where
+                       [?e :artifact/status :ready]
+                       [(embedding-neighbors $ ?query ?opts) [[?e ?a ?v ?dist]]]]
+                     query opts))
              (sort-by #(double (nth % 3)))
              (map-indexed
-	               (fn [idx [eid attr value distance]]
-	                 {:eid          eid
-	                  :attr         attr
-	                  :value        value
-	                  :sem-distance (double distance)
-	                  :sem-rank     (indexed-rank idx)}))
+               (fn [idx [eid attr value distance]]
+                 {:eid          eid
+                  :attr         attr
+                  :value        value
+                  :sem-distance (double distance)
+                  :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))

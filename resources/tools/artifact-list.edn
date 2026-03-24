@@ -1,14 +1,15 @@
-;; List generated artifacts for the current session.
+;; List generated artifacts across current and recent sessions.
 ;; Import with: /import-tool resources/tools/artifact-list.edn
 
 {:id             :artifact-list
  :name           "artifact-list"
- :description    "List artifacts already created for the current session so you can inspect ids, names, formats, and previews before reading or referencing them."
+ :description    "List recently updated artifacts across current and prior sessions so you can resume earlier work without forcing the user to restate context."
  :tags           #{:artifact :output :list :retrieval}
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"
-                  "properties" {}
+                  "properties" {"top" {"type"        "integer"
+                                        "description" "Maximum number of artifacts to return (default 20)."}}
                   "required"   []}
- :handler        "(fn [_args]
+ :handler        "(fn [args]
                     (mapv #(dissoc % :text :sha256 :meta)
-                          (xia.artifact/list-artifacts)))"}
+                          (xia.artifact/list-visible-artifacts :top (or (get args \"top\") 20))))"}

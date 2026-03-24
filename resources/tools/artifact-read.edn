@@ -1,20 +1,20 @@
-;; Read a generated artifact for the current session.
+;; Read a generated artifact across current and prior sessions.
 ;; Import with: /import-tool resources/tools/artifact-read.edn
 
 {:id             :artifact-read
  :name           "artifact-read"
- :description    "Read a previously created artifact from the current session. Returns a text slice plus metadata so larger artifacts can be inspected incrementally."
+ :description    "Read a previously created artifact by id across current and prior sessions. Returns a text slice plus metadata so larger artifacts can be inspected incrementally while resuming work."
  :tags           #{:artifact :output :read :retrieval}
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"
                   "properties" {"artifact_id" {"type"        "string"
-                                               "description" "Artifact id returned by artifact-list or artifact-create."}
+                                               "description" "Artifact id returned by artifact-list, artifact-search, recent-work, or artifact-create."}
                                 "offset"      {"type"        "integer"
                                                "description" "Character offset to start reading from (default 0)."}
                                 "max_chars"   {"type"        "integer"
                                                "description" "Maximum number of characters to return (default 4000)."}}
                   "required"   ["artifact_id"]}
  :handler        "(fn [args]
-                    (xia.artifact/read-artifact (get args \"artifact_id\")
-                                                :offset (or (get args \"offset\") 0)
-                                                :max-chars (or (get args \"max_chars\") 4000)))"}
+                    (xia.artifact/read-visible-artifact (get args \"artifact_id\")
+                                                        :offset (or (get args \"offset\") 0)
+                                                        :max-chars (or (get args \"max_chars\") 4000)))"}

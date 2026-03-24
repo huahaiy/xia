@@ -1,20 +1,20 @@
-;; Read an uploaded local document for the current session.
+;; Read an uploaded local document across current and prior sessions.
 ;; Import with: /import-tool resources/tools/local-doc-read.edn
 
 {:id             :local-doc-read
  :name           "local-doc-read"
- :description    "Read a previously uploaded local document from the current session. Use a document id from local-doc-search. Returns the requested text slice plus metadata so you can inspect larger documents incrementally."
+ :description    "Read a previously uploaded local document by id across current and prior sessions. Returns the requested text slice plus metadata so you can inspect larger documents incrementally while resuming work."
  :tags           #{:local :document :read :retrieval}
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"
                   "properties" {"doc_id"    {"type"        "string"
-                                             "description" "The document id returned by local-doc-search."}
+                                             "description" "The document id returned by local-doc-search or recent-work."}
                                 "offset"    {"type"        "integer"
                                              "description" "Character offset to start reading from (default 0)."}
                                 "max_chars" {"type"        "integer"
                                              "description" "Maximum number of characters to return (default 4000)."}}
                   "required"   ["doc_id"]}
  :handler        "(fn [args]
-                    (xia.local-doc/read-doc (get args \"doc_id\")
-                                            :offset (or (get args \"offset\") 0)
-                                            :max-chars (or (get args \"max_chars\") 4000)))"}
+                    (xia.local-doc/read-visible-doc (get args \"doc_id\")
+                                                    :offset (or (get args \"offset\") 0)
+                                                    :max-chars (or (get args \"max_chars\") 4000)))"}

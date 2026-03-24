@@ -339,3 +339,24 @@
              "Created note from local document research.txt"
              "Deleted local document research.txt"}
            (set (map :summary (memory/recent-episodes 10)))))))
+
+(deftest visible-local-doc-retrieval-can-span-sessions
+  (let [sid-a   (db/create-session! :http)
+        sid-b   (db/create-session! :http)
+        older   (local-doc/save-upload! {:session-id sid-a
+                                         :name "older.md"
+                                         :media-type "text/markdown"
+                                         :text "# Older\n\nAlpha notes"})
+        current (local-doc/save-upload! {:session-id sid-b
+                                         :name "current.md"
+                                         :media-type "text/markdown"
+                                         :text "# Current\n\nBeta notes"})]
+    (binding [wm/*session-id* sid-b]
+      (is (= [(:id current) (:id older)]
+             (mapv :id (local-doc/list-visible-docs :top 5))))
+      (is (= (:id older)
+             (:id (first (local-doc/search-visible-docs "Alpha")))))
+      (let [slice (local-doc/read-visible-doc (:id older) :max-chars 8)]
+        (is (= "older.md" (:name slice)))
+        (is (= (str sid-a) (:session-id slice)))
+        (is (= "# Older\n" (:text slice)))))))

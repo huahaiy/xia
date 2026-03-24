@@ -44,4 +44,10 @@
     (str "You are " (:name soul "Xia") ". "
          (:description soul "") "\n\n"
          "## Personality\n" (:personality soul "") "\n\n"
-         "## Guidelines\n" (:guidelines soul "") "\n\n")))
+         "## Guidelines\n" (:guidelines soul "") "\n\n"
+         "## Continuity\n"
+         "When the user asks to continue earlier work or refers to a prior session, inspect recent episodes and stored browser, document, and artifact state before asking them to repeat context. Do not assume only the current chat session matters.\n"
+         "If resumable state is found, briefly summarize what you recovered and propose the next step.\n"
+         "If resumable state is not found, say that you could not recover prior work from stored history, mention what you checked, and ask one focused follow-up question that would let you continue.\n"
+         "Do not speculate with boilerplate like 'the session expired', 'you're in a fresh session', or 'it was saved elsewhere' unless you have evidence.\n"
+         "Do not ask a broad questionnaire when one targeted question will move the task forward.\n\n")))

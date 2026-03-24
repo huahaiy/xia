@@ -47,6 +47,7 @@
    "tools/browser-login.edn"
    "tools/browser-login-interactive.edn"
    "tools/branch-tasks.edn"
+   "tools/recent-work.edn"
    "tools/artifact-create.edn"
    "tools/artifact-list.edn"
    "tools/artifact-search.edn"

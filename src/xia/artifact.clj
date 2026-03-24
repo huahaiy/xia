@@ -597,6 +597,41 @@
           (sort-by :updated-at #(compare %2 %1))
           vec))))
 
+(defn- time-sort-ms
+  [item]
+  (long (or (some-> (:updated-at item) .getTime)
+            (some-> (:created-at item) .getTime)
+            0)))
+
+(defn- session-priority
+  [current-session-id item-session-id]
+  (if (and current-session-id
+           item-session-id
+           (= (str current-session-id) (str item-session-id)))
+    0
+    1))
+
+(defn- sort-visible-artifacts
+  [current-session-id items]
+  (sort-by (fn [item]
+             [(session-priority current-session-id (:session-id item))
+              (- (time-sort-ms item))
+              (str (:id item))])
+           items))
+
+(defn list-visible-artifacts
+  "List recently updated artifacts across current and prior sessions.
+   Current-session artifacts are ranked first when a session is active."
+  [& {:keys [session-id top]}]
+  (let [current-session-id (or session-id wm/*session-id*)
+        results            (->> (db/q '[:find ?e :where [?e :artifact/id _]])
+                                (map first)
+                                (map artifact-from-eid)
+                                (sort-visible-artifacts current-session-id))]
+    (if top
+      (into [] (take (max 0 (long top))) results)
+      (vec results))))
+
 (defn get-artifact
   [artifact-id]
   (some-> artifact-id normalize-artifact-id artifact-eid artifact-from-eid))
@@ -617,37 +652,78 @@
                            :top top
                            :fts-query fts-query))
 
+(defn- dedupe-by-id
+  [items]
+  (loop [remaining items
+         seen      #{}
+         acc       []]
+    (if-let [item (first remaining)]
+      (let [item-id (:id item)]
+        (if (contains? seen item-id)
+          (recur (rest remaining) seen acc)
+          (recur (rest remaining) (conj seen item-id) (conj acc item))))
+      acc)))
+
+(defn search-visible-artifacts
+  "Search artifacts across current and prior sessions."
+  [query & {:keys [top fts-query] :or {top 5}}]
+  (let [top*           (max 1 (long (or top 5)))
+        global-results (memory/search-artifacts nil
+                                               query
+                                               :top top*
+                                               :fts-query fts-query)]
+    (->> global-results
+         (map (fn [result]
+                (if-let [artifact (get-artifact (:id result))]
+                  (assoc result :session-id (:session-id artifact))
+                  result)))
+         (take top*)
+         vec)))
+
+(defn- artifact-slice
+  [artifact offset max-chars]
+  (let [offset*     (max 0 (int (or offset 0)))
+        max-chars*  (max 1 (int (or max-chars read-char-limit)))
+        text        (:text artifact)
+        text-length (count (or text ""))
+        start       (min offset* text-length)
+        end         (min text-length (+ start max-chars*))]
+    {:id          (:id artifact)
+     :name        (:name artifact)
+     :title       (:title artifact)
+     :kind        (:kind artifact)
+     :media-type  (:media-type artifact)
+     :status      (:status artifact)
+     :size-bytes  (:size-bytes artifact)
+     :compressed-size-bytes (:compressed-size-bytes artifact)
+     :has-blob?   (:has-blob? artifact)
+     :text-available? (:text-available? artifact)
+     :preview     (:preview artifact)
+     :meta        (:meta artifact)
+     :session-id  (:session-id artifact)
+     :text        (when text
+                    (subs text start end))
+     :offset      start
+     :end-offset  end
+     :total-chars text-length
+     :truncated?  (< end text-length)}))
+
 (defn- read-session-artifact
   [session-id artifact-id & {:keys [offset max-chars]
                              :or {offset 0
                                   max-chars read-char-limit}}]
   (let [session-id*  (normalize-session-id session-id)
-        artifact-id* (normalize-artifact-id artifact-id)
-        offset*      (max 0 (int (or offset 0)))
-        max-chars*   (max 1 (int (or max-chars read-char-limit)))]
+        artifact-id* (normalize-artifact-id artifact-id)]
     (when-let [artifact (get-session-artifact session-id* artifact-id*)]
-      (let [text        (:text artifact)
-            text-length (count (or text ""))
-            start       (min offset* text-length)
-            end         (min text-length (+ start max-chars*))]
-        {:id          (:id artifact)
-         :name        (:name artifact)
-         :title       (:title artifact)
-         :kind        (:kind artifact)
-         :media-type  (:media-type artifact)
-         :status      (:status artifact)
-         :size-bytes  (:size-bytes artifact)
-         :compressed-size-bytes (:compressed-size-bytes artifact)
-         :has-blob?   (:has-blob? artifact)
-         :text-available? (:text-available? artifact)
-         :preview     (:preview artifact)
-         :meta        (:meta artifact)
-         :text        (when text
-                        (subs text start end))
-         :offset      start
-         :end-offset  end
-         :total-chars text-length
-         :truncated?  (< end text-length)}))))
+      (artifact-slice artifact offset max-chars))))
+
+(defn read-visible-artifact
+  "Read an artifact by id across current and prior sessions."
+  [artifact-id & {:keys [offset max-chars]
+                  :or {offset 0
+                       max-chars read-char-limit}}]
+  (when-let [artifact (get-artifact artifact-id)]
+    (artifact-slice artifact offset max-chars)))
 
 (defn read-artifact
   [artifact-id & {:keys [offset max-chars]

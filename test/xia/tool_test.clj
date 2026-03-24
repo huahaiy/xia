@@ -223,6 +223,29 @@
     (is (not (contains? without-vision "vision-tool")))
     (is (contains? with-vision "vision-tool"))))
 
+(deftest bundled-recent-work-tool-summarizes-cross-session-state
+  (let [sid-a (db/create-session! :terminal)
+        sid-b (db/create-session! :terminal)]
+    (artifact/create-artifact! {:session-id sid-a
+                                :name "older.md"
+                                :kind :markdown
+                                :content "# Older\n\nAlpha"})
+    (local-doc/save-upload! {:session-id sid-a
+                             :name "notes.md"
+                             :media-type "text/markdown"
+                             :text "# Notes\n\nAlpha"})
+    (artifact/create-artifact! {:session-id sid-b
+                                :name "current.md"
+                                :kind :markdown
+                                :content "# Current\n\nBeta"})
+    (tool/ensure-bundled-tools!)
+    (let [result (tool/execute-tool :recent-work {}
+                                    {:channel :terminal
+                                     :session-id sid-b})]
+      (is (seq (get result :recent_episodes)))
+      (is (= "current.md" (get-in result [:artifacts 0 :name])))
+      (is (= "notes.md" (get-in result [:local_documents 0 :name]))))))
+
 (deftest autonomous-tool-definitions-hide-unavailable-privileged-tools
   (db/register-service! {:id                   :github
                          :name                 "GitHub"

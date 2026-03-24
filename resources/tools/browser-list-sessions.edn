@@ -3,7 +3,7 @@
 
 {:id          :browser-list-sessions
  :name        "browser-list-sessions"
- :description "List browser sessions currently known to Xia. Results include live/resumable status and the current URL so the model can continue multi-step browser work."
+ :description "List browser sessions currently known to Xia across current and prior chat sessions. Results include live/resumable status and the current URL so the model can continue multi-step browser work."
  :tags        #{:browser :web :session}
  :execution-mode :parallel-safe
  :parameters  {"type"       "object"

@@ -102,3 +102,26 @@
     (is (= "# Brief\n\nAlpha" (:content pad)))
     (is (contains? (set (map :summary (memory/recent-episodes 10)))
                    "Created note from artifact brief.md"))))
+
+(deftest visible-artifact-retrieval-can-span-sessions
+  (let [sid-a   (db/create-session! :http)
+        sid-b   (db/create-session! :http)
+        older   (artifact/create-artifact! {:session-id sid-a
+                                            :name "older.md"
+                                            :title "Older"
+                                            :kind :markdown
+                                            :content "# Older\n\nAlpha details"})
+        current (artifact/create-artifact! {:session-id sid-b
+                                            :name "current.md"
+                                            :title "Current"
+                                            :kind :markdown
+                                            :content "# Current\n\nBeta details"})]
+    (binding [wm/*session-id* sid-b]
+      (is (= [(:id current) (:id older)]
+             (mapv :id (artifact/list-visible-artifacts :top 5))))
+      (is (= (:id older)
+             (:id (first (artifact/search-visible-artifacts "Alpha")))))
+      (let [slice (artifact/read-visible-artifact (:id older) :max-chars 8)]
+        (is (= "older.md" (:name slice)))
+        (is (= (str sid-a) (:session-id slice)))
+        (is (= "# Older\n" (:text slice)))))))

@@ -1191,6 +1191,41 @@
           (sort-by :updated-at #(compare %2 %1))
           vec))))
 
+(defn- time-sort-ms
+  [item]
+  (long (or (some-> (:updated-at item) .getTime)
+            (some-> (:created-at item) .getTime)
+            0)))
+
+(defn- session-priority
+  [current-session-id item-session-id]
+  (if (and current-session-id
+           item-session-id
+           (= (str current-session-id) (str item-session-id)))
+    0
+    1))
+
+(defn- sort-visible-docs
+  [current-session-id items]
+  (sort-by (fn [item]
+             [(session-priority current-session-id (:session-id item))
+              (- (time-sort-ms item))
+              (str (:id item))])
+           items))
+
+(defn list-visible-docs
+  "List recently updated local documents across current and prior sessions.
+   Current-session documents are ranked first when a session is active."
+  [& {:keys [session-id top]}]
+  (let [current-session-id (or session-id wm/*session-id*)
+        results            (->> (db/q '[:find ?e :where [?e :local.doc/id _]])
+                                (map first)
+                                (map document-from-eid)
+                                (sort-visible-docs current-session-id))]
+    (if top
+      (into [] (take (max 0 (long top))) results)
+      (vec results))))
+
 (defn get-doc
   [doc-id]
   (some-> doc-id normalize-doc-id doc-eid document-from-eid))
@@ -1203,32 +1238,37 @@
     (when (and doc (= (str session-id*) (:session-id doc)))
       doc)))
 
+(defn- doc-slice
+  [doc offset max-chars]
+  (let [offset*     (max 0 (int (or offset 0)))
+        max-chars*  (max 1 (int (or max-chars 4000)))
+        text        (or (:text doc) "")
+        text-length (count text)
+        start       (min offset* text-length)
+        end         (min text-length (+ start max-chars*))]
+    {:id          (:id doc)
+     :name        (:name doc)
+     :media-type  (:media-type doc)
+     :status      (:status doc)
+     :size-bytes  (:size-bytes doc)
+     :summary     (:summary doc)
+     :preview     (:preview doc)
+     :chunk-count (:chunk-count doc)
+     :session-id  (:session-id doc)
+     :text        (subs text start end)
+     :offset      start
+     :end-offset  end
+     :total-chars text-length
+     :truncated?  (< end text-length)}))
+
 (defn- read-session-doc
   [session-id doc-id & {:keys [offset max-chars]
                         :or {offset 0
                              max-chars 4000}}]
   (let [session-id* (normalize-session-id session-id)
-        doc-id*     (normalize-doc-id doc-id)
-        offset*     (max 0 (int (or offset 0)))
-        max-chars*  (max 1 (int (or max-chars 4000)))]
+        doc-id*     (normalize-doc-id doc-id)]
     (when-let [doc (get-session-doc session-id* doc-id*)]
-      (let [text        (or (:text doc) "")
-            text-length (count text)
-            start       (min offset* text-length)
-            end         (min text-length (+ start max-chars*))]
-        {:id          (:id doc)
-         :name        (:name doc)
-         :media-type  (:media-type doc)
-         :status      (:status doc)
-         :size-bytes  (:size-bytes doc)
-         :summary     (:summary doc)
-         :preview     (:preview doc)
-         :chunk-count (:chunk-count doc)
-         :text        (subs text start end)
-         :offset      start
-         :end-offset  end
-         :total-chars text-length
-         :truncated?  (< end text-length)}))))
+      (doc-slice doc offset max-chars))))
 
 (defn search-docs
   "Search local documents visible to the current session."
@@ -1237,6 +1277,34 @@
                             query
                             :top top
                             :fts-query fts-query))
+
+(defn- dedupe-by-id
+  [items]
+  (loop [remaining items
+         seen      #{}
+         acc       []]
+    (if-let [item (first remaining)]
+      (let [item-id (:id item)]
+        (if (contains? seen item-id)
+          (recur (rest remaining) seen acc)
+          (recur (rest remaining) (conj seen item-id) (conj acc item))))
+      acc)))
+
+(defn search-visible-docs
+  "Search local documents across current and prior sessions."
+  [query & {:keys [top fts-query] :or {top 5}}]
+  (let [top*           (max 1 (long (or top 5)))
+        global-results (memory/search-local-docs nil
+                                                query
+                                                :top top*
+                                                :fts-query fts-query)]
+    (->> global-results
+         (map (fn [result]
+                (if-let [doc (get-doc (:id result))]
+                  (assoc result :session-id (:session-id doc))
+                  result)))
+         (take top*)
+         vec)))
 
 (defn read-doc
   "Read a local document visible to the current session, optionally slicing the text."
@@ -1247,6 +1315,14 @@
                     doc-id
                     :offset offset
                     :max-chars max-chars))
+
+(defn read-visible-doc
+  "Read a local document by id across current and prior sessions."
+  [doc-id & {:keys [offset max-chars]
+             :or {offset 0
+                  max-chars 4000}}]
+  (when-let [doc (get-doc doc-id)]
+    (doc-slice doc offset max-chars)))
 
 (defn save-upload!
   [{:keys [session-id name media-type size-bytes source text bytes bytes-base64 ocr-mode]}]
