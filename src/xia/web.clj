@@ -35,7 +35,9 @@
    :duckduckgo-html  :duckduckgo-html
    :searx            :searxng-json
    :searxng          :searxng-json
-   :searxng-json     :searxng-json})
+   :searxng-json     :searxng-json
+   :brave            :brave-json
+   :brave-json       :brave-json})
 (def ^:private ddg-no-results-pattern
   #"(?i)\bno results\b|\bno more results\b")
 (def ^:private ddg-blocked-pattern
@@ -68,7 +70,7 @@
 (defonce ^ConcurrentHashMap ^:private rate-limits (ConcurrentHashMap.))
 (defonce ^AtomicLong ^:private rate-limit-cleanup (AtomicLong. 0))
 
-(def ^:private rate-limit-max 10)         ; max requests
+(def ^:private rate-limit-max 30)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute
 
 (defn- check-rate-limit!
@@ -719,6 +721,13 @@
     (when (seq value)
       value)))
 
+(defn- configured-brave-api-key []
+  (let [value (some-> (safe-get-config :web/search-brave-api-key)
+                      str
+                      str/trim)]
+    (when (seq value)
+      value)))
+
 (defn- resolve-search-backend!
   [backend]
   (or (normalize-search-backend backend)
@@ -826,6 +835,25 @@
          (take max-results)
          vec)))
 
+(defn- parse-brave-results
+  [body max-results]
+  (let [parsed (json/read-json body)
+        web    (get parsed "web")
+        results (get web "results")]
+    (when-not (sequential? results)
+      (throw (ex-info "Brave Search response did not include web results"
+                      {:type :search/backend-unhealthy
+                       :backend :brave-json})))
+    (->> results
+         (map (fn [result]
+                {:title   (or (get result "title") "")
+                 :url     (or (get result "url") "")
+                 :snippet (or (get result "description") "")}))
+         (filter (fn [{:keys [title url]}]
+                   (or (seq title) (seq url))))
+         (take max-results)
+         vec)))
+
 (defn- search-via-backend!
   [backend query max-results]
   (case backend
@@ -845,6 +873,19 @@
           body     (fetch-search-body! url {"Accept" "application/json,text/json,*/*"})]
       (parse-searxng-results body max-results))
 
+    :brave-json
+    (let [api-key (or (configured-brave-api-key)
+                      (throw (ex-info "Brave Search API key is not configured"
+                                      {:type :search/backend-unconfigured
+                                       :backend :brave-json
+                                       :config-key :web/search-brave-api-key})))
+          url     (append-query-params "https://api.search.brave.com/res/v1/web/search"
+                                       {:q query :count max-results})
+          body    (fetch-search-body! url {"Accept"               "application/json"
+                                           "Accept-Encoding"      "gzip"
+                                           "X-Subscription-Token" api-key})]
+      (parse-brave-results body max-results))
+
     (throw (ex-info (str "Unsupported search backend: " backend)
                     {:backend backend}))))
 
@@ -855,22 +896,24 @@
     (if-let [configured (configured-search-backend-raw)]
       [(resolve-search-backend! configured)]
       (cond-> [default-search-backend]
-        (configured-searxng-url) (conj :searxng-json)))))
+        (configured-brave-api-key) (conj :brave-json)
+        (configured-searxng-url)   (conj :searxng-json)))))
 
 (defn search-web
   "Search the web. Returns structured results.
 
    Uses DuckDuckGo HTML by default, with parser health checks so markup changes
    fail loudly instead of silently returning empty results. The backend can be
-   selected explicitly or configured via :web/search-backend. A configured
-   public SearxNG JSON endpoint can be used via :web/search-searxng-url.
+   selected explicitly or configured via :web/search-backend. Additional
+   backends: Brave Search API via :web/search-brave-api-key (free tier:
+   2000 queries/month), or a SearxNG JSON endpoint via :web/search-searxng-url.
 
    Arguments:
      query — the search query
 
    Options:
      :max-results — max number of results (default 5)
-     :backend     — one of :duckduckgo-html or :searxng-json
+     :backend     — one of :duckduckgo-html, :brave-json, or :searxng-json
 
    Returns:
      {:success? true

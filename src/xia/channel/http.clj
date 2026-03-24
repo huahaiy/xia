@@ -12,6 +12,7 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
+            [xia.identity :as identity]
             [xia.local-doc :as local-doc]
             [xia.local-ocr :as local-ocr]
             [xia.llm :as llm]
@@ -288,11 +289,11 @@
   {"/style.css"                     {:path "style.css" :content-type "text/css"}
    "/app.js"                        {:path "app.js" :content-type "text/javascript"}
    "/favicon.ico"                   {:path "favicon/favicon.ico" :content-type "image/x-icon" :binary? true}
-   "/favicon/favicon-16x16.png"     {:path "favicon/favicon-16x16.png" :content-type "image/png" :binary? true}
-   "/favicon/favicon-32x32.png"     {:path "favicon/favicon-32x32.png" :content-type "image/png" :binary? true}
+   "/favicon/favicon.svg"           {:path "favicon/favicon.svg" :content-type "image/svg+xml"}
+   "/favicon/favicon-96x96.png"     {:path "favicon/favicon-96x96.png" :content-type "image/png" :binary? true}
    "/favicon/apple-touch-icon.png"  {:path "favicon/apple-touch-icon.png" :content-type "image/png" :binary? true}
-   "/favicon/android-chrome-192x192.png" {:path "favicon/android-chrome-192x192.png" :content-type "image/png" :binary? true}
-   "/favicon/android-chrome-512x512.png" {:path "favicon/android-chrome-512x512.png" :content-type "image/png" :binary? true}
+   "/favicon/web-app-manifest-192x192.png" {:path "favicon/web-app-manifest-192x192.png" :content-type "image/png" :binary? true}
+   "/favicon/web-app-manifest-512x512.png" {:path "favicon/web-app-manifest-512x512.png" :content-type "image/png" :binary? true}
    "/favicon/site.webmanifest"      {:path "favicon/site.webmanifest"
                                      :content-type "application/manifest+json; charset=utf-8"}})
 
@@ -2240,12 +2241,20 @@
   (json-response
     200
     {:setup_required setup-required?
+     :identity (let [soul (identity/get-soul)]
+                 {:name        (:name soul "Xia")
+                  :description (:description soul "")
+                  :personality (:personality soul "")
+                  :guidelines  (:guidelines soul "")})
      :providers (->> providers
                      (into [] (map provider->admin-body))
                      sort-by-name)
      :llm_provider_templates (->> (llm-provider-template/list-templates)
                                   (into [] (map llm-provider-template->admin-body))
                                   sort-by-name)
+     :web_search {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
+                  :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
+                  :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")}
      :conversation_context (conversation-context->admin-body)
      :memory_retention (memory-retention->admin-body)
      :knowledge_decay (knowledge-decay->admin-body)
@@ -2279,6 +2288,21 @@
      :remote_devices  (into [] (map remote-device->admin-body) (remote-bridge/list-devices))
      :remote_events   (into [] (map remote-event->admin-body) (remote-bridge/list-events 20))
      :remote_snapshot (remote-snapshot->admin-body (remote-bridge/status-snapshot))})))
+
+(defn- handle-fetch-provider-models [req]
+  (try
+    (let [body     (read-body req)
+          base-url (get body "base_url")
+          api-key  (get body "api_key")]
+      (when-not (nonblank-str base-url)
+        (throw (ex-info "base_url is required" {:type :http/bad-request})))
+      (let [models (llm/fetch-provider-models {:base-url base-url
+                                               :api-key  api-key})]
+        (json-response 200 {:models (or models [])})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))
+    (catch Exception e
+      (json-response 502 {:error (str "Failed to fetch models: " (.getMessage e))}))))
 
 (defn- handle-save-provider [req]
   (try
@@ -2393,6 +2417,17 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
+(defn- handle-delete-provider [req]
+  (try
+    (let [data        (or (read-body req) {})
+          provider-id (parse-keyword-id (get data "id") "id")]
+      (when-not (db/get-provider provider-id)
+        (throw (ex-info "provider not found" {:type :http/not-found :field "id"})))
+      (db/delete-provider! provider-id)
+      (json-response 200 {:deleted (name provider-id)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
 (defn- handle-save-memory-retention [req]
   (try
     (let [data                 (or (read-body req) {})
@@ -2415,6 +2450,39 @@
         (save-config-override! :memory/episode-retained-decayed-count
                                retained-count))
       (json-response 200 {:memory_retention (memory-retention->admin-body)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-save-web-search [req]
+  (try
+    (let [data (or (read-body req) {})]
+      (save-config-override! :web/search-backend
+                             (nonblank-str (get data "backend")))
+      (save-config-override! :web/search-brave-api-key
+                             (nonblank-str (get data "brave_api_key")))
+      (save-config-override! :web/search-searxng-url
+                             (nonblank-str (get data "searxng_url")))
+      (json-response 200 {:web_search
+                           {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
+                            :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
+                            :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")}}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-save-identity [req]
+  (try
+    (let [data (or (read-body req) {})]
+      (doseq [[json-key soul-key] [["name" :name]
+                                    ["description" :description]
+                                    ["personality" :personality]
+                                    ["guidelines" :guidelines]]]
+        (when (contains? data json-key)
+          (identity/set-soul! soul-key (str (get data json-key "")))))
+      (let [soul (identity/get-soul)]
+        (json-response 200 {:identity {:name        (:name soul "Xia")
+                                       :description (:description soul "")
+                                       :personality (:personality soul "")
+                                       :guidelines  (:guidelines soul "")}})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -3218,6 +3286,12 @@
         (and (= method :post) (= uri "/admin/providers"))
         (protected-route-response req #(handle-save-provider req))
 
+        (and (= method :post) (= uri "/admin/provider-models"))
+        (protected-route-response req #(handle-fetch-provider-models req))
+
+        (and (= method :delete) (= uri "/admin/providers"))
+        (protected-route-response req #(handle-delete-provider req))
+
         (and (= method :post) admin-provider-account-start-match)
         (protected-route-response req #(handle-start-provider-account-connector (second admin-provider-account-start-match)))
 
@@ -3226,6 +3300,12 @@
 
         (and (= method :post) (= uri "/admin/memory-retention"))
         (protected-route-response req #(handle-save-memory-retention req))
+
+        (and (= method :post) (= uri "/admin/identity"))
+        (protected-route-response req #(handle-save-identity req))
+
+        (and (= method :post) (= uri "/admin/web-search"))
+        (protected-route-response req #(handle-save-web-search req))
 
         (and (= method :post) (= uri "/admin/context"))
         (protected-route-response req #(handle-save-conversation-context req))

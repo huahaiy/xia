@@ -144,10 +144,10 @@
     (is (re-find #"<textarea" (:body response)))
     (is (re-find #"src=\"app.js\"" (:body response)))
     (is (re-find #"href=\"style.css\"" (:body response)))
-    (is (re-find #"rel=\"icon\" type=\"image/x-icon\" href=\"favicon.ico\"" (:body response)))
-    (is (re-find #"href=\"favicon/favicon-32x32.png\"" (:body response)))
+    (is (re-find #"rel=\"icon\" href=\"favicon.ico\" sizes=\"any\"" (:body response)))
+    (is (re-find #"href=\"favicon/favicon.svg\"" (:body response)))
     (is (re-find #"href=\"favicon/site.webmanifest\"" (:body response)))
-    (is (re-find #"src=\"favicon/android-chrome-192x192.png\"" (:body response)))
+    (is (re-find #"src=\"favicon/favicon.svg\"" (:body response)))
     (is (re-find #"alt=\"Xia logo\"" (:body response)))))
 
 (deftest serves-static-resources
@@ -172,9 +172,14 @@
       (is (= 200 (:status response)))
       (is (= "application/manifest+json; charset=utf-8"
              (get-in response [:headers "Content-Type"])))
-      (is (re-find #"/favicon/android-chrome-192x192.png" (:body response)))))
+      (is (re-find #"/favicon/web-app-manifest-192x192.png" (:body response)))))
+  (testing "serves favicon svg"
+    (let [response (#'http/router {:uri "/favicon/favicon.svg" :request-method :get})]
+      (is (= 200 (:status response)))
+      (is (= "image/svg+xml" (get-in response [:headers "Content-Type"])))
+      (is (re-find #"<svg" (:body response)))))
   (testing "serves favicon png"
-    (let [response (#'http/router {:uri "/favicon/favicon-32x32.png" :request-method :get})]
+    (let [response (#'http/router {:uri "/favicon/favicon-96x96.png" :request-method :get})]
       (is (= 200 (:status response)))
       (is (= "image/png" (get-in response [:headers "Content-Type"])))
       (is (instance? byte-array-class (:body response)))

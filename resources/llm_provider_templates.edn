@@ -110,6 +110,22 @@
   :docs-url "https://platform.minimax.io/docs/guides/quickstart-preparation"
   :sign-in-options []
   :notes "MiniMax's global compatible endpoint is https://api.minimax.io/v1. China deployments may use https://api.minimaxi.com/v1 instead."}
+ {:id :gemini
+  :name "Google Gemini"
+  :description "Connect Xia to Gemini models via Google AI Studio."
+  :category :cloud
+  :base-url "https://generativelanguage.googleapis.com/v1beta/openai"
+  :model-suggestion "gemini-2.5-flash"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a Google AI Studio API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://aistudio.google.com/"
+  :api-key-url "https://aistudio.google.com/apikey"
+  :docs-url "https://ai.google.dev/gemini-api/docs"
+  :sign-in-options [:google]
+  :notes "Google AI Studio provides free-tier access to Gemini models. The OpenAI-compatible endpoint is used here."}
  {:id :openrouter
   :name "OpenRouter"
   :description "Access hundreds of models through a single API key."

@@ -1012,6 +1012,30 @@
                             :round round})
                 (throw (:error round-result))))))))))
 
+(defn fetch-provider-models
+  "Fetch available models from a provider's /models endpoint.
+   Accepts a map with :base-url and optionally :api-key.
+   Returns a sorted vector of model ID strings."
+  [{:keys [base-url api-key]}]
+  (let [auth-header (when-let [k (some-> api-key str/trim not-empty)]
+                      (str "Bearer " k))
+        allow-private? (loopback-base-url? base-url)
+        resp (http/request {:url     (str base-url "/models")
+                            :method  :get
+                            :headers (cond-> {}
+                                       auth-header (assoc "Authorization" auth-header))
+                            :allow-private-network? allow-private?
+                            :timeout 15000
+                            :request-label "Fetch provider models"})]
+    (when (= 200 (:status resp))
+      (let [body (json/read-json (:body resp))
+            data (or (get body "data") [])]
+        (->> data
+             (map #(get % "id"))
+             (filter string?)
+             sort
+             vec)))))
+
 (defn chat-simple
   "Convenience: send messages, return the assistant's text content."
   [messages & opts]

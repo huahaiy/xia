@@ -464,23 +464,13 @@
 
 (def ^:private default-embedding-provider-spec
   ;; Keep Xia's provider choice centralized so the default model can change
-  ;; without touching the rest of the DB wiring.
+  ;; without touching the rest of the DB wiring. Let Datalevin derive
+  ;; embedding metadata from the GGUF manifest and runtime provider output
+  ;; instead of hard-coding dimensions here.
   {:provider :llama.cpp
    :model-id "nomic-ai/nomic-embed-text-v2-moe"
    :model-filename default-embedding-model-file
-   :model-url default-embedding-model-url
-   :embedding-metadata
-   {:embedding/provider
-    {:kind :local
-     :id :llama.cpp
-     :model-id "nomic-ai/nomic-embed-text-v2-moe"}
-    :embedding/output
-    {:dimensions 768
-     :max-tokens 2048}
-    :embedding/artifact
-    {:format :gguf
-     :file default-embedding-model-file
-     :quantization :q8_0}}})
+   :model-url default-embedding-model-url})
 
 (def ^:private default-llm-provider-spec
   ;; Keep local summarization inside the Xia binary by using Datalevin's
@@ -1262,6 +1252,11 @@
                                        (conj [:db/retract provider-eid
                                               :llm.provider/rate-limit-per-minute]))]
     (transact! (conj retracts provider-tx))))
+
+(defn delete-provider! [provider-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.provider/id ?id]]
+                             provider-id))]
+    (transact! [[:db/retractEntity eid]])))
 
 (defn get-default-provider []
   (let [results (q '[:find ?e :where

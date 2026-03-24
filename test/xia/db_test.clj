@@ -14,7 +14,7 @@
     (is (= :llama.cpp provider-id))
     (is (= :llama.cpp (:provider provider)))
     (is (= "nomic-embed-text-v2-moe-q8_0.gguf" (:model-filename provider)))
-    (is (= 768 (get-in provider [:embedding-metadata :embedding/output :dimensions])))
+    (is (not (contains? provider :embedding-metadata)))
     (is (= #{db/episode-text-domain
              db/kg-node-domain
              db/kg-fact-domain

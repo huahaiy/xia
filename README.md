@@ -1,6 +1,6 @@
 # Xia
 
-![Xia logo](xia-logo.png)
+<img src="resources/web/favicon/favicon.svg" alt="Xia logo" width="220">
 
 > There is an old Chinese story about the Snail Maiden (田螺姑娘), a gentle
 > spirit who appears each day to care for a home before anyone returns. Xia

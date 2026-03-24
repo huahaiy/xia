@@ -62,6 +62,8 @@ const state = {
   knowledgeSearching: false,
   knowledgeLoadingFacts: false,
   knowledgeForgettingFactId: '',
+  providerModels: [],
+  providerModelsFetching: false,
   providerDraft: null,
   pendingProviderOauthFlow: null,
   pendingProviderBrowserSessionFlow: null,
@@ -96,6 +98,7 @@ const state = {
   sendStartedAt: 0
 };
 const statusEl = document.getElementById('status');
+const activityStatusEl = document.getElementById('activity-status');
 const sessionLabelEl = document.getElementById('session-label');
 const approvalPanelEl = document.getElementById('approval-panel');
 const approvalToolEl = document.getElementById('approval-tool');
@@ -135,6 +138,13 @@ const searchKnowledgeEl = document.getElementById('search-knowledge');
 const knowledgeNodeListEl = document.getElementById('knowledge-node-list');
 const knowledgeFactListEl = document.getElementById('knowledge-fact-list');
 const knowledgeStatusEl = document.getElementById('knowledge-status');
+const heroNameEl = document.getElementById('hero-name');
+const identityNameEl = document.getElementById('identity-name');
+const identityDescriptionEl = document.getElementById('identity-description');
+const identityPersonalityEl = document.getElementById('identity-personality');
+const identityGuidelinesEl = document.getElementById('identity-guidelines');
+const identityStatusEl = document.getElementById('identity-status');
+const saveIdentityEl = document.getElementById('save-identity');
 const providerOnboardingEl = document.getElementById('provider-onboarding');
 const providerTemplateListEl = document.getElementById('provider-template-list');
 const providerOnboardingStatusEl = document.getElementById('provider-onboarding-status');
@@ -146,6 +156,8 @@ const providerTemplateEl = document.getElementById('provider-template');
 const providerTemplateNoteEl = document.getElementById('provider-template-note');
 const providerBaseUrlEl = document.getElementById('provider-base-url');
 const providerModelEl = document.getElementById('provider-model');
+const providerModelListEl = document.getElementById('provider-model-list');
+const fetchProviderModelsEl = document.getElementById('fetch-provider-models');
 const providerAccessModeEl = document.getElementById('provider-access-mode');
 const providerCredentialSourceEl = document.getElementById('provider-credential-source');
 const providerOauthAccountEl = document.getElementById('provider-oauth-account');
@@ -166,6 +178,7 @@ const providerDefaultEl = document.getElementById('provider-default');
 const providerStatusEl = document.getElementById('provider-status');
 const newProviderEl = document.getElementById('new-provider');
 const saveProviderEl = document.getElementById('save-provider');
+const deleteProviderEl = document.getElementById('delete-provider');
 const retentionFullResolutionDaysEl = document.getElementById('retention-full-resolution-days');
 const retentionDecayHalfLifeDaysEl = document.getElementById('retention-decay-half-life-days');
 const retentionRetainedCountEl = document.getElementById('retention-retained-count');
@@ -174,6 +187,11 @@ const saveRetentionEl = document.getElementById('save-retention');
 const contextRecentHistoryMessageLimitEl = document.getElementById('context-recent-history-message-limit');
 const contextStatusEl = document.getElementById('context-status');
 const saveContextEl = document.getElementById('save-context');
+const searchBackendEl = document.getElementById('search-backend');
+const searchBraveApiKeyEl = document.getElementById('search-brave-api-key');
+const searchSearxngUrlEl = document.getElementById('search-searxng-url');
+const searchStatusEl = document.getElementById('search-status');
+const saveSearchEl = document.getElementById('save-search');
 const knowledgeGracePeriodDaysEl = document.getElementById('knowledge-grace-period-days');
 const knowledgeHalfLifeDaysEl = document.getElementById('knowledge-half-life-days');
 const knowledgeMinConfidenceEl = document.getElementById('knowledge-min-confidence');
@@ -356,7 +374,7 @@ function updateSessionLabel() {
     : 'New local session';
 }
 
-function currentStatusText() {
+function currentActivityText() {
   if (state.pendingApproval) {
     return 'Waiting for your approval...';
   }
@@ -367,7 +385,7 @@ function currentStatusText() {
     const elapsedSeconds = state.sendStartedAt
       ? Math.max(1, Math.floor((Date.now() - state.sendStartedAt) / 1000))
       : 0;
-    
+
     switch (phase) {
       case 'working-memory': return 'Reading context...';
       case 'llm':
@@ -377,19 +395,26 @@ function currentStatusText() {
       case 'tool':          return tool ? `Using ${tool}...` : 'Executing action...';
       case 'approval':      return 'Waiting for approval...';
       case 'finalizing':    return 'Writing response...';
-      case 'complete':      return 'Ready';
+      case 'complete':      return '';
       case 'error':         return s.message || 'Error occurred';
       default:              return s.message || 'Processing...';
     }
   }
   if (state.sending) {
-    return 'Waiting for Xia...';
+    return 'Waiting for response...';
   }
+  return '';
+}
+
+function currentPillText() {
+  if (state.pendingApproval) return 'Approval needed';
+  if (state.sending) return 'Working...';
   return state.baseStatus || 'Ready';
 }
 
 function syncStatus() {
-  statusEl.textContent = currentStatusText();
+  statusEl.textContent = currentPillText();
+  activityStatusEl.textContent = currentActivityText();
 }
 
 function setStatus(text) {
@@ -1149,29 +1174,8 @@ function providerTemplateNote(template) {
   }
   const bits = [];
   if (template.description) bits.push(template.description);
-  const accessModes = providerTemplateAccessModes(template);
-  if (accessModes.length) {
-    bits.push('Access modes: ' + accessModes.map((mode) => firstNonEmpty(mode.label, providerAccessModeLabel(mode.id))).join(', '));
-  }
-  if (defaultProviderAccessMode(template) === 'account') {
-    bits.push('Default path: connect a web account session first. API credential access is the fallback.');
-  }
-  const allCredentialSources = accessModes.flatMap((mode) => Array.isArray(mode.credential_sources) ? mode.credential_sources : []);
-  if (allCredentialSources.includes('api-key')) {
-    bits.push('If you use API key access, create an API key for Xia on the provider site.');
-  }
-  if (Array.isArray(template.sign_in_options) && template.sign_in_options.length) {
-    bits.push('Dashboard sign-in options may include: '
-      + template.sign_in_options.map(providerSignInOptionLabel).join(', '));
-  }
-  if (allCredentialSources.includes('oauth-account')) {
-    bits.push('API sign-in uses a saved OAuth account to call the provider API. Use Set Up API Sign-In to create or link one.');
-  }
-  if (allCredentialSources.includes('browser-session')) {
-    bits.push('Web account session opens a dedicated Xia browser so you can log in once and let Xia reuse that saved web session later.');
-  }
   if (template.notes) bits.push(template.notes);
-  return bits.join(' • ');
+  return bits.join(' — ');
 }
 
 function renderProviderTemplateOptions() {
@@ -1299,6 +1303,97 @@ function syncProviderAuthInputs() {
   providerOpenDocsEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !docsAction;
   providerOauthAccountNoteEl.textContent = providerOauthAccountStatusNote();
   providerBrowserSessionNoteEl.textContent = providerBrowserSessionStatusNote();
+}
+
+// ---------------------------------------------------------------------------
+// Provider model autocomplete
+// ---------------------------------------------------------------------------
+
+function renderProviderModelList() {
+  providerModelListEl.innerHTML = '';
+  const query = providerModelEl.value.trim().toLowerCase();
+  const models = state.providerModels;
+  if (!models.length) {
+    providerModelListEl.hidden = true;
+    return;
+  }
+  const filtered = query
+    ? models.filter(function (m) { return m.toLowerCase().includes(query); })
+    : models;
+  if (!filtered.length) {
+    providerModelListEl.hidden = true;
+    return;
+  }
+  var shown = filtered.slice(0, 80);
+  shown.forEach(function (modelId) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'autocomplete-item';
+    if (query) {
+      var idx = modelId.toLowerCase().indexOf(query);
+      if (idx >= 0) {
+        btn.innerHTML = escapeHtml(modelId.substring(0, idx))
+          + '<mark>' + escapeHtml(modelId.substring(idx, idx + query.length)) + '</mark>'
+          + escapeHtml(modelId.substring(idx + query.length));
+      } else {
+        btn.textContent = modelId;
+      }
+    } else {
+      btn.textContent = modelId;
+    }
+    btn.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      providerModelEl.value = modelId;
+      providerModelListEl.hidden = true;
+    });
+    providerModelListEl.appendChild(btn);
+  });
+  if (filtered.length > 80) {
+    var more = document.createElement('div');
+    more.className = 'autocomplete-item';
+    more.style.color = 'var(--muted)';
+    more.style.fontStyle = 'italic';
+    more.textContent = (filtered.length - 80) + ' more — keep typing to narrow';
+    providerModelListEl.appendChild(more);
+  }
+  providerModelListEl.hidden = false;
+}
+
+function escapeHtml(text) {
+  var d = document.createElement('div');
+  d.appendChild(document.createTextNode(text));
+  return d.innerHTML;
+}
+
+async function fetchProviderModels() {
+  var baseUrl = providerBaseUrlEl.value.trim();
+  var apiKey = providerApiKeyEl.value.trim();
+  if (!baseUrl) {
+    providerStatusEl.textContent = 'Enter a Base URL first.';
+    return;
+  }
+  state.providerModelsFetching = true;
+  fetchProviderModelsEl.disabled = true;
+  providerStatusEl.textContent = 'Fetching models...';
+  try {
+    var data = await fetchJson('/admin/provider-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_url: baseUrl, api_key: apiKey || undefined })
+    });
+    state.providerModels = Array.isArray(data.models) ? data.models : [];
+    providerStatusEl.textContent = state.providerModels.length
+      ? state.providerModels.length + ' models available — type to filter.'
+      : 'No models returned by this provider.';
+    providerModelEl.focus();
+    renderProviderModelList();
+  } catch (err) {
+    state.providerModels = [];
+    providerStatusEl.textContent = err.message || 'Failed to fetch models.';
+  } finally {
+    state.providerModelsFetching = false;
+    fetchProviderModelsEl.disabled = false;
+  }
 }
 
 function applyProviderTemplate(templateId, options = {}) {
@@ -1445,7 +1540,7 @@ function buildProviderTemplateCard(template) {
 }
 
 function renderProviderOnboarding() {
-  const needsOnboarding = !!state.setupRequired;
+  const needsOnboarding = !!state.setupRequired && !state.admin.providers.length;
   providerOnboardingEl.hidden = !needsOnboarding;
   providerTemplateListEl.replaceChildren();
   if (!needsOnboarding) {
@@ -1495,10 +1590,12 @@ function normalizeProviderIdSegment(value) {
 
 function ensureProviderId() {
   const current = providerIdEl.value.trim();
-  if (current) return current;
+  const isEditing = !!state.activeProviderId;
+  if (isEditing && current) return current;
   const templateId = normalizeProviderIdSegment(providerTemplateEl.value);
   const nameId = normalizeProviderIdSegment(providerNameEl.value);
-  const base = nameId || templateId || 'provider';
+  const modelId = normalizeProviderIdSegment(providerModelEl.value);
+  const base = (nameId || templateId || 'provider') + (modelId ? '-' + modelId : '');
   const usedIds = new Set((state.admin.providers || []).map((provider) => provider.id).filter(Boolean));
   let candidate = base;
   let suffix = 2;
@@ -2052,6 +2149,7 @@ function updateAdminButtons() {
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   providerTemplateEl.disabled = state.providerSaving;
   saveProviderEl.disabled = state.providerSaving;
+  deleteProviderEl.disabled = state.providerSaving || !state.activeProviderId;
   newProviderEl.disabled = state.providerSaving;
   providerConfigureOauthEl.disabled = state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction();
   providerOpenAccountEl.disabled = state.providerSaving || state.oauthSaving || !providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account');
@@ -2291,6 +2389,33 @@ function resetMemoryRetentionForm(statusText) {
 function defaultConversationContextStatus() {
   const settings = state.admin.conversationContext || {};
   return 'Keep ' + firstNonEmpty(settings.recent_history_message_limit, 24) + ' recent messages verbatim before using recap history.';
+}
+
+function renderWebSearchSettings() {
+  const settings = state.admin.webSearch || {};
+  searchBackendEl.value = settings.backend || '';
+  searchBraveApiKeyEl.value = settings.brave_api_key || '';
+  searchSearxngUrlEl.value = settings.searxng_url || '';
+}
+
+async function saveWebSearch() {
+  searchStatusEl.textContent = 'Saving...';
+  try {
+    const data = await fetchJson('/admin/web-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        backend: searchBackendEl.value,
+        brave_api_key: searchBraveApiKeyEl.value.trim(),
+        searxng_url: searchSearxngUrlEl.value.trim()
+      })
+    });
+    state.admin.webSearch = data.web_search || {};
+    searchStatusEl.textContent = 'Saved.';
+    setStatus('Search settings saved');
+  } catch (err) {
+    searchStatusEl.textContent = err.message || 'Failed to save.';
+  }
 }
 
 function renderConversationContextSettings() {
@@ -3033,6 +3158,38 @@ async function forgetKnowledgeFact(fact) {
   }
 }
 
+function renderIdentitySettings() {
+  const identity = state.admin.identity || {};
+  identityNameEl.value = identity.name || '';
+  identityDescriptionEl.value = identity.description || '';
+  identityPersonalityEl.value = identity.personality || '';
+  identityGuidelinesEl.value = identity.guidelines || '';
+  heroNameEl.textContent = identity.name || 'Xia';
+  document.title = identity.name || 'Xia';
+}
+
+async function saveIdentity() {
+  identityStatusEl.textContent = 'Saving...';
+  try {
+    const data = await fetchJson('/admin/identity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: identityNameEl.value.trim(),
+        description: identityDescriptionEl.value.trim(),
+        personality: identityPersonalityEl.value.trim(),
+        guidelines: identityGuidelinesEl.value.trim()
+      })
+    });
+    state.admin.identity = data.identity || {};
+    heroNameEl.textContent = state.admin.identity.name || 'Xia';
+    document.title = state.admin.identity.name || 'Xia';
+    identityStatusEl.textContent = 'Saved.';
+  } catch (err) {
+    identityStatusEl.textContent = err.message || 'Failed to save.';
+  }
+}
+
 async function loadAdminConfig() {
   return dedup('loadAdminConfig', loadAdminConfigImpl);
 }
@@ -3040,9 +3197,11 @@ async function loadAdminConfigImpl() {
   try {
     const data = await fetchJson('/admin/config');
     state.setupRequired = !!data.setup_required;
+    state.admin.identity = data.identity || {};
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
     state.admin.llmProviderTemplates = Array.isArray(data.llm_provider_templates) ? data.llm_provider_templates : [];
     state.admin.conversationContext = data.conversation_context || null;
+    state.admin.webSearch = data.web_search || {};
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.localDocSummarization = data.local_doc_summarization || null;
@@ -3071,12 +3230,14 @@ async function loadAdminConfigImpl() {
     const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
+    renderIdentitySettings();
     renderProviderTemplateOptions();
     renderProviderAccessModeOptions();
     renderProviderCredentialSourceOptions();
     renderProviderOauthAccountOptions();
     renderProviderWorkloadNote();
     renderConversationContextSettings();
+    renderWebSearchSettings();
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
     renderLocalDocSummarizationSettings();
@@ -3289,6 +3450,34 @@ function createServiceFromOauthAccount() {
   serviceStatusEl.textContent = 'Service prefilled. Review and save it.';
   updateAdminButtons();
   serviceIdEl.focus();
+}
+
+async function deleteProvider() {
+  if (state.providerSaving || !state.activeProviderId) return;
+  if (!window.confirm('Delete this model provider?')) return;
+  var deletingId = state.activeProviderId;
+  state.providerSaving = true;
+  providerStatusEl.textContent = 'Deleting...';
+  updateAdminButtons();
+  try {
+    await fetchJson('/admin/providers', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: deletingId })
+    });
+    state.admin.providers = state.admin.providers.filter(function (p) { return p.id !== deletingId; });
+    state.providerDraft = null;
+    state.providerModels = [];
+    providerModelListEl.hidden = true;
+    state.providerSaving = false;
+    resetProviderForm('Provider deleted.');
+    renderProviderOnboarding();
+    updateAdminButtons();
+  } catch (err) {
+    providerStatusEl.textContent = err.message || 'Failed to delete provider.';
+    state.providerSaving = false;
+    updateAdminButtons();
+  }
 }
 
 async function saveProvider() {
@@ -4346,7 +4535,7 @@ async function createScratchPadFromContent(title, content) {
     state.scratchDirty = false;
     if (state.activePad) upsertScratchMeta(state.activePad);
     syncScratchEditor(title ? 'Created note from local document.' : 'New note ready.');
-    switchTab('notes-tab');
+    switchTab('chat-tab');
     scratchTitleEl.focus();
     scratchTitleEl.select();
   } catch (err) {
@@ -4495,7 +4684,7 @@ async function createScratchPadFromLocalDoc() {
     state.scratchDirty = false;
     if (state.activePad) upsertScratchMeta(state.activePad);
     syncScratchEditor('Created note from local document.');
-    switchTab('notes-tab');
+    switchTab('chat-tab');
     scratchTitleEl.focus();
     scratchTitleEl.select();
     setStatus('Created note from local document');
@@ -4551,7 +4740,7 @@ async function createScratchPadFromArtifact() {
     state.scratchDirty = false;
     if (state.activePad) upsertScratchMeta(state.activePad);
     syncScratchEditor('Created note from artifact.');
-    switchTab('notes-tab');
+    switchTab('chat-tab');
     scratchTitleEl.focus();
     scratchTitleEl.select();
     setStatus('Created note from artifact');
@@ -4850,6 +5039,8 @@ newProviderEl.addEventListener('click', () => {
 });
 
 providerTemplateEl.addEventListener('change', () => {
+  state.providerModels = [];
+  providerModelListEl.hidden = true;
   renderProviderTemplateOptions();
   renderProviderAccessModeOptions();
   renderProviderCredentialSourceOptions();
@@ -4870,6 +5061,16 @@ providerTemplateEl.addEventListener('change', () => {
     updateAdminButtons();
   }
 });
+providerModelEl.addEventListener('input', () => {
+  if (state.providerModels.length) renderProviderModelList();
+});
+providerModelEl.addEventListener('focus', () => {
+  if (state.providerModels.length) renderProviderModelList();
+});
+providerModelEl.addEventListener('blur', () => {
+  setTimeout(() => { providerModelListEl.hidden = true; }, 150);
+});
+fetchProviderModelsEl.addEventListener('click', () => fetchProviderModels());
 providerAccessModeEl.addEventListener('change', () => {
   if (providerAccessModeEl.value !== 'account') {
     state.pendingProviderOauthFlow = null;
@@ -4922,8 +5123,11 @@ providerOpenDocsEl.addEventListener('click', async () => {
     globalStatus: 'Opened provider docs'
   });
 });
+saveIdentityEl.addEventListener('click', () => saveIdentity());
 saveProviderEl.addEventListener('click', () => saveProvider());
+deleteProviderEl.addEventListener('click', () => deleteProvider());
 saveContextEl.addEventListener('click', () => saveConversationContext());
+saveSearchEl.addEventListener('click', () => saveWebSearch());
 saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
