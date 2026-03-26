@@ -330,17 +330,18 @@
                 <div class="field full">
                   <label class="field-label">Template</label>
                   <select id="provider-template" class="text-input"></select>
+                  <div class="actions provider-auth-actions" style="margin-top:4px">
+                    <a class="secondary-link" id="provider-configure-oauth" href="">Open Setup</a>
+                    <a class="secondary-link" id="provider-open-account" target="_blank" rel="noopener noreferrer" hidden>Open Account</a>
+                    <a class="secondary-link" id="provider-open-docs" target="_blank" rel="noopener noreferrer" hidden>Open Docs</a>
+                  </div>
                   <p class="secret-note" id="provider-template-note"></p>
                 </div>
                 <div class="field advanced-only">
                   <label class="field-label">ID</label>
                   <input type="text" id="provider-id" class="text-input" placeholder="openai">
                 </div>
-                <div class="field">
-                  <label class="field-label">Name</label>
-                  <input type="text" id="provider-name" class="text-input" placeholder="OpenAI">
-                </div>
-                <div class="field full advanced-only">
+                <div class="field full advanced-only" id="provider-base-url-field">
                   <label class="field-label">Base URL</label>
                   <input type="text" id="provider-base-url" class="text-input" placeholder="https://api.openai.com/v1">
                 </div>
@@ -361,17 +362,11 @@
                   <label class="field-label">Credential Type</label>
                   <select id="provider-credential-source" class="text-input"></select>
                 </div>
-                <div class="field">
-                  <label class="field-label">Saved Sign-In</label>
-                  <select id="provider-oauth-account" class="text-input"></select>
+                <div class="field full">
+                  <select id="provider-oauth-account" class="text-input" aria-label="API sign-in"></select>
                   <p class="secret-note" id="provider-oauth-account-note"></p>
                   <input type="hidden" id="provider-browser-session">
                   <p class="secret-note" id="provider-browser-session-note"></p>
-                  <div class="actions" style="margin-top:8px">
-                    <a class="secondary-link" id="provider-configure-oauth" href="">Open Setup</a>
-                    <a class="secondary-link" id="provider-open-account" target="_blank" rel="noopener noreferrer" hidden>Open Account</a>
-                    <a class="secondary-link" id="provider-open-docs" target="_blank" rel="noopener noreferrer" hidden>Open Docs</a>
-                  </div>
                 </div>
                 <div class="field full advanced-only">
                   <label class="field-label">Workloads</label>
@@ -390,13 +385,15 @@
                   <label class="field-label">Rate Limit / Minute</label>
                   <input type="number" id="provider-rate-limit-per-minute" class="text-input" min="1" step="1" placeholder="60">
                 </div>
-                <div class="check-row">
-                  <input type="checkbox" id="provider-default">
-                  <label class="check-label" for="provider-default">Use this as the default model</label>
-                </div>
                 <div class="field full">
                   <label class="field-label">API Key</label>
                   <input type="password" id="provider-api-key" class="text-input" placeholder="sk-...">
+                </div>
+                <div class="field full">
+                  <div class="check-row">
+                    <input type="checkbox" id="provider-default">
+                    <label class="check-label" for="provider-default">Use this as the default model</label>
+                  </div>
                 </div>
               </div>
               <div class="composer-foot">
@@ -612,24 +609,19 @@
             <div class="admin-card">
               <div class="panel-header">
                 <div>
-                <h3 class="panel-title" title="Keep extractive summaries by default, or opt into local or external model-generated summaries for uploaded documents.">Local Document Summaries</h3>
+                <h3 class="panel-title" title="Choose document summary mode: use the extractive default, or switch to local or external model-generated summaries for uploaded documents.">Document Summaries</h3>
                 </div>
               </div>
               <div class="field-grid">
-                <div class="field full">
-                  <div class="check-row">
-                    <input type="checkbox" id="local-doc-model-summaries-enabled">
-                    <label class="check-label" for="local-doc-model-summaries-enabled">Use model-generated summaries instead of the extractive default</label>
-                  </div>
-                </div>
                 <div class="field">
-                  <label class="field-label" for="local-doc-model-summary-backend">Model Backend</label>
+                  <label class="field-label" for="local-doc-model-summary-backend">Summary Mode</label>
                   <select id="local-doc-model-summary-backend" class="text-input">
+                    <option value="default">Extractive default</option>
                     <option value="local">Local model</option>
-                    <option value="external">External LLM API</option>
+                    <option value="external">External provider</option>
                   </select>
                 </div>
-                <div class="field">
+                <div class="field" id="local-doc-model-summary-provider-field">
                   <label class="field-label" for="local-doc-model-summary-provider-id">External Provider</label>
                   <select id="local-doc-model-summary-provider-id" class="text-input">
                     <option value="">Default provider</option>
@@ -645,7 +637,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="local-doc-summarization-status">Loading local document summarization settings...</div>
+                <div class="admin-status" id="local-doc-summarization-status">Loading document summary settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-local-doc-summarization">Save summarization settings</button>
                 </div>

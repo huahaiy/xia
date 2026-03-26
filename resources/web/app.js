@@ -86,6 +86,8 @@ const state = {
   retentionSaving: false,
   knowledgeDecaySaving: false,
   localDocSummarizationSaving: false,
+  localDocSummarizationDraftMode: '',
+  localDocSummarizationDraftBackend: 'local',
   localDocOcrSaving: false,
   localDocOcrDraftMode: '',
   localDocOcrDraftBackend: 'local',
@@ -95,7 +97,7 @@ const state = {
   siteSaving: false,
   remoteBridgeSaving: false,
   remotePairing: false,
-  localDocSummarizationStatus: 'Loading local document summarization settings...',
+  localDocSummarizationStatus: 'Loading document summary settings...',
   localDocOcrStatus: 'Loading OCR settings...',
   contextStatus: 'Loading conversation context settings...',
   databaseBackupStatus: 'Loading database backup settings...',
@@ -168,9 +170,9 @@ const providerOnboardingStatusEl = document.getElementById('provider-onboarding-
 const providerCardEl = document.getElementById('provider-card');
 const providerListEl = document.getElementById('provider-list');
 const providerIdEl = document.getElementById('provider-id');
-const providerNameEl = document.getElementById('provider-name');
 const providerTemplateEl = document.getElementById('provider-template');
 const providerTemplateNoteEl = document.getElementById('provider-template-note');
+const providerBaseUrlFieldEl = document.getElementById('provider-base-url-field');
 const providerBaseUrlEl = document.getElementById('provider-base-url');
 const providerModelEl = document.getElementById('provider-model');
 const providerModelListEl = document.getElementById('provider-model-list');
@@ -215,8 +217,8 @@ const knowledgeMaintenanceIntervalDaysEl = document.getElementById('knowledge-ma
 const knowledgeArchiveAfterBottomDaysEl = document.getElementById('knowledge-archive-after-bottom-days');
 const knowledgeDecayStatusEl = document.getElementById('knowledge-decay-status');
 const saveKnowledgeDecayEl = document.getElementById('save-knowledge-decay');
-const localDocModelSummariesEnabledEl = document.getElementById('local-doc-model-summaries-enabled');
 const localDocModelSummaryBackendEl = document.getElementById('local-doc-model-summary-backend');
+const localDocModelSummaryProviderFieldEl = document.getElementById('local-doc-model-summary-provider-field');
 const localDocModelSummaryProviderIdEl = document.getElementById('local-doc-model-summary-provider-id');
 const localDocChunkSummaryMaxTokensEl = document.getElementById('local-doc-chunk-summary-max-tokens');
 const localDocDocSummaryMaxTokensEl = document.getElementById('local-doc-doc-summary-max-tokens');
@@ -1185,6 +1187,12 @@ async function openProviderPrimaryAction(action, options = {}) {
 
 function providerTemplateNote(template) {
   if (!template) return '';
+  if (!String(template.base_url || '').trim()) {
+    if (template.id === 'claude') {
+      return 'Enter a compatible gateway or proxy Base URL below. Anthropic\'s native API is not supported here yet.';
+    }
+    return 'Enter a compatible Base URL below.';
+  }
   return '';
 }
 
@@ -1595,9 +1603,6 @@ function applyProviderTemplate(templateId, options = {}) {
     ? options.preserveId
     : !!state.activeProviderId;
   providerTemplateEl.value = template.id || '';
-  if (!options.preserveName || !providerNameEl.value.trim()) {
-    providerNameEl.value = template.name || '';
-  }
   if (!options.preserveBaseUrl || !providerBaseUrlEl.value.trim()) {
     providerBaseUrlEl.value = template.base_url || '';
   }
@@ -1633,7 +1638,7 @@ function applyProviderTemplate(templateId, options = {}) {
   } else if (providerModelEl.value) {
     providerModelEl.focus();
   } else {
-    providerNameEl.focus();
+    providerBaseUrlEl.focus();
   }
 }
 
@@ -1685,7 +1690,6 @@ function buildProviderTemplateCard(template) {
     }
     applyProviderTemplate(template.id, {
       preserveId: false,
-      preserveName: false,
       preserveBaseUrl: false,
       preserveModel: false,
       statusText: 'Template applied. Save the model when ready.'
@@ -1717,7 +1721,6 @@ function buildProviderTemplateCard(template) {
           }
           applyProviderTemplate(template.id, {
             preserveId: false,
-            preserveName: false,
             preserveBaseUrl: false,
             preserveModel: false,
             statusText: 'Template applied. Finish setting up sign-in, then save the model.'
@@ -1786,14 +1789,28 @@ function normalizeProviderIdSegment(value) {
     .replace(/^-+|-+$/g, '');
 }
 
+function computedProviderName(options = {}) {
+  const templateId = Object.prototype.hasOwnProperty.call(options, 'templateId')
+    ? options.templateId
+    : providerTemplateEl.value;
+  const modelValue = Object.prototype.hasOwnProperty.call(options, 'model')
+    ? options.model
+    : providerModelEl.value;
+  const template = providerTemplateById(templateId);
+  const templateName = firstNonEmpty(template && template.name, templateId, 'Model');
+  const model = String(modelValue || '').trim();
+  if (!model) return templateName;
+  const shortModel = model.includes('/') ? model.split('/').pop() : model;
+  return templateName + ' — ' + shortModel;
+}
+
 function ensureProviderId() {
   const current = providerIdEl.value.trim();
   const isEditing = !!state.activeProviderId;
   if (isEditing && current) return current;
   const templateId = normalizeProviderIdSegment(providerTemplateEl.value);
-  const nameId = normalizeProviderIdSegment(providerNameEl.value);
   const modelId = normalizeProviderIdSegment(providerModelEl.value);
-  const base = (nameId || templateId || 'provider') + (modelId ? '-' + modelId : '');
+  const base = (templateId || 'provider') + (modelId ? '-' + modelId : '');
   const usedIds = new Set((state.admin.providers || []).map((provider) => provider.id).filter(Boolean));
   let candidate = base;
   let suffix = 2;
@@ -1806,16 +1823,7 @@ function ensureProviderId() {
 }
 
 function ensureProviderName() {
-  const name = providerNameEl.value.trim();
-  const model = providerModelEl.value.trim();
-  if (!model) return name;
-  const template = providerTemplateById(providerTemplateEl.value);
-  const templateName = template ? (template.name || '') : '';
-  if (name && name !== templateName) return name;
-  const shortModel = model.includes('/') ? model.split('/').pop() : model;
-  const generated = (templateName || 'Model') + ' — ' + shortModel;
-  providerNameEl.value = generated;
-  return generated;
+  return computedProviderName();
 }
 
 function scrollCardIntoView(cardEl) {
@@ -1826,7 +1834,7 @@ function scrollCardIntoView(cardEl) {
 function captureProviderDraft() {
   return {
     id: providerIdEl.value.trim(),
-    name: providerNameEl.value,
+    name: ensureProviderName(),
     template: providerTemplateEl.value,
     baseUrl: providerBaseUrlEl.value,
     model: providerModelEl.value,
@@ -1848,7 +1856,6 @@ function restoreProviderDraft(draft, options = {}) {
   if (!draft) return false;
   state.activeProviderId = '';
   providerIdEl.value = draft.id || '';
-  providerNameEl.value = draft.name || '';
   providerTemplateEl.value = draft.template || defaultProviderTemplateId();
   providerBaseUrlEl.value = draft.baseUrl || '';
   providerModelEl.value = draft.model || '';
@@ -1943,7 +1950,7 @@ async function beginProviderBrowserSessionSetup(connectorId, options = {}) {
     state.pendingProviderBrowserSessionFlow = {
       connectorId: connectorId || (template && template.account_connector) || '',
       sessionId: '',
-      providerName: firstNonEmpty(providerNameEl.value, template && template.name, providerTemplateEl.value, 'provider')
+      providerName: computedProviderName({ templateId: providerTemplateEl.value })
     };
   }
   const pending = state.pendingProviderBrowserSessionFlow || {};
@@ -1978,7 +1985,7 @@ async function beginProviderBrowserSessionSetup(connectorId, options = {}) {
       state.pendingProviderBrowserSessionFlow = {
         connectorId: connection.connector || connectorId,
         sessionId: connection.session_id || '',
-        providerName: pending.providerName || firstNonEmpty(providerNameEl.value, template && template.name, 'provider')
+        providerName: pending.providerName || computedProviderName({ templateId: providerTemplateEl.value })
       };
       syncPendingProviderBrowserSessionDraft(providerBrowserSessionEl.value, connection.connector || connectorId);
       providerStatusEl.textContent = connection.message || 'Finish the provider sign-in in the browser window, then click Finish Sign-In.';
@@ -2367,7 +2374,6 @@ function updateAdminButtons() {
   saveContextEl.disabled = state.contextSaving;
   saveRetentionEl.disabled = state.retentionSaving;
   saveKnowledgeDecayEl.disabled = state.knowledgeDecaySaving;
-  localDocModelSummariesEnabledEl.disabled = state.localDocSummarizationSaving;
   localDocModelSummaryBackendEl.disabled = state.localDocSummarizationSaving;
   localDocModelSummaryProviderIdEl.disabled = state.localDocSummarizationSaving
     || localDocModelSummaryBackendEl.value !== 'external';
@@ -2574,7 +2580,6 @@ function resetProviderForm(statusText) {
   state.pendingProviderOauthFlow = null;
   state.pendingProviderBrowserSessionFlow = null;
   providerIdEl.value = '';
-  providerNameEl.value = '';
   providerTemplateEl.value = defaultProviderTemplateId();
   providerBaseUrlEl.value = '';
   providerModelEl.value = '';
@@ -2597,7 +2602,6 @@ function resetProviderForm(statusText) {
   if (templateId) {
     applyProviderTemplate(templateId, {
       preserveId: false,
-      preserveName: false,
       preserveBaseUrl: false,
       preserveModel: false,
       statusText: statusText || 'Choose a model template, review the fields, then save it.'
@@ -2684,11 +2688,17 @@ function renderKnowledgeDecaySettings() {
 
 function defaultLocalDocSummarizationStatus() {
   const settings = state.admin.localDocSummarization || {};
-  return settings.model_summaries_enabled ? 'Model summaries enabled.' : '';
+  if (!settings.model_summaries_enabled) return 'Using extractive default.';
+  return settings.model_summary_backend === 'external'
+    ? 'Using model-generated summaries from an external provider.'
+    : 'Using model-generated summaries locally.';
 }
 
 function renderLocalDocSummarizationProviderOptions() {
-  const selected = localDocModelSummaryProviderIdEl.value;
+  const settings = state.admin.localDocSummarization || {};
+  const selected = firstNonEmpty(localDocModelSummaryProviderIdEl.value,
+    settings.model_summary_provider_id,
+    '');
   localDocModelSummaryProviderIdEl.replaceChildren();
   const blank = document.createElement('option');
   blank.value = '';
@@ -2705,14 +2715,17 @@ function renderLocalDocSummarizationProviderOptions() {
 
 function renderLocalDocSummarizationSettings() {
   const settings = state.admin.localDocSummarization || {};
-  localDocModelSummariesEnabledEl.checked = !!settings.model_summaries_enabled;
-  localDocModelSummaryBackendEl.value = firstNonEmpty(settings.model_summary_backend, 'local');
+  const summaryMode = firstNonEmpty(state.localDocSummarizationDraftMode,
+    settings.model_summaries_enabled ? settings.model_summary_backend : 'default',
+    'default');
+  const isExternal = summaryMode === 'external';
+  localDocModelSummaryBackendEl.value = summaryMode;
   renderLocalDocSummarizationProviderOptions();
-  localDocModelSummaryProviderIdEl.value = settings.model_summary_provider_id || '';
   localDocChunkSummaryMaxTokensEl.value = settings.chunk_summary_max_tokens || '';
   localDocDocSummaryMaxTokensEl.value = settings.doc_summary_max_tokens || '';
+  localDocModelSummaryProviderFieldEl.hidden = !isExternal;
   localDocModelSummaryProviderIdEl.disabled = state.localDocSummarizationSaving
-    || localDocModelSummaryBackendEl.value !== 'external';
+    || !isExternal;
   localDocSummarizationStatusEl.textContent = state.localDocSummarizationStatus || defaultLocalDocSummarizationStatus();
   updateAdminButtons();
 }
@@ -2866,7 +2879,6 @@ function selectProvider(provider) {
   state.pendingProviderOauthFlow = null;
   state.pendingProviderBrowserSessionFlow = null;
   providerIdEl.value = provider.id || '';
-  providerNameEl.value = provider.name || '';
   providerTemplateEl.value = provider.template || '';
   providerBaseUrlEl.value = provider.base_url || '';
   providerModelEl.value = provider.model || '';
@@ -3451,6 +3463,13 @@ async function loadAdminConfigImpl() {
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.localDocSummarization = data.local_doc_summarization || null;
+    state.localDocSummarizationDraftBackend = state.admin.localDocSummarization && state.admin.localDocSummarization.model_summary_backend
+      ? state.admin.localDocSummarization.model_summary_backend
+      : 'local';
+    state.localDocSummarizationDraftMode = state.admin.localDocSummarization
+      && state.admin.localDocSummarization.model_summaries_enabled
+      ? state.localDocSummarizationDraftBackend
+      : 'default';
     state.admin.localDocOcr = data.local_doc_ocr || null;
     state.localDocOcrDraftBackend = state.admin.localDocOcr && state.admin.localDocOcr.model_backend
       ? state.admin.localDocOcr.model_backend
@@ -3868,23 +3887,39 @@ async function saveLocalDocSummarization() {
   renderLocalDocSummarizationSettings();
   updateAdminButtons();
   try {
+    const summaryMode = localDocModelSummaryBackendEl.value || 'default';
+    const summaryBackend = summaryMode === 'default'
+      ? firstNonEmpty(state.localDocSummarizationDraftBackend,
+          state.admin.localDocSummarization && state.admin.localDocSummarization.model_summary_backend,
+          'local')
+      : summaryMode;
     const data = await fetchJson('/admin/local-doc-summarization', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model_summaries_enabled: localDocModelSummariesEnabledEl.checked,
-        model_summary_backend: localDocModelSummaryBackendEl.value,
-        model_summary_provider_id: localDocModelSummaryProviderIdEl.value,
+        model_summaries_enabled: summaryMode !== 'default',
+        model_summary_backend: summaryBackend,
+        model_summary_provider_id: summaryBackend === 'external'
+          ? localDocModelSummaryProviderIdEl.value
+          : '',
         chunk_summary_max_tokens: localDocChunkSummaryMaxTokensEl.value,
         doc_summary_max_tokens: localDocDocSummaryMaxTokensEl.value
       })
     });
     state.admin.localDocSummarization = data.local_doc_summarization || state.admin.localDocSummarization;
-    state.localDocSummarizationStatus = 'Local document summarization settings saved.';
+    state.localDocSummarizationDraftBackend = state.admin.localDocSummarization
+      && state.admin.localDocSummarization.model_summary_backend
+      ? state.admin.localDocSummarization.model_summary_backend
+      : 'local';
+    state.localDocSummarizationDraftMode = state.admin.localDocSummarization
+      && state.admin.localDocSummarization.model_summaries_enabled
+      ? state.localDocSummarizationDraftBackend
+      : 'default';
+    state.localDocSummarizationStatus = 'Document summary settings saved.';
     renderLocalDocSummarizationSettings();
-    setStatus('Local document summarization settings saved');
+    setStatus('Document summary settings saved');
   } catch (err) {
-    state.localDocSummarizationStatus = err.message || 'Failed to save local document summarization settings.';
+    state.localDocSummarizationStatus = err.message || 'Failed to save document summary settings.';
     renderLocalDocSummarizationSettings();
   } finally {
     state.localDocSummarizationSaving = false;
@@ -5309,7 +5344,6 @@ providerTemplateEl.addEventListener('change', () => {
   if (template) {
     applyProviderTemplate(template.id, {
       preserveId: false,
-      preserveName: false,
       preserveBaseUrl: false,
       preserveModel: false,
       preserveAccessMode: false,
@@ -5390,7 +5424,14 @@ saveSearchEl.addEventListener('click', () => saveWebSearch());
 saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
-localDocModelSummaryBackendEl.addEventListener('change', () => updateAdminButtons());
+localDocModelSummaryBackendEl.addEventListener('change', () => {
+  state.localDocSummarizationDraftMode = localDocModelSummaryBackendEl.value || 'default';
+  if (state.localDocSummarizationDraftMode === 'local' || state.localDocSummarizationDraftMode === 'external') {
+    state.localDocSummarizationDraftBackend = state.localDocSummarizationDraftMode;
+  }
+  localDocModelSummaryProviderFieldEl.hidden = state.localDocSummarizationDraftMode !== 'external';
+  updateAdminButtons();
+});
 saveLocalDocOcrEl.addEventListener('click', () => saveLocalDocOcr());
 localDocOcrModelBackendEl.addEventListener('change', () => {
   state.localDocOcrDraftMode = localDocOcrModelBackendEl.value || 'disabled';

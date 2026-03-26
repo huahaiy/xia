@@ -186,6 +186,9 @@ h1 {
 .advanced-only {
   display: none !important;
 }
+.field.advanced-only.force-visible {
+  display: grid !important;
+}
 .advanced-mode .advanced-only {
   display: grid !important;
 }
@@ -257,6 +260,14 @@ h1 {
   line-height: 1.45;
 }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.provider-auth-actions {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.provider-auth-actions .secondary-link {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 button {
   appearance: none;
   border: 0;
