@@ -1,10 +1,12 @@
 (ns xia.identity
   "Identity & soul — defines who this xia is.
    Stored in Datalevin so it travels with the DB."
-  (:require [xia.db :as db]))
+  (:require [clojure.string :as str]
+            [xia.db :as db]))
 
 (def default-soul
   {:name        "Xia"
+   :role        "General personal assistant for everyday digital work."
    :description "A portable personal AI assistant, a modern echo of the Snail Maiden who quietly tends to the details of the user's digital life."
    :personality "You are Xia: a helpful, thoughtful personal assistant.
                  You remember things about the user and build on past
@@ -30,8 +32,8 @@
             (if-let [v (db/get-identity k)]
               (assoc m k v)
               m))
-          {}
-          [:name :description :personality :guidelines]))
+          default-soul
+          [:name :role :description :personality :guidelines]))
 
 (defn set-soul! [k v]
   (db/set-identity! k v))
@@ -40,9 +42,12 @@
   "Build the system prompt from identity.
    Knowledge and skills are appended separately by the agent."
   []
-  (let [soul (get-soul)]
+  (let [soul (get-soul)
+        role (some-> (:role soul) str str/trim not-empty)]
     (str "You are " (:name soul "Xia") ". "
          (:description soul "") "\n\n"
+         (when role
+           (str "## Role\n" role "\n\n"))
          "## Personality\n" (:personality soul "") "\n\n"
          "## Guidelines\n" (:guidelines soul "") "\n\n"
          "## Continuity\n"

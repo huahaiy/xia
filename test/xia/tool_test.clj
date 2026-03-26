@@ -3,7 +3,9 @@
             [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.db :as db]
+            [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
+            [xia.paths :as paths]
             [xia.prompt :as prompt]
             [xia.test-helpers :refer [with-test-db]]
             [xia.tool :as tool]))
@@ -160,6 +162,7 @@
            (get-in tool-def [:function :description])))))
 
 (deftest tool-definitions-are-scoped-by-context
+  (tool/reset-runtime!)
   (db/install-tool! {:id          :web-search
                      :name        "web-search"
                      :description "Search the web for information"
@@ -184,6 +187,7 @@
       (is (not (contains? names "schedule-manage"))))))
 
 (deftest tool-definitions-fall-back-to-all-visible-tools-without-match
+  (tool/reset-runtime!)
   (db/install-tool! {:id          :web-search
                      :name        "web-search"
                      :description "Search the web for information"
@@ -245,6 +249,68 @@
       (is (seq (get result :recent_episodes)))
       (is (= "current.md" (get-in result [:artifacts 0 :name])))
       (is (= "notes.md" (get-in result [:local_documents 0 :name]))))))
+
+(deftest bundled-workspace-tools-share-items-across-sessions
+  (let [root   (str (java.nio.file.Files/createTempDirectory "xia-workspace-tool-test"
+                                                             (into-array java.nio.file.attribute.FileAttribute [])))
+        sid-a  (db/create-session! :terminal)
+        sid-b  (db/create-session! :terminal)
+        report (artifact/create-artifact! {:session-id sid-a
+                                           :name "report.md"
+                                           :kind :markdown
+                                           :content "# Shared\n\nAlpha"})
+        doc    (local-doc/save-upload! {:session-id sid-a
+                                        :name "notes.md"
+                                        :media-type "text/markdown"
+                                        :text "# Notes\n\nBeta"})]
+    (with-redefs [paths/shared-workspace-root (constantly root)]
+      (tool/ensure-bundled-tools!)
+      (prompt/register-approval! :terminal (fn [_] true))
+      (try
+        (let [shared-note     (tool/execute-tool :workspace-write-note
+                                                 {"content" "handoff note"
+                                                  "title" "Handoff"}
+                                                 {:channel :terminal
+                                                  :session-id sid-a})
+              shared-report   (tool/execute-tool :workspace-publish-artifact
+                                                 {"artifact_id" (str (:id report))}
+                                                 {:channel :terminal
+                                                  :session-id sid-a})
+              shared-doc      (tool/execute-tool :workspace-publish-doc
+                                                 {"doc_id" (str (:id doc))}
+                                                 {:channel :terminal
+                                                  :session-id sid-a})
+              listing         (tool/execute-tool :workspace-list {}
+                                                 {:channel :terminal
+                                                  :session-id sid-b})
+              note-slice      (tool/execute-tool :workspace-read
+                                                 {"item_id" (str (:id shared-note))
+                                                  "max_chars" 7}
+                                                 {:channel :terminal
+                                                  :session-id sid-b})
+              imported-report (tool/execute-tool :workspace-import-artifact
+                                                 {"item_id" (str (:id shared-report))}
+                                                 {:channel :terminal
+                                                  :session-id sid-b})
+              imported-doc    (tool/execute-tool :workspace-import-doc
+                                                 {"item_id" (str (:id shared-doc))}
+                                                 {:channel :terminal
+                                                  :session-id sid-b})]
+          (is (= "default" (:workspace_id listing)))
+          (is (= #{(str (:id shared-note))
+                   (str (:id shared-report))
+                   (str (:id shared-doc))}
+                 (set (map #(str (:id %)) (:items listing)))))
+          (is (= "handoff" (:text note-slice)))
+          (is (= "report.md" (:name imported-report)))
+          (is (= "# Shared\n\nAlpha"
+                 (:text (artifact/get-session-artifact sid-b (:id imported-report)))))
+          (is (= "notes.md" (:name imported-doc)))
+          (is (= "# Notes\n\nBeta" (:text imported-doc))))
+        (finally
+          (prompt/register-approval! :terminal nil)
+          (tool/clear-session-approvals! sid-a)
+          (tool/clear-session-approvals! sid-b))))))
 
 (deftest autonomous-tool-definitions-hide-unavailable-privileged-tools
   (db/register-service! {:id                   :github
@@ -371,7 +437,16 @@
   (let [count (tool/ensure-bundled-tools!)]
     (is (pos? count))
     (is (= :branch-tasks (:tool/id (db/get-tool :branch-tasks))))
+    (is (= :peer-list (:tool/id (db/get-tool :peer-list))))
+    (is (= :peer-chat (:tool/id (db/get-tool :peer-chat))))
+    (is (= :peer-instance-list (:tool/id (db/get-tool :peer-instance-list))))
+    (is (= :peer-instance-start (:tool/id (db/get-tool :peer-instance-start))))
+    (is (= :peer-instance-status (:tool/id (db/get-tool :peer-instance-status))))
+    (is (= :peer-instance-stop (:tool/id (db/get-tool :peer-instance-stop))))
     (is (= :artifact-create (:tool/id (db/get-tool :artifact-create))))
+    (is (= [["content"] ["rows"] ["data"]]
+           (mapv #(get % "required")
+                 (get-in (db/get-tool :artifact-create) [:tool/parameters "anyOf"]))))
     (is (= :artifact-list (:tool/id (db/get-tool :artifact-list))))
     (is (= :artifact-search (:tool/id (db/get-tool :artifact-search))))
     (is (= :artifact-read (:tool/id (db/get-tool :artifact-read))))
@@ -397,6 +472,7 @@
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-runtime-status))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-screenshot))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :browser-query-elements))))
+    (is (= :parallel-safe (:tool/execution-mode (db/get-tool :peer-list))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :artifact-list))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :artifact-search))))
     (is (= :parallel-safe (:tool/execution-mode (db/get-tool :artifact-read))))
@@ -410,6 +486,10 @@
                    "tasks"))
     (is (contains? (get-in (db/get-tool :email-send) [:tool/parameters "properties"])
                    "to"))
+    (is (contains? (get-in (db/get-tool :peer-chat) [:tool/parameters "properties"])
+                   "service_id"))
+    (is (contains? (get-in (db/get-tool :peer-instance-start) [:tool/parameters "properties"])
+                   "instance_id"))
     (is (contains? (get-in (db/get-tool :browser-login) [:tool/parameters "properties"])
                    "backend"))
     (is (contains? (get-in (db/get-tool :browser-login-interactive) [:tool/parameters "properties"])
@@ -474,6 +554,143 @@
         (is (= "sent" (:status sent)))
         (is (= "sent-1" (:id sent)))
         (is (= "Bearer tok" (get-in (first @requests) [:headers "Authorization"])))))))
+
+(deftest bundled-peer-tools-run-through-approved-service
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :peer-list)
+  (tool/load-tool! :peer-chat)
+  (db/register-service! {:id                   :ops-peer
+                         :name                 "Ops Xia"
+                         :base-url             "http://127.0.0.1:4011"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :allow-private-network? true
+                         :autonomous-approved? true})
+  (let [requests (atom [])]
+    (with-redefs [xia.service/request
+                  (fn [service-id method path & opts]
+                    (swap! requests conj {:service-id service-id
+                                          :method method
+                                          :path path
+                                          :opts (apply hash-map opts)})
+                    {:status 200
+                     :body {"session_id" "peer-session"
+                            "role" "assistant"
+                            "content" "Peer reply"}})]
+      (let [context {:channel          :scheduler
+                     :autonomous-run?  true
+                     :approval-bypass? true}
+            peers   (tool/execute-tool :peer-list {} context)
+            reply   (tool/execute-tool :peer-chat {"service_id" "ops-peer"
+                                                   "message" "Summarize the rollout"
+                                                   "timeout_ms" 45000}
+                                       context)]
+        (is (= [{:service_id "ops-peer"
+                 :name "Ops Xia"
+                 :base_url "http://127.0.0.1:4011"
+                 :allow_private_network true
+                 :local true
+                 :autonomous_approved true}]
+               (:peers peers)))
+        (is (= {:service_id "ops-peer"
+                :session_id "peer-session"
+                :role "assistant"
+                :content "Peer reply"}
+               reply))
+        (is (= [{:service-id :ops-peer
+                 :method :post
+                 :path "/command/chat"
+                 :opts {:body {"message" "Summarize the rollout"}
+                        :as :json
+                        :timeout 45000}}]
+               @requests))))))
+
+(deftest bundled-peer-instance-tools-execute-through-sci
+  (tool/ensure-bundled-tools!)
+  (doseq [tool-id [:peer-instance-list
+                   :peer-instance-start
+                   :peer-instance-status
+                   :peer-instance-stop]]
+    (tool/load-tool! tool-id))
+  (let [session-id (random-uuid)
+        process    (let [alive? (atom true)
+                         self   (atom nil)
+                         p      (proxy [Process] []
+                                  (getOutputStream [] nil)
+                                  (getInputStream [] nil)
+                                  (getErrorStream [] nil)
+                                  (waitFor [] (reset! alive? false) 0)
+                                  (exitValue []
+                                    (if @alive?
+                                      (throw (IllegalThreadStateException. "process still running"))
+                                      0))
+                                  (destroy []
+                                    (reset! alive? false))
+                                  (destroyForcibly []
+                                    (reset! alive? false)
+                                    @self)
+                                  (isAlive [] @alive?)
+                                  (pid [] 4242))]
+                     (reset! self p)
+                     p)]
+    (prompt/register-approval! :terminal (fn [_] true))
+    (try
+      (instance-supervisor/shutdown!)
+      (instance-supervisor/configure! {:enabled? true
+                                       :command "/opt/xia/bin/xia"})
+      (instance-supervisor/set-instance-management-enabled! true)
+      (with-redefs [xia.instance-supervisor/spawn-process!
+                    (fn [_command _args _env _log-path]
+                      process)
+                    xia.instance-supervisor/wait-until-ready!
+                    (fn [_base-url _process _wait-for-ready-ms _log-path]
+                      true)
+                    xia.instance-supervisor/start-exit-watcher!
+                    (fn [_instance-id _process]
+                      nil)
+                    xia.instance-supervisor/wait-for-exit
+                    (fn [_process _timeout-ms]
+                      true)]
+        (let [context {:channel :terminal
+                       :session-id session-id}
+              started (tool/execute-tool :peer-instance-start {"instance_id" "ops-child"
+                                                               "template_instance" "base"
+                                                               "port" 4115}
+                                         context)
+              listed  (tool/execute-tool :peer-instance-list {} context)
+              status  (tool/execute-tool :peer-instance-status {"instance_id" "ops-child"}
+                                         context)
+              stopped (tool/execute-tool :peer-instance-stop {"instance_id" "ops-child"
+                                                              "timeout_ms" 1500}
+                                         context)]
+          (is (= "ops-child" (:instance_id started)))
+          (is (= "base" (:template_instance started)))
+          (is (= 4115 (:port started)))
+          (is (= "running" (:state started)))
+          (is (= [{:instance_id "ops-child"
+                   :service_id "xia-managed-instance-ops-child"
+                   :service_name "Managed Xia ops-child"
+                   :base_url "http://127.0.0.1:4115"
+                   :port 4115
+                   :pid 4242
+                   :state "running"
+                   :alive true
+                   :template_instance "base"
+                   :log_path (str (paths/default-instance-root "ops-child") "/xia.log")
+                   :started_at (:started_at started)
+                   :exited_at nil
+                   :exit_code nil}]
+                 (:instances listed)))
+          (is (= "ops-child" (:instance_id status)))
+          (is (= "running" (:state status)))
+          (is (= "exited" (:state stopped)))
+          (is (= 0 (:exit_code stopped)))))
+      (finally
+        (instance-supervisor/shutdown!)
+        (instance-supervisor/set-instance-management-enabled! false)
+        (instance-supervisor/configure! {:enabled? false})
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)))))
 
 (deftest branch-workers-cannot-run-branch-tasks-recursively
   (tool/ensure-bundled-tools!)
@@ -616,6 +833,16 @@
       (is (= [] (tool/execute-tool :artifact-list {}
                                    {:channel :terminal
                                     :session-id sid}))))))
+
+(deftest artifact-create-tool-rejects-empty-payload
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :artifact-create)
+  (let [sid    (db/create-session! :http)
+        result (tool/execute-tool :artifact-create {}
+                                  {:channel :terminal
+                                   :session-id sid})]
+    (is (= "Tool execution failed: missing artifact content"
+           (:error result)))))
 
 (deftest browser-open-tool-accepts-playwright-backend
   (tool/ensure-bundled-tools!)

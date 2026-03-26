@@ -1,0 +1,22 @@
+;; Publish an artifact into the shared workspace.
+;; Import with: /import-tool resources/tools/workspace-publish-artifact.edn
+
+{:id          :workspace-publish-artifact
+ :name        "workspace-publish-artifact"
+ :description "Publish an existing artifact into Xia's shared workspace so another instance can read or import it."
+ :tags        #{:workspace :shared :collaboration :artifact :publish}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"artifact_id"  {"type"        "string"
+                                             "description" "Artifact id returned by artifact-list, artifact-search, recent-work, or artifact-create."}
+                             "workspace_id" {"type"        "string"
+                                             "description" "Optional shared workspace id. Defaults to `default`."}
+                             "name"         {"type"        "string"
+                                             "description" "Optional shared filename override."}}
+               "required"   ["artifact_id"]}
+ :handler     "(fn [args]
+                 (dissoc (xia.workspace/publish-artifact!
+                           (get args \"artifact_id\")
+                           :workspace-id (get args \"workspace_id\")
+                           :name (get args \"name\"))
+                         :payload-path :sha256 :meta))"}

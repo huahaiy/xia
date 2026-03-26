@@ -1,0 +1,28 @@
+;; Write a shared note into the shared workspace.
+;; Import with: /import-tool resources/tools/workspace-write-note.edn
+
+{:id          :workspace-write-note
+ :name        "workspace-write-note"
+ :description "Write a shared note into Xia's shared workspace so other instances can pick it up."
+ :tags        #{:workspace :shared :collaboration :note :write}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"content"      {"type"        "string"
+                                             "description" "Note body to write into the shared workspace."}
+                             "title"        {"type"        "string"
+                                             "description" "Optional note title."}
+                             "name"         {"type"        "string"
+                                             "description" "Optional filename override."}
+                             "media_type"   {"type"        "string"
+                                             "description" "Optional media type. Defaults to `text/markdown`."}
+                             "workspace_id" {"type"        "string"
+                                             "description" "Optional shared workspace id. Defaults to `default`."}}
+               "required"   ["content"]}
+ :handler     "(fn [args]
+                 (dissoc (xia.workspace/write-note!
+                           (get args \"content\")
+                           :workspace-id (get args \"workspace_id\")
+                           :title (get args \"title\")
+                           :name (get args \"name\")
+                           :media-type (get args \"media_type\"))
+                         :payload-path :sha256 :meta))"}

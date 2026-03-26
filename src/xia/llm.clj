@@ -521,6 +521,44 @@
             :workload workload
             :response-preview (response-preview response)}))
 
+(defn- content-part-text
+  [part]
+  (cond
+    (string? part)
+    part
+
+    (map? part)
+    (let [text (get part "text")]
+      (cond
+        (string? text)
+        text
+
+        (map? text)
+        (or (some-> (get text "value") str)
+            (some-> (get text "text") str))
+
+        :else
+        nil))
+
+    :else
+    nil))
+
+(defn- normalize-message-content
+  [content]
+  (cond
+    (string? content)
+    content
+
+    (sequential? content)
+    (let [text (->> content
+                    (keep content-part-text)
+                    (apply str))]
+      (when (seq text)
+        text))
+
+    :else
+    nil))
+
 (defn- response-message!
   [response request-info]
   (cond
@@ -550,22 +588,18 @@
 (defn- simple-message-content!
   [response request-info]
   (let [message (response-message! response request-info)
-        content (get message "content")]
+        content (normalize-message-content (get message "content"))]
     (if (string? content)
       content
       (throw (malformed-response-ex
-               "LLM response missing string choices[0].message.content"
+               "LLM response missing text choices[0].message.content"
                (assoc request-info :response response))))))
 
 (defn- tool-message!
   [response request-info]
   (let [message    (response-message! response request-info)
-        content    (get message "content")
+        content    (normalize-message-content (get message "content"))
         tool-calls (get message "tool_calls")]
-    (when-not (or (string? content) (nil? content))
-      (throw (malformed-response-ex
-               "LLM response has non-string choices[0].message.content"
-               (assoc request-info :response response))))
     (when (and (contains? message "tool_calls")
                (not (sequential? tool-calls)))
       (throw (malformed-response-ex
@@ -576,6 +610,7 @@
                "LLM response message has neither content nor tool_calls"
                (assoc request-info :response response))))
     (cond-> message
+      (contains? message "content") (assoc "content" (or content ""))
       (nil? content) (assoc "content" ""))))
 
 (defn- streaming-request?

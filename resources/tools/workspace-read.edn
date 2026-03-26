@@ -1,0 +1,25 @@
+;; Read a shared workspace item.
+;; Import with: /import-tool resources/tools/workspace-read.edn
+
+{:id             :workspace-read
+ :name           "workspace-read"
+ :description    "Read a shared workspace item by id. Text items return a text slice plus metadata. Binary items return metadata and preview only."
+ :tags           #{:workspace :shared :collaboration :read :artifact :document :note}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"item_id"      {"type"        "string"
+                                                "description" "Workspace item id returned by workspace-list."}
+                                "workspace_id" {"type"        "string"
+                                                "description" "Optional shared workspace id. Defaults to `default`."}
+                                "offset"       {"type"        "integer"
+                                                "description" "Character offset for text items (default 0)."}
+                                "max_chars"    {"type"        "integer"
+                                                "description" "Maximum number of characters to return for text items (default 4000)."}}
+                  "required"   ["item_id"]}
+ :handler        "(fn [args]
+                    (dissoc (xia.workspace/read-item
+                              (get args \"item_id\")
+                              :workspace-id (get args \"workspace_id\")
+                              :offset (or (get args \"offset\") 0)
+                              :max-chars (or (get args \"max_chars\") 4000))
+                            :payload-path :sha256 :meta))"}

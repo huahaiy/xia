@@ -8,6 +8,7 @@
             [datalevin.llm :as llm]
             [taoensso.timbre :as log]
             [xia.crypto :as crypto]
+            [xia.paths :as paths]
             [xia.sensitive :as sensitive])
   (:import [java.io InputStream]
            [java.net URI]
@@ -432,6 +433,7 @@
 (defonce ^:private embedding-provider-atom (atom nil))
 (defonce ^:private llm-provider-atom (atom nil))
 (defonce ^:private db-path-atom (atom nil))
+(defonce ^:private instance-id-atom (atom nil))
 (declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
@@ -539,8 +541,7 @@
                (nil? (:model-path provider-spec))
                (string? (:model-filename provider-spec)))
           (assoc :model-path
-                 (str db-path java.io.File/separator
-                      "embed"
+                 (str (paths/managed-embed-dir db-path)
                       java.io.File/separator
                       (:model-filename provider-spec)))))
 
@@ -679,8 +680,7 @@
                (nil? (:model-path provider-spec))
                (string? (:model-filename provider-spec)))
           (assoc :model-path
-                 (str db-path java.io.File/separator
-                      "llm"
+                 (str (paths/managed-llm-dir db-path)
                       java.io.File/separator
                       (:model-filename provider-spec)))))
 
@@ -775,12 +775,14 @@
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
   ([db-path crypto-opts]
-   (let [datalevin-opts (-> (resolve-datalevin-opts crypto-opts)
+   (let [instance-id    (paths/resolve-instance-id (:instance-id crypto-opts))
+         datalevin-opts (-> (resolve-datalevin-opts crypto-opts)
                             (prepare-managed-embedding-runtime! db-path))
          c              (d/get-conn db-path schema datalevin-opts)]
      (try
        (reset! conn-atom c)
        (reset! db-path-atom db-path)
+       (reset! instance-id-atom instance-id)
        (crypto/configure! db-path crypto-opts)
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
@@ -791,6 +793,7 @@
          (close-embedding-provider!)
          (reset! conn-atom nil)
          (reset! db-path-atom nil)
+         (reset! instance-id-atom nil)
          (try
            (d/close c)
            (catch Exception _))
@@ -814,13 +817,18 @@
   []
   @db-path-atom)
 
+(defn current-instance-id
+  []
+  @instance-id-atom)
+
 (defn close! []
   (close-llm-provider!)
   (close-embedding-provider!)
   (when-let [c @conn-atom]
     (d/close c)
     (reset! conn-atom nil))
-  (reset! db-path-atom nil))
+  (reset! db-path-atom nil)
+  (reset! instance-id-atom nil))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic helpers
@@ -1081,6 +1089,337 @@
 
 (defn get-identity [k]
   (ffirst (q '[:find ?v :in $ ?k :where [?e :identity/key ?k] [?e :identity/value ?v]] k)))
+
+(def ^:private template-identity-keys
+  [:name :role :description :personality :guidelines])
+
+(def ^:private template-config-keys
+  #{:user/name
+    :web/search-backend
+    :web/search-brave-api-key
+    :web/search-searxng-url
+    :context/recent-history-message-limit
+    :memory/episode-full-resolution-ms
+    :memory/episode-decay-half-life-ms
+    :memory/episode-retained-decayed-count
+    :memory/knowledge-decay-grace-period-ms
+    :memory/knowledge-decay-half-life-ms
+    :memory/knowledge-decay-min-confidence
+    :memory/knowledge-decay-maintenance-step-ms
+    :memory/knowledge-decay-archive-after-bottom-ms
+    :local-doc/model-summaries-enabled?
+    :local-doc/model-summary-backend
+    :local-doc/model-summary-provider-id
+    :local-doc/chunk-summary-max-tokens
+    :local-doc/doc-summary-max-tokens
+    :local-doc/ocr-enabled?
+    :local-doc/ocr-backend
+    :local-doc/ocr-provider-id
+    :local-doc/ocr-command
+    :local-doc/ocr-model-path
+    :local-doc/ocr-mmproj-path
+    :local-doc/ocr-spotting-mmproj-path
+    :local-doc/ocr-timeout-ms
+    :local-doc/ocr-max-tokens
+    :backup/enabled?
+    :backup/directory
+    :backup/interval-hours
+    :backup/retain-count})
+
+(declare list-oauth-accounts
+         list-providers
+         list-services
+         list-site-creds
+         save-oauth-account!
+         upsert-provider!
+         set-default-provider!
+         save-service!
+         save-site-cred!)
+
+(defn initial-settings-empty?
+  []
+  (and (nil? (get-config :setup/complete))
+       (every? #(nil? (get-identity %)) template-identity-keys)
+       (every? #(nil? (get-config %)) template-config-keys)
+       (empty? (list-oauth-accounts))
+       (empty? (list-providers))
+       (empty? (list-services))
+       (empty? (list-site-creds))))
+
+(defn- decrypt-template-secret-attr
+  [attr value skipped-secret-count]
+  (if (and value (sensitive/encrypted-attr? attr))
+    (try
+      (crypto/decrypt value (attr-aad attr))
+      (catch Exception _
+        (swap! skipped-secret-count inc)
+        nil))
+    value))
+
+(defn- decrypt-template-config-value
+  [config-key value skipped-secret-count]
+  (if (and value (sensitive/secret-config-key? config-key))
+    (try
+      (crypto/decrypt value (config-aad config-key))
+      (catch Exception _
+        (swap! skipped-secret-count inc)
+        nil))
+    value))
+
+(defn- source-db-entities
+  [db-value unique-attr]
+  (->> (d/q '[:find ?e :in $ ?attr :where [?e ?attr _]]
+            db-value
+            unique-attr)
+       (mapv (fn [[eid]]
+               (into {} (d/entity db-value eid))))))
+
+(defn- compact-map
+  [m]
+  (reduce-kv (fn [acc k v]
+               (if (nil? v)
+                 acc
+                 (assoc acc k v)))
+             {}
+             m))
+
+(defn- decrypt-template-entity
+  [entity-map skipped-secret-count]
+  (reduce-kv
+    (fn [acc k v]
+      (if (keyword? k)
+        (let [value* (decrypt-template-secret-attr k v skipped-secret-count)]
+          (if (nil? value*)
+            acc
+            (assoc acc k value*)))
+        (assoc acc k v)))
+    {}
+    entity-map))
+
+(defn- template-provider-record
+  [provider]
+  (let [credential-source (:llm.provider/credential-source provider)]
+    (cond-> {:id       (:llm.provider/id provider)
+             :name     (:llm.provider/name provider)
+             :base-url (:llm.provider/base-url provider)
+             :model    (:llm.provider/model provider)}
+      (contains? provider :llm.provider/api-key)
+      (assoc :api-key (:llm.provider/api-key provider))
+      (contains? provider :llm.provider/template)
+      (assoc :template (:llm.provider/template provider))
+      (contains? provider :llm.provider/access-mode)
+      (assoc :access-mode (:llm.provider/access-mode provider))
+      (and (contains? provider :llm.provider/credential-source)
+           (not= credential-source :browser-session))
+      (assoc :credential-source credential-source
+             :auth-type credential-source)
+      (contains? provider :llm.provider/oauth-account)
+      (assoc :oauth-account (:llm.provider/oauth-account provider))
+      (contains? provider :llm.provider/workloads)
+      (assoc :workloads (:llm.provider/workloads provider))
+      (contains? provider :llm.provider/vision?)
+      (assoc :vision? (:llm.provider/vision? provider))
+      (contains? provider :llm.provider/allow-private-network?)
+      (assoc :allow-private-network? (:llm.provider/allow-private-network? provider))
+      (contains? provider :llm.provider/system-prompt-budget)
+      (assoc :system-prompt-budget (:llm.provider/system-prompt-budget provider))
+      (contains? provider :llm.provider/history-budget)
+      (assoc :history-budget (:llm.provider/history-budget provider))
+      (contains? provider :llm.provider/rate-limit-per-minute)
+      (assoc :rate-limit-per-minute (:llm.provider/rate-limit-per-minute provider))
+      (contains? provider :llm.provider/default?)
+      (assoc :default? (:llm.provider/default? provider)))))
+
+(defn- template-oauth-account-record
+  [account]
+  (let [has-token? (or (contains? account :oauth.account/access-token)
+                       (contains? account :oauth.account/refresh-token))]
+    (cond-> {:id     (:oauth.account/id account)
+             :name   (:oauth.account/name account)
+             :scopes (:oauth.account/scopes account)}
+      (contains? account :oauth.account/connection-mode)
+      (assoc :connection-mode (:oauth.account/connection-mode account))
+      (contains? account :oauth.account/authorize-url)
+      (assoc :authorize-url (:oauth.account/authorize-url account))
+      (contains? account :oauth.account/token-url)
+      (assoc :token-url (:oauth.account/token-url account))
+      (contains? account :oauth.account/client-id)
+      (assoc :client-id (:oauth.account/client-id account))
+      (contains? account :oauth.account/client-secret)
+      (assoc :client-secret (:oauth.account/client-secret account))
+      (contains? account :oauth.account/provider-template)
+      (assoc :provider-template (:oauth.account/provider-template account))
+      (contains? account :oauth.account/redirect-uri)
+      (assoc :redirect-uri (:oauth.account/redirect-uri account))
+      (contains? account :oauth.account/auth-params)
+      (assoc :auth-params (:oauth.account/auth-params account))
+      (contains? account :oauth.account/token-params)
+      (assoc :token-params (:oauth.account/token-params account))
+      (contains? account :oauth.account/access-token)
+      (assoc :access-token (:oauth.account/access-token account))
+      (contains? account :oauth.account/refresh-token)
+      (assoc :refresh-token (:oauth.account/refresh-token account))
+      (and has-token?
+           (contains? account :oauth.account/token-type))
+      (assoc :token-type (:oauth.account/token-type account))
+      (and has-token?
+           (contains? account :oauth.account/expires-at))
+      (assoc :expires-at (:oauth.account/expires-at account))
+      (and has-token?
+           (contains? account :oauth.account/connected-at))
+      (assoc :connected-at (:oauth.account/connected-at account))
+      (contains? account :oauth.account/autonomous-approved?)
+      (assoc :autonomous-approved? (:oauth.account/autonomous-approved? account)))))
+
+(defn- template-service-record
+  [service]
+  (cond-> {:id       (:service/id service)
+           :name     (:service/name service)
+           :base-url (:service/base-url service)
+           :auth-type (:service/auth-type service)}
+    (contains? service :service/auth-key)
+    (assoc :auth-key (:service/auth-key service))
+    (contains? service :service/auth-header)
+    (assoc :auth-header (:service/auth-header service))
+    (contains? service :service/oauth-account)
+    (assoc :oauth-account (:service/oauth-account service))
+    (contains? service :service/rate-limit-per-minute)
+    (assoc :rate-limit-per-minute (:service/rate-limit-per-minute service))
+    (contains? service :service/allow-private-network?)
+    (assoc :allow-private-network? (:service/allow-private-network? service))
+    (contains? service :service/autonomous-approved?)
+    (assoc :autonomous-approved? (:service/autonomous-approved? service))
+    (contains? service :service/enabled?)
+    (assoc :enabled? (:service/enabled? service))))
+
+(defn- template-site-record
+  [site]
+  (cond-> {:id             (:site-cred/id site)
+           :name           (:site-cred/name site)
+           :login-url      (:site-cred/login-url site)
+           :username-field (:site-cred/username-field site)
+           :password-field (:site-cred/password-field site)}
+    (contains? site :site-cred/username)
+    (assoc :username (:site-cred/username site))
+    (contains? site :site-cred/password)
+    (assoc :password (:site-cred/password site))
+    (contains? site :site-cred/form-selector)
+    (assoc :form-selector (:site-cred/form-selector site))
+    (contains? site :site-cred/extra-fields)
+    (assoc :extra-fields (:site-cred/extra-fields site))
+    (contains? site :site-cred/autonomous-approved?)
+    (assoc :autonomous-approved? (:site-cred/autonomous-approved? site))))
+
+(defn- read-template-snapshot
+  [source-conn skipped-secret-count]
+  (let [source-db  (d/db source-conn)
+        identities (reduce
+                     (fn [acc identity-key]
+                       (if-let [value (ffirst (d/q '[:find ?v :in $ ?k
+                                                     :where
+                                                     [?e :identity/key ?k]
+                                                     [?e :identity/value ?v]]
+                                                   source-db
+                                                   identity-key))]
+                         (assoc acc identity-key value)
+                         acc))
+                     {}
+                     template-identity-keys)
+        configs    (reduce
+                     (fn [acc [config-key value]]
+                       (let [value* (decrypt-template-config-value config-key
+                                                                   value
+                                                                   skipped-secret-count)]
+                         (if (nil? value*)
+                           acc
+                           (assoc acc config-key value*))))
+                     {}
+                     (for [[config-key value] (d/q '[:find ?k ?v
+                                                     :where
+                                                     [?e :config/key ?k]
+                                                     [?e :config/value ?v]]
+                                                   source-db)
+                           :when (contains? template-config-keys config-key)]
+                       [config-key value]))
+        oauth-accounts (->> (source-db-entities source-db :oauth.account/id)
+                            (map #(decrypt-template-entity % skipped-secret-count))
+                            (map template-oauth-account-record)
+                            (map compact-map)
+                            vec)
+        providers      (->> (source-db-entities source-db :llm.provider/id)
+                            (map #(decrypt-template-entity % skipped-secret-count))
+                            (map template-provider-record)
+                            (map compact-map)
+                            vec)
+        services       (->> (source-db-entities source-db :service/id)
+                            (map #(decrypt-template-entity % skipped-secret-count))
+                            (map template-service-record)
+                            (map compact-map)
+                            vec)
+        sites          (->> (source-db-entities source-db :site-cred/id)
+                            (map #(decrypt-template-entity % skipped-secret-count))
+                            (map template-site-record)
+                            (map compact-map)
+                            vec)]
+    {:identities         identities
+     :configs            configs
+     :oauth-accounts     oauth-accounts
+     :providers          providers
+     :services           services
+     :sites              sites
+     :default-provider-id (some->> providers
+                                   (filter :default?)
+                                   first
+                                   :id)}))
+
+(defn seed-initial-settings-from-db!
+  [{:keys [source-db-path crypto-opts]}]
+  (let [target-db-path (current-db-path)]
+    (when-not target-db-path
+      (throw (ex-info "Target database is not connected"
+                      {:source-db-path source-db-path})))
+    (when-not (.exists (io/file source-db-path))
+      (throw (ex-info "Template source database does not exist"
+                      {:source-db-path source-db-path})))
+    (if-not (initial-settings-empty?)
+      {:seeded? false
+       :reason :target-not-empty}
+      (let [skipped-secret-count (atom 0)
+            snapshot             (try
+                                   (crypto/configure! source-db-path crypto-opts)
+                                   (let [source-conn (d/get-conn source-db-path
+                                                                 schema
+                                                                 (resolve-datalevin-opts crypto-opts))]
+                                     (try
+                                       (read-template-snapshot source-conn skipped-secret-count)
+                                       (finally
+                                         (d/close source-conn))))
+                                   (finally
+                                     (crypto/configure! target-db-path crypto-opts)))]
+        (doseq [[identity-key value] (:identities snapshot)]
+          (set-identity! identity-key value))
+        (doseq [[config-key value] (:configs snapshot)]
+          (set-config! config-key value))
+        (doseq [account (:oauth-accounts snapshot)]
+          (save-oauth-account! account))
+        (doseq [provider (:providers snapshot)]
+          (upsert-provider! provider))
+        (when-let [default-provider-id (:default-provider-id snapshot)]
+          (set-default-provider! default-provider-id))
+        (doseq [service (:services snapshot)]
+          (save-service! service))
+        (doseq [site (:sites snapshot)]
+          (save-site-cred! site))
+        (when (seq (:providers snapshot))
+          (set-config! :setup/complete "true"))
+        {:seeded? true
+         :identity-count (count (:identities snapshot))
+         :config-count (count (:configs snapshot))
+         :oauth-account-count (count (:oauth-accounts snapshot))
+         :provider-count (count (:providers snapshot))
+         :service-count (count (:services snapshot))
+         :site-count (count (:sites snapshot))
+         :skipped-secret-count @skipped-secret-count}))))
 
 ;; ---------------------------------------------------------------------------
 ;; LLM Providers
@@ -1802,37 +2141,53 @@
 ;; Services (external service registrations)
 ;; ---------------------------------------------------------------------------
 
-(defn- validate-service-base-url!
+(def ^:private service-loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
+
+(defn- loopback-service-base-url?
   [base-url]
+  (try
+    (let [uri    (URI. (or base-url ""))
+          scheme (some-> (.getScheme uri) str/lower-case)
+          host   (some-> (.getHost uri) str/lower-case)]
+      (and (= "http" scheme)
+           (contains? service-loopback-hosts host)))
+    (catch Exception _
+      false)))
+
+(defn- validate-service-base-url!
+  [base-url allow-private-network?]
   (when (str/blank? (or base-url ""))
     (throw (ex-info "Service base URL is required"
                     {:field "base_url"})))
   (let [uri (try
               (URI. base-url)
               (catch Exception e
-                (throw (ex-info "Service base URL must be a valid absolute HTTPS URL"
+                (throw (ex-info "Service base URL must be a valid absolute URL"
                                 {:field "base_url"
                                  :value base-url}
                                 e))))
         scheme (some-> (.getScheme uri) str/lower-case)
         host   (.getHost uri)]
-    (when-not (and (= "https" scheme)
-                   (some? host))
-      (throw (ex-info "Service base URL must use HTTPS"
+    (when-not (and (some? host)
+                   (or (= "https" scheme)
+                       (and allow-private-network?
+                            (loopback-service-base-url? base-url))))
+      (throw (ex-info "Service base URL must use HTTPS (loopback HTTP is allowed only when private-network access is enabled)"
                       {:field "base_url"
-                       :value base-url})))
+                       :value base-url
+                       :allow-private-network? (boolean allow-private-network?)})))
     base-url))
 
 (defn save-service!
   [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?
            autonomous-approved?] :as service}]
-  (let [base-url (validate-service-base-url! base-url)
+  (let [allow-private-network? (or (:service/allow-private-network? service)
+                                   (:allow-private-network? service))
+        base-url (validate-service-base-url! base-url allow-private-network?)
         eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current (when eid (raw-entity eid))
         rate-limit-per-minute (or (:service/rate-limit-per-minute service)
                                   (:rate-limit-per-minute service))
-        allow-private-network? (or (:service/allow-private-network? service)
-                                   (:allow-private-network? service))
         has-rate-limit? (or (contains? service :service/rate-limit-per-minute)
                             (contains? service :rate-limit-per-minute))
         has-allow-private-network? (or (contains? service :service/allow-private-network?)

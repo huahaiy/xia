@@ -3,6 +3,8 @@
             [xia.core :as core]
             [xia.crypto :as crypto]
             [xia.db :as db]
+            [xia.instance-supervisor :as instance-supervisor]
+            [xia.paths :as paths]
             [xia.pack :as pack]
             [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
@@ -91,6 +93,17 @@
       (is (= "unlock-passphrase" (provider {:new? false}))))
     (is (= ["Master passphrase"] @prompts))))
 
+(deftest startup-passphrase-provider-caches-passphrase-for-reuse
+  (let [prompts   (atom [])
+        provider  (#'xia.core/startup-passphrase-provider "terminal")]
+    (with-redefs [xia.core/read-startup-secret
+                  (fn [label _mode]
+                    (swap! prompts conj label)
+                    "unlock-passphrase")]
+      (is (= "unlock-passphrase" (provider {:new? false})))
+      (is (= "unlock-passphrase" (provider {:new? false}))))
+    (is (= ["Master passphrase"] @prompts))))
+
 (deftest main-forwards-web-dev-option
   (let [started (atom nil)]
     (with-redefs-fn {#'xia.core/start! (fn [options] (reset! started options))
@@ -101,6 +114,37 @@
       #(core/-main "--mode" "server" "--web-dev"))
     (is (= "server" (:mode @started)))
     (is (= true (:web-dev @started)))))
+
+(deftest resolve-run-options-uses-instance-scoped-default-db-path
+  (with-redefs-fn {#'xia.paths/env-value (constantly nil)}
+    #(let [options (#'xia.core/resolve-run-options {:instance "Ops Helper"} [])]
+       (is (= "ops-helper" (:instance options)))
+       (is (= (paths/default-db-path "ops-helper")
+              (:db options))))))
+
+(deftest resolve-run-options-keeps-explicit-db-path
+  (with-redefs-fn {#'xia.paths/env-value (constantly nil)}
+    #(let [options (#'xia.core/resolve-run-options {:instance "Ops Helper"
+                                                    :db "/tmp/xia-custom"} [])]
+       (is (= "ops-helper" (:instance options)))
+       (is (= "/tmp/xia-custom" (:db options))))))
+
+(deftest resolve-run-options-normalizes-template-instance
+  (with-redefs-fn {#'xia.paths/env-value (constantly nil)}
+    #(let [options (#'xia.core/resolve-run-options {:instance "worker"
+                                                    :template-instance "Base Config"} [])]
+       (is (= "worker" (:instance options)))
+       (is (= "base-config" (:template-instance options))))))
+
+(deftest resolve-run-options-picks-up-instance-command-from-env
+  (with-redefs-fn {#'xia.paths/env-value (constantly nil)
+                   #'xia.core/env-value (fn [k]
+                                          (case k
+                                            "XIA_INSTANCE_COMMAND" "/opt/xia/bin/xia"
+                                            nil))}
+    #(let [options (#'xia.core/resolve-run-options {:instance "worker"} [])]
+       (is (= "worker" (:instance options)))
+       (is (= "/opt/xia/bin/xia" (:instance-command options))))))
 
 (deftest start-server-runtime-initializes-http-runtime
   (let [calls   (atom [])
@@ -118,6 +162,10 @@
                      #'xia.setup/needs-setup? (constantly false)
                      #'xia.setup/run-setup! (fn [] (swap! calls conj :setup/run))
                      #'xia.identity/init-identity! (fn [] (swap! calls conj :identity/init))
+                     #'xia.instance-supervisor/configure! (fn [opts]
+                                                            (swap! calls conj [:instance-supervisor/configure
+                                                                               (:enabled? opts)
+                                                                               (:command opts)]))
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
                      #'xia.tool/reset-runtime! (fn [] (swap! calls conj :tool/reset))
                      #'xia.tool/load-all-tools! (fn [] (swap! calls conj :tool/load))
@@ -140,12 +188,45 @@
     (is (= true (:web-dev @started)))
     (is (= [[:ensure-db-dir "/tmp/xia-dev-repl"]
             [:db/connect "/tmp/xia-dev-repl" true]
+            [:instance-supervisor/configure false nil]
             :identity/init
             :tool/reset
             :tool/load
             :scheduler/start
             [:http/start "0.0.0.0" 4011 {:web-dev? true}]]
            @calls))))
+
+(deftest start-server-runtime-reports-actual-bound-port
+  (let [started (atom nil)
+        options {:db "/tmp/xia-dev-repl"
+                 :bind "0.0.0.0"
+                 :port 4011}]
+    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [_] nil)
+                     #'xia.db/connect! (fn [_ _] nil)
+                     #'xia.crypto/current-key-source (fn [] :passphrase)
+                     #'xia.setup/needs-setup? (constantly false)
+                     #'xia.setup/run-setup! (fn [] nil)
+                     #'xia.identity/init-identity! (fn [] nil)
+                     #'xia.instance-supervisor/configure! (fn [_] nil)
+                     #'xia.tool/ensure-bundled-tools! (fn [] 0)
+                     #'xia.tool/reset-runtime! (fn [] nil)
+                     #'xia.tool/load-all-tools! (fn [] nil)
+                     #'xia.tool/registered-tools (fn [] [])
+                     #'xia.skill/all-enabled-skills (fn [] [])
+                     #'xia.scheduler/start! (fn [] nil)
+                     #'xia.channel.http/start! (fn [_ _ _] nil)
+                     #'xia.channel.http/current-port (fn [] 4012)
+                     #'xia.core/local-ui-url (fn [bind port]
+                                              (str "http://"
+                                                   (if (= bind "0.0.0.0") "localhost" bind)
+                                                   ":"
+                                                   port
+                                                   "/"))}
+      #(let [output (with-out-str
+                      (reset! started (core/start-server-runtime! options)))]
+         (is (.contains ^String output "Xia server running on 0.0.0.0:4012"))
+         (is (.contains ^String output "open http://localhost:4012/"))))
+    (is (= 4012 (:port @started)))))
 
 (deftest start-server-runtime-skips-interactive-setup-on-first-run
   (let [calls   (atom [])
@@ -158,6 +239,7 @@
                      #'xia.setup/needs-setup? (constantly true)
                      #'xia.setup/run-setup! (fn [] (swap! calls conj :setup/run))
                      #'xia.identity/init-identity! (fn [] nil)
+                     #'xia.instance-supervisor/configure! (fn [_] nil)
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
                      #'xia.tool/reset-runtime! (fn [] nil)
                      #'xia.tool/load-all-tools! (fn [] nil)
@@ -168,6 +250,22 @@
                      #'xia.core/local-ui-url (fn [_ _] "http://localhost:4011/")}
       #(core/start-server-runtime! options))
     (is (empty? @calls))))
+
+(deftest cleanup-stops-managed-instances-before-closing-db
+  (let [calls   (atom [])
+        cleanup (#'xia.core/make-cleanup {:db "/tmp/xia-dev-repl"})]
+    (with-redefs-fn {#'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
+                     #'xia.scheduler/stop! (fn [] (swap! calls conj :scheduler/stop))
+                     #'xia.instance-supervisor/shutdown! (fn [] (swap! calls conj :instance-supervisor/shutdown))
+                     #'xia.db/close! (fn [] (swap! calls conj :db/close))
+                     #'xia.core/save-archive! (fn [_] (swap! calls conj :save-archive))}
+      cleanup)
+    (is (= [:http/stop
+            :scheduler/stop
+            :instance-supervisor/shutdown
+            :db/close
+            :save-archive]
+           @calls))))
 
 (deftest connect-passes-built-in-embedding-provider-ids-to-datalevin
   (let [captured (atom nil)]

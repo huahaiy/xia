@@ -6,7 +6,8 @@
             [taoensso.timbre :as log]
             [xia.config :as cfg]
             [xia.db :as db]
-            [xia.llm :as llm])
+            [xia.llm :as llm]
+            [xia.paths :as paths])
   (:import [java.io File InputStream]
            [java.net URI]
            [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
@@ -155,7 +156,7 @@
 (defn- managed-ocr-dir
   []
   (when-let [db-path (current-db-path)]
-    (str db-path File/separator "ocr")))
+    (paths/managed-ocr-dir db-path)))
 
 (defn- managed-model-path
   []

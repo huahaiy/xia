@@ -1,0 +1,12 @@
+;; List child Xia instances managed by the current Xia process.
+;; Import with: /import-tool resources/tools/peer-instance-list.edn
+
+{:id          :peer-instance-list
+ :name        "peer-instance-list"
+ :description "List child Xia instances managed by the current Xia process. This only works when the host started Xia with instance-management capability enabled."
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {}
+               "required"   []}
+ :handler     "(fn [_args]
+                 {:instances (xia.instance-supervisor/list-managed-instances)})"}

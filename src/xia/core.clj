@@ -4,14 +4,17 @@
    Xia = single binary + Datalevin DB.
    Download, run, answer a few questions, done."
   (:require [clojure.tools.cli :refer [parse-opts]]
+            [clojure.string :as str]
             [taoensso.timbre :as log]
             [clojure.java.io :as io]
             [xia.crypto :as crypto]
             [xia.db :as db]
+            [xia.paths :as paths]
             [xia.logging :as logging]
             [xia.pack :as pack]
             [xia.setup :as setup]
             [xia.identity :as identity]
+            [xia.instance-supervisor :as instance-supervisor]
             [xia.scheduler :as scheduler]
             [xia.skill :as skill]
             [xia.tool :as tool]
@@ -25,15 +28,20 @@
 ;; ---------------------------------------------------------------------------
 
 (def default-run-options
-  {:db (str (System/getProperty "user.home") "/.xia/db")
+  {:instance paths/default-instance-id
+   :template-instance nil
+   :instance-command nil
+   :db (paths/default-db-path)
    :bind "127.0.0.1"
    :port 3008
    :mode "terminal"
    :web-dev false})
 
 (def cli-options
-  [["-d" "--db PATH" "Database path"
-    :default (:db default-run-options)]
+  [["-i" "--instance ID" "Instance id for instance-scoped default storage (or set XIA_INSTANCE)"]
+   ["-t" "--template-instance ID" "Seed a new instance from another instance's initial settings (or set XIA_TEMPLATE_INSTANCE)"]
+   [nil "--instance-command PATH" "Executable path to use when starting child Xia instances (or set XIA_INSTANCE_COMMAND)"]
+   ["-d" "--db PATH" "Database path"]
    ["-b" "--bind HOST" "HTTP/WebSocket bind address (default: 127.0.0.1)"
     :default (:bind default-run-options)]
    ["-p" "--port PORT" "HTTP/WebSocket port"
@@ -46,8 +54,8 @@
    ["-h" "--help" "Show help"]])
 
 (def pack-cli-options
-  [["-d" "--db PATH" "Database path"
-    :default (:db default-run-options)]
+  [["-i" "--instance ID" "Instance id for instance-scoped default storage (or set XIA_INSTANCE)"]
+   ["-d" "--db PATH" "Database path"]
    ["-f" "--force" "Overwrite existing archive"]
    ["-h" "--help" "Show help"]])
 
@@ -68,6 +76,8 @@
   (println "  xia --mode server       Start HTTP/WebSocket server only")
   (println "  xia --mode both         Start both terminal and server")
   (println "  xia --mode both --web-dev  Live-reload resources/web during UI work")
+  (println "  xia --instance ops      Use ~/.xia/instances/ops/db by default")
+  (println "  xia --instance qa --template-instance base  Seed qa from base")
   (println "  xia --log-file xia.log  Write logs to a file")
   (println "  xia --bind 0.0.0.0      Expose server beyond localhost")
   (println "  xia --db /path/to/db    Use a specific database"))
@@ -84,6 +94,7 @@
   (println "Examples:")
   (println "  xia pack")
   (println "  xia pack backup.xia")
+  (println "  xia pack --instance ops")
   (println "  xia pack backup.xia --db /path/to/db")
   (println "  xia pack backup.xia --force"))
 
@@ -102,6 +113,20 @@
        port
        "/"))
 
+(defn- env-value
+  [k]
+  (System/getenv k))
+
+(defn- truthy-env-value?
+  [k]
+  (contains? #{"true" "1" "yes" "on"}
+             (some-> (env-value k) str str/trim str/lower-case)))
+
+(defn- falsy-env-value?
+  [k]
+  (contains? #{"false" "0" "no" "off"}
+             (some-> (env-value k) str str/trim str/lower-case)))
+
 (defn- read-startup-secret
   [label mode]
   (if-let [console (System/console)]
@@ -113,30 +138,99 @@
 
 (defn- startup-passphrase-provider
   [mode]
-  (fn [{:keys [new?]}]
-    (println)
-    (println (if new?
-               "Create a master passphrase to protect Xia secrets."
-               "Enter the master passphrase to unlock Xia secrets."))
-    (loop []
-      (let [passphrase (read-startup-secret "Master passphrase" mode)]
-        (if (and new? (some? passphrase))
-          (let [confirm (read-startup-secret "Confirm master passphrase" mode)]
-            (if (= passphrase confirm)
-              passphrase
-              (do
-                (println "Master passphrases did not match. Please try again.")
-                (recur))))
-          passphrase)))))
+  (let [cached-passphrase (atom ::unset)]
+    (fn [{:keys [new?]}]
+      (if-let [cached (when (not= ::unset @cached-passphrase)
+                        @cached-passphrase)]
+        cached
+        (do
+          (println)
+          (println (if new?
+                     "Create a master passphrase to protect Xia secrets."
+                     "Enter the master passphrase to unlock Xia secrets."))
+          (loop []
+            (let [passphrase (read-startup-secret "Master passphrase" mode)]
+              (if (and new? (some? passphrase))
+                (let [confirm (read-startup-secret "Confirm master passphrase" mode)]
+                  (if (= passphrase confirm)
+                    (do
+                      (reset! cached-passphrase passphrase)
+                      passphrase)
+                    (do
+                      (println "Master passphrases did not match. Please try again.")
+                      (recur))))
+                (do
+                  (reset! cached-passphrase passphrase)
+                  passphrase)))))))))
 
 (declare make-cleanup)
 
+(defn- apply-run-defaults
+  [options]
+  (let [instance-id (paths/resolve-instance-id (:instance options))
+        raw-template-instance (or (:template-instance options)
+                                  (env-value "XIA_TEMPLATE_INSTANCE"))
+        template-instance     (some-> raw-template-instance paths/normalize-instance-id)
+        instance-command
+        (or (:instance-command options)
+            (some-> (env-value "XIA_INSTANCE_COMMAND") str/trim not-empty))
+        _                     (paths/warn-if-instance-id-normalized! (:instance options) instance-id)
+        _                     (when template-instance
+                                (paths/warn-if-instance-id-normalized! raw-template-instance
+                                                                       template-instance))
+        db-path     (or (:db options)
+                        (paths/default-db-path instance-id))]
+    (merge default-run-options
+           options
+           {:instance instance-id
+            :template-instance template-instance
+            :instance-command instance-command
+            :db       db-path})))
+
+(defn- maybe-seed-instance-template!
+  [{:keys [db instance template-instance crypto-opts]}]
+  (when template-instance
+    (if (db/initial-settings-empty?)
+      (let [source-db-path (paths/default-db-path template-instance)
+            target-db-path (.getCanonicalPath (io/file db))
+            source-db-path* (.getCanonicalPath (io/file source-db-path))]
+        (when (= source-db-path* target-db-path)
+          (throw (ex-info "Template instance must be different from the target instance"
+                          {:instance instance
+                           :template-instance template-instance
+                           :db db
+                           :template-db source-db-path})))
+        (when-not (.exists (io/file source-db-path))
+          (throw (ex-info "Template instance database does not exist"
+                          {:instance instance
+                           :template-instance template-instance
+                           :template-db source-db-path})))
+        (let [result (db/seed-initial-settings-from-db! {:source-db-path source-db-path
+                                                         :crypto-opts crypto-opts})]
+          (when (:seeded? result)
+            (log/info "Seeded Xia instance" instance
+                      "from template instance" template-instance
+                      "providers" (:provider-count result)
+                      "oauth-accounts" (:oauth-account-count result)
+                      "services" (:service-count result)
+                      "sites" (:site-count result)
+                      "skipped-secrets" (:skipped-secret-count result)))))
+      (log/info "Skipping template seed for Xia instance" instance
+                "because initial settings already exist"))))
+
 (defn- initialize-runtime!
-  [{:keys [db mode crypto-opts]}]
+  [{:keys [db mode crypto-opts instance template-instance
+           instance-command] :as options}]
   (ensure-db-dir! db)
-  (db/connect! db (merge {:passphrase-provider (startup-passphrase-provider mode)}
+  (db/connect! db (merge {:passphrase-provider (startup-passphrase-provider mode)
+                          :instance-id instance}
                          crypto-opts))
+  (maybe-seed-instance-template! (assoc options :template-instance template-instance))
+  (instance-supervisor/configure! {:enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
+                                   :command instance-command})
+  (log/info "Xia instance" instance)
   (log/info "Database opened at" db)
+  (log/info "Support directory" (paths/support-dir-path db))
   (log/info "Master key source" (pr-str (crypto/current-key-source)))
 
   ;; First-run setup if needed
@@ -163,25 +257,28 @@
 (defn start-server-runtime!
   "Start Xia in non-blocking server mode for REPL-driven development."
   [{:keys [bind port web-dev] :as options}]
-  (let [options* (merge default-run-options
-                        {:mode "server"}
-                        options)]
+  (let [options* (apply-run-defaults
+                   (merge {:mode "server"}
+                          options))
+        bind*    (or bind (:bind options*))
+        port*    (or port (:port options*))]
     (initialize-runtime! options*)
-    (http/start! (or bind (:bind options*))
-                 (or port (:port options*))
+    (http/start! bind*
+                 port*
                  {:web-dev? (true? web-dev)})
-    (println (str "Xia server running on " (:bind options*) ":" (:port options*)))
-    (println (str "open " (local-ui-url (:bind options*) (:port options*))))
-    options*))
+    (let [options** (assoc options* :port (or (http/current-port) port*))]
+      (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
+      (println (str "open " (local-ui-url (:bind options**) (:port options**))))
+      options**)))
 
 (defn stop-runtime!
   "Stop Xia runtime components that were started in the current process."
   [options]
-  ((make-cleanup (merge default-run-options options))))
+  ((make-cleanup (apply-run-defaults options))))
 
 (defn- start!
   [options]
-  (let [options* (merge default-run-options options)]
+  (let [options* (apply-run-defaults options)]
     (initialize-runtime! options*)
 
     ;; Start channels based on mode
@@ -189,38 +286,42 @@
       "server"   (do (http/start! (:bind options*)
                                   (:port options*)
                                   {:web-dev? (:web-dev options*)})
-                     (println (str "Xia server running on " (:bind options*) ":" (:port options*)))
-                     (println (str "open " (local-ui-url (:bind options*) (:port options*))))
+                     (let [port* (or (http/current-port) (:port options*))]
+                       (println (str "Xia server running on " (:bind options*) ":" port*))
+                       (println (str "open " (local-ui-url (:bind options*) port*))))
                      @(promise))
       "both"     (do (http/start! (:bind options*)
                                   (:port options*)
                                   {:web-dev? (:web-dev options*)})
-                     (println (str "Xia server running on " (:bind options*) ":" (:port options*)))
-                     (println (str "open " (local-ui-url (:bind options*) (:port options*))))
+                     (let [port* (or (http/current-port) (:port options*))]
+                       (println (str "Xia server running on " (:bind options*) ":" port*))
+                       (println (str "open " (local-ui-url (:bind options*) port*))))
                      (terminal/start!))
       ;; default: terminal
       (terminal/start!))))
 
 (defn- resolve-run-options
   [options arguments]
-  (cond
-    (empty? arguments)
-    options
+  (let [options* (apply-run-defaults options)]
+    (cond
+      (empty? arguments)
+      options*
 
-    (> (count arguments) 1)
-    (throw (ex-info "Xia accepts at most one positional archive path"
-                    {:arguments arguments}))
+      (> (count arguments) 1)
+      (throw (ex-info "Xia accepts at most one positional archive path"
+                      {:arguments arguments}))
 
-    :else
-    (let [argument (first arguments)]
-      (if (pack/archive-path? argument)
-        (let [archive (pack/open-archive! argument)]
-          (assoc options
-                 :db (:db-path archive)
-                 :archive-context archive
-                 :crypto-opts (:crypto-opts archive)))
-        (throw (ex-info "Unrecognized positional argument"
-                        {:argument argument}))))))
+      :else
+      (let [argument (first arguments)]
+        (if (pack/archive-path? argument)
+          (let [archive (pack/open-archive! argument)]
+            (apply-run-defaults
+              (assoc options*
+                     :db (:db-path archive)
+                     :archive-context archive
+                     :crypto-opts (:crypto-opts archive))))
+          (throw (ex-info "Unrecognized positional argument"
+                          {:argument argument})))))))
 
 (defn- save-archive!
   [{:keys [db archive-context]}]
@@ -242,6 +343,10 @@
           (scheduler/stop!)
           (catch Exception e
             (log/error e "Failed to stop scheduler during shutdown")))
+        (try
+          (instance-supervisor/shutdown!)
+          (catch Exception e
+            (log/error e "Failed to stop managed Xia instances during shutdown")))
         (try
           (db/close!)
           (catch Exception e
@@ -287,9 +392,10 @@
           (System/exit 1))
 
       :else
-      (let [archive (or (first arguments)
-                        (pack/default-archive-path (:db options)))
-            result  (pack/pack! (:db options) archive :force? (:force options))]
+      (let [options* (apply-run-defaults options)
+            archive  (or (first arguments)
+                         (pack/default-archive-path (:db options*)))
+            result   (pack/pack! (:db options*) archive :force? (:force options*))]
         (println (str "packed " (:archive result)))
         (println (str "key source: " (name (:key-source result))))
         (doseq [req (:restore-requires result)]

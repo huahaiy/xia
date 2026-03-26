@@ -22,6 +22,10 @@ const state = {
   scratchDirty: false,
   scratchSaving: false,
   admin: {
+    identity: {},
+    instance: {},
+    capabilities: {},
+    storage: {},
     providers: [],
     llmProviderTemplates: [],
     conversationContext: null,
@@ -139,8 +143,15 @@ const knowledgeNodeListEl = document.getElementById('knowledge-node-list');
 const knowledgeFactListEl = document.getElementById('knowledge-fact-list');
 const knowledgeStatusEl = document.getElementById('knowledge-status');
 const heroNameEl = document.getElementById('hero-name');
+const heroRoleEl = document.getElementById('hero-role');
 const identityNameEl = document.getElementById('identity-name');
+const identityRoleEl = document.getElementById('identity-role');
 const identityDescriptionEl = document.getElementById('identity-description');
+const identityControllerEnabledEl = document.getElementById('identity-controller-enabled');
+const identityControllerNoteEl = document.getElementById('identity-controller-note');
+const identityInstanceIdEl = document.getElementById('identity-instance-id');
+const identityDbPathEl = document.getElementById('identity-db-path');
+const identitySupportDirEl = document.getElementById('identity-support-dir');
 const identityPersonalityEl = document.getElementById('identity-personality');
 const identityGuidelinesEl = document.getElementById('identity-guidelines');
 const identityStatusEl = document.getElementById('identity-status');
@@ -272,6 +283,7 @@ const serviceAuthHeaderEl = document.getElementById('service-auth-header');
 const serviceOauthAccountEl = document.getElementById('service-oauth-account');
 const serviceRateLimitEl = document.getElementById('service-rate-limit');
 const serviceAuthKeyEl = document.getElementById('service-auth-key');
+const serviceAllowPrivateNetworkEl = document.getElementById('service-allow-private-network');
 const serviceAutonomousApprovedEl = document.getElementById('service-autonomous-approved');
 const serviceEnabledEl = document.getElementById('service-enabled');
 const serviceStatusEl = document.getElementById('service-status');
@@ -2607,6 +2619,7 @@ function resetServiceForm(statusText) {
   serviceOauthAccountEl.value = '';
   serviceRateLimitEl.value = '';
   serviceAuthKeyEl.value = '';
+  serviceAllowPrivateNetworkEl.checked = false;
   serviceAutonomousApprovedEl.checked = true;
   serviceEnabledEl.checked = true;
   serviceStatusEl.textContent = statusText || 'Create a service or select an existing one.';
@@ -2728,6 +2741,7 @@ function selectService(service) {
   serviceOauthAccountEl.value = service.oauth_account || '';
   serviceRateLimitEl.value = service.rate_limit_per_minute || '';
   serviceAuthKeyEl.value = '';
+  serviceAllowPrivateNetworkEl.checked = !!service.allow_private_network;
   serviceAutonomousApprovedEl.checked = !!service.autonomous_approved;
   serviceEnabledEl.checked = !!service.enabled;
   serviceStatusEl.textContent = service.auth_type === 'oauth-account'
@@ -2735,6 +2749,9 @@ function selectService(service) {
     : (service.auth_key_configured ? 'Secret stored.' : 'No secret stored.');
   if (service.effective_rate_limit_per_minute) {
     serviceStatusEl.textContent += ' Rate limit: ' + service.effective_rate_limit_per_minute + '/min.';
+  }
+  if (service.allow_private_network) {
+    serviceStatusEl.textContent += ' Private-network access enabled.';
   }
   renderServiceList();
   renderOauthAccountOptions();
@@ -3160,10 +3177,23 @@ async function forgetKnowledgeFact(fact) {
 
 function renderIdentitySettings() {
   const identity = state.admin.identity || {};
+  const instance = state.admin.instance || {};
+  const capabilities = state.admin.capabilities || {};
+  const storage = state.admin.storage || {};
   identityNameEl.value = identity.name || '';
+  identityRoleEl.value = identity.role || '';
   identityDescriptionEl.value = identity.description || '';
+  identityControllerEnabledEl.checked = !!capabilities.instance_management_configured;
+  identityInstanceIdEl.value = instance.id || '';
+  identityDbPathEl.value = storage.db_path || '';
+  identitySupportDirEl.value = storage.support_dir || '';
   identityPersonalityEl.value = identity.personality || '';
   identityGuidelinesEl.value = identity.guidelines || '';
+  if (capabilities.instance_management_enabled) {
+    identityControllerNoteEl.textContent = 'Controller mode is active. This Xia can start and stop managed child Xia instances.';
+  } else {
+    identityControllerNoteEl.textContent = 'Enable controller mode to let this Xia start and stop managed child Xia instances.';
+  }
   heroNameEl.textContent = identity.name || 'Xia';
   document.title = identity.name || 'Xia';
 }
@@ -3176,14 +3206,16 @@ async function saveIdentity() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: identityNameEl.value.trim(),
+        role: identityRoleEl.value.trim(),
         description: identityDescriptionEl.value.trim(),
+        controller_enabled: !!identityControllerEnabledEl.checked,
         personality: identityPersonalityEl.value.trim(),
         guidelines: identityGuidelinesEl.value.trim()
       })
     });
     state.admin.identity = data.identity || {};
-    heroNameEl.textContent = state.admin.identity.name || 'Xia';
-    document.title = state.admin.identity.name || 'Xia';
+    state.admin.capabilities = data.capabilities || state.admin.capabilities || {};
+    renderIdentitySettings();
     identityStatusEl.textContent = 'Saved.';
   } catch (err) {
     identityStatusEl.textContent = err.message || 'Failed to save.';
@@ -3198,6 +3230,9 @@ async function loadAdminConfigImpl() {
     const data = await fetchJson('/admin/config');
     state.setupRequired = !!data.setup_required;
     state.admin.identity = data.identity || {};
+    state.admin.instance = data.instance || {};
+    state.admin.capabilities = data.capabilities || {};
+    state.admin.storage = data.storage || {};
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
     state.admin.llmProviderTemplates = Array.isArray(data.llm_provider_templates) ? data.llm_provider_templates : [];
     state.admin.conversationContext = data.conversation_context || null;
@@ -3865,6 +3900,7 @@ async function saveService() {
         oauth_account: serviceOauthAccountEl.value,
         rate_limit_per_minute: serviceRateLimitEl.value,
         auth_key: serviceAuthKeyEl.value,
+        allow_private_network: serviceAllowPrivateNetworkEl.checked,
         autonomous_approved: serviceAutonomousApprovedEl.checked,
         enabled: serviceEnabledEl.checked
       })

@@ -13,6 +13,7 @@
             [xia.db :as db]
             [xia.hippocampus :as hippo]
             [xia.identity :as identity]
+            [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
             [xia.local-ocr :as local-ocr]
             [xia.llm :as llm]
@@ -21,6 +22,7 @@
             [xia.memory :as memory]
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
+            [xia.paths :as paths]
             [xia.context :as context]
             [xia.remote-bridge :as remote-bridge]
             [xia.service :as service-proxy]
@@ -32,6 +34,7 @@
             [xia.skill.openclaw :as openclaw-skill]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
+    [java.net BindException]
     [java.nio.charset StandardCharsets]
     [java.nio.file Files LinkOption Path Paths]
     [java.security SecureRandom]
@@ -52,6 +55,7 @@
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
+(def ^:private command-channel-token-config-key :secret/command-channel-token)
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private session-finalize-lock-count 256)
@@ -59,7 +63,9 @@
 (def ^:private provider-access-modes #{:local :api :account})
 (def ^:private provider-credential-sources #{:none :api-key :oauth-account :browser-session})
 (def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
+(def ^:private http-port-search-limit 100)
 (def ^:private ms-per-day (* 24 60 60 1000))
+(def ^:private rest-session-channels #{:http :command})
 (def ^:private byte-array-class (class (byte-array 0)))
 (defn- long-max
   ^long [^long a ^long b]
@@ -453,7 +459,7 @@
   (some-> (request-content-type req)
           (str/starts-with? "multipart/form-data")))
 
-(declare nonblank-str parse-session-id session-exists?)
+(declare nonblank-str parse-session-id session-exists? session-id-str)
 
 (defn- first-forwarded
   [value]
@@ -471,6 +477,10 @@
                        (nonblank-str (request-header req "host")))]
         (when host
           (str scheme "://" host)))))
+
+(defn- env-value
+  [k]
+  (System/getenv k))
 
 (defn- parse-query-string
   [query-string]
@@ -490,6 +500,24 @@
 
 (defn- session-cookie-header []
   (str (session-cookie-value) "; Path=/; HttpOnly; SameSite=Strict"))
+
+(defn- bearer-token
+  [value]
+  (when-let [header (some-> value str str/trim not-empty)]
+    (let [[scheme token & extra] (str/split header #"\s+")]
+      (when (and (= "bearer" (some-> scheme str/lower-case))
+                 (seq token)
+                 (empty? extra))
+        token))))
+
+(defn- request-bearer-token
+  [req]
+  (bearer-token (request-header req "authorization")))
+
+(defn- command-channel-token
+  []
+  (or (some-> (env-value "XIA_COMMAND_TOKEN") nonblank-str)
+      (some-> (db/get-config command-channel-token-config-key) nonblank-str)))
 
 (defn- cookie-map
   [req]
@@ -585,6 +613,12 @@
 (defn- unauthorized-response []
   (json-response 401 {:error "missing or invalid local session secret"}))
 
+(defn- command-channel-unavailable-response []
+  (json-response 503 {:error "command channel is not configured"}))
+
+(defn- command-unauthorized-response []
+  (json-response 401 {:error "missing or invalid command token"}))
+
 (defn- protected-route-response
   [req allowed-fn]
   (cond
@@ -596,6 +630,14 @@
 
     :else
     (allowed-fn)))
+
+(defn- command-route-response
+  [req allowed-fn]
+  (if-let [token (command-channel-token)]
+    (if (= (request-bearer-token req) token)
+      (allowed-fn)
+      (command-unauthorized-response))
+    (command-channel-unavailable-response)))
 
 (defn- approval->body
   [{:keys [approval-id tool-id tool-name description arguments reason policy created-at]}]
@@ -680,6 +722,21 @@
                     :where
                     [?e :session/id ?sid]]
                   sid))))
+
+(defn- session-channel
+  [session-id]
+  (when-let [eid (session-eid session-id)]
+    (ffirst (db/q '[:find ?channel :in $ ?e
+                    :where
+                    [?e :session/channel ?channel]]
+                  eid))))
+
+(defn- session-accessible?
+  [session-id expected-channel]
+  (when-let [sid (session-id-str session-id)]
+    (and (session-exists? sid)
+         (or (nil? expected-channel)
+             (= expected-channel (session-channel sid))))))
 
 (defn- session-active?
   [session-id]
@@ -846,27 +903,50 @@
        sid
        (fn []
          (let [sid-str     (str sid)
+               channel     (or (session-channel sid) :http)
                was-active? (session-active? sid)]
            (try
              (when was-active?
                (let [topics (:topics (wm/get-wm sid))]
-                 (wm/snapshot! sid)
-                 (hippo/record-conversation! sid :http :topics topics)))
+                 (try
+                   (wm/snapshot! sid)
+                   (catch Exception e
+                     (log/error e "Failed to snapshot session working memory during finalization"
+                                sid-str
+                                "channel" (name channel)
+                                "reason" (name reason))))
+                 (try
+                   (hippo/record-conversation! sid channel :topics topics)
+                   (catch Exception e
+                     (log/warn e "Failed to record session conversation during finalization"
+                               sid-str
+                               "channel" (name channel)
+                               "reason" (name reason))))))
              (catch Exception e
-               (log/error e "Failed to finalize REST session" sid-str "reason" (name reason)))
+               (log/error e "Failed to finalize session"
+                          sid-str
+                          "channel" (name channel)
+                          "reason" (name reason)))
              (finally
                (try
                  (wm/clear-wm! sid)
                  (catch Exception e
-                   (log/error e "Failed to clear REST working memory" sid-str)))
+                   (log/error e "Failed to clear session working memory"
+                              sid-str
+                              "channel" (name channel))))
                (clear-rest-session-state! sid)
                (when was-active?
                  (try
                    (set-session-active! sid false)
                    (catch Exception e
-                     (log/error e "Failed to mark REST session inactive" sid-str))))))
+                     (log/error e "Failed to mark session inactive"
+                                sid-str
+                                "channel" (name channel)))))))
            (when was-active?
-             (log/info "Finalized REST session" sid-str "reason" (name reason)))
+             (log/info "Finalized session"
+                       sid-str
+                       "channel" (name channel)
+                       "reason" (name reason)))
            was-active?))))))
 
 (defn- scratch-pad->body
@@ -1458,54 +1538,59 @@
   [session-id artifact-id]
   (artifact/get-session-artifact session-id artifact-id))
 
-(defn- handle-create-session []
-  (let [sid (db/create-session! :http)]
-    (wm/ensure-wm! sid)
-    (touch-rest-session! sid)
-    (json-response 200 {:session_id (str sid)})))
+(defn- handle-create-session
+  ([] (handle-create-session :http))
+  ([channel]
+   (let [sid (db/create-session! channel)]
+     (wm/ensure-wm! sid)
+     (touch-rest-session! sid)
+     (json-response 200 {:session_id (str sid)}))))
 
 (defn- internal-server-error-response
   [^Throwable e]
   (json-response 500 {:error (or (throwable-message e) "internal server error")}))
 
 (defn- chat-request
-  [req]
-  (let [data       (read-body req)
-        message    (get data "message")
-        session-id (get data "session_id")
-        local-doc-ids (when (sequential? (get data "local_doc_ids"))
-                        (vec (keep #(when (some? %) (str %))
-                                   (get data "local_doc_ids"))))
-        artifact-ids (when (sequential? (get data "artifact_ids"))
-                       (vec (keep #(when (some? %) (str %))
-                                  (get data "artifact_ids"))))]
-    (cond
-      (not message)
-      {:response (json-response 400 {:error "missing 'message' field"})}
+  ([req]
+   (chat-request req :http))
+  ([req channel]
+   (let [data          (read-body req)
+         message       (get data "message")
+         session-id    (get data "session_id")
+         local-doc-ids (when (sequential? (get data "local_doc_ids"))
+                         (vec (keep #(when (some? %) (str %))
+                                    (get data "local_doc_ids"))))
+         artifact-ids  (when (sequential? (get data "artifact_ids"))
+                         (vec (keep #(when (some? %) (str %))
+                                    (get data "artifact_ids"))))]
+     (cond
+       (not message)
+       {:response (json-response 400 {:error "missing 'message' field"})}
 
-      (and session-id (not (session-exists? session-id)))
-      {:response (json-response 404 {:error "unknown session id"})}
+       (and session-id (not (session-accessible? session-id channel)))
+       {:response (json-response 404 {:error "unknown session id"})}
 
-      (and session-id (not (session-active? session-id)))
-      {:response (json-response 409 {:error "session closed"})}
+       (and session-id (not (session-active? session-id)))
+       {:response (json-response 409 {:error "session closed"})}
 
-      :else
-      (let [sid (if session-id
-                  (java.util.UUID/fromString session-id)
-                  (db/create-session! :http))]
-        (wm/ensure-wm! sid)
-        (cancel-rest-session-finalizer! sid)
-        {:session-id sid
-         :message    message
-         :local-doc-ids local-doc-ids
-         :artifact-ids artifact-ids}))))
+       :else
+       (let [sid (if session-id
+                   (java.util.UUID/fromString session-id)
+                   (db/create-session! channel))]
+         (wm/ensure-wm! sid)
+         (cancel-rest-session-finalizer! sid)
+         {:session-id    sid
+          :channel       channel
+          :message       message
+          :local-doc-ids local-doc-ids
+          :artifact-ids  artifact-ids})))))
 
 (defn- process-chat!
-  [{:keys [session-id message local-doc-ids artifact-ids]}]
+  [{:keys [session-id channel message local-doc-ids artifact-ids]}]
   (try
     (let [response (agent/process-message session-id
                                           message
-                                          :channel :http
+                                          :channel channel
                                           :local-doc-ids local-doc-ids
                                           :artifact-ids artifact-ids)]
       (json-response 200 {:session_id (str session-id)
@@ -1534,111 +1619,139 @@
                             (internal-server-error-response e)))]
            (http/send! ch response))))}))
 
-(defn- handle-chat [req]
-  (let [{:keys [response] :as chat} (chat-request req)]
-    (cond
-      response
-      response
+(defn- handle-chat
+  ([req]
+   (handle-chat req :http))
+  ([req channel]
+   (let [{:keys [response] :as chat} (chat-request req channel)]
+     (cond
+       response
+       response
 
-      (:async-channel req)
-      (handle-chat-async req chat)
+       (:async-channel req)
+       (handle-chat-async req chat)
 
-      :else
-      (handle-chat-sync chat))))
+       :else
+       (handle-chat-sync chat)))))
 
-(defn- handle-get-status [session-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
+(defn- handle-get-status
+  ([session-id]
+   (handle-get-status session-id nil))
+  ([session-id expected-channel]
+   (cond
+     (nil? (parse-session-id session-id))
+     (json-response 400 {:error "invalid session id"})
 
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
+     (not (session-accessible? session-id expected-channel))
+     (json-response 404 {:error "session not found"})
 
-    :else
-    (do
-      (touch-rest-session! session-id)
-      (json-response 200 {:session_id session-id
-                          :status     (status->body (get @session-statuses session-id))}))))
+     :else
+     (do
+       (touch-rest-session! session-id)
+       (json-response 200 {:session_id session-id
+                           :status     (status->body (get @session-statuses session-id))})))))
 
-(defn- handle-get-approval [session-id]
-  (if-not (parse-session-id session-id)
-    (json-response 400 {:error "invalid session id"})
-    (do
-      (touch-rest-session! session-id)
-      (if-let [approval (get @pending-approvals session-id)]
-        (json-response 200 {:pending true
-                            :approval (approval->body approval)})
-        (json-response 200 {:pending false})))))
+(defn- handle-get-approval
+  ([session-id]
+   (handle-get-approval session-id nil))
+  ([session-id expected-channel]
+   (cond
+     (nil? (parse-session-id session-id))
+     (json-response 400 {:error "invalid session id"})
 
-(defn- handle-submit-approval [session-id req]
-  (if-not (parse-session-id session-id)
-    (json-response 400 {:error "invalid session id"})
-    (let [data        (read-body req)
-          approval-id (get data "approval_id")
-          decision    (get data "decision")
-          current     (get @pending-approvals session-id)
-          decision*   (case decision
-                        "allow" :allow
-                        "deny"  :deny
-                        nil)]
-      (cond
-        (nil? current)
-        (json-response 404 {:error "no pending approval"})
+     (not (session-accessible? session-id expected-channel))
+     (json-response 404 {:error "session not found"})
 
-        (not= approval-id (:approval-id current))
-        (json-response 409 {:error "stale approval id"})
+     :else
+     (do
+       (touch-rest-session! session-id)
+       (if-let [approval (get @pending-approvals session-id)]
+         (json-response 200 {:pending true
+                             :approval (approval->body approval)})
+         (json-response 200 {:pending false}))))))
 
-        (nil? decision*)
-        (json-response 400 {:error "invalid decision"})
+(defn- handle-submit-approval
+  ([session-id req]
+   (handle-submit-approval session-id req nil))
+  ([session-id req expected-channel]
+   (if-not (parse-session-id session-id)
+     (json-response 400 {:error "invalid session id"})
+     (if-not (session-accessible? session-id expected-channel)
+       (json-response 404 {:error "session not found"})
+       (let [data        (read-body req)
+             approval-id (get data "approval_id")
+             decision    (get data "decision")
+             current     (get @pending-approvals session-id)
+             decision*   (case decision
+                           "allow" :allow
+                           "deny"  :deny
+                           nil)]
+         (cond
+           (nil? current)
+           (json-response 404 {:error "no pending approval"})
 
-        :else
-        (do
-          (deliver (:decision current) decision*)
-          (clear-pending-approval! session-id approval-id)
-          (touch-rest-session! session-id)
-          (json-response 200 {:status "recorded"}))))))
+           (not= approval-id (:approval-id current))
+           (json-response 409 {:error "stale approval id"})
 
-(defn- handle-session-messages [session-id]
-  (try
-    (let [sid      (java.util.UUID/fromString session-id)
-          messages (->> (db/session-messages sid)
-                        (into [] (comp
-                                   (filter #(#{:user :assistant} (:role %)))
-                                   (map (fn [{:keys [role content created-at local-docs artifacts]}]
-                                          {:role       (name role)
-                                           :content    content
-                                           :created_at (instant->str created-at)
-                                           :local_docs (into [] (map local-doc-ref->body)
-                                                             (or local-docs []))
-                                           :artifacts  (into [] (map artifact-ref->body)
-                                                             (or artifacts []))})))))]
-      (touch-rest-session! session-id)
-      (json-response 200 {:session_id session-id
-                          :messages   messages}))
-    (catch IllegalArgumentException _
-      (json-response 400 {:error "invalid session id"}))))
+           (nil? decision*)
+           (json-response 400 {:error "invalid decision"})
 
-(defn- handle-close-session [session-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
+           :else
+           (do
+             (deliver (:decision current) decision*)
+             (clear-pending-approval! session-id approval-id)
+             (touch-rest-session! session-id)
+             (json-response 200 {:status "recorded"}))))))))
 
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
+(defn- handle-session-messages
+  ([session-id]
+   (handle-session-messages session-id nil))
+  ([session-id expected-channel]
+   (try
+     (let [sid (java.util.UUID/fromString session-id)]
+       (if-not (session-accessible? sid expected-channel)
+         (json-response 404 {:error "session not found"})
+         (let [messages (->> (db/session-messages sid)
+                             (into [] (comp
+                                        (filter #(#{:user :assistant} (:role %)))
+                                        (map (fn [{:keys [role content created-at local-docs artifacts]}]
+                                               {:role       (name role)
+                                                :content    content
+                                                :created_at (instant->str created-at)
+                                                :local_docs (into [] (map local-doc-ref->body)
+                                                                  (or local-docs []))
+                                                :artifacts  (into [] (map artifact-ref->body)
+                                                                  (or artifacts []))}))))) ]
+           (touch-rest-session! session-id)
+           (json-response 200 {:session_id session-id
+                               :messages   messages}))))
+     (catch IllegalArgumentException _
+       (json-response 400 {:error "invalid session id"})))))
 
-    (session-busy? session-id)
-    (if (agent/cancel-session! (parse-session-id session-id)
-                               "session close requested")
-      (json-response 202 {:session_id (parse-session-id session-id)
-                          :status     "cancelling"
-                          :closing    true})
-      (json-response 409 {:error "session is still processing a request"}))
+(defn- handle-close-session
+  ([session-id]
+   (handle-close-session session-id nil))
+  ([session-id expected-channel]
+   (cond
+     (nil? (parse-session-id session-id))
+     (json-response 400 {:error "invalid session id"})
 
-    :else
-    (let [closed? (finalize-rest-session! session-id :explicit)]
-      (json-response 200 {:session_id      (parse-session-id session-id)
-                          :status          (if closed? "closed" "already_closed")
-                          :already_closed  (not closed?)}))))
+     (not (session-accessible? session-id expected-channel))
+     (json-response 404 {:error "session not found"})
+
+     (session-busy? session-id)
+     (if (agent/cancel-session! (parse-session-id session-id)
+                                "session close requested")
+       (json-response 202 {:session_id (parse-session-id session-id)
+                           :status     "cancelling"
+                           :closing    true})
+       (json-response 409 {:error "session is still processing a request"}))
+
+     :else
+     (let [closed? (finalize-rest-session! session-id :explicit)]
+       (json-response 200 {:session_id      (parse-session-id session-id)
+                           :status          (if closed? "closed" "already_closed")
+                           :already_closed  (not closed?)})))))
 
 (defn- handle-history-sessions []
   (json-response 200
@@ -2237,15 +2350,26 @@
 (defn- handle-admin-config [_req]
   (let [providers        (db/list-providers)
         setup-required?  (or (empty? providers)
-                             (nil? (db/get-default-provider)))]
+                             (nil? (db/get-default-provider)))
+        storage-layout   (paths/storage-layout (db/current-db-path))]
   (json-response
     200
     {:setup_required setup-required?
      :identity (let [soul (identity/get-soul)]
                  {:name        (:name soul "Xia")
+                  :role        (:role soul "")
                   :description (:description soul "")
                   :personality (:personality soul "")
                   :guidelines  (:guidelines soul "")})
+     :instance {:id (or (db/current-instance-id)
+                        paths/default-instance-id)}
+     :capabilities (instance-supervisor/capabilities)
+     :storage {:db_path     (:db-path storage-layout)
+               :support_dir (:support-dir storage-layout)
+               :workspace_root (:workspace-root storage-layout)
+               :embed_dir   (:embed-dir storage-layout)
+               :llm_dir     (:llm-dir storage-layout)
+               :ocr_dir     (:ocr-dir storage-layout)}
      :providers (->> providers
                      (into [] (map provider->admin-body))
                      sort-by-name)
@@ -2473,16 +2597,22 @@
   (try
     (let [data (or (read-body req) {})]
       (doseq [[json-key soul-key] [["name" :name]
+                                    ["role" :role]
                                     ["description" :description]
                                     ["personality" :personality]
                                     ["guidelines" :guidelines]]]
         (when (contains? data json-key)
           (identity/set-soul! soul-key (str (get data json-key "")))))
       (let [soul (identity/get-soul)]
+        (when (contains? data "controller_enabled")
+          (instance-supervisor/set-instance-management-enabled!
+            (true? (get data "controller_enabled"))))
         (json-response 200 {:identity {:name        (:name soul "Xia")
+                                       :role        (:role soul "")
                                        :description (:description soul "")
                                        :personality (:personality soul "")
-                                       :guidelines  (:guidelines soul "")}})))
+                                       :guidelines  (:guidelines soul "")}
+                            :capabilities (instance-supervisor/capabilities)})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
@@ -3130,6 +3260,10 @@
           session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
           status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
           approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
+          command-session-close-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)" uri)
+          command-session-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/messages" uri)
+          command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
+          command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
           history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
           scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
           scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
@@ -3175,20 +3309,42 @@
         (and (= method :post) (= uri "/chat"))
         (protected-route-response req #(handle-chat req))
 
+        ;; Machine command channel
+        (and (= method :post) (= uri "/command/sessions"))
+        (command-route-response req #(handle-create-session :command))
+
+        (and (= method :post) (= uri "/command/chat"))
+        (command-route-response req #(handle-chat req :command))
+
+        (and (= method :delete) command-session-close-match)
+        (command-route-response req #(handle-close-session (second command-session-close-match) :command))
+
+        (and (= method :get) command-status-match)
+        (command-route-response req #(handle-get-status (second command-status-match) :command))
+
+        (and (= method :get) command-approval-match)
+        (command-route-response req #(handle-get-approval (second command-approval-match) :command))
+
+        (and (= method :post) command-approval-match)
+        (command-route-response req #(handle-submit-approval (second command-approval-match) req :command))
+
+        (and (= method :get) command-session-match)
+        (command-route-response req #(handle-session-messages (second command-session-match) :command))
+
         (and (= method :delete) session-close-match)
-        (protected-route-response req #(handle-close-session (second session-close-match)))
+        (protected-route-response req #(handle-close-session (second session-close-match) :http))
 
         (and (= method :get) status-match)
-        (protected-route-response req #(handle-get-status (second status-match)))
+        (protected-route-response req #(handle-get-status (second status-match) :http))
 
         (and (= method :get) approval-match)
-        (protected-route-response req #(handle-get-approval (second approval-match)))
+        (protected-route-response req #(handle-get-approval (second approval-match) :http))
 
         (and (= method :post) approval-match)
-        (protected-route-response req #(handle-submit-approval (second approval-match) req))
+        (protected-route-response req #(handle-submit-approval (second approval-match) req :http))
 
         (and (= method :get) session-match)
-        (protected-route-response req #(handle-session-messages (second session-match)))
+        (protected-route-response req #(handle-session-messages (second session-match) :http))
 
         (and (= method :get) (= uri "/history/sessions"))
         (protected-route-response req handle-history-sessions)
@@ -3382,6 +3538,43 @@
 ;; Server lifecycle
 ;; ---------------------------------------------------------------------------
 
+(defn current-port
+  []
+  (:port @server-atom))
+
+(defn- port-bind-conflict?
+  [^Throwable error]
+  (boolean
+    (some (fn [^Throwable cause]
+            (or (instance? BindException cause)
+                (str/includes? (str/lower-case (or (.getMessage cause) ""))
+                               "address already in use")))
+          (take-while some? (iterate #(some-> ^Throwable % .getCause) error)))))
+
+(defn- start-server-with-port-fallback
+  [bind-host requested-port]
+  (loop [port (int requested-port)
+         attempts 0]
+    (let [result (try
+                   {:stop-fn (http/run-server router {:ip bind-host :port port})
+                    :port port}
+                   (catch Exception e
+                     (if (port-bind-conflict? e)
+                       {:retry? true :error e}
+                       (throw e))))]
+      (if (:retry? result)
+        (if (< attempts http-port-search-limit)
+          (do
+            (log/warn "HTTP/WebSocket port" port "is unavailable on" bind-host ", trying" (inc port))
+            (recur (inc port) (inc attempts)))
+          (throw (ex-info "Could not find an available HTTP/WebSocket port"
+                          {:bind-host bind-host
+                           :requested-port requested-port
+                           :attempted-port-start requested-port
+                           :attempted-port-end port}
+                          (:error result))))
+        result))))
+
 (defn start!
   "Start the HTTP/WebSocket server.
    Defaults to loopback-only binding."
@@ -3394,23 +3587,27 @@
      (log/warn "Server already running"))
    (configure-web-dev! web-dev?)
    (prompt/register-approval! :http http-approval-handler)
+   (prompt/register-approval! :command http-approval-handler)
    (prompt/register-approval! :websocket http-approval-handler)
    (prompt/register-status! :http http-status-handler)
+   (prompt/register-status! :command http-status-handler)
    (prompt/register-status! :websocket http-status-handler)
    (let [^ScheduledExecutorService finalizer-exec
          (Executors/newSingleThreadScheduledExecutor)
-         s (http/run-server router {:ip bind-host :port port})]
+         {:keys [stop-fn port]} (start-server-with-port-fallback bind-host port)]
      (reset! rest-session-finalizer-executor finalizer-exec)
-     (reset! server-atom s)
+     (reset! server-atom {:stop-fn stop-fn
+                          :bind-host bind-host
+                          :port port})
      (log/info "HTTP/WebSocket server started on" bind-host ":" port)
-     s)))
+     stop-fn)))
 
 (defn stop! []
-  (when-let [s @server-atom]
+  (when-let [{:keys [stop-fn]} @server-atom]
     (doseq [{:keys [id channel active?]} (db/list-sessions {:include-workers? true})
-            :when (and (= :http channel) active?)]
+            :when (and (contains? rest-session-channels channel) active?)]
       (finalize-rest-session! id :server-stop))
-    (s) ; http-kit stop fn
+    (stop-fn) ; http-kit stop fn
     (when-let [^ScheduledExecutorService exec @rest-session-finalizer-executor]
       (clear-rest-session-finalizers!)
       (.shutdown exec)
@@ -3420,8 +3617,10 @@
           (.shutdownNow exec)))
       (reset! rest-session-finalizer-executor nil))
     (prompt/register-approval! :http nil)
+    (prompt/register-approval! :command nil)
     (prompt/register-approval! :websocket nil)
     (prompt/register-status! :http nil)
+    (prompt/register-status! :command nil)
     (prompt/register-status! :websocket nil)
     (reset! pending-approvals {})
     (reset! session-statuses {})

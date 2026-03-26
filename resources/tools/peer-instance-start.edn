@@ -1,0 +1,30 @@
+;; Start a managed child Xia instance on the same host.
+;; Import with: /import-tool resources/tools/peer-instance-start.edn
+
+{:id          :peer-instance-start
+ :name        "peer-instance-start"
+ :description "Start a managed child Xia instance on the same host. The child is bound to loopback, given a fresh command token, and registered as a peer service in the current Xia instance. This only works when the host started Xia with instance-management capability enabled."
+ :approval    :session
+ :tags        #{:peer :instance :multi-instance :management :process}
+ :parameters  {"type"       "object"
+               "properties" {"instance_id"        {"type"        "string"
+                                                  "description" "Instance id for the child Xia to start."}
+                             "template_instance"  {"type"        "string"
+                                                  "description" "Optional instance id to use as the template seed for a new child instance."}
+                             "port"               {"type"        "integer"
+                                                  "description" "Optional preferred loopback port for the child Xia HTTP server."}
+                             "service_id"         {"type"        "string"
+                                                  "description" "Optional service id to register in the parent Xia for talking to this child."}
+                             "service_name"       {"type"        "string"
+                                                  "description" "Optional service display name to register in the parent Xia."}
+                             "wait_for_ready_ms"  {"type"        "integer"
+                                                  "description" "Optional timeout in milliseconds for waiting until the child Xia is ready."}}
+               "required"   ["instance_id"]}
+ :handler     "(fn [args]
+                 (xia.instance-supervisor/start-instance!
+                   (get args \"instance_id\")
+                   :template-instance (get args \"template_instance\")
+                   :port (get args \"port\")
+                   :service-id (get args \"service_id\")
+                   :service-name (get args \"service_name\")
+                   :wait-for-ready-ms (get args \"wait_for_ready_ms\")))"}

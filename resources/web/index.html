@@ -21,7 +21,7 @@
           <div class="hero-brand">
             <img src="favicon/favicon.svg" alt="Xia logo" class="hero-logo">
             <div class="hero-brand-copy">
-              <div class="eyebrow">Personal Assistant</div>
+              <div class="eyebrow" id="hero-role">Personal Assistant</div>
               <h1 id="hero-name">Xia</h1>
             </div>
           </div>
@@ -286,9 +286,33 @@
                   <label class="field-label">Name</label>
                   <input type="text" id="identity-name" class="text-input" placeholder="Xia">
                 </div>
-                <div class="field full advanced-only">
+                <div class="field">
+                  <label class="field-label">Role</label>
+                  <input type="text" id="identity-role" class="text-input" placeholder="General personal assistant">
+                </div>
+                <div class="field full">
                   <label class="field-label">Description</label>
                   <textarea id="identity-description" class="text-input" rows="2" placeholder="A portable personal AI assistant..."></textarea>
+                </div>
+                <div class="field full">
+                  <label class="field-label">Controller Mode</label>
+                  <div class="check-row">
+                    <input type="checkbox" id="identity-controller-enabled">
+                    <label class="check-label" for="identity-controller-enabled">Allow this Xia to start and stop managed child Xia instances</label>
+                  </div>
+                  <p class="secret-note" id="identity-controller-note"></p>
+                </div>
+                <div class="field full">
+                  <label class="field-label">Instance ID</label>
+                  <input type="text" id="identity-instance-id" class="text-input" readonly>
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Database Path</label>
+                  <input type="text" id="identity-db-path" class="text-input" readonly>
+                </div>
+                <div class="field full advanced-only">
+                  <label class="field-label">Support Directory</label>
+                  <input type="text" id="identity-support-dir" class="text-input" readonly>
                 </div>
                 <div class="field full advanced-only">
                   <label class="field-label">Personality</label>
@@ -798,6 +822,13 @@
                 <div class="field full">
                   <label class="field-label">Auth Secret</label>
                   <input type="password" id="service-auth-key" class="text-input" placeholder="Leave blank to keep stored secret">
+                </div>
+                <div class="field full">
+                  <div class="check-row">
+                    <input type="checkbox" id="service-allow-private-network">
+                    <label class="check-label" for="service-allow-private-network">Allow local/private-network targets</label>
+                  </div>
+                  <p class="secret-note">Required for local Xia peers using <code>http://127.0.0.1:&lt;port&gt;</code> or <code>http://localhost:&lt;port&gt;</code>.</p>
                 </div>
                 <div class="field full">
                   <div class="check-row">

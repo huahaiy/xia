@@ -1,0 +1,23 @@
+;; List shared workspace items published by Xia instances on the same machine.
+;; Import with: /import-tool resources/tools/workspace-list.edn
+
+{:id             :workspace-list
+ :name           "workspace-list"
+ :description    "List items from Xia's shared workspace so collaborating instances can discover shared artifacts, document exports, and notes."
+ :tags           #{:workspace :shared :collaboration :list :artifact :document :note}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"workspace_id" {"type"        "string"
+                                                "description" "Optional shared workspace id. Defaults to `default`."}
+                                "top"          {"type"        "integer"
+                                                "description" "Maximum number of items to return (default 20)."}
+                                "source_type"  {"type"        "string"
+                                                "description" "Optional filter: `artifact`, `local-doc`, or `note`."}}
+                  "required"   []}
+ :handler        "(fn [args]
+                    {:workspace_id (or (get args \"workspace_id\") \"default\")
+                     :items (mapv #(dissoc % :payload-path :sha256 :meta)
+                                  (xia.workspace/list-items
+                                    :workspace-id (get args \"workspace_id\")
+                                    :top (or (get args \"top\") 20)
+                                    :source-type (get args \"source_type\")))})"}

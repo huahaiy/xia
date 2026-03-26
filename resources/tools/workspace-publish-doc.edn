@@ -1,0 +1,22 @@
+;; Publish a local document into the shared workspace.
+;; Import with: /import-tool resources/tools/workspace-publish-doc.edn
+
+{:id          :workspace-publish-doc
+ :name        "workspace-publish-doc"
+ :description "Publish a local document into Xia's shared workspace. Text documents keep their format; binary originals are exported as shared text when only extracted text is available."
+ :tags        #{:workspace :shared :collaboration :document :publish}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"doc_id"       {"type"        "string"
+                                             "description" "Local document id returned by local-doc-search, local-doc-read, or recent-work."}
+                             "workspace_id" {"type"        "string"
+                                             "description" "Optional shared workspace id. Defaults to `default`."}
+                             "name"         {"type"        "string"
+                                             "description" "Optional shared filename override."}}
+               "required"   ["doc_id"]}
+ :handler     "(fn [args]
+                 (dissoc (xia.workspace/publish-local-doc!
+                           (get args \"doc_id\")
+                           :workspace-id (get args \"workspace_id\")
+                           :name (get args \"name\"))
+                         :payload-path :sha256 :meta))"}

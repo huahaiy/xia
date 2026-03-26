@@ -753,6 +753,30 @@
          :size-bytes (:size-bytes artifact)
          :bytes      bytes}))))
 
+(defn visible-artifact-download-data
+  "Load artifact payload bytes by id across current and prior sessions."
+  [artifact-id]
+  (let [artifact-id* (normalize-artifact-id artifact-id)]
+    (when-let [artifact (get-artifact artifact-id*)]
+      (let [bytes (or (some-> (:text artifact) utf8-bytes)
+                      (load-blob-bytes (:blob-id artifact)
+                                       (:blob-codec artifact)))]
+        (when (and (:has-blob? artifact) (nil? bytes))
+          (throw (ex-info "artifact blob missing"
+                          {:type :artifact/blob-missing
+                           :artifact-id (str artifact-id*)
+                           :blob-id (some-> (:blob-id artifact) str)})))
+        {:id         (:id artifact)
+         :session-id (:session-id artifact)
+         :name       (:name artifact)
+         :title      (:title artifact)
+         :kind       (:kind artifact)
+         :media-type (:media-type artifact)
+         :size-bytes (:size-bytes artifact)
+         :preview    (:preview artifact)
+         :meta       (:meta artifact)
+         :bytes      bytes}))))
+
 (defn- scratch-pad-episode-context
   [{:keys [name pad-id preview]}]
   (str/join "\n"

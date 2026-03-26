@@ -1,0 +1,18 @@
+;; Stop a managed child Xia instance started by the current Xia process.
+;; Import with: /import-tool resources/tools/peer-instance-stop.edn
+
+{:id          :peer-instance-stop
+ :name        "peer-instance-stop"
+ :description "Stop a managed child Xia instance started by the current Xia process. This only works when the host started Xia with instance-management capability enabled."
+ :approval    :session
+ :tags        #{:peer :instance :multi-instance :management :process}
+ :parameters  {"type"       "object"
+               "properties" {"instance_id" {"type"        "string"
+                                            "description" "Managed child Xia instance id."}
+                             "timeout_ms"  {"type"        "integer"
+                                            "description" "Optional timeout in milliseconds for waiting for the child Xia to stop."}}
+               "required"   ["instance_id"]}
+ :handler     "(fn [args]
+                 (xia.instance-supervisor/stop-instance!
+                   (get args \"instance_id\")
+                   :timeout-ms (get args \"timeout_ms\")))"}

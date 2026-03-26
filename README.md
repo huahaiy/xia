@@ -133,4 +133,5 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 
 ## More Documentation
 
+- Multi-instance setup and template seeding: [doc/multi-instance.md](doc/multi-instance.md)
 - Technical and implementation details: [doc/impl.md](doc/impl.md)

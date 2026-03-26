@@ -178,11 +178,19 @@
                                  :auth-type :bearer
                                  :auth-key  "tok"})))
     (is (nil? (db/get-service :insecure))))
-  (testing "allow-private-network does not bypass HTTPS"
+  (testing "allow-private-network permits loopback HTTP"
+    (db/register-service! {:id                     :local-peer
+                           :base-url               "http://127.0.0.1:4011"
+                           :auth-type              :bearer
+                           :auth-key               "tok"
+                           :allow-private-network? true})
+    (is (= "http://127.0.0.1:4011"
+           (:service/base-url (db/get-service :local-peer)))))
+  (testing "allow-private-network does not permit non-loopback HTTP"
     (is (thrown-with-msg?
           clojure.lang.ExceptionInfo #"must use HTTPS"
           (db/register-service! {:id                     :insecure-private
-                                 :base-url               "http://127.0.0.1:8080"
+                                 :base-url               "http://192.168.1.10:8080"
                                  :auth-type              :bearer
                                  :auth-key               "tok"
                                  :allow-private-network? true})))

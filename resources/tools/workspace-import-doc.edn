@@ -1,0 +1,25 @@
+;; Import a shared workspace item into the current session as a local document.
+;; Import with: /import-tool resources/tools/workspace-import-doc.edn
+
+{:id          :workspace-import-doc
+ :name        "workspace-import-doc"
+ :description "Import a shared workspace item into the current session as a local document so Xia can search or cite it like any other uploaded document."
+ :tags        #{:workspace :shared :collaboration :document :import}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"item_id"      {"type"        "string"
+                                             "description" "Workspace item id returned by workspace-list."}
+                             "workspace_id" {"type"        "string"
+                                             "description" "Optional shared workspace id. Defaults to `default`."}
+                             "name"         {"type"        "string"
+                                             "description" "Optional imported document filename override."}
+                             "ocr_mode"     {"type"        "string"
+                                             "description" "Optional OCR mode when importing an image-based workspace item."}}
+               "required"   ["item_id"]}
+ :handler     "(fn [args]
+                 (dissoc (xia.workspace/import-item-as-local-doc!
+                           (get args \"item_id\")
+                           :workspace-id (get args \"workspace_id\")
+                           :name (get args \"name\")
+                           :ocr-mode (get args \"ocr_mode\"))
+                         :sha256))"}

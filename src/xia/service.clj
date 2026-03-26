@@ -28,28 +28,45 @@
            [java.util.concurrent.atomic AtomicLong]))
 
 (def default-rate-limit-per-minute 60)
+(def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 
 ;; ---------------------------------------------------------------------------
 ;; URL safety
 ;; ---------------------------------------------------------------------------
 
-(defn- https-service-base-url?
+(defn- loopback-service-base-url?
   [base-url]
   (try
     (let [uri    (java.net.URI. (or base-url ""))
           scheme (some-> (.getScheme uri) str/lower-case)
-          host   (.getHost uri)]
-      (and (= "https" scheme)
-           (some? host)))
+          host   (some-> (.getHost uri) str/lower-case)]
+      (and (= "http" scheme)
+           (contains? loopback-hosts host)))
     (catch Exception _
       false)))
 
-(defn- ensure-https-service-base-url!
-  [service-id base-url]
-  (when-not (https-service-base-url? base-url)
-    (throw (ex-info (str "Service " (name service-id) " base URL must use HTTPS")
+(defn- allowed-service-base-url?
+  [base-url allow-private-network?]
+  (try
+    (let [uri    (java.net.URI. (or base-url ""))
+          scheme (some-> (.getScheme uri) str/lower-case)
+          host   (.getHost uri)]
+      (and (some? host)
+           (or (= "https" scheme)
+               (and allow-private-network?
+                    (loopback-service-base-url? base-url)))))
+    (catch Exception _
+      false)))
+
+(defn- ensure-service-base-url!
+  [service-id base-url allow-private-network?]
+  (when-not (allowed-service-base-url? base-url allow-private-network?)
+    (throw (ex-info (str "Service " (name service-id)
+                         " base URL must use HTTPS"
+                         " (loopback HTTP is allowed only when private-network access is enabled)")
                     {:service-id service-id
-                     :base-url   base-url}))))
+                     :base-url   base-url
+                     :allow-private-network? (boolean allow-private-network?)}))))
 
 (defn- safe-resolve-url
   "Resolve a path against a base URL. Rejects absolute URLs, path traversal,
@@ -191,7 +208,9 @@
     (when-not (:service/enabled? svc)
       (throw (ex-info (str "Service " (name service-id) " is disabled")
                       {:service-id service-id})))
-    (ensure-https-service-base-url! service-id (:service/base-url svc))
+    (ensure-service-base-url! service-id
+                              (:service/base-url svc)
+                              (:service/allow-private-network? svc))
     (let [auth-type (:service/auth-type svc)
           oauth-account-id (:service/oauth-account svc)]
       {:base-url      (:service/base-url svc)
@@ -282,14 +301,15 @@
      path       — relative path (e.g. \"/users/me/messages\")
      opts       — optional map:
        :body          — request body (string or map; maps are JSON-encoded)
-       :headers       — additional headers (merged after auth headers)
-       :query-params  — URL query parameters
-       :as            — response coercion: :json (default), :string, :raw
+     :headers       — additional headers (merged after auth headers)
+     :query-params  — URL query parameters
+     :timeout       — request timeout in milliseconds
+     :as            — response coercion: :json (default), :string, :raw
 
    Returns:
      {:status 200 :headers {...} :body <parsed>}"
-  [service-id method path & {:keys [body headers query-params as]
-                              :or   {as :json}}]
+  [service-id method path & {:keys [body headers query-params as timeout]
+                             :or   {as :json}}]
   (let [svc     (resolve-service service-id)
         url     (safe-resolve-url (:base-url svc) path)
         body-str (cond
@@ -308,6 +328,7 @@
                          :request-label (str "Service request " (name service-id))}
                   body-str     (assoc :body body-str)
                   body-str     (assoc-in [:headers "Content-Type"] "application/json")
+                  timeout      (assoc :timeout timeout)
                   query-params (assoc :query-params query-params))
         ;; Inject service auth — this is the key security boundary
         req     (inject-auth req svc)

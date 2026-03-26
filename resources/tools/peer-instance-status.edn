@@ -1,0 +1,18 @@
+;; Read status for a managed child Xia instance.
+;; Import with: /import-tool resources/tools/peer-instance-status.edn
+
+{:id          :peer-instance-status
+ :name        "peer-instance-status"
+ :description "Read status for a managed child Xia instance started by the current Xia process. This only works when the host started Xia with instance-management capability enabled."
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"instance_id" {"type"        "string"
+                                            "description" "Managed child Xia instance id."}}
+               "required"   ["instance_id"]}
+ :handler     "(fn [args]
+                 (if-let [status (xia.instance-supervisor/instance-status
+                                   (get args \"instance_id\"))]
+                   status
+                   (throw (ex-info \"Managed Xia instance not found\"
+                                   {:type :instance-supervisor/not-found
+                                    :instance-id (get args \"instance_id\")}))))"}

@@ -3,7 +3,7 @@
 
 {:id             :artifact-create
  :name           "artifact-create"
- :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, or plain text that the user can later inspect and download from Xia."
+ :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, or plain text that the user can later inspect and download from Xia. Provide one payload source: `content`, `rows`, or `data`. Do not call this tool with an empty payload."
  :tags           #{:artifact :output :file :export}
  :parameters     {"type"       "object"
                   "properties" {"name"       {"type"        "string"
@@ -14,13 +14,16 @@
                                              "enum"        ["txt" "markdown" "csv" "json" "html"]
                                              "description" "Artifact format. Defaults to txt if omitted."}
                                 "content"    {"type"        "string"
-                                             "description" "Raw text content for txt, markdown, html, or pre-rendered csv/json."}
+                                             "description" "Raw text content for txt, markdown, html, or pre-rendered csv/json. Required unless you provide `rows` or `data`."}
                                 "rows"       {"type"        "array"
-                                             "description" "Optional CSV rows as arrays or objects. Use this instead of content for structured CSV output."}
-                                "data"       {"description" "Optional structured JSON value. Use this instead of content for JSON artifacts."}
+                                             "description" "Optional CSV rows as arrays or objects. Use this instead of `content` for structured CSV output."}
+                                "data"       {"description" "Optional structured JSON value. Use this instead of `content` for JSON artifacts."}
                                 "meta"       {"type"        "object"
                                              "description" "Optional metadata to store alongside the artifact."}}
-                  "required"   []}
+                  "required"   []
+                  "anyOf"      [{"required" ["content"]}
+                                {"required" ["rows"]}
+                                {"required" ["data"]}]}
  :handler        "(fn [args]
                     (let [artifact (xia.artifact/create-artifact!
                                      {:name    (get args \"name\")

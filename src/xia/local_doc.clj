@@ -1324,6 +1324,21 @@
   (when-let [doc (get-doc doc-id)]
     (doc-slice doc offset max-chars)))
 
+(defn visible-doc-export-data
+  "Load a local document's normalized text and metadata across current and
+   prior sessions. Original uploaded bytes are not retained."
+  [doc-id]
+  (when-let [doc (get-doc doc-id)]
+    {:id         (:id doc)
+     :session-id (:session-id doc)
+     :name       (:name doc)
+     :media-type (:media-type doc)
+     :size-bytes (:size-bytes doc)
+     :sha256     (:sha256 doc)
+     :summary    (:summary doc)
+     :preview    (:preview doc)
+     :text       (:text doc)}))
+
 (defn save-upload!
   [{:keys [session-id name media-type size-bytes source text bytes bytes-base64 ocr-mode]}]
   (let [session-id*  (normalize-session-id session-id)

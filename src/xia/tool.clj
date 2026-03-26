@@ -48,6 +48,19 @@
    "tools/browser-login-interactive.edn"
    "tools/branch-tasks.edn"
    "tools/recent-work.edn"
+   "tools/peer-list.edn"
+   "tools/peer-chat.edn"
+   "tools/peer-instance-list.edn"
+   "tools/peer-instance-start.edn"
+   "tools/peer-instance-status.edn"
+   "tools/peer-instance-stop.edn"
+   "tools/workspace-list.edn"
+   "tools/workspace-read.edn"
+   "tools/workspace-publish-artifact.edn"
+   "tools/workspace-publish-doc.edn"
+   "tools/workspace-write-note.edn"
+   "tools/workspace-import-artifact.edn"
+   "tools/workspace-import-doc.edn"
    "tools/artifact-create.edn"
    "tools/artifact-list.edn"
    "tools/artifact-search.edn"
@@ -73,6 +86,10 @@
   #{:branch-tasks
     :browser-bootstrap-runtime
     :browser-install-deps
+    :peer-instance-list
+    :peer-instance-start
+    :peer-instance-status
+    :peer-instance-stop
     :schedule-list
     :schedule-create
     :schedule-manage})
@@ -82,6 +99,14 @@
     :policy :session
     :autonomous-scope :service
     :reason "uses stored service credentials"}
+   {:match "xia.peer/chat"
+    :policy :session
+    :autonomous-scope :service
+    :reason "communicates with a configured Xia peer through stored service credentials"}
+   {:match "xia.instance-supervisor/"
+    :policy :session
+    :autonomous-scope nil
+    :reason "starts or stops managed local Xia instances on the host"}
    {:match "xia.email/"
     :policy :session
     :autonomous-scope :service
@@ -122,6 +147,42 @@
     :policy :session
     :autonomous-scope nil
     :reason "changes autonomous background tasks"}])
+
+(def ^:private expected-tool-input-error-types
+  #{:artifact/missing-content
+    :artifact/unsupported-kind
+    :artifact/invalid-bytes
+    :artifact/invalid-bytes-base64
+   :artifact/invalid-csv-rows
+   :artifact/session-required
+   :artifact/session-not-found
+   :artifact/not-found
+   :local-doc/invalid-session-id
+   :local-doc/session-required
+   :local-doc/session-not-found
+   :local-doc/unsupported-format
+   :workspace/invalid-workspace-id
+   :workspace/invalid-item-id
+   :workspace/invalid-source-type
+   :workspace/session-required
+   :workspace/not-found
+   :workspace/source-not-found
+   :workspace/payload-missing
+   :workspace/missing-content
+   :instance-supervisor/capability-disabled
+   :instance-supervisor/command-unavailable
+   :instance-supervisor/invalid-instance-id
+   :instance-supervisor/invalid-template-instance
+   :instance-supervisor/invalid-bind
+   :instance-supervisor/invalid-port
+   :instance-supervisor/instance-conflict
+   :instance-supervisor/already-running
+   :instance-supervisor/not-found})
+
+(defn- expected-tool-input-error?
+  [^Throwable e]
+  (contains? expected-tool-input-error-types
+             (some-> e ex-data :type)))
 
 (defn registered-tools
   "Return all currently loaded tool handlers."
@@ -624,7 +685,11 @@
                             :message (str "Tool " (name tool-id) " failed: " (.getMessage e))
                             :tool-id tool-id
                             :tool-name (or (:tool/name tool) (name tool-id))})
-           (log/error e "Tool execution failed:" tool-id)
+           (if (expected-tool-input-error? e)
+             (log/warn "Tool execution rejected invalid input:" tool-id
+                       "type" (some-> e ex-data :type)
+                       "message" (.getMessage e))
+             (log/error e "Tool execution failed:" tool-id))
            {:error (str "Tool execution failed: " (.getMessage e))}))
        (do
          (audit-entry! context tool-id tool arguments

@@ -365,10 +365,54 @@
                 (catch clojure.lang.ExceptionInfo e
                   e))]
       (is (some? err))
-      (is (re-find #"missing string choices\[0\]\.message\.content"
+      (is (re-find #"missing text choices\[0\]\.message\.content"
                    (.getMessage ^Throwable err)))
       (is (= :llm/malformed-response
              (:type (ex-data err)))))))
+
+(deftest chat-simple-accepts-content-part-arrays
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :default
+                             :llm.provider/base-url "https://api.example.com/v1"
+                             :llm.provider/api-key "sk-test"
+                             :llm.provider/model "gpt-test"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request
+                (fn [_req]
+                  {:status 200
+                   :body "{\"choices\":[{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"},{\"type\":\"text\",\"text\":\" there.\"}]}}]}"})]
+    (is (= "Hello there."
+           (llm/chat-simple [{"role" "user" "content" "hello"}])))))
+
+(deftest chat-with-tools-accepts-content-part-arrays
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :default
+                             :llm.provider/base-url "https://api.example.com/v1"
+                             :llm.provider/api-key "sk-test"
+                             :llm.provider/model "gpt-test"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request
+                (fn [_req]
+                  {:status 200
+                   :body "{\"choices\":[{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Searching...\"}],\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web-search\",\"arguments\":\"{}\"}}]}}]}"})]
+    (is (= {"content" "Searching..."
+            "tool_calls" [{"id" "call_1"
+                           "type" "function"
+                           "function" {"name" "web-search"
+                                       "arguments" "{}"}}]}
+           (llm/chat-with-tools [{"role" "user" "content" "hello"}]
+                                [{:type "function"
+                                  :function {:name "web-search"}}])))))
 
 (deftest chat-with-tools-normalizes-nil-content-but-rejects-malformed-message
   (with-redefs [xia.db/get-default-provider

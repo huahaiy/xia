@@ -53,6 +53,9 @@
                                        (io/make-parents target-path)
                                        (spit target-path "test-model")
                                        target-path)
+                                     #'xia.paths/managed-embed-dir
+                                     (fn [_db-path]
+                                       (str path "/embed-cache"))
                                      #'datalevin.core/get-conn
                                      (fn [_db-path _schema _opts]
                                        (swap! calls conj :get-conn)
@@ -70,6 +73,87 @@
     (is (= [:download :get-conn]
            (mapv #(if (vector? %) (first %) %) @calls)))
     (is (.contains ^String output "Downloading Xia embedding model"))))
+
+(deftest seed-initial-settings-from-db-copies-template-config
+  (let [target-path (db/current-db-path)
+        source-path (str (java.nio.file.Files/createTempDirectory
+                           "xia-template-source"
+                           (make-array java.nio.file.attribute.FileAttribute 0)))
+        connect-opts (th/test-connect-options
+                       {:passphrase-provider (constantly "xia-test-passphrase")})]
+    (db/close!)
+    (db/connect! source-path connect-opts)
+    (try
+      (db/set-identity! :name "Base Xia")
+      (db/set-identity! :role "Ops assistant")
+      (db/set-identity! :description "Handles shared operations setup.")
+      (db/set-config! :user/name "Huahai")
+      (db/set-config! :web/search-backend "brave")
+      (db/set-config! :web/search-brave-api-key "brave-secret")
+      (db/set-config! :local-doc/ocr-enabled? true)
+      (db/register-oauth-account! {:id            :shared-oauth
+                                   :name          "Shared OAuth"
+                                   :authorize-url "https://example.com/oauth/authorize"
+                                   :token-url     "https://example.com/oauth/token"
+                                   :client-id     "client-id"
+                                   :client-secret "client-secret"
+                                   :access-token  "access-token"})
+      (db/upsert-provider! {:id                :openai
+                            :name              "OpenAI"
+                            :base-url          "https://api.openai.com/v1"
+                            :api-key           "openai-secret"
+                            :model             "gpt-5"
+                            :template          :openai
+                            :credential-source :api-key
+                            :workloads         #{:assistant :memory-summary}
+                            :default?          true})
+      (db/save-service! {:id       :github
+                         :name     "GitHub"
+                         :base-url "https://api.github.com"
+                         :auth-type :bearer
+                         :auth-key "github-secret"})
+      (db/save-site-cred! {:id             :portal
+                           :name           "Portal"
+                           :login-url      "https://portal.example/login"
+                           :username-field "email"
+                           :password-field "password"
+                           :username       "ops@example.com"
+                           :password       "site-secret"})
+      (finally
+        (db/close!)))
+    (db/connect! target-path connect-opts)
+    (let [result (db/seed-initial-settings-from-db! {:source-db-path source-path
+                                                     :crypto-opts connect-opts})
+          provider (db/get-provider :openai)
+          service  (db/get-service :github)
+          site     (db/get-site-cred :portal)
+          account  (db/get-oauth-account :shared-oauth)]
+      (is (true? (:seeded? result)))
+      (is (= 1 (:provider-count result)))
+      (is (= 1 (:service-count result)))
+      (is (= 1 (:site-count result)))
+      (is (= 1 (:oauth-account-count result)))
+      (is (= 0 (:skipped-secret-count result)))
+      (is (= "Base Xia" (db/get-identity :name)))
+      (is (= "Ops assistant" (db/get-identity :role)))
+      (is (= "Huahai" (db/get-config :user/name)))
+      (is (= "brave" (db/get-config :web/search-backend)))
+      (is (= "brave-secret" (db/get-config :web/search-brave-api-key)))
+      (is (= "true" (db/get-config :setup/complete)))
+      (is (= "https://api.openai.com/v1" (:llm.provider/base-url provider)))
+      (is (= "openai-secret" (:llm.provider/api-key provider)))
+      (is (= "gpt-5" (:llm.provider/model provider)))
+      (is (= :openai (:llm.provider/template provider)))
+      (is (= :api-key (:llm.provider/credential-source provider)))
+      (is (= #{:assistant :memory-summary} (:llm.provider/workloads provider)))
+      (is (= :openai (:llm.provider/id (db/get-default-provider))))
+      (is (= "https://api.github.com" (:service/base-url service)))
+      (is (= "github-secret" (:service/auth-key service)))
+      (is (= "https://portal.example/login" (:site-cred/login-url site)))
+      (is (= "ops@example.com" (:site-cred/username site)))
+      (is (= "site-secret" (:site-cred/password site)))
+      (is (= "client-secret" (:oauth.account/client-secret account)))
+      (is (= "access-token" (:oauth.account/access-token account))))))
 
 (deftest providers-persist-vision-capability
   (db/upsert-provider! {:id       :openai

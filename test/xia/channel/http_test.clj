@@ -8,13 +8,16 @@
             [xia.backup :as backup]
             [xia.channel.http :as http]
             [xia.db :as db]
+            [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
             [xia.local-ocr :as local-ocr]
+            [xia.paths :as paths]
             [xia.remote-bridge :as remote-bridge]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
             [xia.test-helpers :as th :refer [minimal-pdf-bytes with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream File]
+           [java.net BindException]
            [java.nio.charset StandardCharsets]
            [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
@@ -100,6 +103,11 @@
 (defn- ui-headers []
   {"origin" "http://localhost:3008"
    "cookie" (local-session-cookie)})
+
+(defn- command-headers
+  ([] (command-headers "command-secret"))
+  ([token]
+   {"authorization" (str "Bearer " token)}))
 
 (defn- wait-for
   [f]
@@ -338,6 +346,68 @@
       (is (= 200 (:status response)))
       (is (= "ok" (get body "content"))))))
 
+(deftest command-route-is-disabled-without-token
+  (with-redefs [xia.channel.http/command-channel-token (constantly nil)]
+    (let [response (#'http/router {:uri            "/command/sessions"
+                                   :request-method :post})
+          body     (response-json response)]
+      (is (= 503 (:status response)))
+      (is (= "command channel is not configured" (get body "error"))))))
+
+(deftest command-route-blocks-missing-or-invalid-token
+  (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
+    (testing "missing token"
+      (let [response (#'http/router {:uri            "/command/sessions"
+                                     :request-method :post})
+            body     (response-json response)]
+        (is (= 401 (:status response)))
+        (is (= "missing or invalid command token" (get body "error")))))
+    (testing "wrong token"
+      (let [response (#'http/router {:uri            "/command/sessions"
+                                     :request-method :post
+                                     :headers        (command-headers "wrong-secret")})
+            body     (response-json response)]
+        (is (= 401 (:status response)))
+        (is (= "missing or invalid command token" (get body "error")))))))
+
+(deftest command-create-session-route-returns-session-id
+  (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
+    (let [response (#'http/router {:uri            "/command/sessions"
+                                   :request-method :post
+                                   :headers        (command-headers)})
+          body     (response-json response)
+          sid      (UUID/fromString (get body "session_id"))]
+      (is (= 200 (:status response)))
+      (is (= :command
+             (ffirst (db/q '[:find ?channel :in $ ?sid
+                             :where
+                             [?s :session/id ?sid]
+                             [?s :session/channel ?channel]]
+                           sid)))))))
+
+(deftest command-chat-route-creates-command-session
+  (let [seen-opts (atom nil)]
+    (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")
+                  xia.agent/process-message (fn [_session-id user-message & opts]
+                                              (reset! seen-opts (apply hash-map opts))
+                                              (str "echo: " user-message))]
+      (let [response (#'http/router {:uri            "/command/chat"
+                                     :request-method :post
+                                     :headers        (command-headers)
+                                     :body           (request-body {"message" "hello"})})
+            body     (response-json response)
+            sid      (UUID/fromString (get body "session_id"))]
+        (is (= 200 (:status response)))
+        (is (= "assistant" (get body "role")))
+        (is (= "echo: hello" (get body "content")))
+        (is (= :command (:channel @seen-opts)))
+        (is (= :command
+               (ffirst (db/q '[:find ?channel :in $ ?sid
+                               :where
+                               [?s :session/id ?sid]
+                               [?s :session/channel ?channel]]
+                             sid))))))))
+
 (deftest chat-route-allows-direct-local-client-with-session-secret
   (with-redefs [xia.agent/process-message (fn [_session-id _user-message & _] "ok")]
     (let [response (#'http/router {:uri            "/chat"
@@ -515,6 +585,40 @@
                                [(get-else $ ?s :session/active? false) ?active]]
                              sid))))))))
 
+(deftest command-close-session-route-finalizes-command-session
+  (let [sid       (db/create-session! :command)
+        lifecycle (atom [])]
+    (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")
+                  xia.channel.http/cancel-rest-session-finalizer! (fn [session-id]
+                                                                    (swap! lifecycle conj [:cancel session-id]))
+                  xia.working-memory/get-wm (fn [session-id]
+                                              (is (= sid session-id))
+                                              {:topics "release planning"})
+                  xia.working-memory/snapshot! (fn [session-id]
+                                                (swap! lifecycle conj [:snapshot session-id]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.working-memory/clear-wm! (fn [session-id]
+                                                 (swap! lifecycle conj [:clear session-id]))]
+      (let [response (#'http/router {:uri            (str "/command/sessions/" sid)
+                                     :request-method :delete
+                                     :headers        (command-headers)})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= "closed" (get body "status")))
+        (is (= false (get body "already_closed")))
+        (is (= [[:snapshot sid]
+                [:record sid :command "release planning"]
+                [:clear sid]
+                [:cancel (str sid)]]
+               @lifecycle))
+        (is (= false
+               (ffirst (db/q '[:find ?active :in $ ?sid
+                               :where
+                               [?s :session/id ?sid]
+                               [(get-else $ ?s :session/active? false) ?active]]
+                             sid))))))))
+
 (deftest close-session-route-cancels-busy-rest-session
   (let [sid       (db/create-session! :http)
         cancelled (atom nil)
@@ -611,7 +715,7 @@
 
 (deftest history-sessions-route-returns-chat-session-summaries
   (let [visible-sid (db/create-session! :http)
-        hidden-sid  (db/create-session! :api)]
+        hidden-sid  (db/create-session! :command)]
     (db/add-message! visible-sid :user "hello")
     (db/add-message! visible-sid :assistant "latest reply")
     (db/add-message! hidden-sid :user "should stay hidden")
@@ -1166,6 +1270,55 @@
         (is (= "recorded" (get submit-body "status")))))
     (is (= true (deref waiter 2000 ::timeout)))))
 
+(deftest command-approval-route-allows-round-trip
+  (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
+    (let [sid    (str (db/create-session! :command))
+          waiter (future
+                   (#'http/http-approval-handler
+                     {:session-id   sid
+                      :tool-id      :browser-login
+                      :tool-name    "browser-login"
+                      :description  "Log into a site"
+                      :arguments    {"site" "jira"}
+                      :reason       "uses stored site credentials"
+                      :policy       :session}))]
+      (let [pending-body (wait-for
+                           #(let [response (#'http/router {:uri            (str "/command/sessions/" sid "/approval")
+                                                           :request-method :get
+                                                           :headers        (command-headers)})
+                                  body     (response-json response)]
+                              (when (get body "pending")
+                                body)))]
+        (is (some? pending-body))
+        (is (= "browser-login" (get-in pending-body ["approval" "tool_name"])))
+        (let [approval-id (get-in pending-body ["approval" "approval_id"])
+              submit      (#'http/router {:uri            (str "/command/sessions/" sid "/approval")
+                                          :request-method :post
+                                          :headers        (command-headers)
+                                          :body           (request-body {"approval_id" approval-id
+                                                                         "decision" "allow"})})
+              submit-body (response-json submit)]
+          (is (= 200 (:status submit)))
+          (is (= "recorded" (get submit-body "status")))))
+      (is (= true (deref waiter 2000 ::timeout))))))
+
+(deftest session-message-routes-keep-http-and-command-sessions-separate
+  (let [http-sid    (str (db/create-session! :http))
+        command-sid (str (db/create-session! :command))]
+    (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
+      (let [http-response (#'http/router {:uri            (str "/sessions/" command-sid "/messages")
+                                          :request-method :get
+                                          :headers        (ui-headers)})
+            http-body     (response-json http-response)
+            cmd-response  (#'http/router {:uri            (str "/command/sessions/" http-sid "/messages")
+                                          :request-method :get
+                                          :headers        (command-headers)})
+            cmd-body      (response-json cmd-response)]
+        (is (= 404 (:status http-response)))
+        (is (= "session not found" (get http-body "error")))
+        (is (= 404 (:status cmd-response)))
+        (is (= "session not found" (get cmd-body "error")))))))
+
 (deftest admin-config-route-returns-safe-summaries
   (db/upsert-provider! {:id       :openai
                         :name     "OpenAI"
@@ -1222,31 +1375,44 @@
                       :source-name "demo-skill.zip"
                       :import-warnings ["Ignored unsupported frontmatter field `homepage`."]
                       :imported-from-openclaw? true})
-  (let [response (#'http/router {:uri            "/admin/config"
-                                 :request-method :get
-                                 :headers        (ui-headers)})
-        body     (response-json response)
-        provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
-        openai-template (first (filter #(= "openai" (get % "id")) (get body "llm_provider_templates")))
-        conversation-context (get body "conversation_context")
-        memory-retention (get body "memory_retention")
-        knowledge-decay (get body "knowledge_decay")
-        local-doc-summarization (get body "local_doc_summarization")
-        local-doc-ocr (get body "local_doc_ocr")
-        database-backup (get body "database_backup")
-        llm-workloads (get body "llm_workloads")
-        templates (get body "oauth_provider_templates")
-        oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
-        service  (first (filter #(= "github" (get % "id")) (get body "services")))
-        site     (first (filter #(= "github" (get % "id")) (get body "sites")))
-        tool     (first (filter #(= "demo-tool" (get % "id")) (get body "tools")))
-        skill    (first (filter #(= "demo-skill" (get % "id")) (get body "skills")))
-        remote-bridge (get body "remote_bridge")
-        remote-devices (get body "remote_devices")
-        remote-events (get body "remote_events")
-        remote-snapshot (get body "remote_snapshot")]
-    (is (= 200 (:status response)))
-    (is (= false (get body "setup_required")))
+  (instance-supervisor/configure! {:enabled? true
+                                   :command "/opt/xia/bin/xia"})
+  (instance-supervisor/set-instance-management-enabled! true)
+  (try
+    (let [response (#'http/router {:uri            "/admin/config"
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
+          openai-template (first (filter #(= "openai" (get % "id")) (get body "llm_provider_templates")))
+          conversation-context (get body "conversation_context")
+          memory-retention (get body "memory_retention")
+          knowledge-decay (get body "knowledge_decay")
+          local-doc-summarization (get body "local_doc_summarization")
+          local-doc-ocr (get body "local_doc_ocr")
+          database-backup (get body "database_backup")
+          llm-workloads (get body "llm_workloads")
+          templates (get body "oauth_provider_templates")
+          oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
+          service  (first (filter #(= "github" (get % "id")) (get body "services")))
+          site     (first (filter #(= "github" (get % "id")) (get body "sites")))
+          tool     (first (filter #(= "demo-tool" (get % "id")) (get body "tools")))
+          skill    (first (filter #(= "demo-skill" (get % "id")) (get body "skills")))
+          remote-bridge (get body "remote_bridge")
+          remote-devices (get body "remote_devices")
+          remote-events (get body "remote_events")
+          remote-snapshot (get body "remote_snapshot")]
+      (is (= 200 (:status response)))
+      (is (= false (get body "setup_required")))
+      (is (= "General personal assistant for everyday digital work."
+             (get-in body ["identity" "role"])))
+      (is (= "default" (get-in body ["instance" "id"])))
+      (is (= true (get-in body ["capabilities" "instance_management_configured"])))
+      (is (= true (get-in body ["capabilities" "instance_management_enabled"])))
+      (is (= (paths/absolute-path (db/current-db-path))
+             (get-in body ["storage" "db_path"])))
+      (is (= (paths/absolute-path (paths/support-dir-path (db/current-db-path)))
+             (get-in body ["storage" "support_dir"])))
     (is (= true (get provider "api_key_configured")))
     (is (not (contains? provider "api_key")))
     (is (= "openai" (get provider "template")))
@@ -1300,8 +1466,9 @@
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
-    (is (= #{"claude" "custom" "deepseek" "glm" "minimax" "ollama" "openai" "qwen"}
-           (set (map #(get % "id") (get body "llm_provider_templates")))))
+    (is (every? (set (map #(get % "id") (get body "llm_provider_templates")))
+                ["claude" "custom" "deepseek" "gemini" "glm"
+                 "minimax" "ollama" "openai" "openrouter" "qwen"]))
     (is (= #{"browser-session" "api-key"} (set (get openai-template "auth_types"))))
     (is (= "account" (get-in openai-template ["access_modes" 0 "id"])))
     (is (= true (get-in openai-template ["access_modes" 0 "default"])))
@@ -1348,10 +1515,13 @@
     (is (= true (get remote-bridge "keypair_ready")))
     (is (string? (get remote-bridge "public_key")))
     (is (= "disabled" (get remote-bridge "connection_state")))
-    (is (= [] remote-devices))
-    (is (= [] remote-events))
-    (is (= [] (get remote-snapshot "attention")))
-    (is (= "disabled" (get-in remote-snapshot ["connectivity" "connection_state"])))))
+      (is (= [] remote-devices))
+      (is (= [] remote-events))
+      (is (= [] (get remote-snapshot "attention")))
+      (is (= "disabled" (get-in remote-snapshot ["connectivity" "connection_state"]))))
+    (finally
+      (instance-supervisor/set-instance-management-enabled! false)
+      (instance-supervisor/configure! {:enabled? false}))))
 
 (deftest admin-config-route-flags-first-run-onboarding-when-no-providers
   (let [response (#'http/router {:uri            "/admin/config"
@@ -1361,6 +1531,29 @@
     (is (= 200 (:status response)))
     (is (= true (get body "setup_required")))
     (is (seq (get body "llm_provider_templates")))))
+
+(deftest admin-identity-route-saves-role
+  (instance-supervisor/configure! {:enabled? true
+                                   :command "/opt/xia/bin/xia"})
+  (try
+    (let [response (#'http/router {:uri            "/admin/identity"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"name" "Ops Xia"
+                                                                  "role" "Release assistant"
+                                                                  "description" "Coordinates release work."
+                                                                  "controller_enabled" true})})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= "Ops Xia" (get-in body ["identity" "name"])))
+      (is (= "Release assistant" (get-in body ["identity" "role"])))
+      (is (= "Coordinates release work." (get-in body ["identity" "description"])))
+      (is (= true (get-in body ["capabilities" "instance_management_configured"])))
+      (is (= true (get-in body ["capabilities" "instance_management_enabled"])))
+      (is (= "Release assistant" (db/get-identity :role))))
+    (finally
+      (instance-supervisor/set-instance-management-enabled! false)
+      (instance-supervisor/configure! {:enabled? false}))))
 
 (deftest admin-context-route-saves-and-clears-settings
   (let [save-response (#'http/router {:uri            "/admin/context"
@@ -2154,6 +2347,7 @@
                     (reset! captured opts)
                     (fn [] nil))]
       (http/start! 18790)
+      (is (= 18790 (http/current-port)))
       (http/stop!)
       (is (= "127.0.0.1" (:ip @captured)))
       (is (= 18790 (:port @captured))))))
@@ -2168,3 +2362,16 @@
       (http/stop!)
       (is (= "0.0.0.0" (:ip @captured)))
       (is (= 18790 (:port @captured))))))
+
+(deftest start-falls-forward-when-port-is-taken
+  (let [attempts (atom [])]
+    (with-redefs [org.httpkit.server/run-server
+                  (fn [_handler opts]
+                    (swap! attempts conj opts)
+                    (if (= 18790 (:port opts))
+                      (throw (BindException. "Address already in use"))
+                      (fn [] nil)))]
+      (http/start! 18790)
+      (is (= [18790 18791] (mapv :port @attempts)))
+      (is (= 18791 (http/current-port)))
+      (http/stop!))))

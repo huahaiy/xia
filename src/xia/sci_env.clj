@@ -21,14 +21,17 @@
             [xia.config :as cfg]
             [xia.cron :as cron]
             [xia.email :as email]
+            [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
+            [xia.peer :as peer]
             [xia.scratch :as scratch]
             [xia.schedule :as schedule]
             [xia.secret :as secret]
             [xia.service :as service]
             [xia.skill :as skill]
             [xia.web :as web]
+            [xia.workspace :as workspace]
             [xia.working-memory :as wm])
   (:import [java.util Date]
            [java.util.concurrent.atomic AtomicLong]))
@@ -136,6 +139,27 @@
 (def ^:private xia-service-ns
   {'request       service/request
    'list-services service/list-services})
+
+(def ^:private xia-peer-ns
+  {'list-peers peer/list-peers
+   'chat       peer/chat})
+
+(def ^:private xia-instance-supervisor-ns
+  {'instance-management-enabled? instance-supervisor/instance-management-enabled?
+   'list-managed-instances       instance-supervisor/list-managed-instances
+   'instance-status              instance-supervisor/instance-status
+   'start-instance!              instance-supervisor/start-instance!
+   'stop-instance!               instance-supervisor/stop-instance!})
+
+(def ^:private xia-workspace-ns
+  {'list-items               workspace/list-items
+   'get-item                 workspace/get-item
+   'read-item                workspace/read-item
+   'publish-artifact!        workspace/publish-artifact!
+   'publish-local-doc!       workspace/publish-local-doc!
+   'write-note!              workspace/write-note!
+   'import-item-as-artifact! workspace/import-item-as-artifact!
+   'import-item-as-local-doc! workspace/import-item-as-local-doc!})
 
 (def ^:private xia-email-ns
   {'list-messages email/list-messages
@@ -278,6 +302,9 @@
                   'xia.artifact       xia-artifact-ns
                   'xia.cron           xia-cron-ns
                   'xia.service        xia-service-ns
+                  'xia.peer           xia-peer-ns
+                  'xia.instance-supervisor xia-instance-supervisor-ns
+                  'xia.workspace      xia-workspace-ns
                   'xia.email          xia-email-ns
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns

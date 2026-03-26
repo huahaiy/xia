@@ -1,0 +1,13 @@
+;; List configured Xia peer services.
+;; Import with: /import-tool resources/tools/peer-list.edn
+
+{:id             :peer-list
+ :name           "peer-list"
+ :description    "List configured Xia peer services. Use this before peer-chat when you need to discover which peer service ids are available."
+ :tags           #{:peer :service :instance :multi-instance :delegation}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {}
+                  "required"   []}
+ :handler        "(fn [_args]
+                    {:peers (xia.peer/list-peers)})"}

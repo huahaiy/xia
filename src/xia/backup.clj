@@ -10,6 +10,7 @@
             [taoensso.timbre :as log]
             [xia.config :as cfg]
             [xia.db :as db]
+            [xia.paths :as paths]
             [xia.pack :as pack])
   (:import [java.io File]
            [java.nio.file Files Path Paths StandardCopyOption]
@@ -57,7 +58,7 @@
 (defn- default-backup-directory
   []
   (let [db-path (or (db/current-db-path)
-                    (path-str (System/getProperty "user.home") ".xia" "db"))
+                    (paths/default-db-path))
         db-file (io/file db-path)
         parent  (or (.getParentFile db-file)
                     (.getAbsoluteFile (io/file ".")))]

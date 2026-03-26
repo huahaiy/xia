@@ -4,6 +4,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.local-ocr :as local-ocr]
+            [xia.paths :as paths]
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.io File]
            [java.nio.charset StandardCharsets]))
@@ -11,9 +12,8 @@
 (use-fixtures :each with-test-db)
 
 (deftest settings-default-to-managed-paddleocr-paths
-  (let [db-path   (db/current-db-path)
-        settings  (local-ocr/settings)
-        ocr-dir   (str db-path File/separator "ocr")]
+  (let [settings  (local-ocr/settings)
+        ocr-dir   (paths/managed-ocr-dir (db/current-db-path))]
     (is (= true (:managed-install settings)))
     (is (= :local (:model-backend settings)))
     (is (= "llama-cli" (:command settings)))

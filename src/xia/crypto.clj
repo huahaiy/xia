@@ -7,7 +7,8 @@
    3. XIA_MASTER_PASSPHRASE / XIA_MASTER_PASSPHRASE_FILE — derive with PBKDF2
    4. Interactive passphrase provider — derive with PBKDF2 for new startups"
   (:require [clojure.string :as str]
-            [taoensso.timbre :as log])
+            [taoensso.timbre :as log]
+            [xia.paths :as paths])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files LinkOption Path Paths StandardCopyOption]
            [java.nio.file.attribute PosixFilePermission PosixFilePermissions]
@@ -22,7 +23,6 @@
 (def ^:private iv-bytes 12)
 (def ^:private salt-bytes 16)
 (def ^:private pbkdf2-iterations 210000)
-(def ^:private support-dir-name ".xia")
 (def ^:private salt-file-name "master.salt")
 (def ^:private key-state (atom nil))
 
@@ -44,11 +44,9 @@
         (throw (ex-info "Encryption key must decode to 32 bytes" {})))
       key)))
 
-(defn- support-dir-path [db-path]
-  (str (Paths/get db-path (into-array String [support-dir-name]))))
-
 (defn- default-salt-path [db-path]
-  (str (Paths/get db-path (into-array String [support-dir-name salt-file-name]))))
+  (str (Paths/get (paths/support-dir-path db-path)
+                  (into-array String [salt-file-name]))))
 
 (defn- legacy-salt-path [db-path]
   (str db-path ".salt"))
