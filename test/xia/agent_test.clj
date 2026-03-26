@@ -806,22 +806,23 @@
         tool-call {"id"       "call-1"
                    "function" {"name"      "web-search"
                                "arguments" "{not-json"}}]
-    (with-redefs [log/-log!
-                  (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
-                    (let [vargs     @vargs_
-                          throwable (when (instance? Throwable (first vargs))
-                                      (first vargs))
-                          msg-args   (if throwable (rest vargs) vargs)]
-                      (reset! logged {:level level
-                                      :throwable throwable
-                                      :message (str/join " " msg-args)})))]
-      (let [prepared (#'agent/prepare-tool-call tool-call)]
-        (is (= {} (:args prepared)))
-        (is (= :web-search (:tool-id prepared)))
-        (is (= :warn (:level @logged)))
-        (is (instance? Exception (:throwable @logged)))
-        (is (re-find #"Failed to parse tool arguments for web-search"
-                     (:message @logged)))))))
+    (log/with-min-level :trace
+      (with-redefs [log/-log!
+                    (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
+                      (let [vargs     @vargs_
+                            throwable (when (instance? Throwable (first vargs))
+                                        (first vargs))
+                            msg-args   (if throwable (rest vargs) vargs)]
+                        (reset! logged {:level level
+                                        :throwable throwable
+                                        :message (str/join " " msg-args)})))]
+        (let [prepared (#'agent/prepare-tool-call tool-call)]
+          (is (= {} (:args prepared)))
+          (is (= :web-search (:tool-id prepared)))
+          (is (= :warn (:level @logged)))
+          (is (instance? Exception (:throwable @logged)))
+          (is (re-find #"Failed to parse tool arguments for web-search"
+                       (:message @logged))))))))
 
 (deftest execute-tool-calls-waits-for-all-parallel-futures-before-rethrowing
   (let [started       (atom [])

@@ -187,7 +187,6 @@ const providerVisionEl = document.getElementById('provider-vision');
 const providerApiKeyEl = document.getElementById('provider-api-key');
 const providerDefaultEl = document.getElementById('provider-default');
 const providerStatusEl = document.getElementById('provider-status');
-const newProviderEl = document.getElementById('new-provider');
 const saveProviderEl = document.getElementById('save-provider');
 const deleteProviderEl = document.getElementById('delete-provider');
 const retentionFullResolutionDaysEl = document.getElementById('retention-full-resolution-days');
@@ -493,6 +492,15 @@ async function fetchJson(url, options) {
 
 function firstNonEmpty(value, fallback) {
   return value && String(value).trim() ? String(value).trim() : (fallback || '');
+}
+
+function providerDisplayName(provider) {
+  const name = firstNonEmpty(provider.name, provider.id);
+  const model = provider.model || '';
+  if (!model) return name;
+  if (name.includes(model) || name.includes(model.split('/').pop())) return name;
+  const shortModel = model.includes('/') ? model.split('/').pop() : model;
+  return name + ' — ' + shortModel;
 }
 
 function renderSelectableList(target, items, activeId, emptyText, titleFn, metaFn, onSelect) {
@@ -830,12 +838,10 @@ function renderRemoteSnapshot() {
 
 function defaultRemoteBridgeStatus() {
   const bridge = state.admin.remoteBridge || {};
-  const bits = [];
-  bits.push(bridge.enabled ? 'Enabled' : 'Disabled');
-  bits.push(bridge.keypair_ready ? 'Keys ready' : 'Keys missing');
-  if (bridge.connection_state) bits.push('State: ' + bridge.connection_state);
-  if (bridge.connected_at) bits.push('Connected ' + formatDateTime(bridge.connected_at));
-  return bits.join(' • ');
+  if (!bridge.enabled) return 'Disabled.';
+  if (!bridge.keypair_ready) return 'Keys missing.';
+  if (bridge.connection_state === 'connected') return 'Connected.';
+  return 'Enabled.';
 }
 
 function defaultRemotePairStatus() {
@@ -1028,13 +1034,8 @@ function providerMeta(provider) {
 }
 
 function llmProviderTemplateMeta(template) {
-  const bits = [];
-  if (template.category) bits.push(template.category);
-  if (template.base_url) bits.push(template.base_url);
-  if (template.model_suggestion) bits.push('Suggested model: ' + template.model_suggestion);
-  const defaultMode = defaultProviderAccessMode(template);
-  if (defaultMode) bits.push('Default: ' + providerAccessModeLabel(defaultMode));
-  return bits.join(' • ');
+  if (template.category) return template.category;
+  return '';
 }
 
 function providerSignInOptionLabel(option) {
@@ -1181,9 +1182,12 @@ async function openProviderPrimaryAction(action, options = {}) {
 }
 
 function providerTemplateNote(template) {
-  if (!template) {
-    return 'Choose a provider template to prefill common settings.';
-  }
+  if (!template) return '';
+  return '';
+}
+
+function providerTemplateTooltip(template) {
+  if (!template) return '';
   const bits = [];
   if (template.description) bits.push(template.description);
   if (template.notes) bits.push(template.notes);
@@ -1204,7 +1208,9 @@ function renderProviderTemplateOptions() {
     providerTemplateEl.appendChild(option);
   });
   providerTemplateEl.value = selected || '';
-  providerTemplateNoteEl.textContent = providerTemplateNote(providerTemplateById(providerTemplateEl.value));
+  const selectedTemplate = providerTemplateById(providerTemplateEl.value);
+  providerTemplateNoteEl.textContent = providerTemplateNote(selectedTemplate);
+  providerTemplateEl.title = providerTemplateTooltip(selectedTemplate);
 }
 
 function renderProviderAccessModeOptions() {
@@ -1310,9 +1316,9 @@ function syncProviderAuthInputs() {
   providerConfigureOauthEl.textContent = primaryAction ? primaryAction.label : 'Open Setup';
   providerConfigureOauthEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !primaryAction;
   providerOpenAccountEl.hidden = !accountAction;
-  providerOpenAccountEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !accountAction;
+  providerOpenAccountEl.href = accountAction ? accountAction.url : '';
   providerOpenDocsEl.hidden = !docsAction;
-  providerOpenDocsEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !docsAction;
+  providerOpenDocsEl.href = docsAction ? docsAction.url : '';
   providerOauthAccountNoteEl.textContent = providerOauthAccountStatusNote();
   providerBrowserSessionNoteEl.textContent = providerBrowserSessionStatusNote();
 }
@@ -1460,16 +1466,15 @@ function buildProviderTemplateCard(template) {
   const card = document.createElement('article');
   card.className = 'template-card';
 
+  const tooltip = [template.description, template.notes].filter(Boolean).join(' — ');
+  if (tooltip) card.title = tooltip;
+
   const head = document.createElement('div');
   head.className = 'template-card-head';
   const title = document.createElement('div');
   title.className = 'template-card-title';
   title.textContent = firstNonEmpty(template.name, template.id);
-  const meta = document.createElement('div');
-  meta.className = 'template-card-meta';
-  meta.textContent = [llmProviderTemplateMeta(template), template.description].filter(Boolean).join(' • ');
   head.appendChild(title);
-  head.appendChild(meta);
   card.appendChild(head);
 
   const tags = document.createElement('div');
@@ -1478,6 +1483,7 @@ function buildProviderTemplateCard(template) {
     const badge = document.createElement('span');
     badge.className = 'template-badge';
     badge.textContent = firstNonEmpty(accessMode.label, providerAccessModeLabel(accessMode.id));
+    if (accessMode.description) badge.title = accessMode.description;
     tags.appendChild(badge);
   });
   (template.sign_in_options || []).forEach((option) => {
@@ -1489,11 +1495,6 @@ function buildProviderTemplateCard(template) {
   if (tags.childNodes.length) {
     card.appendChild(tags);
   }
-
-  const note = document.createElement('div');
-  note.className = 'template-card-meta';
-  note.textContent = template.notes || 'Use this template to prefill the model settings.';
-  card.appendChild(note);
 
   const actions = document.createElement('div');
   actions.className = 'actions';
@@ -1519,32 +1520,42 @@ function buildProviderTemplateCard(template) {
   providerVisibleActions(template,
     defaultProviderAccessMode(template),
     defaultProviderCredentialSource(template, defaultProviderAccessMode(template))).forEach((action) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'secondary';
-    button.textContent = action.label;
-    button.disabled = state.providerSaving || state.oauthSaving;
-    button.addEventListener('click', async () => {
-      if (action.kind === 'oauth') {
-        switchTab('settings-tab');
-        if (!state.activeProviderId) {
-          resetProviderForm('Create a model from a template.');
+    if (action.kind === 'external' && action.url) {
+      const link = document.createElement('a');
+      link.className = 'secondary-link';
+      link.href = action.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = action.label;
+      actions.appendChild(link);
+    } else {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = action.label;
+      button.disabled = state.providerSaving || state.oauthSaving;
+      button.addEventListener('click', async () => {
+        if (action.kind === 'oauth') {
+          switchTab('settings-tab');
+          if (!state.activeProviderId) {
+            resetProviderForm('Create a model from a template.');
+          }
+          applyProviderTemplate(template.id, {
+            preserveId: false,
+            preserveName: false,
+            preserveBaseUrl: false,
+            preserveModel: false,
+            statusText: 'Template applied. Finish setting up sign-in, then save the model.'
+          });
         }
-        applyProviderTemplate(template.id, {
-          preserveId: false,
-          preserveName: false,
-          preserveBaseUrl: false,
-          preserveModel: false,
-          statusText: 'Template applied. Finish setting up sign-in, then save the model.'
+        await openProviderPrimaryAction(action, {
+          statusEl: providerOnboardingStatusEl,
+          statusText: 'Opened setup for ' + firstNonEmpty(template.name, template.id) + '.',
+          globalStatus: 'Opened provider setup'
         });
-      }
-      await openProviderPrimaryAction(action, {
-        statusEl: providerOnboardingStatusEl,
-        statusText: 'Opened setup for ' + firstNonEmpty(template.name, template.id) + '.',
-        globalStatus: 'Opened provider setup'
       });
-    });
-    actions.appendChild(button);
+      actions.appendChild(button);
+    }
   });
   card.appendChild(actions);
 
@@ -1617,6 +1628,19 @@ function ensureProviderId() {
   }
   providerIdEl.value = candidate;
   return candidate;
+}
+
+function ensureProviderName() {
+  const name = providerNameEl.value.trim();
+  const model = providerModelEl.value.trim();
+  if (!model) return name;
+  const template = providerTemplateById(providerTemplateEl.value);
+  const templateName = template ? (template.name || '') : '';
+  if (name && name !== templateName) return name;
+  const shortModel = model.includes('/') ? model.split('/').pop() : model;
+  const generated = (templateName || 'Model') + ' — ' + shortModel;
+  providerNameEl.value = generated;
+  return generated;
 }
 
 function scrollCardIntoView(cardEl) {
@@ -2162,10 +2186,7 @@ function updateAdminButtons() {
   providerTemplateEl.disabled = state.providerSaving;
   saveProviderEl.disabled = state.providerSaving;
   deleteProviderEl.disabled = state.providerSaving || !state.activeProviderId;
-  newProviderEl.disabled = state.providerSaving;
   providerConfigureOauthEl.disabled = state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction();
-  providerOpenAccountEl.disabled = state.providerSaving || state.oauthSaving || !providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account');
-  providerOpenDocsEl.disabled = state.providerSaving || state.oauthSaving || !providerActionByKind(providerTemplateById(providerTemplateEl.value), 'docs');
   contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;
   saveContextEl.disabled = state.contextSaving;
   saveRetentionEl.disabled = state.retentionSaving;
@@ -2239,7 +2260,7 @@ function renderProviderList() {
     state.admin.providers,
     state.activeProviderId,
     'No models configured yet. Add one so Xia can talk to an LLM.',
-    (provider) => firstNonEmpty(provider.name, provider.id),
+    (provider) => providerDisplayName(provider),
     providerMeta,
     selectProvider
   );
@@ -2386,7 +2407,7 @@ function renderMemoryRetentionSettings() {
   retentionFullResolutionDaysEl.value = settings.full_resolution_days || '';
   retentionDecayHalfLifeDaysEl.value = settings.decay_half_life_days || '';
   retentionRetainedCountEl.value = settings.retained_count || '';
-  retentionStatusEl.textContent = 'Tune how aggressively processed episodes are thinned after the full-resolution window.';
+  retentionStatusEl.textContent = '';
   updateAdminButtons();
 }
 
@@ -2394,13 +2415,12 @@ function resetMemoryRetentionForm(statusText) {
   retentionFullResolutionDaysEl.value = '';
   retentionDecayHalfLifeDaysEl.value = '';
   retentionRetainedCountEl.value = '';
-  retentionStatusEl.textContent = statusText || 'Configure retention for consolidated episodes.';
+  retentionStatusEl.textContent = statusText || '';
   updateAdminButtons();
 }
 
 function defaultConversationContextStatus() {
-  const settings = state.admin.conversationContext || {};
-  return 'Keep ' + firstNonEmpty(settings.recent_history_message_limit, 24) + ' recent messages verbatim before using recap history.';
+  return '';
 }
 
 function renderWebSearchSettings() {
@@ -2450,19 +2470,13 @@ function renderKnowledgeDecaySettings() {
   knowledgeMinConfidenceEl.value = settings.min_confidence ?? '';
   knowledgeMaintenanceIntervalDaysEl.value = settings.maintenance_interval_days || '';
   knowledgeArchiveAfterBottomDaysEl.value = settings.archive_after_bottom_days || '';
-  knowledgeDecayStatusEl.textContent = 'Tune how quickly stale fact confidence fades after the grace period.';
+  knowledgeDecayStatusEl.textContent = '';
   updateAdminButtons();
 }
 
 function defaultLocalDocSummarizationStatus() {
   const settings = state.admin.localDocSummarization || {};
-  const bits = [];
-  bits.push(settings.model_summaries_enabled ? 'Model summaries enabled' : 'Using extractive summaries');
-  bits.push('Backend: ' + firstNonEmpty(settings.model_summary_backend, 'local'));
-  if (settings.model_summary_backend === 'external') {
-    bits.push('Provider: ' + firstNonEmpty(settings.model_summary_provider_id, 'default'));
-  }
-  return bits.join(' • ');
+  return settings.model_summaries_enabled ? 'Model summaries enabled.' : '';
 }
 
 function renderLocalDocSummarizationProviderOptions() {
@@ -2475,7 +2489,7 @@ function renderLocalDocSummarizationProviderOptions() {
   state.admin.providers.forEach((provider) => {
     const option = document.createElement('option');
     option.value = provider.id || '';
-    option.textContent = firstNonEmpty(provider.name, provider.id);
+    option.textContent = providerDisplayName(provider);
     localDocModelSummaryProviderIdEl.appendChild(option);
   });
   localDocModelSummaryProviderIdEl.value = selected || '';
@@ -2497,25 +2511,12 @@ function renderLocalDocSummarizationSettings() {
 
 function defaultLocalDocOcrStatus() {
   const settings = state.admin.localDocOcr || {};
-  const bits = [];
-  bits.push(settings.enabled ? 'Local OCR enabled' : 'Local OCR disabled');
-  bits.push('Model backend: ' + firstNonEmpty(settings.model_backend, 'local'));
-  if (settings.model_backend === 'external') {
-    bits.push('Provider: ' + firstNonEmpty(settings.resolved_external_provider_id, settings.external_provider_id, 'default'));
-    if (settings.external_provider_vision) bits.push('Vision-capable');
-  } else {
-    bits.push('Runtime: ' + firstNonEmpty(settings.backend, 'llama.cpp-cli'));
-    if (settings.command) bits.push('Command: ' + settings.command);
-    if (settings.managed_install) bits.push('Managed model install available');
-    if (settings.resolved_model_path) bits.push('Model: ' + settings.resolved_model_path);
-    if (settings.resolved_mmproj_path) bits.push('mmproj: ' + settings.resolved_mmproj_path);
+  if (!settings.configured) {
+    return settings.model_backend === 'external'
+      ? 'Needs a vision-capable external provider.'
+      : 'Not configured.';
   }
-  if (settings.configured) bits.push('Configured');
-  else bits.push(settings.model_backend === 'external'
-    ? 'Needs a vision-capable external provider'
-    : 'Needs a llama.cpp command plus managed or explicit OCR assets');
-  if (settings.default_mode) bits.push('Default mode: ' + settings.default_mode);
-  return bits.join(' • ');
+  return settings.enabled ? 'Enabled.' : 'Disabled.';
 }
 
 function renderLocalDocOcrProviderOptions() {
@@ -2530,7 +2531,7 @@ function renderLocalDocOcrProviderOptions() {
     .forEach((provider) => {
       const option = document.createElement('option');
       option.value = provider.id || '';
-      option.textContent = firstNonEmpty(provider.name, provider.id);
+      option.textContent = providerDisplayName(provider);
       localDocOcrExternalProviderIdEl.appendChild(option);
     });
   localDocOcrExternalProviderIdEl.value = selected || '';
@@ -2556,21 +2557,10 @@ function renderLocalDocOcrSettings() {
 
 function defaultDatabaseBackupStatus() {
   const settings = state.admin.databaseBackup || {};
-  const bits = [];
-  bits.push(settings.enabled ? 'Automatic backups enabled' : 'Automatic backups disabled');
-  bits.push('Every ' + firstNonEmpty(settings.interval_hours, 24) + 'h');
-  bits.push('Keep ' + firstNonEmpty(settings.retain_count, 7));
-  if (settings.running) {
-    bits.push('Running now');
-  } else if (settings.last_success_at) {
-    bits.push('Last success: ' + settings.last_success_at);
-  } else if (settings.next_due_at) {
-    bits.push('Next due: ' + settings.next_due_at);
-  }
-  if (settings.last_error) {
-    bits.push('Last error: ' + settings.last_error);
-  }
-  return bits.join(' • ');
+  if (settings.last_error) return 'Last backup failed: ' + settings.last_error;
+  if (settings.running) return 'Running now...';
+  if (!settings.enabled) return 'Disabled.';
+  return 'Enabled.';
 }
 
 function renderDatabaseBackupSettings() {
@@ -3195,6 +3185,7 @@ function renderIdentitySettings() {
     identityControllerNoteEl.textContent = 'Enable controller mode to let this Xia start and stop managed child Xia instances.';
   }
   heroNameEl.textContent = identity.name || 'Xia';
+  heroRoleEl.textContent = identity.role || 'Personal Assistant';
   document.title = identity.name || 'Xia';
 }
 
@@ -3522,12 +3513,13 @@ async function saveProvider() {
   updateAdminButtons();
   try {
     const providerId = ensureProviderId();
+    const providerName = ensureProviderName();
     const data = await fetchJson('/admin/providers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id: providerId,
-        name: providerNameEl.value,
+        name: providerName,
         template: providerTemplateEl.value,
         base_url: providerBaseUrlEl.value,
         model: providerModelEl.value,
@@ -3544,14 +3536,13 @@ async function saveProvider() {
         default: providerDefaultEl.checked
       })
     });
-    const provider = data.provider || null;
-    state.activeProviderId = provider && provider.id ? provider.id : state.activeProviderId;
     state.providerDraft = null;
     state.pendingProviderOauthFlow = null;
     state.pendingProviderBrowserSessionFlow = null;
     providerApiKeyEl.value = '';
-    providerStatusEl.textContent = 'Model saved.';
+    state.activeProviderId = '';
     await loadAdminConfig();
+    resetProviderForm('Model saved. Add another or select one from the list.');
     setStatus('Model saved');
   } catch (err) {
     providerStatusEl.textContent = err.message || 'Failed to save.';
@@ -5069,10 +5060,6 @@ knowledgeQueryEl.addEventListener('keydown', (event) => {
   }
 });
 
-newProviderEl.addEventListener('click', () => {
-  resetProviderForm('Create a model.');
-  providerNameEl.focus();
-});
 
 providerTemplateEl.addEventListener('change', () => {
   state.providerModels = [];
@@ -5143,20 +5130,6 @@ providerConfigureOauthEl.addEventListener('click', async () => {
       ? 'Opened setup in a new tab.'
       : undefined,
     globalStatus: action && action.kind === 'external' ? 'Opened provider setup' : undefined
-  });
-});
-providerOpenAccountEl.addEventListener('click', async () => {
-  await openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'account'), {
-    statusEl: providerStatusEl,
-    statusText: 'Opened provider account in a new tab.',
-    globalStatus: 'Opened provider account'
-  });
-});
-providerOpenDocsEl.addEventListener('click', async () => {
-  await openProviderPrimaryAction(providerActionByKind(providerTemplateById(providerTemplateEl.value), 'docs'), {
-    statusEl: providerStatusEl,
-    statusText: 'Opened provider docs in a new tab.',
-    globalStatus: 'Opened provider docs'
   });
 });
 saveIdentityEl.addEventListener('click', () => saveIdentity());

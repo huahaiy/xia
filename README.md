@@ -103,6 +103,12 @@ What the local web UI is for:
 The server binds to `127.0.0.1` by default. Use `--bind 0.0.0.0` only when you
 intentionally want to expose it beyond the local machine.
 
+Host-level multi-instance control is enabled by default for top-level Xia
+processes. The default Xia instance starts in controller mode automatically,
+and you can enable controller mode for other Xia instances from Settings. Child
+Xia instances that are launched by a controller Xia disable host-level control
+for themselves automatically. See [doc/multi-instance.md](doc/multi-instance.md).
+
 ## Typical Uses
 
 - Keep an assistant that remembers your projects, contacts, preferences, and

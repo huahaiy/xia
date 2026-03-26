@@ -280,6 +280,19 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .secondary:hover:not(:disabled) {
   background: #f0f1f3;
 }
+.secondary-link {
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-decoration: none;
+  padding: 9px 4px;
+  cursor: pointer;
+}
+.secondary-link:hover {
+  text-decoration: underline;
+}
+.panel-title[title] {
+  cursor: help;
+}
 .messages {
   flex: 1 1 auto;
   min-height: 0;

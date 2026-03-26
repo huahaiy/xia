@@ -509,26 +509,27 @@
         logged     (promise)]
     (db/add-message! session-id :user "hello")
     (db/add-message! session-id :assistant "hi there")
-    (with-redefs [xia.hippocampus/summarize-conversation (constantly "summary")
-                  xia.hippocampus/consolidate-pending!   (fn []
-                                                           (throw (ex-info "boom" {:type :test})))
-                  log/-log!
-                  (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
-                    (let [vargs     @vargs_
-                          throwable (when (instance? Throwable (first vargs))
-                                      (first vargs))
-                          msg-args   (if throwable (rest vargs) vargs)]
-                      (when (= :error level)
-                        (deliver logged {:level level
-                                         :throwable throwable
-                                         :message (str/join " " msg-args)}))))]
-      (hippo/record-conversation! session-id :terminal)
-      (let [entry (deref logged 1000 ::timeout)]
-        (is (not= ::timeout entry))
-        (is (= :error (:level entry)))
-        (is (instance? Exception (:throwable entry)))
-        (is (re-find #"Background consolidation failed for session"
-                     (:message entry)))))))
+    (log/with-min-level :trace
+      (with-redefs [xia.hippocampus/summarize-conversation (constantly "summary")
+                    xia.hippocampus/consolidate-pending!   (fn []
+                                                             (throw (ex-info "boom" {:type :test})))
+                    log/-log!
+                    (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
+                      (let [vargs     @vargs_
+                            throwable (when (instance? Throwable (first vargs))
+                                        (first vargs))
+                            msg-args   (if throwable (rest vargs) vargs)]
+                        (when (= :error level)
+                          (deliver logged {:level level
+                                           :throwable throwable
+                                           :message (str/join " " msg-args)}))))]
+        (hippo/record-conversation! session-id :terminal)
+        (let [entry (deref logged 1000 ::timeout)]
+          (is (not= ::timeout entry))
+          (is (= :error (:level entry)))
+          (is (instance? Exception (:throwable entry)))
+          (is (re-find #"Background consolidation failed for session"
+                       (:message entry))))))))
 
 (deftest test-record-conversation-persists-explicit-local-document-references
   (let [session-id (db/create-session! :terminal)

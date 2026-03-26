@@ -2,8 +2,8 @@
   "Host-side supervisor for starting and stopping local Xia child instances.
 
    This is intentionally outside SCI's general-purpose sandbox escape hatch:
-   it only launches Xia itself, on loopback, behind an explicit host-granted
-   capability flag."
+   it only launches Xia itself, on loopback, behind a host capability that
+   child Xia instances automatically disable."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [taoensso.timbre :as log]
@@ -68,13 +68,24 @@
                                         (resolve-instance-command command))})
   nil)
 
+(defn- host-capability-enabled?
+  []
+  (:enabled? @capability-state))
+
+(defn- default-controller-instance?
+  []
+  (= paths/default-instance-id
+     (some-> (db/current-instance-id) str paths/normalize-instance-id)))
+
 (defn instance-management-configured?
   []
-  (cfg/boolean-option instance-management-config-key false))
+  (cfg/boolean-option instance-management-config-key
+                      (default-controller-instance?)))
 
 (defn instance-management-enabled?
   []
-  (instance-management-configured?))
+  (and (host-capability-enabled?)
+       (instance-management-configured?)))
 
 (defn instance-command
   []
@@ -89,9 +100,8 @@
 
 (defn set-instance-management-enabled!
   [enabled?]
-  (if enabled?
-    (db/set-config! instance-management-config-key "true")
-    (db/delete-config! instance-management-config-key))
+  (db/set-config! instance-management-config-key
+                  (if enabled? "true" "false"))
   (when-not enabled?
     (shutdown!))
   (capabilities))
@@ -103,6 +113,11 @@
                     {:type :instance-supervisor/capability-disabled
                      :capability :instance-management
                      :scope :instance})))
+  (when-not (host-capability-enabled?)
+    (throw (ex-info "Host instance management is disabled for this Xia process."
+                    {:type :instance-supervisor/capability-disabled
+                     :capability :instance-management
+                     :scope :host})))
   (when-not (nonblank-string (instance-command))
     (throw (ex-info "No Xia command is configured for starting child instances"
                     {:type :instance-supervisor/command-unavailable}))))

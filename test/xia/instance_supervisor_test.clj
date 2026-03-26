@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [xia.db :as db]
             [xia.instance-supervisor :as instance-supervisor]
+            [xia.paths :as paths]
             [xia.test-helpers :refer [with-test-db]]))
 
 (use-fixtures :each with-test-db)
@@ -58,6 +59,31 @@
          (is (= :instance-supervisor/capability-disabled
                 (:type error)))
          (is (= :host (:scope error)))))))
+
+(deftest default-instance-starts-with-controller-mode-enabled
+  (with-reset-supervisor
+    #(do
+       (instance-supervisor/configure! {:enabled? true})
+       (with-redefs [xia.db/current-instance-id (constantly paths/default-instance-id)]
+         (is (= true (instance-supervisor/instance-management-configured?)))
+         (is (= true (instance-supervisor/instance-management-enabled?)))))))
+
+(deftest non-default-instance-starts-with-controller-mode-disabled
+  (with-reset-supervisor
+    #(do
+       (instance-supervisor/configure! {:enabled? true})
+       (with-redefs [xia.db/current-instance-id (constantly "ops-child")]
+         (is (= false (instance-supervisor/instance-management-configured?)))
+         (is (= false (instance-supervisor/instance-management-enabled?)))))))
+
+(deftest default-instance-can-be-explicitly-disabled
+  (with-reset-supervisor
+    #(do
+       (instance-supervisor/configure! {:enabled? true})
+       (with-redefs [xia.db/current-instance-id (constantly paths/default-instance-id)]
+         (instance-supervisor/set-instance-management-enabled! false)
+         (is (= false (instance-supervisor/instance-management-configured?)))
+         (is (= false (instance-supervisor/instance-management-enabled?)))))))
 
 (deftest start-and-stop-managed-instance-registers-service
   (with-reset-supervisor

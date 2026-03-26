@@ -188,12 +188,43 @@
     (is (= true (:web-dev @started)))
     (is (= [[:ensure-db-dir "/tmp/xia-dev-repl"]
             [:db/connect "/tmp/xia-dev-repl" true]
-            [:instance-supervisor/configure false nil]
+            [:instance-supervisor/configure true nil]
             :identity/init
             :tool/reset
             :tool/load
             :scheduler/start
             [:http/start "0.0.0.0" 4011 {:web-dev? true}]]
+           @calls))))
+
+(deftest start-server-runtime-disables-host-instance-management-when-env-is-false
+  (let [calls   (atom [])
+        options {:db "/tmp/xia-dev-repl"
+                 :bind "127.0.0.1"
+                 :port 4011}]
+    (with-redefs-fn {#'xia.core/env-value (fn [k]
+                                            (case k
+                                              "XIA_ALLOW_INSTANCE_MANAGEMENT" "false"
+                                              nil))
+                     #'xia.core/ensure-db-dir! (fn [_] nil)
+                     #'xia.db/connect! (fn [_ _] nil)
+                     #'xia.crypto/current-key-source (fn [] :passphrase)
+                     #'xia.setup/needs-setup? (constantly false)
+                     #'xia.setup/run-setup! (fn [] nil)
+                     #'xia.identity/init-identity! (fn [] nil)
+                     #'xia.instance-supervisor/configure! (fn [opts]
+                                                            (swap! calls conj [:instance-supervisor/configure
+                                                                               (:enabled? opts)
+                                                                               (:command opts)]))
+                     #'xia.tool/ensure-bundled-tools! (fn [] 0)
+                     #'xia.tool/reset-runtime! (fn [] nil)
+                     #'xia.tool/load-all-tools! (fn [] nil)
+                     #'xia.tool/registered-tools (fn [] [])
+                     #'xia.skill/all-enabled-skills (fn [] [])
+                     #'xia.scheduler/start! (fn [] nil)
+                     #'xia.channel.http/start! (fn [_ _ _] nil)
+                     #'xia.core/local-ui-url (fn [_ _] "http://localhost:4011/")}
+      #(core/start-server-runtime! options))
+    (is (= [[:instance-supervisor/configure false nil]]
            @calls))))
 
 (deftest start-server-runtime-reports-actual-bound-port
