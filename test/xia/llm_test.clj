@@ -124,6 +124,31 @@
   (is (false? (llm/vision-capable? {:llm.provider/id :text
                                     :llm.provider/vision? false}))))
 
+(deftest fetch-provider-model-metadata-infers-vision-from-metadata
+  (with-redefs [xia.http-client/request
+                (fn [req]
+                  (is (= "https://api.example.com/v1/models/anthropic%2Fclaude-sonnet-4"
+                         (:url req)))
+                  {:status 200
+                   :body (json/write-json-str {"id" "anthropic/claude-sonnet-4"
+                                               "architecture" {"input_modalities" ["text" "image"]}})})]
+    (is (= {:id "anthropic/claude-sonnet-4"
+            :vision? true
+            :vision-source :metadata}
+           (llm/fetch-provider-model-metadata {:base-url "https://api.example.com/v1"
+                                               :model "anthropic/claude-sonnet-4"})))))
+
+(deftest fetch-provider-model-metadata-falls-back-to-model-id-inference
+  (with-redefs [xia.http-client/request
+                (fn [_req]
+                  {:status 404
+                   :body ""})]
+    (is (= {:id "gpt-4o"
+            :vision? true
+            :vision-source :model-id}
+           (llm/fetch-provider-model-metadata {:base-url "https://api.example.com/v1"
+                                               :model "gpt-4o"})))))
+
 (deftest resolve-provider-selection-round-robins-workload
   (with-redefs [xia.db/list-providers
                 (constantly [{:llm.provider/id :openai-a

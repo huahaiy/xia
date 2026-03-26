@@ -291,7 +291,6 @@
                     <input type="checkbox" id="identity-controller-enabled">
                     <label class="check-label" for="identity-controller-enabled">Allow this Xia to start and stop managed child Xia instances</label>
                   </div>
-                  <p class="secret-note" id="identity-controller-note"></p>
                 </div>
                 <div class="field full">
                   <label class="field-label">Instance ID</label>
@@ -352,6 +351,7 @@
                     <div class="autocomplete-list" id="provider-model-list" hidden></div>
                   </div>
                   <button type="button" class="secondary" id="fetch-provider-models" style="margin-top:6px">Fetch models</button>
+                  <p class="secret-note model-capability-note" id="provider-model-capability-note"></p>
                 </div>
                 <div class="field">
                   <label class="field-label">Connection Model</label>
@@ -368,7 +368,7 @@
                   <input type="hidden" id="provider-browser-session">
                   <p class="secret-note" id="provider-browser-session-note"></p>
                   <div class="actions" style="margin-top:8px">
-                    <button type="button" class="secondary" id="provider-configure-oauth">Open Setup</button>
+                    <a class="secondary-link" id="provider-configure-oauth" href="">Open Setup</a>
                     <a class="secondary-link" id="provider-open-account" target="_blank" rel="noopener noreferrer" hidden>Open Account</a>
                     <a class="secondary-link" id="provider-open-docs" target="_blank" rel="noopener noreferrer" hidden>Open Docs</a>
                   </div>
@@ -391,12 +391,8 @@
                   <input type="number" id="provider-rate-limit-per-minute" class="text-input" min="1" step="1" placeholder="60">
                 </div>
                 <div class="check-row">
-                  <input type="checkbox" id="provider-vision">
-                  <label class="check-label" for="provider-vision">Supports image input</label>
-                </div>
-                <div class="check-row">
                   <input type="checkbox" id="provider-default">
-                  <label class="check-label" for="provider-default">Use as default</label>
+                  <label class="check-label" for="provider-default">Use this as the default model</label>
                 </div>
                 <div class="field full">
                   <label class="field-label">API Key</label>
@@ -659,56 +655,36 @@
             <div class="admin-card">
               <div class="panel-header">
                 <div>
-                <h3 class="panel-title" title="Choose a built-in local OCR model or route image OCR through an external vision-capable model.">Local OCR</h3>
+                <h3 class="panel-title" title="Choose OCR mode: local OCR downloads Xia-managed PaddleOCR models automatically, or external provider routes image OCR through a vision-capable model.">OCR</h3>
                 </div>
               </div>
               <div class="field-grid">
-                <div class="field full">
-                  <div class="check-row">
-                    <input type="checkbox" id="local-doc-ocr-enabled">
-                    <label class="check-label" for="local-doc-ocr-enabled">Enable local OCR for uploaded images</label>
-                  </div>
-                </div>
                 <div class="field">
-                  <label class="field-label" for="local-doc-ocr-model-backend">OCR Backend</label>
+                  <label class="field-label" for="local-doc-ocr-model-backend">OCR Mode</label>
                   <select id="local-doc-ocr-model-backend" class="text-input">
-                    <option value="local">Built-in local model</option>
-                    <option value="external">External vision model</option>
+                    <option value="disabled">Disabled</option>
+                    <option value="local">Local OCR</option>
+                    <option value="external">External provider</option>
                   </select>
                 </div>
-                <div class="field">
+                <div class="field full" id="local-doc-ocr-local-note-field">
+                  <p class="secret-note">Local OCR downloads Xia-managed PaddleOCR models automatically when first needed.</p>
+                </div>
+                <div class="field" id="local-doc-ocr-external-provider-field">
                   <label class="field-label" for="local-doc-ocr-external-provider-id">External Provider</label>
-                  <select id="local-doc-ocr-external-provider-id" class="text-input">
-                    <option value="">Default provider</option>
-                  </select>
+                  <select id="local-doc-ocr-external-provider-id" class="text-input"></select>
                 </div>
-                <div class="field">
-                  <label class="field-label" for="local-doc-ocr-command">Command</label>
-                  <input type="text" id="local-doc-ocr-command" class="text-input" placeholder="llama-cli">
-                </div>
-                <div class="field">
+                <div class="field advanced-only">
                   <label class="field-label" for="local-doc-ocr-timeout-ms">Timeout (ms)</label>
                   <input type="number" min="1" step="1" id="local-doc-ocr-timeout-ms" class="text-input" placeholder="120000">
                 </div>
-                <div class="field full">
-                  <label class="field-label" for="local-doc-ocr-model-path">Model Path</label>
-                  <input type="text" id="local-doc-ocr-model-path" class="text-input" placeholder="/path/to/PaddleOCR-VL-1.5.gguf">
-                </div>
-                <div class="field full">
-                  <label class="field-label" for="local-doc-ocr-mmproj-path">mmproj Path</label>
-                  <input type="text" id="local-doc-ocr-mmproj-path" class="text-input" placeholder="/path/to/PaddleOCR-VL-1.5-mmproj.gguf">
-                </div>
-                <div class="field full">
-                  <label class="field-label" for="local-doc-ocr-spotting-mmproj-path">Spotting mmproj Path</label>
-                  <input type="text" id="local-doc-ocr-spotting-mmproj-path" class="text-input" placeholder="/path/to/PaddleOCR-VL-1.5-mmproj-spotting.gguf">
-                </div>
-                <div class="field">
+                <div class="field advanced-only">
                   <label class="field-label" for="local-doc-ocr-max-tokens">Max Tokens</label>
                   <input type="number" min="1" step="1" id="local-doc-ocr-max-tokens" class="text-input" placeholder="2048">
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="local-doc-ocr-status">Loading local OCR settings...</div>
+                <div class="admin-status" id="local-doc-ocr-status">Loading OCR settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-local-doc-ocr">Save OCR settings</button>
                 </div>

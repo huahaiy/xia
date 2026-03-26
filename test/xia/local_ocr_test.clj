@@ -14,15 +14,11 @@
 (deftest settings-default-to-managed-paddleocr-paths
   (let [settings  (local-ocr/settings)
         ocr-dir   (paths/managed-ocr-dir (db/current-db-path))]
-    (is (= true (:managed-install settings)))
     (is (= :local (:model-backend settings)))
-    (is (= "llama-cli" (:command settings)))
-    (is (nil? (:model-path settings)))
-    (is (nil? (:mmproj-path settings)))
     (is (= (str ocr-dir File/separator "PaddleOCR-VL-1.5.gguf")
-           (:resolved-model-path settings)))
+           (#'local-ocr/resolved-model-path)))
     (is (= (str ocr-dir File/separator "PaddleOCR-VL-1.5-mmproj.gguf")
-           (:resolved-mmproj-path settings)))
+           (#'local-ocr/resolved-mmproj-path)))
     (is (= true (:configured settings)))))
 
 (deftest spotting-metadata-file-uses-required-max-pixels

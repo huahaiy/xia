@@ -2428,6 +2428,28 @@
     (catch Exception e
       (json-response 502 {:error (str "Failed to fetch models: " (.getMessage e))}))))
 
+(defn- handle-fetch-provider-model-metadata [req]
+  (try
+    (let [body     (read-body req)
+          base-url (get body "base_url")
+          api-key  (get body "api_key")
+          model-id (get body "model")]
+      (when-not (nonblank-str base-url)
+        (throw (ex-info "base_url is required" {:type :http/bad-request})))
+      (when-not (nonblank-str model-id)
+        (throw (ex-info "model is required" {:type :http/bad-request})))
+      (let [{:keys [id vision? vision-source]}
+            (llm/fetch-provider-model-metadata {:base-url base-url
+                                               :api-key  api-key
+                                               :model    model-id})]
+        (json-response 200 {:model {:id            id
+                                    :vision        (boolean vision?)
+                                    :vision_source (some-> vision-source name)}})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))
+    (catch Exception e
+      (json-response 502 {:error (str "Failed to fetch model metadata: " (.getMessage e))}))))
+
 (defn- handle-save-provider [req]
   (try
     (let [data         (or (read-body req) {})
@@ -2749,14 +2771,6 @@
           provider-id          (when (contains? data "external_provider_id")
                                  (parse-optional-provider-id (get data "external_provider_id")
                                                              "external_provider_id"))
-          command              (when (contains? data "command")
-                                 (nonblank-str (get data "command")))
-          model-path           (when (contains? data "model_path")
-                                 (nonblank-str (get data "model_path")))
-          mmproj-path          (when (contains? data "mmproj_path")
-                                 (nonblank-str (get data "mmproj_path")))
-          spotting-mmproj-path (when (contains? data "spotting_mmproj_path")
-                                 (nonblank-str (get data "spotting_mmproj_path")))
           timeout-ms           (when (contains? data "timeout_ms")
                                  (parse-optional-positive-long (get data "timeout_ms")
                                                                "timeout_ms"))
@@ -2776,14 +2790,10 @@
       (when (contains? data "external_provider_id")
         (save-config-override! :local-doc/ocr-provider-id
                                (some-> provider-id name)))
-      (when (contains? data "command")
-        (save-config-override! :local-doc/ocr-command command))
-      (when (contains? data "model_path")
-        (save-config-override! :local-doc/ocr-model-path model-path))
-      (when (contains? data "mmproj_path")
-        (save-config-override! :local-doc/ocr-mmproj-path mmproj-path))
-      (when (contains? data "spotting_mmproj_path")
-        (save-config-override! :local-doc/ocr-spotting-mmproj-path spotting-mmproj-path))
+      (save-config-override! :local-doc/ocr-command nil)
+      (save-config-override! :local-doc/ocr-model-path nil)
+      (save-config-override! :local-doc/ocr-mmproj-path nil)
+      (save-config-override! :local-doc/ocr-spotting-mmproj-path nil)
       (when (contains? data "timeout_ms")
         (save-config-override! :local-doc/ocr-timeout-ms timeout-ms))
       (when (contains? data "max_tokens")
@@ -3444,6 +3454,9 @@
 
         (and (= method :post) (= uri "/admin/provider-models"))
         (protected-route-response req #(handle-fetch-provider-models req))
+
+        (and (= method :post) (= uri "/admin/provider-model-metadata"))
+        (protected-route-response req #(handle-fetch-provider-model-metadata req))
 
         (and (= method :delete) (= uri "/admin/providers"))
         (protected-route-response req #(handle-delete-provider req))

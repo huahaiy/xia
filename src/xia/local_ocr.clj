@@ -1,5 +1,5 @@
 (ns xia.local-ocr
-  "OCR helpers for image uploads, using either a local managed llama.cpp runtime
+  "OCR helpers for image uploads, using either Xia-managed local PaddleOCR assets
    or an external vision-capable model provider."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
@@ -185,23 +185,15 @@
         model-backend*        (model-backend)
         {:keys [provider-id provider]} (resolved-external-provider)]
     {:enabled               (enabled?)
-     :backend               :llama.cpp-cli
      :model-backend         model-backend*
      :external-provider-id  (external-provider-id)
      :resolved-external-provider-id provider-id
      :external-provider-vision? (boolean (and provider
                                              (llm/vision-capable? provider)))
-     :managed-install       (boolean (managed-ocr-dir))
      :configured            (boolean (case model-backend*
                                        :external (external-provider-ready?)
                                        (configured? resolved-model-path*
                                                     resolved-mmproj-path*)))
-     :command               (command-path)
-     :model-path            (model-path)
-     :mmproj-path           (mmproj-path)
-     :resolved-model-path   resolved-model-path*
-     :resolved-mmproj-path  resolved-mmproj-path*
-     :spotting-mmproj-path  (spotting-mmproj-path)
      :timeout-ms            (timeout-ms)
      :max-tokens            (max-tokens)
      :default-mode          :ocr
@@ -210,26 +202,16 @@
 
 (defn admin-body
   []
-  (let [{:keys [enabled configured command model-path mmproj-path spotting-mmproj-path
-                resolved-model-path resolved-mmproj-path managed-install
-                model-backend external-provider-id resolved-external-provider-id
+  (let [{:keys [enabled configured model-backend external-provider-id resolved-external-provider-id
                 external-provider-vision?
                 timeout-ms max-tokens default-mode spotting-image-max-pixels supported-modes]}
         (settings)]
     {:enabled                     (boolean enabled)
-     :backend                     "llama.cpp-cli"
      :model_backend               (name model-backend)
      :external_provider_id        (some-> external-provider-id name)
      :resolved_external_provider_id (some-> resolved-external-provider-id name)
      :external_provider_vision    (boolean external-provider-vision?)
-     :managed_install             (boolean managed-install)
      :configured                  (boolean configured)
-     :command                     command
-     :model_path                  model-path
-     :mmproj_path                 mmproj-path
-     :resolved_model_path         resolved-model-path
-     :resolved_mmproj_path        resolved-mmproj-path
-     :spotting_mmproj_path        spotting-mmproj-path
      :timeout_ms                  timeout-ms
      :max_tokens                  max-tokens
      :default_mode                (name default-mode)
@@ -246,15 +228,12 @@
 
 (defn- missing-config-ex
   []
-  (let [settings (settings)
-        missing  (cond-> []
-                   (not (seq (:command settings)))
-                   (conj :command)
-                   (not (seq (:resolved-model-path settings)))
+  (let [missing  (cond-> []
+                   (not (seq (resolved-model-path)))
                    (conj :model-path)
-                   (not (seq (:resolved-mmproj-path settings)))
+                   (not (seq (resolved-mmproj-path)))
                    (conj :mmproj-path))]
-    (ex-info "Local OCR is not configured. Xia needs a llama.cpp command plus either explicit model/mmproj paths or an open DB for managed OCR assets."
+    (ex-info "Local OCR is not configured. Xia needs access to its managed PaddleOCR assets or explicit local OCR asset paths."
              {:type :local-doc/ocr-not-configured
               :missing-config missing})))
 

@@ -11,7 +11,8 @@
             [xia.http-client :as http]
             [xia.oauth :as oauth]
             [xia.rate-limit :as rate-limit])
-  (:import [java.net URI]
+  (:import [java.net URI URLEncoder]
+           [java.nio.charset StandardCharsets]
            [java.time ZonedDateTime]
            [java.time.format DateTimeFormatter]
            [java.util.concurrent ConcurrentHashMap TimeoutException]
@@ -1070,6 +1071,137 @@
              (filter string?)
              sort
              vec)))))
+
+(defn- normalize-model-flag
+  [value]
+  (cond
+    (nil? value) nil
+    (true? value) true
+    (false? value) false
+    (number? value) (not (zero? (long value)))
+    (string? value) (let [normalized (some-> value str/trim str/lower-case)]
+                      (cond
+                        (#{"true" "yes" "1" "vision" "image" "images" "multimodal"} normalized) true
+                        (#{"false" "no" "0" "text" "text-only"} normalized) false
+                        :else nil))
+    :else nil))
+
+(defn- modality-values
+  [value]
+  (cond
+    (nil? value) []
+    (string? value) [(str/lower-case value)]
+    (keyword? value) [(some-> value name str/lower-case)]
+    (sequential? value) (mapcat modality-values value)
+    :else []))
+
+(defn- image-capable-modality?
+  [value]
+  (let [normalized (some-> value str/lower-case)]
+    (boolean (and normalized
+                  (or (str/includes? normalized "image")
+                      (str/includes? normalized "vision")
+                      (str/includes? normalized "multimodal")
+                      (str/includes? normalized "omni"))))))
+
+(defn- vision-capable-model-id?
+  [model-id]
+  (let [normalized (some-> model-id str/lower-case)]
+    (boolean (and normalized
+                  (or (re-find #"(^|[/:-])gpt-4o($|[-/])" normalized)
+                      (re-find #"(^|[/:-])gpt-4\.1($|[-/])" normalized)
+                      (re-find #"(^|[/:-])gemini($|[-/])" normalized)
+                      (re-find #"(^|[/:-])claude($|[-/])" normalized)
+                      (str/includes? normalized "vision")
+                      (str/includes? normalized "vl")
+                      (str/includes? normalized "image")
+                      (str/includes? normalized "multimodal")
+                      (str/includes? normalized "omni")
+                      (str/includes? normalized "llava")
+                      (str/includes? normalized "pixtral")
+                      (str/includes? normalized "minicpm-v")
+                      (str/includes? normalized "qvq"))))))
+
+(defn- infer-model-vision
+  [model]
+  (let [flags      [(normalize-model-flag (get model "vision"))
+                    (normalize-model-flag (get model "image_input"))
+                    (normalize-model-flag (get-in model ["capabilities" "vision"]))
+                    (normalize-model-flag (get-in model ["capabilities" "image_input"]))
+                    (normalize-model-flag (get-in model ["capabilities" "image"]))
+                    (normalize-model-flag (get-in model ["capabilities" "multimodal"]))]
+        modalities (->> [(get model "input_modalities")
+                         (get model "modalities")
+                         (get model "supported_input_modalities")
+                         (get model "input_modality")
+                         (get-in model ["architecture" "modality"])
+                         (get-in model ["architecture" "input_modalities"])
+                         (get-in model ["architecture" "modalities"])
+                         (get-in model ["capabilities" "input_modalities"])]
+                        (mapcat modality-values)
+                        (remove str/blank?))
+        model-id   (or (get model "id")
+                       (get model "model")
+                       (get-in model ["data" "id"]))]
+    (cond
+      (some true? flags)
+      {:vision? true
+       :source :metadata}
+
+      (some image-capable-modality? modalities)
+      {:vision? true
+       :source :metadata}
+
+      (or (some false? flags)
+          (seq modalities))
+      {:vision? false
+       :source :metadata}
+
+      (vision-capable-model-id? model-id)
+      {:vision? true
+       :source :model-id}
+
+      :else
+      {:vision? false
+       :source :model-id})))
+
+(defn- encode-model-path-segment
+  [model-id]
+  (when-let [value (some-> model-id str)]
+    (-> (URLEncoder/encode value (.name StandardCharsets/UTF_8))
+        (str/replace "+" "%20"))))
+
+(defn fetch-provider-model-metadata
+  "Fetch a single model's metadata from /models/{id} and infer whether it
+   accepts image input. Falls back to model-id inference when the provider
+   does not expose a usable metadata endpoint."
+  [{:keys [base-url api-key model]}]
+  (let [model-id        (some-> model str/trim not-empty)
+        auth-header     (when-let [k (some-> api-key str/trim not-empty)]
+                          (str "Bearer " k))
+        allow-private?  (loopback-base-url? base-url)
+        fallback        (let [{:keys [vision? source]} (infer-model-vision {"id" model-id})]
+                          {:id model-id
+                           :vision? vision?
+                           :vision-source source})
+        metadata-url    (str (str/replace (str base-url) #"/+$" "")
+                             "/models/"
+                             (encode-model-path-segment model-id))
+        resp            (http/request {:url     metadata-url
+                                       :method  :get
+                                       :headers (cond-> {}
+                                                  auth-header (assoc "Authorization" auth-header))
+                                       :allow-private-network? allow-private?
+                                       :timeout 15000
+                                       :request-label "Fetch provider model metadata"})]
+    (if (= 200 (:status resp))
+      (let [body                  (json/read-json (:body resp))
+            body                  (if (map? body) body {"id" model-id})
+            {:keys [vision? source]} (infer-model-vision (assoc body "id" (or (get body "id") model-id)))]
+        {:id model-id
+         :vision? vision?
+         :vision-source source})
+      fallback)))
 
 (defn chat-simple
   "Convenience: send messages, return the assistant's text content."

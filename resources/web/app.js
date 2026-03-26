@@ -68,6 +68,11 @@ const state = {
   knowledgeForgettingFactId: '',
   providerModels: [],
   providerModelsFetching: false,
+  providerModelMetadataLoading: false,
+  providerModelMetadataModelId: '',
+  providerModelCapabilities: {},
+  providerModelVision: false,
+  providerModelVisionModelId: '',
   providerDraft: null,
   pendingProviderOauthFlow: null,
   pendingProviderBrowserSessionFlow: null,
@@ -82,6 +87,8 @@ const state = {
   knowledgeDecaySaving: false,
   localDocSummarizationSaving: false,
   localDocOcrSaving: false,
+  localDocOcrDraftMode: '',
+  localDocOcrDraftBackend: 'local',
   databaseBackupSaving: false,
   oauthSaving: false,
   serviceSaving: false,
@@ -89,7 +96,7 @@ const state = {
   remoteBridgeSaving: false,
   remotePairing: false,
   localDocSummarizationStatus: 'Loading local document summarization settings...',
-  localDocOcrStatus: 'Loading local OCR settings...',
+  localDocOcrStatus: 'Loading OCR settings...',
   contextStatus: 'Loading conversation context settings...',
   databaseBackupStatus: 'Loading database backup settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
@@ -148,7 +155,6 @@ const identityNameEl = document.getElementById('identity-name');
 const identityRoleEl = document.getElementById('identity-role');
 const identityDescriptionEl = document.getElementById('identity-description');
 const identityControllerEnabledEl = document.getElementById('identity-controller-enabled');
-const identityControllerNoteEl = document.getElementById('identity-controller-note');
 const identityInstanceIdEl = document.getElementById('identity-instance-id');
 const identityDbPathEl = document.getElementById('identity-db-path');
 const identitySupportDirEl = document.getElementById('identity-support-dir');
@@ -169,6 +175,7 @@ const providerBaseUrlEl = document.getElementById('provider-base-url');
 const providerModelEl = document.getElementById('provider-model');
 const providerModelListEl = document.getElementById('provider-model-list');
 const fetchProviderModelsEl = document.getElementById('fetch-provider-models');
+const providerModelCapabilityNoteEl = document.getElementById('provider-model-capability-note');
 const providerAccessModeEl = document.getElementById('provider-access-mode');
 const providerCredentialSourceEl = document.getElementById('provider-credential-source');
 const providerOauthAccountEl = document.getElementById('provider-oauth-account');
@@ -183,7 +190,6 @@ const providerWorkloadsNoteEl = document.getElementById('provider-workloads-note
 const providerSystemPromptBudgetEl = document.getElementById('provider-system-prompt-budget');
 const providerHistoryBudgetEl = document.getElementById('provider-history-budget');
 const providerRateLimitEl = document.getElementById('provider-rate-limit-per-minute');
-const providerVisionEl = document.getElementById('provider-vision');
 const providerApiKeyEl = document.getElementById('provider-api-key');
 const providerDefaultEl = document.getElementById('provider-default');
 const providerStatusEl = document.getElementById('provider-status');
@@ -216,14 +222,11 @@ const localDocChunkSummaryMaxTokensEl = document.getElementById('local-doc-chunk
 const localDocDocSummaryMaxTokensEl = document.getElementById('local-doc-doc-summary-max-tokens');
 const localDocSummarizationStatusEl = document.getElementById('local-doc-summarization-status');
 const saveLocalDocSummarizationEl = document.getElementById('save-local-doc-summarization');
-const localDocOcrEnabledEl = document.getElementById('local-doc-ocr-enabled');
 const localDocOcrModelBackendEl = document.getElementById('local-doc-ocr-model-backend');
+const localDocOcrLocalNoteFieldEl = document.getElementById('local-doc-ocr-local-note-field');
+const localDocOcrExternalProviderFieldEl = document.getElementById('local-doc-ocr-external-provider-field');
 const localDocOcrExternalProviderIdEl = document.getElementById('local-doc-ocr-external-provider-id');
-const localDocOcrCommandEl = document.getElementById('local-doc-ocr-command');
 const localDocOcrTimeoutMsEl = document.getElementById('local-doc-ocr-timeout-ms');
-const localDocOcrModelPathEl = document.getElementById('local-doc-ocr-model-path');
-const localDocOcrMmprojPathEl = document.getElementById('local-doc-ocr-mmproj-path');
-const localDocOcrSpottingMmprojPathEl = document.getElementById('local-doc-ocr-spotting-mmproj-path');
 const localDocOcrMaxTokensEl = document.getElementById('local-doc-ocr-max-tokens');
 const localDocOcrStatusEl = document.getElementById('local-doc-ocr-status');
 const saveLocalDocOcrEl = document.getElementById('save-local-doc-ocr');
@@ -947,7 +950,7 @@ function providerCredentialSourcesForAccessMode(template, accessMode) {
 function defaultProviderTemplateId() {
   const templates = Array.isArray(state.admin.llmProviderTemplates) ? state.admin.llmProviderTemplates : [];
   if (!templates.length) return '';
-  return (templates.find((template) => defaultProviderAccessMode(template) === 'account')
+  return (templates.find((template) => template.id === 'openrouter')
     || templates.find((template) => template.id === 'openai')
     || templates.find((template) => template.id === 'ollama')
     || templates[0]).id || '';
@@ -1025,7 +1028,6 @@ function providerMeta(provider) {
       : '';
     bits.push(label + suffix);
   }
-  if (provider.vision) bits.push('Vision');
   if (provider.default) bits.push('Default');
   if (credentialSource === 'api-key' || ((credentialSource !== 'oauth-account' && credentialSource !== 'browser-session') && provider.api_key_configured)) {
     bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
@@ -1197,17 +1199,16 @@ function providerTemplateTooltip(template) {
 function renderProviderTemplateOptions() {
   const selected = providerTemplateEl.value || defaultProviderTemplateId();
   providerTemplateEl.replaceChildren();
-  const blank = document.createElement('option');
-  blank.value = '';
-  blank.textContent = 'Choose a template';
-  providerTemplateEl.appendChild(blank);
   (state.admin.llmProviderTemplates || []).forEach((template) => {
     const option = document.createElement('option');
     option.value = template.id || '';
     option.textContent = template.name || template.id || 'Template';
     providerTemplateEl.appendChild(option);
   });
-  providerTemplateEl.value = selected || '';
+  const fallback = defaultProviderTemplateId()
+    || ((state.admin.llmProviderTemplates || [])[0] || {}).id
+    || '';
+  providerTemplateEl.value = providerTemplateById(selected) ? selected : fallback;
   const selectedTemplate = providerTemplateById(providerTemplateEl.value);
   providerTemplateNoteEl.textContent = providerTemplateNote(selectedTemplate);
   providerTemplateEl.title = providerTemplateTooltip(selectedTemplate);
@@ -1270,7 +1271,7 @@ function providerOauthAccountStatusNote() {
     return '';
   }
   if (!(state.admin.oauthAccounts || []).length) {
-    return 'Use Set Up API Sign-In to create a saved OAuth API sign-in, then link it here.';
+    return '';
   }
   if (!providerOauthAccountEl.value) {
     return 'Choose a connected API sign-in for this provider, or use Set Up API Sign-In to make one.';
@@ -1282,6 +1283,19 @@ function providerOauthAccountStatusNote() {
   return account.connected
     ? 'This provider will use the linked OAuth API credential.'
     : 'The linked OAuth API sign-in still needs to be connected.';
+}
+
+function providerPrimaryActionTooltip(primaryAction) {
+  if (providerCredentialSourceEl.value !== 'oauth-account') {
+    return '';
+  }
+  if (!primaryAction || primaryAction.label !== 'Set Up API Sign-In') {
+    return '';
+  }
+  if ((state.admin.oauthAccounts || []).length) {
+    return '';
+  }
+  return 'Use Set Up API Sign-In to create a saved OAuth API sign-in, then link it here.';
 }
 
 function providerBrowserSessionStatusNote() {
@@ -1314,7 +1328,16 @@ function syncProviderAuthInputs() {
   providerBrowserSessionNoteEl.hidden = credentialSource !== 'browser-session';
   providerConfigureOauthEl.hidden = !primaryAction;
   providerConfigureOauthEl.textContent = primaryAction ? primaryAction.label : 'Open Setup';
-  providerConfigureOauthEl.disabled = providerSaving || state.oauthSaving || state.providerAccountConnecting || !primaryAction;
+  providerConfigureOauthEl.title = providerPrimaryActionTooltip(primaryAction);
+  providerConfigureOauthEl.href = primaryAction && primaryAction.kind === 'external' && primaryAction.url
+    ? primaryAction.url
+    : '#';
+  providerConfigureOauthEl.target = primaryAction && primaryAction.kind === 'external' ? '_blank' : '';
+  providerConfigureOauthEl.rel = primaryAction && primaryAction.kind === 'external'
+    ? 'noopener noreferrer'
+    : '';
+  providerConfigureOauthEl.setAttribute('aria-disabled',
+    (providerSaving || state.oauthSaving || state.providerAccountConnecting || !primaryAction) ? 'true' : 'false');
   providerOpenAccountEl.hidden = !accountAction;
   providerOpenAccountEl.href = accountAction ? accountAction.url : '';
   providerOpenDocsEl.hidden = !docsAction;
@@ -1326,6 +1349,146 @@ function syncProviderAuthInputs() {
 // ---------------------------------------------------------------------------
 // Provider model autocomplete
 // ---------------------------------------------------------------------------
+
+function providerModelCapabilityKey(baseUrl, modelId) {
+  return String(baseUrl || '').trim() + '::' + String(modelId || '').trim();
+}
+
+function cachedProviderModelCapability(modelId) {
+  const normalizedModelId = String(modelId || '').trim();
+  const baseUrl = providerBaseUrlEl.value.trim();
+  if (!normalizedModelId || !baseUrl) return null;
+  return state.providerModelCapabilities[providerModelCapabilityKey(baseUrl, normalizedModelId)] || null;
+}
+
+function setProviderModelVision(modelId, vision) {
+  const normalizedModelId = (modelId || '').trim();
+  const baseUrl = providerBaseUrlEl.value.trim();
+  state.providerModelVisionModelId = normalizedModelId;
+  state.providerModelVision = !!vision;
+  if (normalizedModelId && baseUrl) {
+    state.providerModelCapabilities[providerModelCapabilityKey(baseUrl, normalizedModelId)] = { vision: !!vision };
+  }
+  renderProviderModelCapabilityNote();
+  if (state.providerModels.length && !providerModelListEl.hidden) {
+    renderProviderModelList();
+  }
+}
+
+function currentProviderVision() {
+  const modelId = providerModelEl.value.trim();
+  if (!modelId) return false;
+  const cached = cachedProviderModelCapability(modelId);
+  if (cached) return !!cached.vision;
+  return modelId === state.providerModelVisionModelId && !!state.providerModelVision;
+}
+
+function currentProviderModelVisionKnown() {
+  const modelId = providerModelEl.value.trim();
+  if (!modelId) return false;
+  if (cachedProviderModelCapability(modelId)) return true;
+  return modelId === state.providerModelVisionModelId;
+}
+
+function renderProviderModelCapabilityNote() {
+  const modelId = providerModelEl.value.trim();
+  if (state.providerModelMetadataLoading
+      && modelId
+      && modelId === state.providerModelMetadataModelId) {
+    providerModelCapabilityNoteEl.textContent = 'Image input: checking...';
+    return;
+  }
+  if (!currentProviderModelVisionKnown()) {
+    providerModelCapabilityNoteEl.textContent = '';
+    return;
+  }
+  const cached = cachedProviderModelCapability(modelId);
+  const supportsVision = cached ? !!cached.vision : !!state.providerModelVision;
+  providerModelCapabilityNoteEl.textContent = supportsVision
+    ? 'Image input: supported.'
+    : 'Image input: not supported.';
+}
+
+function providerModelBadgeState(modelId) {
+  const normalizedModelId = String(modelId || '').trim();
+  if (state.providerModelMetadataLoading
+      && normalizedModelId
+      && normalizedModelId === state.providerModelMetadataModelId) {
+    return { label: 'Checking...', kind: 'checking' };
+  }
+  const cached = cachedProviderModelCapability(normalizedModelId);
+  if (!cached) return null;
+  return cached.vision
+    ? { label: 'Image', kind: 'vision' }
+    : { label: 'Text', kind: 'text' };
+}
+
+function clearProviderModelVisionIfModelChanged() {
+  const modelId = providerModelEl.value.trim();
+  if (!modelId || modelId !== state.providerModelVisionModelId) {
+    setProviderModelVision('', false);
+  }
+}
+
+function providerModelWasFetched(modelId) {
+  return !!modelId && state.providerModels.includes(modelId);
+}
+
+async function fetchProviderModelMetadata(modelId) {
+  const normalizedModelId = (modelId || '').trim();
+  const baseUrl = providerBaseUrlEl.value.trim();
+  const apiKey = providerApiKeyEl.value.trim();
+  if (!baseUrl || !normalizedModelId) return;
+  state.providerModelMetadataLoading = true;
+  state.providerModelMetadataModelId = normalizedModelId;
+  renderProviderModelCapabilityNote();
+  if (state.providerModels.length && !providerModelListEl.hidden) {
+    renderProviderModelList();
+  }
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/provider-model-metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base_url: baseUrl,
+        api_key: apiKey || undefined,
+        model: normalizedModelId
+      })
+    });
+    if (providerModelEl.value.trim() !== normalizedModelId) return;
+    const model = data.model || {};
+    setProviderModelVision(normalizedModelId, !!model.vision);
+    providerStatusEl.textContent = !!model.vision
+      ? 'Selected model supports image input.'
+      : 'Selected model appears text-only.';
+  } catch (err) {
+    if (providerModelEl.value.trim() !== normalizedModelId) return;
+    setProviderModelVision('', false);
+    providerStatusEl.textContent = err.message || 'Failed to inspect the selected model.';
+  } finally {
+    state.providerModelMetadataLoading = false;
+    state.providerModelMetadataModelId = '';
+    renderProviderModelCapabilityNote();
+    if (state.providerModels.length && !providerModelListEl.hidden) {
+      renderProviderModelList();
+    }
+    updateAdminButtons();
+  }
+}
+
+function maybeFetchProviderModelMetadata() {
+  const modelId = providerModelEl.value.trim();
+  if (state.providerModelMetadataLoading) return;
+  if (!providerModelWasFetched(modelId)) return;
+  const cached = cachedProviderModelCapability(modelId);
+  if (cached) {
+    setProviderModelVision(modelId, !!cached.vision);
+    return;
+  }
+  if (modelId === state.providerModelVisionModelId) return;
+  fetchProviderModelMetadata(modelId);
+}
 
 function renderProviderModelList() {
   providerModelListEl.innerHTML = '';
@@ -1347,30 +1510,40 @@ function renderProviderModelList() {
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'autocomplete-item';
+    var label = document.createElement('span');
+    label.className = 'autocomplete-item-label';
     if (query) {
       var idx = modelId.toLowerCase().indexOf(query);
       if (idx >= 0) {
-        btn.innerHTML = escapeHtml(modelId.substring(0, idx))
+        label.innerHTML = escapeHtml(modelId.substring(0, idx))
           + '<mark>' + escapeHtml(modelId.substring(idx, idx + query.length)) + '</mark>'
           + escapeHtml(modelId.substring(idx + query.length));
       } else {
-        btn.textContent = modelId;
+        label.textContent = modelId;
       }
     } else {
-      btn.textContent = modelId;
+      label.textContent = modelId;
+    }
+    btn.appendChild(label);
+    var badgeState = providerModelBadgeState(modelId);
+    if (badgeState) {
+      var badge = document.createElement('span');
+      badge.className = 'autocomplete-item-badge autocomplete-item-badge-' + badgeState.kind;
+      badge.textContent = badgeState.label;
+      btn.appendChild(badge);
     }
     btn.addEventListener('mousedown', function (e) {
       e.preventDefault();
       providerModelEl.value = modelId;
       providerModelListEl.hidden = true;
+      clearProviderModelVisionIfModelChanged();
+      fetchProviderModelMetadata(modelId);
     });
     providerModelListEl.appendChild(btn);
   });
   if (filtered.length > 80) {
     var more = document.createElement('div');
-    more.className = 'autocomplete-item';
-    more.style.color = 'var(--muted)';
-    more.style.fontStyle = 'italic';
+    more.className = 'autocomplete-item autocomplete-item-note';
     more.textContent = (filtered.length - 80) + ' more — keep typing to narrow';
     providerModelListEl.appendChild(more);
   }
@@ -1405,6 +1578,7 @@ async function fetchProviderModels() {
       : 'No models returned by this provider.';
     providerModelEl.focus();
     renderProviderModelList();
+    maybeFetchProviderModelMetadata();
   } catch (err) {
     state.providerModels = [];
     providerStatusEl.textContent = err.message || 'Failed to fetch models.';
@@ -1430,6 +1604,7 @@ function applyProviderTemplate(templateId, options = {}) {
   if (!options.preserveModel || !providerModelEl.value.trim()) {
     providerModelEl.value = template.model_suggestion || '';
   }
+  clearProviderModelVisionIfModelChanged();
   if (!preserveId || !providerIdEl.value.trim()) {
     providerIdEl.value = template.id || '';
   }
@@ -1663,7 +1838,7 @@ function captureProviderDraft() {
     systemPromptBudget: providerSystemPromptBudgetEl.value,
     historyBudget: providerHistoryBudgetEl.value,
     rateLimitPerMinute: providerRateLimitEl.value,
-    vision: providerVisionEl.checked,
+    vision: currentProviderVision(),
     apiKey: providerApiKeyEl.value,
     default: providerDefaultEl.checked
   };
@@ -1691,7 +1866,7 @@ function restoreProviderDraft(draft, options = {}) {
   providerSystemPromptBudgetEl.value = draft.systemPromptBudget || '';
   providerHistoryBudgetEl.value = draft.historyBudget || '';
   providerRateLimitEl.value = draft.rateLimitPerMinute || '';
-  providerVisionEl.checked = !!draft.vision;
+  setProviderModelVision(draft.model || '', !!draft.vision);
   providerApiKeyEl.value = draft.apiKey || '';
   providerDefaultEl.checked = !!draft.default;
   providerStatusEl.textContent = options.statusText || 'Continue configuring the model.';
@@ -2184,9 +2359,10 @@ function updateAdminButtons() {
   searchKnowledgeEl.disabled = state.knowledgeSearching || !knowledgeQueryEl.value.trim();
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   providerTemplateEl.disabled = state.providerSaving;
-  saveProviderEl.disabled = state.providerSaving;
+  saveProviderEl.disabled = state.providerSaving || state.providerModelMetadataLoading;
   deleteProviderEl.disabled = state.providerSaving || !state.activeProviderId;
-  providerConfigureOauthEl.disabled = state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction();
+  providerConfigureOauthEl.setAttribute('aria-disabled',
+    (state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction()) ? 'true' : 'false');
   contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;
   saveContextEl.disabled = state.contextSaving;
   saveRetentionEl.disabled = state.retentionSaving;
@@ -2198,15 +2374,11 @@ function updateAdminButtons() {
   localDocChunkSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
   localDocDocSummaryMaxTokensEl.disabled = state.localDocSummarizationSaving;
   saveLocalDocSummarizationEl.disabled = state.localDocSummarizationSaving;
-  localDocOcrEnabledEl.disabled = state.localDocOcrSaving;
   localDocOcrModelBackendEl.disabled = state.localDocOcrSaving;
   localDocOcrExternalProviderIdEl.disabled = state.localDocOcrSaving
-    || localDocOcrModelBackendEl.value !== 'external';
-  localDocOcrCommandEl.disabled = state.localDocOcrSaving;
+    || localDocOcrModelBackendEl.value !== 'external'
+    || !localDocOcrExternalProviderIdEl.options.length;
   localDocOcrTimeoutMsEl.disabled = state.localDocOcrSaving;
-  localDocOcrModelPathEl.disabled = state.localDocOcrSaving;
-  localDocOcrMmprojPathEl.disabled = state.localDocOcrSaving;
-  localDocOcrSpottingMmprojPathEl.disabled = state.localDocOcrSaving;
   localDocOcrMaxTokensEl.disabled = state.localDocOcrSaving;
   saveLocalDocOcrEl.disabled = state.localDocOcrSaving;
   databaseBackupEnabledEl.disabled = state.databaseBackupSaving;
@@ -2255,15 +2427,51 @@ function updateAdminButtons() {
 }
 
 function renderProviderList() {
-  renderSelectableList(
-    providerListEl,
-    state.admin.providers,
-    state.activeProviderId,
-    'No models configured yet. Add one so Xia can talk to an LLM.',
-    (provider) => providerDisplayName(provider),
-    providerMeta,
-    selectProvider
-  );
+  providerListEl.replaceChildren();
+  if (!state.admin.providers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = 'No models configured yet. Add one so Xia can talk to an LLM.';
+    providerListEl.appendChild(empty);
+    return;
+  }
+  state.admin.providers.forEach((provider) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'admin-item' + (provider.id === state.activeProviderId ? ' active' : '');
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'admin-item-title-row';
+
+    const title = document.createElement('div');
+    title.className = 'admin-item-title';
+    title.textContent = providerDisplayName(provider);
+    titleRow.appendChild(title);
+
+    if (provider.vision) {
+      const badges = document.createElement('div');
+      badges.className = 'admin-item-badges';
+      const badge = document.createElement('span');
+      badge.className = 'admin-item-capability-badge';
+      badge.textContent = 'Image input';
+      badges.appendChild(badge);
+      titleRow.appendChild(badges);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'admin-item-meta';
+    meta.textContent = providerMeta(provider);
+
+    button.appendChild(titleRow);
+    button.appendChild(meta);
+    button.addEventListener('click', () => {
+      const result = selectProvider(provider);
+      if (result && typeof result.catch === 'function') {
+        result.catch((err) => console.error('Selection handler failed:', err));
+      }
+    });
+    providerListEl.appendChild(button);
+  });
 }
 
 function renderOauthAccountList() {
@@ -2378,7 +2586,7 @@ function resetProviderForm(statusText) {
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
   providerRateLimitEl.value = '';
-  providerVisionEl.checked = false;
+  setProviderModelVision('', false);
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !state.admin.providers.some((provider) => provider.default);
   renderProviderTemplateOptions();
@@ -2511,46 +2719,63 @@ function renderLocalDocSummarizationSettings() {
 
 function defaultLocalDocOcrStatus() {
   const settings = state.admin.localDocOcr || {};
-  if (!settings.configured) {
-    return settings.model_backend === 'external'
-      ? 'Needs a vision-capable external provider.'
-      : 'Not configured.';
+  if (!settings.enabled) return 'Disabled.';
+  if (settings.model_backend === 'external') {
+    return settings.configured
+      ? 'Enabled.'
+      : 'Select a vision-capable external provider.';
   }
-  return settings.enabled ? 'Enabled.' : 'Disabled.';
+  return 'Enabled. Xia will use managed PaddleOCR models.';
 }
 
 function renderLocalDocOcrProviderOptions() {
-  const selected = localDocOcrExternalProviderIdEl.value;
+  const settings = state.admin.localDocOcr || {};
+  const selected = firstNonEmpty(localDocOcrExternalProviderIdEl.value,
+    settings.external_provider_id,
+    '');
+  const visionProviders = state.admin.providers.filter((provider) => !!provider.vision);
+  const selectedProvider = selected
+    ? state.admin.providers.find((provider) => (provider.id || '') === selected)
+    : null;
+  const providers = selectedProvider
+      && !visionProviders.some((provider) => (provider.id || '') === selected)
+    ? visionProviders.concat([selectedProvider])
+    : visionProviders;
   localDocOcrExternalProviderIdEl.replaceChildren();
-  const blank = document.createElement('option');
-  blank.value = '';
-  blank.textContent = 'Default provider';
-  localDocOcrExternalProviderIdEl.appendChild(blank);
-  state.admin.providers
-    .filter((provider) => !!provider.vision)
-    .forEach((provider) => {
-      const option = document.createElement('option');
-      option.value = provider.id || '';
-      option.textContent = providerDisplayName(provider);
-      localDocOcrExternalProviderIdEl.appendChild(option);
-    });
-  localDocOcrExternalProviderIdEl.value = selected || '';
+  providers.forEach((provider) => {
+    const option = document.createElement('option');
+    option.value = provider.id || '';
+    option.textContent = providerDisplayName(provider);
+    localDocOcrExternalProviderIdEl.appendChild(option);
+  });
+  if (selected && providers.some((provider) => (provider.id || '') === selected)) {
+    localDocOcrExternalProviderIdEl.value = selected;
+  } else {
+    localDocOcrExternalProviderIdEl.selectedIndex = -1;
+  }
 }
 
 function renderLocalDocOcrSettings() {
   const settings = state.admin.localDocOcr || {};
-  localDocOcrEnabledEl.checked = !!settings.enabled;
-  localDocOcrModelBackendEl.value = firstNonEmpty(settings.model_backend, 'local');
+  const modelBackend = firstNonEmpty(state.localDocOcrDraftMode,
+    settings.enabled ? settings.model_backend : 'disabled',
+    'disabled');
+  const isExternal = modelBackend === 'external';
+  const isLocal = modelBackend === 'local';
+  localDocOcrModelBackendEl.value = modelBackend;
   renderLocalDocOcrProviderOptions();
-  localDocOcrExternalProviderIdEl.value = settings.external_provider_id || '';
-  localDocOcrCommandEl.value = settings.command || '';
+  if (settings.external_provider_id
+      && Array.from(localDocOcrExternalProviderIdEl.options)
+        .some((option) => option.value === settings.external_provider_id)) {
+    localDocOcrExternalProviderIdEl.value = settings.external_provider_id;
+  }
   localDocOcrTimeoutMsEl.value = settings.timeout_ms || '';
-  localDocOcrModelPathEl.value = settings.model_path || '';
-  localDocOcrMmprojPathEl.value = settings.mmproj_path || '';
-  localDocOcrSpottingMmprojPathEl.value = settings.spotting_mmproj_path || '';
   localDocOcrMaxTokensEl.value = settings.max_tokens || '';
+  localDocOcrLocalNoteFieldEl.hidden = !isLocal;
+  localDocOcrExternalProviderFieldEl.hidden = !isExternal;
   localDocOcrExternalProviderIdEl.disabled = state.localDocOcrSaving
-    || localDocOcrModelBackendEl.value !== 'external';
+    || !isExternal
+    || !localDocOcrExternalProviderIdEl.options.length;
   localDocOcrStatusEl.textContent = state.localDocOcrStatus || defaultLocalDocOcrStatus();
   updateAdminButtons();
 }
@@ -2657,7 +2882,7 @@ function selectProvider(provider) {
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
   providerRateLimitEl.value = provider.rate_limit_per_minute || '';
-  providerVisionEl.checked = !!provider.vision;
+  setProviderModelVision(provider.model || '', !!provider.vision);
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !!provider.default;
   if (providerCredentialSource(provider) === 'oauth-account') {
@@ -3179,11 +3404,6 @@ function renderIdentitySettings() {
   identitySupportDirEl.value = storage.support_dir || '';
   identityPersonalityEl.value = identity.personality || '';
   identityGuidelinesEl.value = identity.guidelines || '';
-  if (capabilities.instance_management_enabled) {
-    identityControllerNoteEl.textContent = 'Controller mode is active. This Xia can start and stop managed child Xia instances.';
-  } else {
-    identityControllerNoteEl.textContent = 'Enable controller mode to let this Xia start and stop managed child Xia instances.';
-  }
   heroNameEl.textContent = identity.name || 'Xia';
   heroRoleEl.textContent = identity.role || 'Personal Assistant';
   document.title = identity.name || 'Xia';
@@ -3232,6 +3452,12 @@ async function loadAdminConfigImpl() {
     state.admin.knowledgeDecay = data.knowledge_decay || null;
     state.admin.localDocSummarization = data.local_doc_summarization || null;
     state.admin.localDocOcr = data.local_doc_ocr || null;
+    state.localDocOcrDraftBackend = state.admin.localDocOcr && state.admin.localDocOcr.model_backend
+      ? state.admin.localDocOcr.model_backend
+      : 'local';
+    state.localDocOcrDraftMode = state.admin.localDocOcr && state.admin.localDocOcr.enabled
+      ? state.localDocOcrDraftBackend
+      : 'disabled';
     state.admin.databaseBackup = data.database_backup || null;
     state.admin.llmWorkloads = Array.isArray(data.llm_workloads) ? data.llm_workloads : [];
     state.admin.oauthProviderTemplates = Array.isArray(data.oauth_provider_templates) ? data.oauth_provider_templates : [];
@@ -3531,7 +3757,7 @@ async function saveProvider() {
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
         rate_limit_per_minute: providerRateLimitEl.value,
-        vision: providerVisionEl.checked,
+        vision: currentProviderVision(),
         api_key: providerApiKeyEl.value,
         default: providerDefaultEl.checked
       })
@@ -3673,27 +3899,37 @@ async function saveLocalDocOcr() {
   renderLocalDocOcrSettings();
   updateAdminButtons();
   try {
+    const ocrMode = localDocOcrModelBackendEl.value || 'disabled';
+    const ocrBackend = ocrMode === 'disabled'
+      ? firstNonEmpty(state.localDocOcrDraftBackend,
+          state.admin.localDocOcr && state.admin.localDocOcr.model_backend,
+          'local')
+      : ocrMode;
     const data = await fetchJson('/admin/local-doc-ocr', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        enabled: localDocOcrEnabledEl.checked,
-        model_backend: localDocOcrModelBackendEl.value,
-        external_provider_id: localDocOcrExternalProviderIdEl.value,
-        command: localDocOcrCommandEl.value,
-        model_path: localDocOcrModelPathEl.value,
-        mmproj_path: localDocOcrMmprojPathEl.value,
-        spotting_mmproj_path: localDocOcrSpottingMmprojPathEl.value,
+        enabled: ocrMode !== 'disabled',
+        model_backend: ocrBackend,
+        external_provider_id: ocrBackend === 'external'
+          ? localDocOcrExternalProviderIdEl.value
+          : '',
         timeout_ms: localDocOcrTimeoutMsEl.value,
         max_tokens: localDocOcrMaxTokensEl.value
       })
     });
     state.admin.localDocOcr = data.local_doc_ocr || state.admin.localDocOcr;
-    state.localDocOcrStatus = 'Local OCR settings saved.';
+    state.localDocOcrDraftBackend = state.admin.localDocOcr && state.admin.localDocOcr.model_backend
+      ? state.admin.localDocOcr.model_backend
+      : 'local';
+    state.localDocOcrDraftMode = state.admin.localDocOcr && state.admin.localDocOcr.enabled
+      ? state.localDocOcrDraftBackend
+      : 'disabled';
+    state.localDocOcrStatus = 'OCR settings saved.';
     renderLocalDocOcrSettings();
-    setStatus('Local OCR settings saved');
+    setStatus('OCR settings saved');
   } catch (err) {
-    state.localDocOcrStatus = err.message || 'Failed to save local OCR settings.';
+    state.localDocOcrStatus = err.message || 'Failed to save OCR settings.';
     renderLocalDocOcrSettings();
   } finally {
     state.localDocOcrSaving = false;
@@ -5063,6 +5299,7 @@ knowledgeQueryEl.addEventListener('keydown', (event) => {
 
 providerTemplateEl.addEventListener('change', () => {
   state.providerModels = [];
+  setProviderModelVision('', false);
   providerModelListEl.hidden = true;
   renderProviderTemplateOptions();
   renderProviderAccessModeOptions();
@@ -5085,12 +5322,18 @@ providerTemplateEl.addEventListener('change', () => {
   }
 });
 providerModelEl.addEventListener('input', () => {
+  clearProviderModelVisionIfModelChanged();
   if (state.providerModels.length) renderProviderModelList();
 });
 providerModelEl.addEventListener('focus', () => {
   if (state.providerModels.length) renderProviderModelList();
 });
+providerModelEl.addEventListener('change', () => {
+  clearProviderModelVisionIfModelChanged();
+  maybeFetchProviderModelMetadata();
+});
 providerModelEl.addEventListener('blur', () => {
+  maybeFetchProviderModelMetadata();
   setTimeout(() => { providerModelListEl.hidden = true; }, 150);
 });
 fetchProviderModelsEl.addEventListener('click', () => fetchProviderModels());
@@ -5122,14 +5365,21 @@ providerOauthAccountEl.addEventListener('change', () => {
   syncProviderAuthInputs();
   updateAdminButtons();
 });
-providerConfigureOauthEl.addEventListener('click', async () => {
+providerConfigureOauthEl.addEventListener('click', async (event) => {
   const action = currentProviderPrimaryAction();
+  const disabled = providerConfigureOauthEl.getAttribute('aria-disabled') === 'true';
+  if (disabled || !action) {
+    event.preventDefault();
+    return;
+  }
+  if (action.kind === 'external') {
+    providerStatusEl.textContent = 'Opened setup in a new tab.';
+    setStatus('Opened provider setup');
+    return;
+  }
+  event.preventDefault();
   await openProviderPrimaryAction(action, {
-    statusEl: providerStatusEl,
-    statusText: action && action.kind === 'external'
-      ? 'Opened setup in a new tab.'
-      : undefined,
-    globalStatus: action && action.kind === 'external' ? 'Opened provider setup' : undefined
+    statusEl: providerStatusEl
   });
 });
 saveIdentityEl.addEventListener('click', () => saveIdentity());
@@ -5142,7 +5392,13 @@ saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
 localDocModelSummaryBackendEl.addEventListener('change', () => updateAdminButtons());
 saveLocalDocOcrEl.addEventListener('click', () => saveLocalDocOcr());
-localDocOcrModelBackendEl.addEventListener('change', () => renderLocalDocOcrSettings());
+localDocOcrModelBackendEl.addEventListener('change', () => {
+  state.localDocOcrDraftMode = localDocOcrModelBackendEl.value || 'disabled';
+  if (state.localDocOcrDraftMode === 'local' || state.localDocOcrDraftMode === 'external') {
+    state.localDocOcrDraftBackend = state.localDocOcrDraftMode;
+  }
+  renderLocalDocOcrSettings();
+});
 saveDatabaseBackupEl.addEventListener('click', () => saveDatabaseBackup());
 
 newOauthAccountEl.addEventListener('click', () => {
