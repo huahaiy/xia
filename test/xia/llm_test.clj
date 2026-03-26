@@ -49,6 +49,59 @@
     (is (= "high"
            (get-in body ["messages" 0 "content" 1 "image_url" "detail"])))))
 
+(deftest build-request-uses-anthropic-native-messages-api
+  (let [req  (#'llm/build-request {:base-url "https://api.anthropic.com/v1"
+                                   :api-key  "sk-ant"
+                                   :model    "claude-sonnet-4-5"}
+                                  [{"role" "system"
+                                    "content" "Follow instructions."}
+                                   {"role" "user"
+                                    "content" [{"type" "text" "text" "Interpret this"}
+                                               {"type" "image_url"
+                                                "image_url" {"url" "https://cdn.example.com/chart.png"}}]}
+                                   {"role" "assistant"
+                                    "content" "Searching..."
+                                    "tool_calls" [{"id" "call_1"
+                                                   "type" "function"
+                                                   "function" {"name" "web-search"
+                                                               "arguments" "{\"q\":\"hi\"}"}}]}
+                                   {"role" "tool"
+                                    "tool_call_id" "call_1"
+                                    "content" "{\"results\":[]}"}]
+                                  {:tools [{:type "function"
+                                            :function {:name "web-search"
+                                                       :description "Search the web"
+                                                       :parameters {:type "object"
+                                                                    :properties {"q" {:type "string"}}}}}]})
+        body (json/read-json (:body req))]
+    (is (= "https://api.anthropic.com/v1/messages" (:url req)))
+    (is (= :post (:method req)))
+    (is (= "sk-ant" (get-in req [:headers "x-api-key"])))
+    (is (= "2023-06-01" (get-in req [:headers "anthropic-version"])))
+    (is (nil? (get-in req [:headers "Authorization"])))
+    (is (= "Follow instructions." (get body "system")))
+    (is (= 4096 (get body "max_tokens")))
+    (is (= "Interpret this"
+           (get-in body ["messages" 0 "content" 0 "text"])))
+    (is (= "url"
+           (get-in body ["messages" 0 "content" 1 "source" "type"])))
+    (is (= "https://cdn.example.com/chart.png"
+           (get-in body ["messages" 0 "content" 1 "source" "url"])))
+    (is (= "tool_use"
+           (get-in body ["messages" 1 "content" 1 "type"])))
+    (is (= "web-search"
+           (get-in body ["messages" 1 "content" 1 "name"])))
+    (is (= "hi"
+           (get-in body ["messages" 1 "content" 1 "input" "q"])))
+    (is (= "tool_result"
+           (get-in body ["messages" 2 "content" 0 "type"])))
+    (is (= "{\"results\":[]}"
+           (get-in body ["messages" 2 "content" 0 "content"])))
+    (is (= "web-search"
+           (get-in body ["tools" 0 "name"])))
+    (is (= "object"
+           (get-in body ["tools" 0 "input_schema" "type"])))))
+
 (deftest build-request-can-allow-private-network-targets
   (let [req (#'llm/build-request {:base-url "http://127.0.0.1:11434/v1"
                                   :api-key "sk-test"
@@ -148,6 +201,35 @@
             :vision-source :model-id}
            (llm/fetch-provider-model-metadata {:base-url "https://api.example.com/v1"
                                                :model "gpt-4o"})))))
+
+(deftest fetch-provider-models-uses-anthropic-native-headers
+  (with-redefs [xia.http-client/request
+                (fn [req]
+                  (is (= "https://api.anthropic.com/v1/models" (:url req)))
+                  (is (= "sk-ant" (get-in req [:headers "x-api-key"])))
+                  (is (= "2023-06-01" (get-in req [:headers "anthropic-version"])))
+                  {:status 200
+                   :body (json/write-json-str {"data" [{"id" "claude-sonnet-4-5"}
+                                                       {"id" "claude-haiku-4-5"}]})})]
+    (is (= ["claude-haiku-4-5" "claude-sonnet-4-5"]
+           (llm/fetch-provider-models {:base-url "https://api.anthropic.com/v1"
+                                       :api-key "sk-ant"})))))
+
+(deftest fetch-provider-model-metadata-uses-anthropic-native-headers
+  (with-redefs [xia.http-client/request
+                (fn [req]
+                  (is (= "https://api.anthropic.com/v1/models/claude-sonnet-4-5" (:url req)))
+                  (is (= "sk-ant" (get-in req [:headers "x-api-key"])))
+                  (is (= "2023-06-01" (get-in req [:headers "anthropic-version"])))
+                  {:status 200
+                   :body (json/write-json-str {"id" "claude-sonnet-4-5"
+                                               "display_name" "Claude Sonnet 4.5"})})]
+    (is (= {:id "claude-sonnet-4-5"
+            :vision? true
+            :vision-source :model-id}
+           (llm/fetch-provider-model-metadata {:base-url "https://api.anthropic.com/v1"
+                                               :api-key "sk-ant"
+                                               :model "claude-sonnet-4-5"})))))
 
 (deftest resolve-provider-selection-round-robins-workload
   (with-redefs [xia.db/list-providers
@@ -659,9 +741,188 @@
                                          "arguments" "{\"q\":\"hi\"}"}}]}
              (llm/chat-with-tools [{"role" "user" "content" "hello"}]
                                   [{:type "function"
-                                    :function {:name "web-search"}}]
+                                  :function {:name "web-search"}}]
                                   :on-delta (fn [_] nil))))
       (is (= 1 @fallback-calls)))))
+
+(deftest chat-supports-anthropic-native-text-response
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :anthropic
+                             :llm.provider/base-url "https://api.anthropic.com/v1"
+                             :llm.provider/api-key "sk-ant"
+                             :llm.provider/model "claude-sonnet-4-5"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request
+                (fn [req]
+                  (is (= "https://api.anthropic.com/v1/messages" (:url req)))
+                  (is (= "sk-ant" (get-in req [:headers "x-api-key"])))
+                  {:status 200
+                   :body (json/write-json-str {"type" "message"
+                                               "role" "assistant"
+                                               "content" [{"type" "text"
+                                                           "text" "Hello there."}]
+                                               "stop_reason" "end_turn"
+                                               "usage" {"input_tokens" 12
+                                                        "output_tokens" 4}})})]
+    (let [response (llm/chat [{"role" "user" "content" "hello"}])]
+      (is (= "Hello there."
+             (get-in response ["choices" 0 "message" "content"])))
+      (is (= "stop"
+             (get-in response ["choices" 0 "finish_reason"])))
+      (is (= 16
+             (get-in response ["usage" "total_tokens"]))))
+    (is (= "Hello there."
+           (llm/chat-simple [{"role" "user" "content" "hello"}])))))
+
+(deftest chat-with-tools-supports-anthropic-native-tool-use-response
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :anthropic
+                             :llm.provider/base-url "https://api.anthropic.com/v1"
+                             :llm.provider/api-key "sk-ant"
+                             :llm.provider/model "claude-sonnet-4-5"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request
+                (fn [_req]
+                  {:status 200
+                   :body (json/write-json-str {"type" "message"
+                                               "role" "assistant"
+                                               "content" [{"type" "text"
+                                                           "text" "Searching..."}
+                                                          {"type" "tool_use"
+                                                           "id" "toolu_1"
+                                                           "name" "web-search"
+                                                           "input" {"q" "hi"}}]
+                                               "stop_reason" "tool_use"})})]
+    (is (= {"role" "assistant"
+            "content" "Searching..."
+            "tool_calls" [{"id" "toolu_1"
+                           "type" "function"
+                           "function" {"name" "web-search"
+                                       "arguments" "{\"q\":\"hi\"}"}}]}
+           (llm/chat-with-tools [{"role" "user" "content" "hello"}]
+                                [{:type "function"
+                                  :function {:name "web-search"}}])))))
+
+(deftest chat-streams-anthropic-text-deltas
+  (let [deltas (atom [])]
+    (with-redefs [xia.db/get-default-provider
+                  (constantly {:llm.provider/id :anthropic
+                               :llm.provider/base-url "https://api.anthropic.com/v1"
+                               :llm.provider/api-key "sk-ant"
+                               :llm.provider/model "claude-sonnet-4-5"})
+                  xia.llm/provider-health
+                  (atom {})
+                  xia.llm/max-provider-retry-rounds
+                  (constantly 4)
+                  xia.llm/max-provider-retry-wait-ms
+                  (constantly 300000)
+                  xia.http-client/request-events
+                  (fn [req]
+                    (is (= true (get (json/read-json (:body req)) "stream")))
+                    ((:on-event req) {:event "message_start"
+                                      :data (json/write-json-str {"type" "message_start"
+                                                                  "message" {"type" "message"
+                                                                             "role" "assistant"
+                                                                             "content" []
+                                                                             "usage" {"input_tokens" 10
+                                                                                      "output_tokens" 0}}})})
+                    ((:on-event req) {:event "content_block_start"
+                                      :data (json/write-json-str {"type" "content_block_start"
+                                                                  "index" 0
+                                                                  "content_block" {"type" "text"
+                                                                                   "text" ""}})})
+                    ((:on-event req) {:event "content_block_delta"
+                                      :data (json/write-json-str {"type" "content_block_delta"
+                                                                  "index" 0
+                                                                  "delta" {"type" "text_delta"
+                                                                           "text" "Hel"}})})
+                    ((:on-event req) {:event "content_block_delta"
+                                      :data (json/write-json-str {"type" "content_block_delta"
+                                                                  "index" 0
+                                                                  "delta" {"type" "text_delta"
+                                                                           "text" "lo"}})})
+                    ((:on-event req) {:event "message_delta"
+                                      :data (json/write-json-str {"type" "message_delta"
+                                                                  "delta" {"stop_reason" "end_turn"
+                                                                           "stop_sequence" nil}
+                                                                  "usage" {"input_tokens" 10
+                                                                           "output_tokens" 2}})})
+                    ((:on-event req) {:event "message_stop"
+                                      :data (json/write-json-str {"type" "message_stop"})})
+                    {:status 200
+                     :headers {"content-type" "text/event-stream"}
+                     :streamed? true})]
+      (is (= "Hello"
+             (llm/chat-simple [{"role" "user" "content" "hello"}]
+                              :on-delta (fn [{:keys [content]}]
+                                          (swap! deltas conj content)))))
+      (is (= ["Hel" "Hello"] @deltas)))))
+
+(deftest chat-streams-anthropic-tool-call-deltas
+  (with-redefs [xia.db/get-default-provider
+                (constantly {:llm.provider/id :anthropic
+                             :llm.provider/base-url "https://api.anthropic.com/v1"
+                             :llm.provider/api-key "sk-ant"
+                             :llm.provider/model "claude-sonnet-4-5"})
+                xia.llm/provider-health
+                (atom {})
+                xia.llm/max-provider-retry-rounds
+                (constantly 4)
+                xia.llm/max-provider-retry-wait-ms
+                (constantly 300000)
+                xia.http-client/request-events
+                (fn [req]
+                  ((:on-event req) {:event "message_start"
+                                    :data (json/write-json-str {"type" "message_start"
+                                                                "message" {"type" "message"
+                                                                           "role" "assistant"
+                                                                           "content" []}})})
+                  ((:on-event req) {:event "content_block_start"
+                                    :data (json/write-json-str {"type" "content_block_start"
+                                                                "index" 0
+                                                                "content_block" {"type" "tool_use"
+                                                                                 "id" "toolu_1"
+                                                                                 "name" "web-search"
+                                                                                 "input" {}}})})
+                  ((:on-event req) {:event "content_block_delta"
+                                    :data (json/write-json-str {"type" "content_block_delta"
+                                                                "index" 0
+                                                                "delta" {"type" "input_json_delta"
+                                                                         "partial_json" "{\"q\":\""}})})
+                  ((:on-event req) {:event "content_block_delta"
+                                    :data (json/write-json-str {"type" "content_block_delta"
+                                                                "index" 0
+                                                                "delta" {"type" "input_json_delta"
+                                                                         "partial_json" "hi\"}"}})})
+                  ((:on-event req) {:event "message_delta"
+                                    :data (json/write-json-str {"type" "message_delta"
+                                                                "delta" {"stop_reason" "tool_use"
+                                                                         "stop_sequence" nil}})})
+                  ((:on-event req) {:event "message_stop"
+                                    :data (json/write-json-str {"type" "message_stop"})})
+                  {:status 200
+                   :headers {"content-type" "text/event-stream"}
+                   :streamed? true})]
+    (is (= {"content" ""
+            "role" "assistant"
+            "tool_calls" [{"id" "toolu_1"
+                           "type" "function"
+                           "function" {"name" "web-search"
+                                       "arguments" "{\"q\":\"hi\"}"}}]}
+           (llm/chat-with-tools [{"role" "user" "content" "hello"}]
+                                [{:type "function"
+                                  :function {:name "web-search"}}]
+                                :on-delta (fn [_] nil))))))
 
 (deftest chat-allows-loopback-provider-base-url
   (with-redefs [xia.db/get-default-provider

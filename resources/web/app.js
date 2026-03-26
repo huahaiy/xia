@@ -1188,9 +1188,6 @@ async function openProviderPrimaryAction(action, options = {}) {
 function providerTemplateNote(template) {
   if (!template) return '';
   if (!String(template.base_url || '').trim()) {
-    if (template.id === 'claude') {
-      return 'Enter a compatible gateway or proxy Base URL below. Anthropic\'s native API is not supported here yet.';
-    }
     return 'Enter a compatible Base URL below.';
   }
   return '';
@@ -1220,6 +1217,31 @@ function renderProviderTemplateOptions() {
   const selectedTemplate = providerTemplateById(providerTemplateEl.value);
   providerTemplateNoteEl.textContent = providerTemplateNote(selectedTemplate);
   providerTemplateEl.title = providerTemplateTooltip(selectedTemplate);
+  syncProviderModelFetchUi();
+}
+
+function providerTemplateNeedsManualBaseUrl(template) {
+  return !String(template && template.base_url || '').trim();
+}
+
+function providerModelFetchState() {
+  const template = providerTemplateById(providerTemplateEl.value);
+  const baseUrl = providerBaseUrlEl.value.trim();
+  if (!baseUrl) {
+    return {
+      enabled: false,
+      reason: 'Enter a compatible Base URL before fetching models.'
+    };
+  }
+  return { enabled: true, reason: '' };
+}
+
+function syncProviderModelFetchUi() {
+  const template = providerTemplateById(providerTemplateEl.value);
+  providerBaseUrlFieldEl.classList.toggle('force-visible', providerTemplateNeedsManualBaseUrl(template));
+  const fetchState = providerModelFetchState();
+  fetchProviderModelsEl.disabled = state.providerSaving || state.providerModelsFetching || !fetchState.enabled;
+  fetchProviderModelsEl.title = fetchState.enabled ? '' : fetchState.reason;
 }
 
 function renderProviderAccessModeOptions() {
@@ -1567,12 +1589,13 @@ function escapeHtml(text) {
 async function fetchProviderModels() {
   var baseUrl = providerBaseUrlEl.value.trim();
   var apiKey = providerApiKeyEl.value.trim();
-  if (!baseUrl) {
-    providerStatusEl.textContent = 'Enter a Base URL first.';
+  var fetchState = providerModelFetchState();
+  if (!fetchState.enabled) {
+    providerStatusEl.textContent = fetchState.reason;
     return;
   }
   state.providerModelsFetching = true;
-  fetchProviderModelsEl.disabled = true;
+  syncProviderModelFetchUi();
   providerStatusEl.textContent = 'Fetching models...';
   try {
     var data = await fetchJson('/admin/provider-models', {
@@ -1592,7 +1615,7 @@ async function fetchProviderModels() {
     providerStatusEl.textContent = err.message || 'Failed to fetch models.';
   } finally {
     state.providerModelsFetching = false;
-    fetchProviderModelsEl.disabled = false;
+    syncProviderModelFetchUi();
   }
 }
 
@@ -2366,6 +2389,7 @@ function updateAdminButtons() {
   searchKnowledgeEl.disabled = state.knowledgeSearching || !knowledgeQueryEl.value.trim();
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   providerTemplateEl.disabled = state.providerSaving;
+  syncProviderModelFetchUi();
   saveProviderEl.disabled = state.providerSaving || state.providerModelMetadataLoading;
   deleteProviderEl.disabled = state.providerSaving || !state.activeProviderId;
   providerConfigureOauthEl.setAttribute('aria-disabled',
@@ -5354,6 +5378,12 @@ providerTemplateEl.addEventListener('change', () => {
     syncProviderAuthInputs();
     updateAdminButtons();
   }
+});
+providerBaseUrlEl.addEventListener('input', () => {
+  state.providerModels = [];
+  setProviderModelVision('', false);
+  providerModelListEl.hidden = true;
+  syncProviderModelFetchUi();
 });
 providerModelEl.addEventListener('input', () => {
   clearProviderModelVisionIfModelChanged();

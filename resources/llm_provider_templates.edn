@@ -52,19 +52,20 @@
   :notes "Use API sign-in when the provider issues a usable API token. Otherwise use an API key. Beijing uses the default base URL; Singapore uses https://dashscope-intl.aliyuncs.com/compatible-mode/v1."}
  {:id :claude
   :name "Claude"
-  :description "Connect Claude through a compatible gateway or proxy."
+  :description "Connect Xia to Anthropic-hosted Claude models."
   :category :cloud
-  :base-url ""
+  :base-url "https://api.anthropic.com/v1"
   :model-suggestion "claude-sonnet-4-5"
   :access-modes [{:id :api
                   :label "API credential"
-                  :description "Use a provider API credential, either by API sign-in or API key."
-                  :credential-sources [:oauth-account :api-key]
+                  :description "Use an Anthropic API key."
+                  :credential-sources [:api-key]
                   :default? true}]
   :account-url "https://console.anthropic.com/"
+  :api-key-url "https://console.anthropic.com/settings/keys"
   :docs-url "https://docs.anthropic.com/en/api/getting-started"
   :sign-in-options []
-  :notes "Anthropic's native API uses x-api-key, so Xia currently needs an Anthropic-compatible gateway or proxy instead of the raw Anthropic endpoint."}
+  :notes "Uses Anthropic's native Messages API with x-api-key authentication."}
  {:id :deepseek
   :name "DeepSeek"
   :description "Connect Xia to DeepSeek-hosted models."

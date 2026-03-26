@@ -1,7 +1,8 @@
 (ns xia.llm
   "Multi-provider LLM client. All providers follow the OpenAI-compatible
-   chat completions API shape, so one client handles OpenAI, Anthropic
-   (via proxy), Qwen, local Ollama, etc."
+   chat completions API shape, except Anthropic-native providers which
+   are translated at the boundary. One client handles OpenAI, Anthropic,
+   Qwen, local Ollama, etc."
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
@@ -53,6 +54,8 @@
 (defonce ^AtomicLong ^:private provider-rate-limit-cleanup (AtomicLong. 0))
 (def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private rate-limit-window-ms 60000)
+(def ^:private anthropic-api-version "2023-06-01")
+(def ^:private default-anthropic-max-tokens 4096)
 
 (defn- long-max
   ^long [^long a ^long b]
@@ -124,6 +127,23 @@
       (:allow-private-network? provider)
       (loopback-base-url? (or (:llm.provider/base-url provider)
                               (:base-url provider)))))
+
+(defn- normalize-base-url
+  [base-url]
+  (str/replace (str (or base-url "")) #"/+$" ""))
+
+(defn- base-url-host
+  [base-url]
+  (try
+    (some-> base-url normalize-base-url URI. .getHost str/lower-case)
+    (catch Exception _
+      nil)))
+
+(defn- provider-family-from-base-url
+  [base-url]
+  (if (= "api.anthropic.com" (base-url-host base-url))
+    :anthropic
+    :openai))
 
 (defn vision-capable?
   "True when a provider is configured to accept image input."
@@ -466,16 +486,18 @@
       (assoc :finish-reason (get choice "finish_reason")))))
 
 (defn- finalized-stream-message
-  [{:keys [role content tool-calls finish-reason]}]
-  {"choices"
-   [{"finish_reason" finish-reason
-     "message"
-     (cond-> {"role" (or role "assistant")
-              "content" (or content "")}
-       (seq tool-calls)
-       (assoc "tool_calls" (vec (remove nil? tool-calls))))}]})
+  [{:keys [role content tool-calls finish-reason usage]}]
+  (cond-> {"choices"
+           [{"finish_reason" finish-reason
+             "message"
+             (cond-> {"role" (or role "assistant")
+                      "content" (or content "")}
+               (seq tool-calls)
+               (assoc "tool_calls" (vec (remove nil? tool-calls))))}]}
+    (map? usage)
+    (assoc "usage" usage)))
 
-(defn- parse-response-body
+(defn- parse-json-body
   [body provider-id workload]
   (try
     (json/read-json body)
@@ -614,6 +636,390 @@
       (contains? message "content") (assoc "content" (or content ""))
       (nil? content) (assoc "content" ""))))
 
+(declare streaming-request?)
+
+(defn- provider-api-key
+  [provider]
+  (some-> (or (:llm.provider/api-key provider)
+              (:api-key provider))
+          str/trim
+          not-empty))
+
+(defn- provider-api-headers
+  [provider-family {:keys [api-key auth-header]}]
+  (case provider-family
+    :anthropic
+    (cond-> {"anthropic-version" anthropic-api-version}
+      api-key (assoc "x-api-key" api-key)
+      (and (nil? api-key) (some? auth-header)) (assoc "Authorization" auth-header))
+
+    :openai
+    (cond-> {}
+      (some? auth-header) (assoc "Authorization" auth-header)
+      (and (nil? auth-header) api-key) (assoc "Authorization" (str "Bearer " api-key)))
+
+    {}))
+
+(defn- message-role
+  [message]
+  (some-> (or (:role message)
+              (get message "role"))
+          name))
+
+(defn- message-content
+  [message]
+  (or (:content message)
+      (get message "content")))
+
+(defn- message-tool-calls
+  [message]
+  (or (:tool_calls message)
+      (:tool-calls message)
+      (get message "tool_calls")
+      (get message "tool-calls")))
+
+(defn- message-tool-call-id
+  [message]
+  (some-> (or (:tool_call_id message)
+              (:tool-call-id message)
+              (get message "tool_call_id")
+              (get message "tool-call_id"))
+          str
+          str/trim
+          not-empty))
+
+(defn- parse-tool-call-arguments
+  [arguments]
+  (cond
+    (map? arguments)
+    arguments
+
+    (nil? arguments)
+    {}
+
+    (string? arguments)
+    (let [arguments (str/trim arguments)]
+      (cond
+        (str/blank? arguments)
+        {}
+
+        :else
+        (try
+          (let [parsed (json/read-json arguments)]
+            (if (map? parsed)
+              parsed
+              {"value" parsed}))
+          (catch Exception _
+            {"raw_arguments" arguments}))))
+
+    :else
+    {"value" arguments}))
+
+(defn- content-part-type
+  [part]
+  (some-> (or (:type part)
+              (get part "type"))
+          str
+          str/lower-case))
+
+(defn- image-url-value
+  [part]
+  (or (get-in part [:image_url :url])
+      (get-in part [:image-url :url])
+      (get-in part ["image_url" "url"])
+      (get-in part ["image-url" "url"])))
+
+(defn- data-url-image-source
+  [url]
+  (when-let [[_ media-type data] (and (string? url)
+                                      (re-matches #"(?is)^data:([^;,]+);base64,(.+)$" url))]
+    {"type" "base64"
+     "media_type" (str/lower-case media-type)
+     "data" data}))
+
+(defn- anthropic-image-source
+  [url]
+  (or (data-url-image-source url)
+      (when (seq (some-> url str str/trim))
+        {"type" "url"
+         "url" url})))
+
+(defn- anthropic-content-block
+  [part]
+  (cond
+    (string? part)
+    (when (seq part)
+      {"type" "text"
+       "text" part})
+
+    (map? part)
+    (case (content-part-type part)
+      "text"
+      (when-let [text (content-part-text part)]
+        {"type" "text"
+         "text" text})
+
+      "image_url"
+      (when-let [source (some-> part image-url-value anthropic-image-source)]
+        {"type" "image"
+         "source" source})
+
+      "image"
+      (let [source (or (:source part)
+                       (get part "source"))]
+        (when (map? source)
+          {"type" "image"
+           "source" source}))
+
+      nil)
+
+    :else
+    nil))
+
+(defn- anthropic-content-blocks
+  [content]
+  (cond
+    (nil? content)
+    []
+
+    (string? content)
+    (if (seq content)
+      [{"type" "text"
+        "text" content}]
+      [])
+
+    (sequential? content)
+    (into [] (keep anthropic-content-block) content)
+
+    :else
+    (if-let [text (normalize-message-content content)]
+      [{"type" "text"
+        "text" text}]
+      [])))
+
+(defn- tool-call-id
+  [tool-call]
+  (some-> (or (:id tool-call)
+              (get tool-call "id"))
+          str
+          str/trim
+          not-empty))
+
+(defn- tool-call-name
+  [tool-call]
+  (some-> (or (:name tool-call)
+              (get tool-call "name")
+              (:name (:function tool-call))
+              (get-in tool-call ["function" "name"]))
+          str
+          str/trim
+          not-empty))
+
+(defn- tool-call-arguments
+  [tool-call]
+  (or (:arguments tool-call)
+      (get tool-call "arguments")
+      (:arguments (:function tool-call))
+      (get-in tool-call ["function" "arguments"])))
+
+(defn- openai-tool-call->anthropic-block
+  [tool-call]
+  (when-let [name (tool-call-name tool-call)]
+    (cond-> {"type" "tool_use"
+             "name" name
+             "input" (parse-tool-call-arguments (tool-call-arguments tool-call))}
+      (tool-call-id tool-call)
+      (assoc "id" (tool-call-id tool-call)))))
+
+(defn- anthropic-tool-result-block
+  [message]
+  (when-let [tool-use-id (message-tool-call-id message)]
+    (cond-> {"type" "tool_result"
+             "tool_use_id" tool-use-id}
+      (contains? message :content)
+      (assoc "content" (or (normalize-message-content (message-content message)) ""))
+
+      (contains? message "content")
+      (assoc "content" (or (normalize-message-content (message-content message)) "")))))
+
+(defn- flush-pending-tool-results
+  [messages pending-tool-results]
+  (if (seq pending-tool-results)
+    (conj messages {"role" "user"
+                    "content" (vec pending-tool-results)})
+    messages))
+
+(defn- build-anthropic-message-payload
+  [messages]
+  (loop [remaining messages
+         system-lines []
+         pending-tool-results []
+         acc []]
+    (if-let [message (first remaining)]
+      (let [role       (message-role message)
+            content    (message-content message)
+            tool-calls (message-tool-calls message)]
+        (case role
+          "system"
+          (recur (next remaining)
+                 (cond-> system-lines
+                   (seq (normalize-message-content content))
+                   (conj (normalize-message-content content)))
+                 pending-tool-results
+                 acc)
+
+          "tool"
+          (if-let [tool-result (anthropic-tool-result-block message)]
+            (recur (next remaining)
+                   system-lines
+                   (conj pending-tool-results tool-result)
+                   acc)
+            (recur (next remaining)
+                   system-lines
+                   []
+                   (conj (flush-pending-tool-results acc pending-tool-results)
+                         {"role" "user"
+                          "content" (anthropic-content-blocks content)})))
+
+          "assistant"
+          (recur (next remaining)
+                 system-lines
+                 []
+                 (conj (flush-pending-tool-results acc pending-tool-results)
+                       {"role" "assistant"
+                        "content" (into (anthropic-content-blocks content)
+                                        (keep openai-tool-call->anthropic-block)
+                                        tool-calls)}))
+
+          (recur (next remaining)
+                 system-lines
+                 []
+                 (conj (flush-pending-tool-results acc pending-tool-results)
+                       {"role" "user"
+                        "content" (anthropic-content-blocks content)}))))
+      (cond-> {:messages (flush-pending-tool-results acc pending-tool-results)}
+        (seq system-lines)
+        (assoc :system (str/join "\n\n" system-lines))))))
+
+(defn- tool-definition-function
+  [tool]
+  (or (:function tool)
+      (get tool "function")
+      tool))
+
+(defn- openai-tool->anthropic-tool
+  [tool]
+  (let [function    (tool-definition-function tool)
+        name        (some-> (or (:name function)
+                                (get function "name"))
+                            str
+                            str/trim
+                            not-empty)
+        description (some-> (or (:description function)
+                                (get function "description")
+                                (:description tool)
+                                (get tool "description"))
+                            str
+                            str/trim
+                            not-empty)
+        schema      (or (:parameters function)
+                        (get function "parameters")
+                        (:input_schema tool)
+                        (get tool "input_schema")
+                        {"type" "object"
+                         "properties" {}})]
+    (when name
+      (cond-> {"name" name
+               "input_schema" (if (map? schema)
+                                schema
+                                {"type" "object"
+                                 "properties" {}})}
+        description
+        (assoc "description" description)))))
+
+(defn- build-openai-request-body
+  [model messages {:keys [tools temperature max-tokens] :as opts}]
+  (cond-> {:model    model
+           :messages messages}
+    (seq tools) (assoc :tools tools)
+    (some? temperature) (assoc :temperature temperature)
+    (some? max-tokens) (assoc :max_tokens max-tokens)
+    (streaming-request? opts) (assoc :stream true)))
+
+(defn- build-anthropic-request-body
+  [model messages {:keys [tools temperature max-tokens] :as opts}]
+  (let [{:keys [messages system]} (build-anthropic-message-payload messages)]
+    (cond-> {:model      model
+             :messages   messages
+             :max_tokens (or max-tokens default-anthropic-max-tokens)}
+      (seq system) (assoc :system system)
+      (seq tools) (assoc :tools (into [] (keep openai-tool->anthropic-tool) tools))
+      (some? temperature) (assoc :temperature temperature)
+      (streaming-request? opts) (assoc :stream true))))
+
+(defn- anthropic-stop-reason->finish-reason
+  [stop-reason]
+  (case stop-reason
+    "end_turn" "stop"
+    "stop_sequence" "stop"
+    "tool_use" "tool_calls"
+    "max_tokens" "length"
+    stop-reason))
+
+(defn- usage->openai-usage
+  [usage]
+  (let [prompt-tokens     (get usage "input_tokens")
+        completion-tokens (get usage "output_tokens")]
+    (when (or (some? prompt-tokens)
+              (some? completion-tokens))
+      {"prompt_tokens" (or prompt-tokens 0)
+       "completion_tokens" (or completion-tokens 0)
+       "total_tokens" (+ (long (or prompt-tokens 0))
+                         (long (or completion-tokens 0)))})))
+
+(defn- anthropic-tool-input->arguments
+  [input]
+  (if (nil? input)
+    "{}"
+    (json/write-json-str input)))
+
+(defn- anthropic-tool-block->openai-tool-call
+  [block]
+  (when (= "tool_use" (get block "type"))
+    {"id" (or (get block "id")
+              (str "tool_" (System/nanoTime)))
+     "type" "function"
+     "function" {"name" (or (get block "name") "")
+                 "arguments" (anthropic-tool-input->arguments (get block "input"))}}))
+
+(defn- anthropic-response->openai-response
+  [response]
+  (let [content     (or (get response "content") [])
+        text        (->> content
+                         (filter #(= "text" (get % "type")))
+                         (map #(or (get % "text") ""))
+                         (apply str))
+        tool-calls  (into [] (keep anthropic-tool-block->openai-tool-call) content)
+        message     (cond-> {"role" (or (get response "role") "assistant")}
+                      (or (seq text) (seq tool-calls))
+                      (assoc "content" (if (seq text) text ""))
+
+                      (seq tool-calls)
+                      (assoc "tool_calls" tool-calls))
+        usage       (usage->openai-usage (get response "usage"))]
+    (cond-> {"choices"
+             [{"finish_reason" (anthropic-stop-reason->finish-reason
+                                 (get response "stop_reason"))
+               "message" message}]}
+      usage
+      (assoc "usage" usage))))
+
+(defn- normalize-chat-response
+  [provider-family response]
+  (case provider-family
+    :anthropic (anthropic-response->openai-response response)
+    response))
+
 (defn- streaming-request?
   [opts]
   (fn? (:on-delta opts)))
@@ -636,21 +1042,23 @@
 
 (defn- build-request
   "Build the HTTP request map for a chat completion call."
-  [{:keys [base-url auth-header api-key model allow-private-network?]} messages {:keys [tools temperature max-tokens] :as opts}]
-  (let [auth-header (or auth-header
-                        (when-let [api-key (some-> api-key str/trim not-empty)]
-                          (str "Bearer " api-key)))
-        body (cond-> {:model    model
-                      :messages messages}
-               tools       (assoc :tools tools)
-               temperature (assoc :temperature temperature)
-               max-tokens  (assoc :max_tokens max-tokens)
-               (streaming-request? opts) (assoc :stream true))]
-    {:url           (str base-url "/chat/completions")
+  [{:keys [base-url auth-header api-key model allow-private-network? provider-family]} messages opts]
+  (let [provider-family (or provider-family
+                            (provider-family-from-base-url base-url))
+        base-url        (normalize-base-url base-url)
+        api-key         (some-> api-key str/trim not-empty)
+        body            (case provider-family
+                          :anthropic (build-anthropic-request-body model messages opts)
+                          (build-openai-request-body model messages opts))]
+    {:url           (str base-url
+                         (case provider-family
+                           :anthropic "/messages"
+                           "/chat/completions"))
      :method        :post
-     :headers       (cond-> {"Content-Type" "application/json"}
-                      (some? auth-header)
-                      (assoc "Authorization" auth-header))
+     :headers       (merge {"Content-Type" "application/json"}
+                           (provider-api-headers provider-family
+                                                 {:api-key api-key
+                                                  :auth-header auth-header}))
      :body          (json/write-json-str body)
      :allow-private-network? (boolean allow-private-network?)
      :timeout       request-timeout-ms
@@ -769,8 +1177,128 @@
                   :workload    workload
                   :limit       limit})))))
 
+(defn- anthro-stream-tool-input->arguments
+  [input]
+  (cond
+    (nil? input)
+    ""
+
+    (and (map? input) (empty? input))
+    ""
+
+    :else
+    (json/write-json-str input)))
+
+(defn- finalize-stream-tool-call
+  [tool-call]
+  (update-in tool-call ["function" "arguments"]
+             (fn [arguments]
+               (if (seq arguments)
+                 arguments
+                 "{}"))))
+
+(defn- finalized-anthropic-stream-message
+  [state]
+  (finalized-stream-message
+    (update state :tool-calls
+            (fn [tool-calls]
+              (mapv finalize-stream-tool-call
+                    (remove nil? tool-calls))))))
+
+(defn- handle-openai-stream-event!
+  [stream-state {:keys [data]} opts provider-id workload]
+  (cond
+    (str/blank? data)
+    nil
+
+    (= "[DONE]" data)
+    (vswap! stream-state assoc :done? true)
+
+    :else
+    (let [chunk  (parse-json-body data provider-id workload)
+          choice (get-in chunk ["choices" 0])]
+      (vswap! stream-state merge-choice-delta choice)
+      (when-let [content (get-in choice ["delta" "content"])]
+        (when-let [on-delta (:on-delta opts)]
+          (on-delta {:provider-id provider-id
+                     :workload workload
+                     :delta content
+                     :content (:content @stream-state)}))))))
+
+(defn- handle-anthropic-stream-event!
+  [stream-state {:keys [event data]} opts provider-id workload]
+  (when-not (str/blank? data)
+    (let [chunk      (parse-json-body data provider-id workload)
+          event-type (or event (get chunk "type"))]
+      (case event-type
+        "ping"
+        nil
+
+        "message_start"
+        (let [message (or (get chunk "message") {})]
+          (vswap! stream-state
+                  (fn [state]
+                    (cond-> state
+                      (get message "role")
+                      (assoc :role (get message "role"))
+
+                      (usage->openai-usage (get message "usage"))
+                      (assoc :usage (usage->openai-usage (get message "usage")))))))
+
+        "content_block_start"
+        (let [index (long (or (get chunk "index") 0))
+              block (or (get chunk "content_block") {})]
+          (when (= "tool_use" (get block "type"))
+            (vswap! stream-state update :tool-calls
+                    merge-tool-call-delta
+                    {"index" index
+                     "id" (get block "id")
+                     "type" "function"
+                     "function" {"name" (or (get block "name") "")
+                                 "arguments" (anthro-stream-tool-input->arguments
+                                               (get block "input"))}})))
+
+        "content_block_delta"
+        (let [index (long (or (get chunk "index") 0))
+              delta (or (get chunk "delta") {})
+              delta-type (get delta "type")]
+          (case delta-type
+            "text_delta"
+            (let [text (get delta "text")]
+              (vswap! stream-state update :content append-text text)
+              (when-let [on-delta (:on-delta opts)]
+                (on-delta {:provider-id provider-id
+                           :workload workload
+                           :delta text
+                           :content (:content @stream-state)})))
+
+            "input_json_delta"
+            (vswap! stream-state update :tool-calls
+                    merge-tool-call-delta
+                    {"index" index
+                     "function" {"arguments" (or (get delta "partial_json") "")}})
+
+            nil))
+
+        "message_delta"
+        (vswap! stream-state
+                (fn [state]
+                  (cond-> state
+                    (get-in chunk ["delta" "stop_reason"])
+                    (assoc :finish-reason
+                           (anthropic-stop-reason->finish-reason
+                             (get-in chunk ["delta" "stop_reason"])))
+
+                    (usage->openai-usage (get chunk "usage"))
+                    (assoc :usage (usage->openai-usage (get chunk "usage"))))))
+
+        "message_stop"
+        (vswap! stream-state assoc :done? true)
+
+        nil))))
+
 (defn- stream-chat-response
-  [stream-req fallback-req opts provider-id workload]
+  [provider-family stream-req fallback-req opts provider-id workload]
   (let [stream-state (volatile! {:role "assistant"
                                  :content ""
                                  :tool-calls []
@@ -779,30 +1307,20 @@
       (let [stream-resp (http/request-events
                           (assoc stream-req
                                  :on-event
-                                 (fn [{:keys [data]}]
-                                   (cond
-                                     (str/blank? data)
-                                     nil
+                                 (fn [event]
+                                   (case provider-family
+                                     :anthropic
+                                     (handle-anthropic-stream-event! stream-state event opts provider-id workload)
 
-                                     (= "[DONE]" data)
-                                     (vswap! stream-state assoc :done? true)
-
-                                     :else
-                                     (let [chunk  (parse-response-body data provider-id workload)
-                                           choice (get-in chunk ["choices" 0])]
-                                       (vswap! stream-state merge-choice-delta choice)
-                                       (when-let [content (get-in choice ["delta" "content"])]
-                                         (when-let [on-delta (:on-delta opts)]
-                                           (on-delta {:provider-id provider-id
-                                                      :workload workload
-                                                      :delta content
-                                                      :content (:content @stream-state)}))))))))]
+                                     (handle-openai-stream-event! stream-state event opts provider-id workload)))))]
         (when (and (:streamed? stream-resp)
                    (not (stream-complete? @stream-state)))
           (throw (incomplete-stream-ex provider-id workload @stream-state)))
         (if (:streamed? stream-resp)
           (assoc stream-resp
-                 :response (finalized-stream-message @stream-state))
+                 :response (case provider-family
+                             :anthropic (finalized-anthropic-stream-message @stream-state)
+                             (finalized-stream-message @stream-state)))
           stream-resp))
       (catch Exception e
         (if (recoverable-stream-error? e)
@@ -825,8 +1343,12 @@
       (account-connector/request-chat provider messages opts))
     (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
           model     (or (:llm.provider/model provider) (:model provider))
+          provider-family (provider-family-from-base-url base-url)
+          api-key   (provider-api-key provider)
           auth-header (provider-auth-header provider)
           request-config {:base-url base-url
+                          :provider-family provider-family
+                          :api-key api-key
                           :auth-header auth-header
                           :model model
                           :allow-private-network? (provider-allows-private-network? provider)}
@@ -841,7 +1363,12 @@
                                "model" model
                                (when workload (str "workload " workload)))
           resp      (if (streaming-request? opts)
-                      (stream-chat-response req fallback-req opts provider-id workload)
+                      (stream-chat-response provider-family
+                                            req
+                                            fallback-req
+                                            opts
+                                            provider-id
+                                            workload)
                       (http/request req))
           status    (:status resp)]
       (when (not= 200 status)
@@ -853,8 +1380,14 @@
                           :workload    workload})))
       (let [response (if (:streamed? resp)
                        (or (:response resp)
-                           (parse-response-body (:body resp) provider-id workload))
-                       (parse-response-body (:body resp) provider-id workload))]
+                           (normalize-chat-response provider-family
+                                                    (parse-json-body (:body resp)
+                                                                     provider-id
+                                                                     workload)))
+                       (normalize-chat-response provider-family
+                                                (parse-json-body (:body resp)
+                                                                 provider-id
+                                                                 workload)))]
         (when (:stream-recovered? resp)
           (maybe-report-recovered-stream-content! opts
                                                   provider-id
@@ -1053,13 +1586,14 @@
    Accepts a map with :base-url and optionally :api-key.
    Returns a sorted vector of model ID strings."
   [{:keys [base-url api-key]}]
-  (let [auth-header (when-let [k (some-> api-key str/trim not-empty)]
-                      (str "Bearer " k))
-        allow-private? (loopback-base-url? base-url)
-        resp (http/request {:url     (str base-url "/models")
+  (let [provider-family (provider-family-from-base-url base-url)
+        base-url        (normalize-base-url base-url)
+        api-key         (some-> api-key str/trim not-empty)
+        allow-private?  (loopback-base-url? base-url)
+        resp            (http/request {:url     (str base-url "/models")
                             :method  :get
-                            :headers (cond-> {}
-                                       auth-header (assoc "Authorization" auth-header))
+                            :headers (provider-api-headers provider-family
+                                                           {:api-key api-key})
                             :allow-private-network? allow-private?
                             :timeout 15000
                             :request-label "Fetch provider models"})]
@@ -1177,20 +1711,21 @@
    does not expose a usable metadata endpoint."
   [{:keys [base-url api-key model]}]
   (let [model-id        (some-> model str/trim not-empty)
-        auth-header     (when-let [k (some-> api-key str/trim not-empty)]
-                          (str "Bearer " k))
+        provider-family (provider-family-from-base-url base-url)
+        base-url        (normalize-base-url base-url)
+        api-key         (some-> api-key str/trim not-empty)
         allow-private?  (loopback-base-url? base-url)
         fallback        (let [{:keys [vision? source]} (infer-model-vision {"id" model-id})]
                           {:id model-id
                            :vision? vision?
                            :vision-source source})
-        metadata-url    (str (str/replace (str base-url) #"/+$" "")
+        metadata-url    (str base-url
                              "/models/"
                              (encode-model-path-segment model-id))
         resp            (http/request {:url     metadata-url
                                        :method  :get
-                                       :headers (cond-> {}
-                                                  auth-header (assoc "Authorization" auth-header))
+                                       :headers (provider-api-headers provider-family
+                                                                      {:api-key api-key})
                                        :allow-private-network? allow-private?
                                        :timeout 15000
                                        :request-label "Fetch provider model metadata"})]
