@@ -364,8 +364,8 @@
 (defn delete-message
   "Delete a Gmail message.
 
-   By default this moves the message to Trash. Pass :permanent? true to
-   permanently delete it instead."
+   By default this removes the message from the inbox and adds the Trash label.
+   Pass :permanent? true to permanently delete it instead."
   [message-id & {:keys [service-id permanent?]}]
   (let [service-id (resolve-service-id service-id)
         message-id (nonblank-str message-id)]
@@ -376,8 +376,11 @@
           method   (if permanent? :delete :post)
           path     (if permanent?
                      (str "/gmail/v1/users/me/messages/" message-id)
-                     (str "/gmail/v1/users/me/messages/" message-id "/trash"))
-          response (gmail-request service-id method path)
+                     (str "/gmail/v1/users/me/messages/" message-id "/modify"))
+          opts     (when-not permanent?
+                     {:body {"addLabelIds"    ["TRASH"]
+                             "removeLabelIds" ["INBOX" "UNREAD"]}})
+          response (apply gmail-request service-id method path (mapcat identity opts))
           body     (:body response)]
       {:service-id (name service-id)
        :status     status

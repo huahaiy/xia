@@ -228,8 +228,12 @@
                 :labels ["TRASH"]}
                result))
         (is (= :post (:method @captured)))
-        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/trash"
-               (:url @captured)))))))
+        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify"
+               (:url @captured)))
+        (is (= "application/json" (get-in @captured [:headers "Content-Type"])))
+        (let [payload (json/read-json (:body @captured))]
+          (is (= ["TRASH"] (get payload "addLabelIds")))
+          (is (= ["INBOX" "UNREAD"] (get payload "removeLabelIds"))))))))
 
 (deftest delete-message-permanently-deletes-when-requested
   (db/register-service! {:id        :gmail

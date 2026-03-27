@@ -1,5 +1,6 @@
 (ns xia.tool-test
-  (:require [clojure.test :refer :all]
+  (:require [charred.api :as json]
+            [clojure.test :refer :all]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.db :as db]
@@ -570,7 +571,9 @@
                        :body "{\"id\":\"sent-1\",\"threadId\":\"t1\",\"labelIds\":[\"SENT\"]}"}
 
                       (and (= :post (:method req))
-                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/trash" (:url req)))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify" (:url req))
+                           (= ["TRASH"] (get (json/read-json (:body req)) "addLabelIds"))
+                           (= ["INBOX" "UNREAD"] (get (json/read-json (:body req)) "removeLabelIds")))
                       {:status 200
                        :headers {"content-type" "application/json"}
                        :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"}
