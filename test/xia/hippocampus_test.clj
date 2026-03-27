@@ -557,6 +557,23 @@
         (is (.contains ^String (:context episode) "Local documents referenced: paper.md"))
         (is (.contains ^String (:context episode) "Artifacts referenced: Findings"))))))
 
+(deftest test-record-conversation-skips-background-consolidation-during-shutdown
+  (let [session-id (db/create-session! :terminal)
+        consolidations (atom 0)]
+    (db/add-message! session-id :user "hello")
+    (db/add-message! session-id :assistant "hi there")
+    (hippo/reset-runtime!)
+    (try
+      (hippo/prepare-shutdown!)
+      (with-redefs [xia.hippocampus/summarize-conversation (constantly "summary")
+                    xia.hippocampus/consolidate-pending! (fn []
+                                                          (swap! consolidations inc))]
+        (hippo/record-conversation! session-id :terminal)
+        (hippo/await-background-tasks!)
+        (is (zero? @consolidations)))
+      (finally
+        (hippo/reset-runtime!)))))
+
 ;; ---------------------------------------------------------------------------
 ;; maintain-knowledge! — confidence decay
 ;; ---------------------------------------------------------------------------

@@ -2250,6 +2250,10 @@
   (let [eids (q '[:find ?e :where [?e :service/id _]])]
     (mapv #(decrypt-entity (raw-entity (first %))) eids)))
 
+(defn remove-service! [service-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] service-id))]
+    (transact! [[:db/retractEntity eid]])))
+
 (defn enable-service! [service-id enabled?]
   (transact! [{:service/id service-id :service/enabled? enabled?}]))
 

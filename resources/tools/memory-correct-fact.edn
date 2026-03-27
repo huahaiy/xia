@@ -1,0 +1,24 @@
+;; Correct a wrong long-term memory fact by retracting it and saving the replacement.
+;; Import with: /import-tool resources/tools/memory-correct-fact.edn
+
+{:id          :memory-correct-fact
+ :name        "memory-correct-fact"
+ :description "Correct a stored long-term memory fact when the user explicitly says Xia remembered something incorrectly. This retracts the exact wrong fact and stores the replacement."
+ :tags        #{:memory :knowledge :correction}
+ :approval    :always
+ :parameters  {"type"       "object"
+               "properties" {"old_fact"       {"type"        "string"
+                                              "description" "The exact wrong fact text currently stored in memory"}
+                             "corrected_fact" {"type"        "string"
+                                              "description" "The corrected fact text to store instead"}
+                             "entity_name"    {"type"        "string"
+                                              "description" "Optional entity or node name to narrow the match when similar facts exist"}
+                             "fact_id"        {"type"        "integer"
+                                              "description" "Optional fact id returned by a prior ambiguous/not_found result to target one specific fact"}} 
+               "required"   ["old_fact" "corrected_fact"]}
+ :handler     "(fn [args]
+                 (xia.memory-edit/correct-fact!
+                   {:fact-id        (get args \"fact_id\")
+                    :old-fact       (get args \"old_fact\")
+                    :corrected-fact (get args \"corrected_fact\")
+                    :entity-name    (get args \"entity_name\")}))"}

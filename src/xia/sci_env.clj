@@ -24,6 +24,7 @@
             [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
+            [xia.memory-edit :as memory-edit]
             [xia.peer :as peer]
             [xia.scratch :as scratch]
             [xia.schedule :as schedule]
@@ -93,6 +94,9 @@
 (def ^:private xia-memory-ns
   (merge xia-memory-read-ns
          xia-memory-write-blocked-ns))
+
+(def ^:private xia-memory-edit-ns
+  {'correct-fact! memory-edit/correct-fact!})
 
 (def ^:private xia-wm-ns
   {'get-wm      wm/get-wm
@@ -164,7 +168,8 @@
 (def ^:private xia-email-ns
   {'list-messages email/list-messages
    'read-message  email/read-message
-   'send-message  email/send-message})
+   'send-message  email/send-message
+   'delete-message email/delete-message})
 
 (def ^:private xia-web-ns
   {'fetch-page   web/fetch-page
@@ -294,6 +299,7 @@
                   'clojure.java.shell sci-shell-overrides
                   'clojure.repl       sci-repl-overrides
                   'xia.memory         xia-memory-ns
+                  'xia.memory-edit    xia-memory-edit-ns
                   'xia.working-memory xia-wm-ns
                   'xia.skill          xia-skill-ns
                   'xia.schedule       xia-schedule-ns

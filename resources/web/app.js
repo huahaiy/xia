@@ -253,7 +253,6 @@ const oauthAccountCardEl = document.getElementById('oauth-account-card');
 const oauthAccountListEl = document.getElementById('oauth-account-list');
 const oauthTemplateEl = document.getElementById('oauth-template');
 const oauthTemplateNoteEl = document.getElementById('oauth-template-note');
-const applyOauthTemplateEl = document.getElementById('apply-oauth-template');
 const oauthAccountIdEl = document.getElementById('oauth-account-id');
 const oauthAccountNameEl = document.getElementById('oauth-account-name');
 const oauthConnectionModeEl = document.getElementById('oauth-connection-mode');
@@ -281,9 +280,7 @@ const oauthTokenParamsFieldEl = document.getElementById('oauth-token-params-fiel
 const oauthTokenParamsEl = document.getElementById('oauth-token-params');
 const oauthAccountAutonomousApprovedEl = document.getElementById('oauth-account-autonomous-approved');
 const oauthAccountStatusEl = document.getElementById('oauth-account-status');
-const newOauthAccountEl = document.getElementById('new-oauth-account');
 const saveOauthAccountEl = document.getElementById('save-oauth-account');
-const oauthAccountCreateServiceEl = document.getElementById('oauth-account-create-service');
 const connectOauthAccountEl = document.getElementById('connect-oauth-account');
 const refreshOauthAccountEl = document.getElementById('refresh-oauth-account');
 const deleteOauthAccountEl = document.getElementById('delete-oauth-account');
@@ -456,7 +453,9 @@ function currentActivityText() {
   if (state.sending) {
     return 'Waiting for response...';
   }
-  return '';
+  return state.baseStatus && state.baseStatus !== 'Ready'
+    ? state.baseStatus
+    : 'Ready for input.';
 }
 
 function currentPillText() {
@@ -465,9 +464,70 @@ function currentPillText() {
   return state.baseStatus || 'Ready';
 }
 
+function statusToneFromText(text) {
+  const value = String(text || '').trim().toLowerCase();
+  if (!value || value === 'ready') return 'ready';
+  if (value.includes('approval')) return 'approval';
+  if (value.includes('failed') || value.includes('error')) return 'error';
+  if (value.includes('lost') || value.includes('retry') || value.includes('denied')) return 'warning';
+  if (value.includes('saved')
+      || value.includes('connected')
+      || value.includes('reconnected')
+      || value.includes('approved')
+      || value.includes('deleted')
+      || value.includes('copied')
+      || value.includes('opened')
+      || value.includes('uploaded')
+      || value.includes('imported')
+      || value.includes('downloaded')
+      || value.includes('created')
+      || value.includes('paired')
+      || value.includes('revoked')
+      || value.includes('refreshed')) {
+    return 'success';
+  }
+  return 'neutral';
+}
+
+function currentPillTone() {
+  if (state.pendingApproval) return 'approval';
+  if (state.sending) return 'working';
+  return statusToneFromText(state.baseStatus);
+}
+
+function currentActivityTone() {
+  if (state.pendingApproval) return 'approval';
+  if (state.sending && state.liveStatus) {
+    switch (state.liveStatus.phase) {
+      case 'approval': return 'approval';
+      case 'error': return 'error';
+      case 'llm':
+      case 'tool':
+      case 'tool-plan':
+      case 'working-memory':
+      case 'finalizing':
+        return 'working';
+      default:
+        return 'neutral';
+    }
+  }
+  if (state.sending) return 'working';
+  if (!state.baseStatus || state.baseStatus === 'Ready') return 'ready';
+  return statusToneFromText(state.baseStatus);
+}
+
 function syncStatus() {
-  statusEl.textContent = currentPillText();
-  activityStatusEl.textContent = currentActivityText();
+  const pillText = currentPillText();
+  const activityText = currentActivityText();
+  statusEl.textContent = pillText;
+  statusEl.dataset.tone = currentPillTone();
+  if (state.liveStatus && state.liveStatus.phase) {
+    statusEl.dataset.phase = state.liveStatus.phase;
+  } else {
+    delete statusEl.dataset.phase;
+  }
+  activityStatusEl.textContent = activityText;
+  activityStatusEl.dataset.tone = currentActivityTone();
 }
 
 function setStatus(text) {
@@ -672,6 +732,16 @@ function hideInfoTooltip(anchor) {
   if (infoTooltipEl) infoTooltipEl.hidden = true;
 }
 
+function bindInfoHintEvents(hint) {
+  if (!hint || hint.dataset.infoHintBound === 'true') return hint;
+  hint.addEventListener('mouseenter', () => showInfoTooltip(hint));
+  hint.addEventListener('mouseleave', () => hideInfoTooltip(hint));
+  hint.addEventListener('focus', () => showInfoTooltip(hint));
+  hint.addEventListener('blur', () => hideInfoTooltip(hint));
+  hint.dataset.infoHintBound = 'true';
+  return hint;
+}
+
 function buildInfoHint(text) {
   if (!text) return null;
   const hint = document.createElement('span');
@@ -681,11 +751,13 @@ function buildInfoHint(text) {
   hint.dataset.tooltip = text;
   hint.setAttribute('role', 'img');
   hint.setAttribute('aria-label', text);
-  hint.addEventListener('mouseenter', () => showInfoTooltip(hint));
-  hint.addEventListener('mouseleave', () => hideInfoTooltip(hint));
-  hint.addEventListener('focus', () => showInfoTooltip(hint));
-  hint.addEventListener('blur', () => hideInfoTooltip(hint));
-  return hint;
+  return bindInfoHintEvents(hint);
+}
+
+function bindStaticInfoHints() {
+  document.querySelectorAll('.info-hint[data-tooltip]').forEach((hint) => {
+    bindInfoHintEvents(hint);
+  });
 }
 
 function skillMeta(skill) {
@@ -2838,7 +2910,6 @@ function syncOauthAccountInputs() {
   oauthAuthParamsFieldEl.hidden = manualToken;
   oauthTokenParamsFieldEl.hidden = manualToken;
   oauthTemplateEl.disabled = state.oauthSaving || manualToken;
-  applyOauthTemplateEl.disabled = state.oauthSaving || manualToken;
   if (manualToken) {
     oauthTemplateNoteEl.textContent = 'Store a durable provider token directly. Xia will use it as an API credential without an OAuth browser flow.';
   } else {
@@ -3171,8 +3242,6 @@ function updateAdminButtons() {
   oauthAuthParamsEl.disabled = state.oauthSaving || manualOauthToken;
   oauthTokenParamsEl.disabled = state.oauthSaving || manualOauthToken;
   saveOauthAccountEl.disabled = state.oauthSaving;
-  newOauthAccountEl.disabled = state.oauthSaving;
-  oauthAccountCreateServiceEl.disabled = state.oauthSaving || !state.activeOauthAccountId;
   connectOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId || manualOauthToken;
   refreshOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId || manualOauthToken || !(activeOauthAccount && activeOauthAccount.refresh_token_configured);
   deleteOauthAccountEl.disabled = state.oauthSaving || !state.activeOauthAccountId;
@@ -4479,33 +4548,6 @@ function applyOauthTemplate() {
   syncOauthAccountInputs();
   updateAdminButtons();
   oauthClientIdEl.focus();
-}
-
-function createServiceFromOauthAccount() {
-  const account = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);
-  if (!account) {
-    oauthAccountStatusEl.textContent = 'Select a connection first.';
-    return;
-  }
-  const template = account.provider_template
-    ? state.admin.oauthProviderTemplates.find((entry) => entry.id === account.provider_template)
-    : null;
-  state.activeServiceId = '';
-  renderServiceList();
-  renderOauthAccountOptions();
-  serviceIdEl.value = (template && template.service_id) || account.id || '';
-  serviceNameEl.value = (template && template.service_name) || (firstNonEmpty(account.name, account.id) + ' API');
-  serviceBaseUrlEl.value = (template && template.api_base_url) || '';
-  serviceAuthTypeEl.value = 'oauth-account';
-  serviceAuthHeaderEl.value = '';
-  serviceOauthAccountEl.value = account.id || '';
-  serviceRateLimitEl.value = '';
-  serviceAuthKeyEl.value = '';
-  serviceAutonomousApprovedEl.checked = true;
-  serviceEnabledEl.checked = true;
-  serviceStatusEl.textContent = 'Service prefilled. Review and save it.';
-  updateAdminButtons();
-  serviceIdEl.focus();
 }
 
 async function deleteProvider() {
@@ -6268,19 +6310,19 @@ localDocOcrModelBackendEl.addEventListener('change', () => {
 });
 saveDatabaseBackupEl.addEventListener('click', () => saveDatabaseBackup());
 
-newOauthAccountEl.addEventListener('click', () => {
-  resetOauthAccountForm('Create a connection.');
-  oauthAccountIdEl.focus();
-});
-
 oauthConnectionModeEl.addEventListener('change', () => {
   syncOauthAccountInputs();
   updateAdminButtons();
 });
-oauthTemplateEl.addEventListener('change', () => renderOauthTemplateOptions());
-applyOauthTemplateEl.addEventListener('click', () => applyOauthTemplate());
+oauthTemplateEl.addEventListener('change', () => {
+  if (oauthTemplateEl.value) {
+    applyOauthTemplate();
+  } else {
+    renderOauthTemplateOptions();
+    updateAdminButtons();
+  }
+});
 saveOauthAccountEl.addEventListener('click', () => saveOauthAccount());
-oauthAccountCreateServiceEl.addEventListener('click', () => createServiceFromOauthAccount());
 connectOauthAccountEl.addEventListener('click', () => connectOauthAccount());
 refreshOauthAccountEl.addEventListener('click', () => refreshOauthAccount());
 deleteOauthAccountEl.addEventListener('click', () => deleteOauthAccount());
@@ -6400,6 +6442,7 @@ resetSiteForm('Loading...');
 renderCapabilities();
 updateAdminButtons();
 updateComposerState();
+bindStaticInfoHints();
 composerEl.focus();
 Promise.all([
   loadSessionMessages(),

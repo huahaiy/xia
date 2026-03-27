@@ -60,6 +60,11 @@ Rules:
   ;; Fact dedup depends on a current view of node facts. Keep the read/build/write
   ;; window serialized so concurrent consolidations do not fan out duplicates.
   (Object.))
+(defonce ^:private background-consolidation-state
+  (atom {:accepting? true
+         :tasks #{}}))
+(defonce ^:private background-consolidation-lock
+  (Object.))
 
 (def ^:private importance-prompt
   "You are rating which episodic memories deserve longer retention.
@@ -555,6 +560,55 @@ Rules:
                      :workload :memory-summary)]
     response))
 
+(defn reset-runtime!
+  "Re-enable background consolidation submission for a fresh runtime."
+  []
+  (locking background-consolidation-lock
+    (reset! background-consolidation-state
+            {:accepting? true
+             :tasks #{}})))
+
+(defn prepare-shutdown!
+  "Stop accepting new background consolidations and return the pending count."
+  []
+  (locking background-consolidation-lock
+    (let [{:keys [tasks]}
+          (swap! background-consolidation-state assoc :accepting? false)
+          pending (count tasks)]
+      (when (pos? pending)
+        (log/info "Waiting for" pending "hippocampus background task(s) before database close"))
+      pending)))
+
+(defn await-background-tasks!
+  "Block until currently tracked background consolidations finish."
+  []
+  (loop []
+    (when-let [task (locking background-consolidation-lock
+                      (first (:tasks @background-consolidation-state)))]
+      (try
+        @task
+        (catch Exception _
+          nil))
+      (recur))))
+
+(defn- submit-background-consolidation!
+  [session-id]
+  (locking background-consolidation-lock
+    (when (:accepting? @background-consolidation-state)
+      (let [self (promise)
+            task (future
+                   (let [me @self]
+                     (try
+                       (consolidate-pending!)
+                       (catch Exception e
+                         (log/error e "Background consolidation failed for session" session-id))
+                       (finally
+                         (locking background-consolidation-lock
+                           (swap! background-consolidation-state update :tasks disj me))))))]
+        (swap! background-consolidation-state update :tasks conj task)
+        (deliver self task)
+        task))))
+
 (defn- referenced-local-doc-names
   [messages]
   (->> messages
@@ -600,12 +654,8 @@ Rules:
            :channel      channel
            :session-id   session-id
            :participants (db/get-config :user/name)})
-        ;; Consolidate in the background
-        (future
-          (try
-            (consolidate-pending!)
-            (catch Exception e
-              (log/error e "Background consolidation failed for session" session-id))))))))
+        ;; Consolidate in the background when the runtime is accepting new work.
+        (submit-background-consolidation! session-id)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Knowledge maintenance

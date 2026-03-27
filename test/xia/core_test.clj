@@ -282,18 +282,54 @@
       #(core/start-server-runtime! options))
     (is (empty? @calls))))
 
+(deftest initialize-runtime-resets-background-workers-before-starting-scheduler
+  (let [calls (atom [])]
+    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [_] nil)
+                     #'xia.db/connect! (fn [_ _] nil)
+                     #'xia.crypto/current-key-source (fn [] :passphrase)
+                     #'xia.setup/needs-setup? (constantly false)
+                     #'xia.identity/init-identity! (fn [] (swap! calls conj :identity/init))
+                     #'xia.hippocampus/reset-runtime! (fn [] (swap! calls conj :hippo/reset))
+                     #'xia.llm/reset-runtime! (fn [] (swap! calls conj :llm/reset))
+                     #'xia.instance-supervisor/configure! (fn [_] (swap! calls conj :instance-supervisor/configure))
+                     #'xia.tool/ensure-bundled-tools! (fn [] 0)
+                     #'xia.tool/reset-runtime! (fn [] (swap! calls conj :tool/reset))
+                     #'xia.tool/load-all-tools! (fn [] (swap! calls conj :tool/load))
+                     #'xia.tool/registered-tools (fn [] [])
+                     #'xia.skill/all-enabled-skills (fn [] [])
+                     #'xia.scheduler/start! (fn [] (swap! calls conj :scheduler/start))}
+      #(#'xia.core/initialize-runtime! {:db "/tmp/xia-dev-repl"
+                                        :mode "server"
+                                        :instance "dev"}))
+    (is (= [:hippo/reset
+            :llm/reset
+            :instance-supervisor/configure
+            :identity/init
+            :tool/reset
+            :tool/load
+            :scheduler/start]
+           @calls))))
+
 (deftest cleanup-stops-managed-instances-before-closing-db
   (let [calls   (atom [])
         cleanup (#'xia.core/make-cleanup {:db "/tmp/xia-dev-repl"})]
-    (with-redefs-fn {#'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
+    (with-redefs-fn {#'xia.hippocampus/prepare-shutdown! (fn [] (swap! calls conj :hippo/prepare))
+                     #'xia.llm/prepare-shutdown! (fn [] (swap! calls conj :llm/prepare))
+                     #'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
                      #'xia.scheduler/stop! (fn [] (swap! calls conj :scheduler/stop))
                      #'xia.instance-supervisor/shutdown! (fn [] (swap! calls conj :instance-supervisor/shutdown))
+                     #'xia.hippocampus/await-background-tasks! (fn [] (swap! calls conj :hippo/await))
+                     #'xia.llm/await-background-tasks! (fn [] (swap! calls conj :llm/await))
                      #'xia.db/close! (fn [] (swap! calls conj :db/close))
                      #'xia.core/save-archive! (fn [_] (swap! calls conj :save-archive))}
       cleanup)
-    (is (= [:http/stop
+    (is (= [:hippo/prepare
+            :llm/prepare
+            :http/stop
             :scheduler/stop
             :instance-supervisor/shutdown
+            :hippo/await
+            :llm/await
             :db/close
             :save-archive]
            @calls))))
@@ -330,14 +366,22 @@
 
 (deftest stop-runtime-stops-process-components
   (let [calls (atom [])]
-    (with-redefs-fn {#'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
+    (with-redefs-fn {#'xia.hippocampus/prepare-shutdown! (fn [] (swap! calls conj :hippo/prepare))
+                     #'xia.llm/prepare-shutdown! (fn [] (swap! calls conj :llm/prepare))
+                     #'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
                      #'xia.scheduler/stop! (fn [] (swap! calls conj :scheduler/stop))
+                     #'xia.hippocampus/await-background-tasks! (fn [] (swap! calls conj :hippo/await))
+                     #'xia.llm/await-background-tasks! (fn [] (swap! calls conj :llm/await))
                      #'xia.db/close! (fn [] (swap! calls conj :db/close))
                      #'xia.core/save-archive! (fn [options]
                                                 (swap! calls conj [:save-archive (:db options)]))}
       #(core/stop-runtime! {:db "/tmp/xia-dev-repl"}))
-    (is (= [:http/stop
+    (is (= [:hippo/prepare
+            :llm/prepare
+            :http/stop
             :scheduler/stop
+            :hippo/await
+            :llm/await
             :db/close
             [:save-archive "/tmp/xia-dev-repl"]]
            @calls))))

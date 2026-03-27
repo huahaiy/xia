@@ -1925,7 +1925,8 @@
                                                                      "token_params" ""
                                                                      "autonomous_approved" true})})
         save-body     (response-json save-response)
-        account       (db/get-oauth-account :google)]
+        account       (db/get-oauth-account :google)
+        service       (db/get-service :google)]
     (is (= 200 (:status save-response)))
     (is (= "Google Workspace" (get-in save-body ["oauth_account" "name"])))
     (is (= "oauth-flow" (get-in save-body ["oauth_account" "connection_mode"])))
@@ -1935,7 +1936,10 @@
     (is (= true (:oauth.account/autonomous-approved? account)))
     (is (= :oauth-flow (:oauth.account/connection-mode account)))
     (is (= :google (:oauth.account/provider-template account)))
-    (is (= "{\"access_type\":\"offline\"}" (:oauth.account/auth-params account))))
+    (is (= "{\"access_type\":\"offline\"}" (:oauth.account/auth-params account)))
+    (is (= :oauth-account (:service/auth-type service)))
+    (is (= :google (:service/oauth-account service)))
+    (is (= "https://www.googleapis.com" (:service/base-url service))))
   (with-redefs [xia.oauth/start-authorization!
                 (fn [account-id callback-url]
                   (is (= :google account-id))
@@ -2069,19 +2073,50 @@
     (is (= true (:site-cred/autonomous-approved? site)))))
 
 (deftest oauth-callback-route-renders-success-page
-  (with-redefs [xia.oauth/callback-account-id (fn [_state] :google)
+  (db/register-oauth-account! {:id                :gmail-login
+                               :name              "Gmail Login"
+                               :provider-template :gmail})
+  (with-redefs [xia.oauth/callback-account-id (fn [_state] :gmail-login)
                 xia.oauth/complete-authorization!
                 (fn [state code]
                   (is (= "abc" state))
                   (is (= "secret-code" code))
-                  {:oauth.account/id :google})]
+                  (db/get-oauth-account :gmail-login))]
     (let [response (#'http/router {:uri            "/oauth/callback"
                                    :request-method :get
                                    :query-string   "state=abc&code=secret-code"})]
       (is (= 200 (:status response)))
       (is (= "text/html; charset=utf-8" (get-in response [:headers "Content-Type"])))
       (is (re-find #"OAuth connected" (:body response)))
-      (is (re-find #"xia-oauth-complete" (:body response))))))
+      (is (re-find #"xia-oauth-complete" (:body response)))
+      (is (= :gmail-login (:service/oauth-account (db/get-service :gmail)))))))
+
+(deftest admin-oauth-account-delete-removes-auto-created-template-service
+  (let [save-response (#'http/router {:uri            "/admin/oauth-accounts"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"id" "gmail-login"
+                                                                     "name" "Gmail Login"
+                                                                     "authorize_url" "https://accounts.google.com/o/oauth2/v2/auth"
+                                                                     "token_url" "https://oauth2.googleapis.com/token"
+                                                                     "client_id" "client-id"
+                                                                     "client_secret" "client-secret"
+                                                                     "provider_template" "gmail"
+                                                                     "scopes" "https://www.googleapis.com/auth/gmail.readonly"
+                                                                     "redirect_uri" ""
+                                                                     "auth_params" "{\"access_type\":\"offline\"}"
+                                                                     "token_params" ""
+                                                                     "autonomous_approved" true})})]
+    (is (= 200 (:status save-response)))
+    (is (= :gmail-login (:service/oauth-account (db/get-service :gmail))))
+    (let [delete-response (#'http/router {:uri            "/admin/oauth-accounts/gmail-login"
+                                          :request-method :delete
+                                          :headers        (ui-headers)})
+          delete-body     (response-json delete-response)]
+      (is (= 200 (:status delete-response)))
+      (is (= "deleted" (get delete-body "status")))
+      (is (nil? (db/get-oauth-account :gmail-login)))
+      (is (nil? (db/get-service :gmail))))))
 
 (deftest admin-provider-route-preserves-secret-and-switches-default
   (db/upsert-provider! {:id       :anthropic

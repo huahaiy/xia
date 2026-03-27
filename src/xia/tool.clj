@@ -69,6 +69,8 @@
    "tools/email-list.edn"
    "tools/email-read.edn"
    "tools/email-send.edn"
+   "tools/email-delete.edn"
+   "tools/memory-correct-fact.edn"
    "tools/local-doc-search.edn"
    "tools/local-doc-read.edn"
    "tools/schedule-list.edn"
@@ -621,7 +623,10 @@
    (if-let [{:keys [tool handler]} (get @registry tool-id)]
      (if (fn? handler)
        (try
-         (binding [prompt/*interaction-context* context
+         (binding [prompt/*interaction-context* (assoc context
+                                                       :tool-id tool-id
+                                                       :tool-name (or (:tool/name tool)
+                                                                      (name tool-id)))
                    wm/*session-id*            (or (:resource-session-id context)
                                                   (:session-id context))]
            (let [branch-blocked? (and (:branch-worker? context)

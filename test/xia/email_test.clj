@@ -78,6 +78,63 @@
                (:query-params (first @requests))))
         (is (= "Bearer tok" (get-in (first @requests) [:headers "Authorization"])))))))
 
+(deftest list-messages-auto-creates-gmail-service-from-gmail-oauth-account
+  (db/register-oauth-account! {:id                :gmail-login
+                               :name              "Gmail Login"
+                               :provider-template :gmail
+                               :access-token      "oauth-token"
+                               :token-type        "Bearer"})
+  (let [requests (atom [])]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj req)
+                    (cond
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"messages\":[],\"resultSizeEstimate\":0}"}
+
+                      :else
+                      (throw (ex-info "Unexpected Gmail request" {:request req}))))]
+      (let [result  (email/list-messages :max-results 3)
+            service (db/get-service :gmail)]
+        (is (= "gmail" (:service-id result)))
+        (is (= :oauth-account (:service/auth-type service)))
+        (is (= :gmail-login (:service/oauth-account service)))
+        (is (= "https://gmail.googleapis.com" (:service/base-url service)))
+        (is (= "Bearer oauth-token" (get-in (first @requests) [:headers "Authorization"])))
+        (is (= {"maxResults" 3
+                "q" "in:inbox"}
+               (:query-params (first @requests))))))))
+
+(deftest list-messages-treats-invalid-service-id-text-as-query
+  (db/register-service! {:id        :gmail
+                         :name      "Gmail"
+                         :base-url  "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key  "tok"})
+  (let [requests (atom [])]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj req)
+                    (cond
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"messages\":[],\"resultSizeEstimate\":0}"}
+
+                      :else
+                      (throw (ex-info "Unexpected Gmail request" {:request req}))))]
+      (let [result (email/list-messages :service-id "hyang@juji-inc.com"
+                                        :max-results 2)]
+        (is (= "gmail" (:service-id result)))
+        (is (= "in:inbox hyang@juji-inc.com" (:query result)))
+        (is (= {"maxResults" 2
+                "q" "in:inbox hyang@juji-inc.com"}
+               (:query-params (first @requests))))))))
+
 (deftest read-message-prefers-plain-text-and-preserves-newlines
   (db/register-service! {:id       :gmail
                          :name     "Gmail"
@@ -149,3 +206,51 @@
         (is (re-find #"(?m)^References: <older-1@example.com> <older-2@example.com>$" raw))
         (is (re-find #"(?m)^Subject: Quarterly update$" raw))
         (is (str/includes? raw "\r\n\r\nAll done."))))))
+
+(deftest delete-message-moves-message-to-trash-by-default
+  (db/register-service! {:id        :gmail
+                         :name      "Gmail"
+                         :base-url  "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key  "tok"})
+  (let [captured (atom nil)]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (reset! captured req)
+                    {:status 200
+                     :headers {"content-type" "application/json"}
+                     :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"})]
+      (let [result (email/delete-message "m1")]
+        (is (= {:service-id "gmail"
+                :status "trashed"
+                :id "m1"
+                :thread-id "t1"
+                :labels ["TRASH"]}
+               result))
+        (is (= :post (:method @captured)))
+        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/trash"
+               (:url @captured)))))))
+
+(deftest delete-message-permanently-deletes-when-requested
+  (db/register-service! {:id        :gmail
+                         :name      "Gmail"
+                         :base-url  "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key  "tok"})
+  (let [captured (atom nil)]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (reset! captured req)
+                    {:status 204
+                     :headers {}
+                     :body ""})]
+      (let [result (email/delete-message "m1" :permanent? true)]
+        (is (= {:service-id "gmail"
+                :status "deleted"
+                :id "m1"
+                :thread-id nil
+                :labels []}
+               result))
+        (is (= :delete (:method @captured)))
+        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1"
+               (:url @captured)))))))

@@ -51,6 +51,11 @@
 (defonce ^:private provider-health (atom {}))
 (defonce ^ConcurrentHashMap ^:private provider-rate-limits (ConcurrentHashMap.))
 (defonce ^AtomicLong ^:private provider-rate-limit-cleanup (AtomicLong. 0))
+(defonce ^:private async-log-state
+  (atom {:accepting? true
+         :tasks #{}}))
+(defonce ^:private async-log-lock
+  (Object.))
 (def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private rate-limit-window-ms 60000)
 (def ^:private anthropic-api-version "2023-06-01")
@@ -72,6 +77,54 @@
   "Return the known LLM workload route definitions."
   []
   workload-options)
+
+(defn reset-runtime!
+  "Re-enable async LLM log writes for a fresh runtime."
+  []
+  (locking async-log-lock
+    (reset! async-log-state
+            {:accepting? true
+             :tasks #{}})))
+
+(defn prepare-shutdown!
+  "Stop accepting new async LLM log writes and return the pending count."
+  []
+  (locking async-log-lock
+    (let [{:keys [tasks]} (swap! async-log-state assoc :accepting? false)
+          pending        (count tasks)]
+      (when (pos? pending)
+        (log/info "Waiting for" pending "LLM log write(s) before database close"))
+      pending)))
+
+(defn await-background-tasks!
+  "Block until tracked async LLM log writes finish."
+  []
+  (loop []
+    (when-let [task (locking async-log-lock
+                      (first (:tasks @async-log-state)))]
+      (try
+        @task
+        (catch Exception _
+          nil))
+      (recur))))
+
+(defn- submit-log-write!
+  [log-entry]
+  (locking async-log-lock
+    (when (:accepting? @async-log-state)
+      (let [self (promise)
+            task (future
+                   (let [me @self]
+                     (try
+                       (db/log-llm-call! log-entry)
+                       (catch Exception e
+                         (log/debug e "Failed to write LLM call log"))
+                       (finally
+                         (locking async-log-lock
+                           (swap! async-log-state update :tasks disj me))))))]
+        (swap! async-log-state update :tasks conj task)
+        (deliver self task)
+        task))))
 
 (defn- current-workload-id-set
   []
@@ -1432,9 +1485,7 @@
                               (assoc :prompt-tokens (get usage "prompt_tokens"))
                               (get usage "completion_tokens")
                               (assoc :completion-tokens (get usage "completion_tokens")))]
-            (future (try (db/log-llm-call! log-entry)
-                         (catch Exception e
-                           (log/debug e "Failed to write LLM call log")))))
+            (submit-log-write! log-entry))
           (catch Exception e
             (log/debug e "Failed to build LLM call log entry")))
         (if (:ok? result)

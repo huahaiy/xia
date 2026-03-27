@@ -511,12 +511,22 @@
                 </div>
               </div>
               <div class="field-grid">
-                <div class="field" style="max-width:240px">
-                  <label class="field-label" for="context-recent-history-message-limit">Recent History Window (Messages)</label>
+                <div class="field">
+                  <label class="field-label" for="context-recent-history-message-limit">
+                    Recent History Window (Messages)
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="How many of the newest messages stay in the prompt verbatim before older history is summarized into the recap."
+                          data-tooltip="How many of the newest messages stay in the prompt verbatim before older history is summarized into the recap.">?</span>
+                  </label>
                   <input type="number" id="context-recent-history-message-limit" class="text-input" min="4" step="1" placeholder="24">
                 </div>
-                <div class="field" style="max-width:240px">
-                  <label class="field-label" for="context-history-budget">Default History Budget (Tokens)</label>
+                <div class="field">
+                  <label class="field-label" for="context-history-budget">
+                    Default History Budget (Tokens)
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="The token budget reserved for conversation history after the system prompt and current request, before older history must be compacted."
+                          data-tooltip="The token budget reserved for conversation history after the system prompt and current request, before older history must be compacted.">?</span>
+                  </label>
                   <input type="number" id="context-history-budget" class="text-input" min="1" step="1" placeholder="8000">
                 </div>
               </div>
@@ -564,92 +574,92 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">API Auth</h3>
-                  <p class="panel-note">Store OAuth API credentials here. API services can link to them, and providers can reuse them when API sign-in is supported.</p>
+                  <p class="panel-note">Store OAuth API credentials here. Preset-backed connections create matching API services automatically, and providers can reuse them when API sign-in is supported.</p>
                 </div>
-                <button type="button" class="secondary" id="new-oauth-account">New connection</button>
               </div>
               <div class="admin-list" id="oauth-account-list"></div>
-              <div class="field-grid">
-                <div class="field full">
-                  <label class="field-label">Service Preset</label>
-                  <select id="oauth-template" class="text-input"></select>
-                  <p class="secret-note" id="oauth-template-note"></p>
-                  <button type="button" class="secondary" id="apply-oauth-template" style="margin-top:8px">Apply preset</button>
-                </div>
-                <div class="field advanced-only">
-                  <label class="field-label">Internal ID</label>
-                  <input type="text" id="oauth-account-id" class="text-input" placeholder="github">
-                </div>
-                <div class="field">
-                  <label class="field-label">Display Name</label>
-                  <input type="text" id="oauth-account-name" class="text-input" placeholder="GitHub">
-                </div>
-                <div class="field">
-                  <label class="field-label">Connection Type</label>
-                  <select id="oauth-connection-mode" class="text-input">
-                    <option value="oauth-flow">OAuth flow</option>
-                    <option value="manual-token">Manual API token</option>
-                  </select>
-                </div>
-                <div class="field full" id="oauth-access-token-field">
-                  <label class="field-label">Access Token</label>
-                  <input type="password" id="oauth-access-token" class="text-input" placeholder="Paste a durable provider token">
-                </div>
-                <div class="field" id="oauth-token-type-field">
-                  <label class="field-label">Token Type</label>
-                  <input type="text" id="oauth-token-type" class="text-input" placeholder="Bearer">
-                </div>
-                <div class="field" id="oauth-expires-at-field">
-                  <label class="field-label">Expires At (Optional)</label>
-                  <input type="text" id="oauth-expires-at" class="text-input" placeholder="2027-03-22T00:00:00Z">
-                </div>
-                <div class="field full advanced-only" id="oauth-authorize-url-field">
-                  <label class="field-label">Authorize URL</label>
-                  <input type="text" id="oauth-authorize-url" class="text-input">
-                </div>
-                <div class="field full advanced-only" id="oauth-token-url-field">
-                  <label class="field-label">Token URL</label>
-                  <input type="text" id="oauth-token-url" class="text-input">
-                </div>
-                <div class="field" id="oauth-client-id-field">
-                  <label class="field-label">Client ID</label>
-                  <input type="text" id="oauth-client-id" class="text-input">
-                </div>
-                <div class="field" id="oauth-client-secret-field">
-                  <label class="field-label">Client Secret</label>
-                  <input type="password" id="oauth-client-secret" class="text-input">
-                </div>
-                <div class="field full advanced-only" id="oauth-scopes-field">
-                  <label class="field-label">Scopes</label>
-                  <input type="text" id="oauth-scopes" class="text-input">
-                </div>
-                <div class="field full advanced-only" id="oauth-redirect-uri-field">
-                  <label class="field-label">Redirect URI (Optional)</label>
-                  <input type="text" id="oauth-redirect-uri" class="text-input" placeholder="Leave blank for default">
-                </div>
-                <div class="field advanced-only" id="oauth-auth-params-field">
-                  <label class="field-label">Auth Params (JSON)</label>
-                  <input type="text" id="oauth-auth-params" class="text-input" placeholder="{}">
-                </div>
-                <div class="field advanced-only" id="oauth-token-params-field">
-                  <label class="field-label">Token Params (JSON)</label>
-                  <input type="text" id="oauth-token-params" class="text-input" placeholder="{}">
-                </div>
-                <div class="field full">
-                  <div class="check-row">
-                    <input type="checkbox" id="oauth-account-autonomous-approved">
-                    <label class="check-label" for="oauth-account-autonomous-approved">Allow autonomous use of this OAuth account</label>
+              <div class="detail-panel">
+                <div class="detail-header">Connection details</div>
+                <div class="field-grid">
+                  <div class="field full">
+                    <label class="field-label">Service Preset</label>
+                    <select id="oauth-template" class="text-input"></select>
+                    <p class="secret-note" id="oauth-template-note"></p>
+                  </div>
+                  <div class="field advanced-only">
+                    <label class="field-label">Internal ID</label>
+                    <input type="text" id="oauth-account-id" class="text-input" placeholder="github">
+                  </div>
+                  <div class="field">
+                    <label class="field-label">Display Name</label>
+                    <input type="text" id="oauth-account-name" class="text-input" placeholder="GitHub">
+                  </div>
+                  <div class="field">
+                    <label class="field-label">Connection Type</label>
+                    <select id="oauth-connection-mode" class="text-input">
+                      <option value="oauth-flow">OAuth flow</option>
+                      <option value="manual-token">Manual API token</option>
+                    </select>
+                  </div>
+                  <div class="field full" id="oauth-access-token-field">
+                    <label class="field-label">Access Token</label>
+                    <input type="password" id="oauth-access-token" class="text-input" placeholder="Paste a durable provider token">
+                  </div>
+                  <div class="field" id="oauth-token-type-field">
+                    <label class="field-label">Token Type</label>
+                    <input type="text" id="oauth-token-type" class="text-input" placeholder="Bearer">
+                  </div>
+                  <div class="field" id="oauth-expires-at-field">
+                    <label class="field-label">Expires At (Optional)</label>
+                    <input type="text" id="oauth-expires-at" class="text-input" placeholder="2027-03-22T00:00:00Z">
+                  </div>
+                  <div class="field full advanced-only" id="oauth-authorize-url-field">
+                    <label class="field-label">Authorize URL</label>
+                    <input type="text" id="oauth-authorize-url" class="text-input">
+                  </div>
+                  <div class="field full advanced-only" id="oauth-token-url-field">
+                    <label class="field-label">Token URL</label>
+                    <input type="text" id="oauth-token-url" class="text-input">
+                  </div>
+                  <div class="field" id="oauth-client-id-field">
+                    <label class="field-label">Client ID</label>
+                    <input type="text" id="oauth-client-id" class="text-input">
+                  </div>
+                  <div class="field" id="oauth-client-secret-field">
+                    <label class="field-label">Client Secret</label>
+                    <input type="password" id="oauth-client-secret" class="text-input">
+                  </div>
+                  <div class="field full advanced-only" id="oauth-scopes-field">
+                    <label class="field-label">Scopes</label>
+                    <input type="text" id="oauth-scopes" class="text-input">
+                  </div>
+                  <div class="field full advanced-only" id="oauth-redirect-uri-field">
+                    <label class="field-label">Redirect URI (Optional)</label>
+                    <input type="text" id="oauth-redirect-uri" class="text-input" placeholder="Leave blank for default">
+                  </div>
+                  <div class="field advanced-only" id="oauth-auth-params-field">
+                    <label class="field-label">Auth Params (JSON)</label>
+                    <input type="text" id="oauth-auth-params" class="text-input" placeholder="{}">
+                  </div>
+                  <div class="field advanced-only" id="oauth-token-params-field">
+                    <label class="field-label">Token Params (JSON)</label>
+                    <input type="text" id="oauth-token-params" class="text-input" placeholder="{}">
+                  </div>
+                  <div class="field full">
+                    <div class="check-row">
+                      <input type="checkbox" id="oauth-account-autonomous-approved">
+                      <label class="check-label" for="oauth-account-autonomous-approved">Allow autonomous use of this OAuth account</label>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="composer-foot">
-                <div class="admin-status" id="oauth-account-status">Loading connections...</div>
-                <div class="actions">
-                  <button type="button" class="secondary" id="delete-oauth-account">Delete</button>
-                  <button type="button" class="secondary" id="oauth-account-create-service">Add to API list</button>
-                  <button type="button" class="secondary" id="refresh-oauth-account">Refresh</button>
-                  <button type="button" class="primary" id="connect-oauth-account">Connect Now</button>
-                  <button type="button" class="primary" id="save-oauth-account">Save details</button>
+                <div class="composer-foot">
+                  <div class="admin-status" id="oauth-account-status">Loading connections...</div>
+                  <div class="actions">
+                    <button type="button" class="secondary" id="delete-oauth-account">Delete</button>
+                    <button type="button" class="secondary" id="refresh-oauth-account">Refresh</button>
+                    <button type="button" class="primary" id="connect-oauth-account">Connect Now</button>
+                    <button type="button" class="primary" id="save-oauth-account">Save details</button>
+                  </div>
                 </div>
               </div>
             </div>

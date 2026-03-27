@@ -1381,6 +1381,41 @@
    :token_params  (json/write-json-str (or (:token-params template) {}))
    :notes         (:notes template)})
 
+(defn- oauth-account-template-service-spec
+  [account]
+  (when-let [template-id (:oauth.account/provider-template account)]
+    (when-let [template (oauth-template/get-template template-id)]
+      (let [service-id   (some-> (:service-id template) nonblank-str keyword)
+            service-name (or (nonblank-str (:service-name template))
+                             (nonblank-str (:name template)))
+            api-base-url (nonblank-str (:api-base-url template))]
+        (when (and service-id api-base-url)
+          {:id       service-id
+           :name     (or service-name (name service-id))
+           :base-url api-base-url})))))
+
+(defn- sync-template-service-for-oauth-account!
+  [account]
+  (when-let [{:keys [id name base-url]} (oauth-account-template-service-spec account)]
+    (let [existing (db/get-service id)]
+      (db/save-service! {:id            id
+                         :name          (or (some-> (:service/name existing) nonblank-str)
+                                            name)
+                         :base-url      base-url
+                         :auth-type     :oauth-account
+                         :oauth-account (:oauth.account/id account)})
+      (db/get-service id))))
+
+(defn- auto-managed-template-service-for-oauth-account
+  [account]
+  (when-let [{:keys [id base-url]} (oauth-account-template-service-spec account)]
+    (let [service (db/get-service id)]
+      (when (and service
+                 (= :oauth-account (:service/auth-type service))
+                 (= (:oauth.account/id account) (:service/oauth-account service))
+                 (= base-url (nonblank-str (:service/base-url service))))
+        service))))
+
 (defn- site->admin-body
   [site]
   {:id                  (some-> (:site-cred/id site) name)
@@ -3050,19 +3085,40 @@
                                :token-type    token-type
                                :expires-at    expires-at
                                :connected-at  connected-at})
-      (json-response 200 {:oauth_account (oauth-account->admin-body
-                                           (db/get-oauth-account account-id))}))
+      (let [saved-account (db/get-oauth-account account-id)]
+        (sync-template-service-for-oauth-account! saved-account)
+        (json-response 200 {:oauth_account (oauth-account->admin-body saved-account)})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
 (defn- handle-delete-oauth-account [account-id]
   (try
-    (let [oauth-id (parse-keyword-id account-id "oauth_account_id")]
+    (let [oauth-id             (parse-keyword-id account-id "oauth_account_id")
+          account              (db/get-oauth-account oauth-id)
+          linked-providers     (into []
+                                     (filter #(= oauth-id (:llm.provider/oauth-account %)))
+                                     (db/list-providers))
+          linked-services      (into []
+                                     (filter #(= oauth-id (:service/oauth-account %)))
+                                     (db/list-services))
+          auto-managed-service (some-> account auto-managed-template-service-for-oauth-account)
+          auto-managed-only?   (and (empty? linked-providers)
+                                    (= 1 (count linked-services))
+                                    auto-managed-service
+                                    (= (:service/id auto-managed-service)
+                                       (:service/id (first linked-services))))]
       (cond
-        (nil? (db/get-oauth-account oauth-id))
+        (nil? account)
         (json-response 404 {:error "oauth account not found"})
 
-        (db/oauth-account-in-use? oauth-id)
+        auto-managed-only?
+        (do
+          (db/remove-service! (:service/id auto-managed-service))
+          (db/remove-oauth-account! oauth-id)
+          (json-response 200 {:status "deleted"
+                              :oauth_account_id (name oauth-id)}))
+
+        (or (seq linked-providers) (seq linked-services))
         (json-response 409 {:error "oauth account is still referenced by a provider or service"})
 
         :else
@@ -3163,6 +3219,7 @@
       :else
       (try
         (let [account (oauth/complete-authorization! state code)]
+          (sync-template-service-for-oauth-account! account)
           (html-response (oauth-callback-page "ok"
                                               "OAuth connected"
                                               "Xia stored the new access token and can now use this account for online work."

@@ -3,11 +3,13 @@
             [xia.artifact :as artifact]
             [xia.browser :as browser]
             [xia.db :as db]
+            [xia.http-client :as http-client]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
+            [xia.memory :as memory]
             [xia.paths :as paths]
             [xia.prompt :as prompt]
-            [xia.test-helpers :refer [with-test-db]]
+            [xia.test-helpers :as th :refer [with-test-db]]
             [xia.tool :as tool]))
 
 (use-fixtures :each with-test-db)
@@ -160,6 +162,33 @@
                         defs)]
     (is (= "Annotated tool Requires user approval before execution."
            (get-in tool-def [:function :description])))))
+
+(deftest memory-correct-fact-tool-corrects-memory-with-one-approval
+  (tool/reset-runtime!)
+  (tool/import-tool-file! "resources/tools/memory-correct-fact.edn")
+  (let [node-eid   (th/seed-node! "Gmail" "service")
+        _          (th/seed-fact! node-eid "service_id: hyang@juji-inc.com")
+        approvals* (atom 0)
+        session-id (random-uuid)]
+    (prompt/register-approval! :terminal
+                               (fn [_]
+                                 (swap! approvals* inc)
+                                 true))
+    (try
+      (let [result (tool/execute-tool :memory-correct-fact
+                                      {"old_fact" "service_id: hyang@juji-inc.com"
+                                       "corrected_fact" "Gmail service id is gmail"
+                                       "entity_name" "Gmail"}
+                                      {:channel :terminal
+                                       :session-id session-id})
+            facts  (memory/node-facts-with-eids node-eid)]
+        (is (= "corrected" (:status result)))
+        (is (= 1 @approvals*))
+        (is (= ["Gmail service id is gmail"]
+               (mapv :content facts))))
+      (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)))))
 
 (deftest tool-definitions-are-scoped-by-context
   (tool/reset-runtime!)
@@ -454,6 +483,8 @@
     (is (= :email-list (:tool/id (db/get-tool :email-list))))
     (is (= :email-read (:tool/id (db/get-tool :email-read))))
     (is (= :email-send (:tool/id (db/get-tool :email-send))))
+    (is (= :email-delete (:tool/id (db/get-tool :email-delete))))
+    (is (= :session (:tool/approval (db/get-tool :email-delete))))
     (is (= :web-search (:tool/id (db/get-tool :web-search))))
     (is (= :browser-runtime-status (:tool/id (db/get-tool :browser-runtime-status))))
     (is (= :browser-bootstrap-runtime (:tool/id (db/get-tool :browser-bootstrap-runtime))))
@@ -486,6 +517,8 @@
                    "tasks"))
     (is (contains? (get-in (db/get-tool :email-send) [:tool/parameters "properties"])
                    "to"))
+    (is (contains? (get-in (db/get-tool :email-delete) [:tool/parameters "properties"])
+                   "message_id"))
     (is (contains? (get-in (db/get-tool :peer-chat) [:tool/parameters "properties"])
                    "service_id"))
     (is (contains? (get-in (db/get-tool :peer-instance-start) [:tool/parameters "properties"])
@@ -497,7 +530,7 @@
 
 (deftest bundled-email-tools-run-through-approved-service
   (tool/ensure-bundled-tools!)
-  (doseq [tool-id [:email-list :email-read :email-send]]
+  (doseq [tool-id [:email-list :email-read :email-send :email-delete]]
     (tool/load-tool! tool-id))
   (db/register-service! {:id                   :gmail
                          :name                 "Gmail"
@@ -536,6 +569,12 @@
                        :headers {"content-type" "application/json"}
                        :body "{\"id\":\"sent-1\",\"threadId\":\"t1\",\"labelIds\":[\"SENT\"]}"}
 
+                      (and (= :post (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/trash" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"}
+
                       :else
                       (throw (ex-info "Unexpected Gmail request" {:request req}))))]
       (let [context {:channel          :scheduler
@@ -545,7 +584,8 @@
             read    (tool/execute-tool :email-read {"message_id" "m1"} context)
             sent    (tool/execute-tool :email-send {"to" "boss@example.com"
                                                     "subject" "Re: Budget"
-                                                    "body" "Done"} context)]
+                                                    "body" "Done"} context)
+            deleted (tool/execute-tool :email-delete {"message_id" "m1"} context)]
         (is (= "gmail" (:service-id listed)))
         (is (= 1 (:returned-count listed)))
         (is (= "Budget" (get-in listed [:messages 0 :subject])))
@@ -553,7 +593,47 @@
         (is (= :plain (:body-kind read)))
         (is (= "sent" (:status sent)))
         (is (= "sent-1" (:id sent)))
+        (is (= "trashed" (:status deleted)))
+        (is (= "m1" (:id deleted)))
         (is (= "Bearer tok" (get-in (first @requests) [:headers "Authorization"])))))))
+
+(deftest bundled-email-delete-approval-is-cached-per-session
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :email-delete)
+  (db/register-service! {:id        :gmail
+                         :name      "Gmail"
+                         :base-url  "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key  "tok"})
+  (let [approvals* (atom 0)
+        requests*  (atom [])
+        session-id (random-uuid)]
+    (prompt/register-approval! :terminal
+                               (fn [_]
+                                 (swap! approvals* inc)
+                                 true))
+    (try
+      (with-redefs [http-client/request
+                    (fn [req]
+                      (swap! requests* conj req)
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"})]
+        (is (= "trashed"
+               (:status (tool/execute-tool :email-delete
+                                           {"message_id" "m1"}
+                                           {:channel :terminal
+                                            :session-id session-id}))))
+        (is (= "trashed"
+               (:status (tool/execute-tool :email-delete
+                                           {"message_id" "m2"}
+                                           {:channel :terminal
+                                            :session-id session-id}))))
+        (is (= 1 @approvals*))
+        (is (= 2 (count @requests*))))
+      (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)))))
 
 (deftest bundled-peer-tools-run-through-approved-service
   (tool/ensure-bundled-tools!)

@@ -402,6 +402,36 @@
            (llm/chat-simple [{"role" "user" "content" "hello"}]
                             :workload :assistant)))))
 
+(deftest chat-skips-async-log-write-during-shutdown
+  (let [logged? (atom false)]
+    (llm/reset-runtime!)
+    (try
+      (llm/prepare-shutdown!)
+      (with-redefs [xia.db/get-default-provider
+                    (constantly {:llm.provider/id :default
+                                 :llm.provider/base-url "https://api.example.com/v1"
+                                 :llm.provider/api-key "sk-test"
+                                 :llm.provider/model "gpt-test"})
+                    xia.llm/provider-health
+                    (atom {})
+                    xia.llm/max-provider-retry-rounds
+                    (constantly 4)
+                    xia.llm/max-provider-retry-wait-ms
+                    (constantly 300000)
+                    xia.http-client/request
+                    (fn [_]
+                      {:status 200
+                       :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})
+                    xia.db/log-llm-call!
+                    (fn [_]
+                      (reset! logged? true))]
+        (is (= "ok"
+               (llm/chat-simple [{"role" "user" "content" "hello"}])))
+        (llm/await-background-tasks!)
+        (is (false? @logged?)))
+      (finally
+        (llm/reset-runtime!)))))
+
 (deftest chat-simple-rejects-malformed-provider-response
   (with-redefs [xia.db/get-default-provider
                 (constantly {:llm.provider/id :default

@@ -14,7 +14,9 @@
             [xia.pack :as pack]
             [xia.setup :as setup]
             [xia.identity :as identity]
+            [xia.hippocampus :as hippo]
             [xia.instance-supervisor :as instance-supervisor]
+            [xia.llm :as llm]
             [xia.scheduler :as scheduler]
             [xia.skill :as skill]
             [xia.tool :as tool]
@@ -225,6 +227,8 @@
   (db/connect! db (merge {:passphrase-provider (startup-passphrase-provider mode)
                           :instance-id instance}
                          crypto-opts))
+  (hippo/reset-runtime!)
+  (llm/reset-runtime!)
   (maybe-seed-instance-template! (assoc options :template-instance template-instance))
   (instance-supervisor/configure! {:enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
                                    :command instance-command})
@@ -336,6 +340,14 @@
     (fn []
       (when (compare-and-set! ran? false true)
         (try
+          (hippo/prepare-shutdown!)
+          (catch Exception e
+            (log/error e "Failed to quiesce hippocampus background work during shutdown")))
+        (try
+          (llm/prepare-shutdown!)
+          (catch Exception e
+            (log/error e "Failed to quiesce LLM background work during shutdown")))
+        (try
           (http/stop!)
           (catch Exception e
             (log/error e "Failed to stop HTTP server during shutdown")))
@@ -347,6 +359,14 @@
           (instance-supervisor/shutdown!)
           (catch Exception e
             (log/error e "Failed to stop managed Xia instances during shutdown")))
+        (try
+          (hippo/await-background-tasks!)
+          (catch Exception e
+            (log/error e "Failed while waiting for hippocampus background work during shutdown")))
+        (try
+          (llm/await-background-tasks!)
+          (catch Exception e
+            (log/error e "Failed while waiting for LLM background work during shutdown")))
         (try
           (db/close!)
           (catch Exception e

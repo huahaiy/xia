@@ -28,6 +28,11 @@
     (string? service-id) (some-> service-id nonblank-str keyword)
     :else (keyword (str service-id))))
 
+(defn- service-id-text?
+  [value]
+  (boolean (re-matches #"[A-Za-z0-9._-]+"
+                       (or (nonblank-str value) ""))))
+
 (defn- normalize-base-url
   [base-url]
   (some-> base-url nonblank-str (str/replace #"/+$" "")))
@@ -37,6 +42,37 @@
   (= gmail-api-base-url
      (normalize-base-url (:service/base-url service))))
 
+(defn- connected-oauth-account?
+  [account]
+  (boolean (or (nonblank-str (:oauth.account/access-token account))
+               (nonblank-str (:oauth.account/refresh-token account)))))
+
+(defn- gmail-oauth-account?
+  [account]
+  (= :gmail (:oauth.account/provider-template account)))
+
+(defn- auto-gmail-oauth-account
+  []
+  (let [accounts   (->> (db/list-oauth-accounts)
+                        (filter gmail-oauth-account?)
+                        (sort-by #(some-> % :oauth.account/id name))
+                        vec)
+        connected  (into [] (filter connected-oauth-account?) accounts)]
+    (cond
+      (= 1 (count connected)) (first connected)
+      (= 1 (count accounts))   (first accounts)
+      :else                    nil)))
+
+(defn- ensure-auto-gmail-service!
+  []
+  (when-let [account (auto-gmail-oauth-account)]
+    (db/save-service! {:id            default-service-id
+                       :name          "Gmail"
+                       :base-url      gmail-api-base-url
+                       :auth-type     :oauth-account
+                       :oauth-account (:oauth.account/id account)})
+    default-service-id))
+
 (defn- detect-gmail-service-id
   []
   (or (when (some-> (db/get-service default-service-id) gmail-service?)
@@ -45,7 +81,8 @@
                (filter gmail-service?)
                (sort-by #(some-> % :service/id name))
                first
-               :service/id)))
+               :service/id)
+      (ensure-auto-gmail-service!)))
 
 (defn- resolve-service-id
   [service-id]
@@ -192,6 +229,30 @@
              seq
              (str/join " "))))
 
+(defn- list-request
+  [{:keys [service-id query] :as opts}]
+  (let [query* (nonblank-str query)
+        service-id-text (when (string? service-id)
+                          (nonblank-str service-id))
+        service-id* (cond
+                      (keyword? service-id)
+                      service-id
+
+                      (and service-id-text
+                           (service-id-text? service-id-text))
+                      (normalize-service-id service-id-text)
+
+                      :else
+                      nil)
+        query** (if (and (nil? query*)
+                         service-id-text
+                         (nil? service-id*))
+                  service-id-text
+                  query*)]
+    (assoc opts
+           :service-id service-id*
+           :query query**)))
+
 (defn- gmail-request
   [service-id method path & {:as opts}]
   (apply service/request service-id method path (mapcat identity opts)))
@@ -210,8 +271,11 @@
       :or   {max-results  default-max-results
              unread-only? false
              inbox-only?  true}}]
-  (let [service-id  (resolve-service-id service-id)
-        query-text  (format-query query unread-only? inbox-only?)
+  (let [{service-id* :service-id
+         query*      :query} (list-request {:service-id service-id
+                                            :query query})
+        service-id  (resolve-service-id service-id*)
+        query-text  (format-query query* unread-only? inbox-only?)
         response    (gmail-request service-id
                                    :get
                                    "/gmail/v1/users/me/messages"
@@ -296,3 +360,27 @@
      :id         (get-in response [:body "id"])
      :thread-id  (get-in response [:body "threadId"])
      :labels     (vec (or (get-in response [:body "labelIds"]) []))}))
+
+(defn delete-message
+  "Delete a Gmail message.
+
+   By default this moves the message to Trash. Pass :permanent? true to
+   permanently delete it instead."
+  [message-id & {:keys [service-id permanent?]}]
+  (let [service-id (resolve-service-id service-id)
+        message-id (nonblank-str message-id)]
+    (when-not message-id
+      (throw (ex-info "message-id is required"
+                      {:type :email/missing-message-id})))
+    (let [status   (if permanent? "deleted" "trashed")
+          method   (if permanent? :delete :post)
+          path     (if permanent?
+                     (str "/gmail/v1/users/me/messages/" message-id)
+                     (str "/gmail/v1/users/me/messages/" message-id "/trash"))
+          response (gmail-request service-id method path)
+          body     (:body response)]
+      {:service-id (name service-id)
+       :status     status
+       :id         (or (get body "id") message-id)
+       :thread-id  (get body "threadId")
+       :labels     (vec (or (get body "labelIds") []))})))
