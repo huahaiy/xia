@@ -171,6 +171,7 @@
    :workspace/source-not-found
    :workspace/payload-missing
    :workspace/missing-content
+   :email/invalid-body
    :instance-supervisor/capability-disabled
    :instance-supervisor/command-unavailable
    :instance-supervisor/invalid-instance-id
@@ -184,6 +185,11 @@
 (defn- expected-tool-input-error?
   [^Throwable e]
   (contains? expected-tool-input-error-types
+             (some-> e ex-data :type)))
+
+(defn- cancelled-tool-error?
+  [^Throwable e]
+  (contains? #{:request-cancelled :sci/shutdown}
              (some-> e ex-data :type)))
 
 (defn registered-tools
@@ -685,17 +691,28 @@
                                   :tool-name (or (:tool/name tool) (name tool-id))})
                  (approval-error tool-id error)))))
          (catch Exception e
-           (prompt/status! {:state   :error
-                            :phase   :tool
-                            :message (str "Tool " (name tool-id) " failed: " (.getMessage e))
-                            :tool-id tool-id
-                            :tool-name (or (:tool/name tool) (name tool-id))})
-           (if (expected-tool-input-error? e)
+           (let [cancelled? (cancelled-tool-error? e)
+                 message    (if cancelled?
+                              (str "Tool " (name tool-id) " cancelled: " (.getMessage e))
+                              (str "Tool " (name tool-id) " failed: " (.getMessage e)))]
+             (prompt/status! {:state   (if cancelled? :cancelled :error)
+                              :phase   :tool
+                              :message message
+                              :tool-id tool-id
+                              :tool-name (or (:tool/name tool) (name tool-id))})
+             (cond
+               cancelled?
+               (log/info "Tool execution cancelled:" tool-id
+                         "type" (some-> e ex-data :type)
+                         "message" (.getMessage e))
+
+               (expected-tool-input-error? e)
              (log/warn "Tool execution rejected invalid input:" tool-id
                        "type" (some-> e ex-data :type)
                        "message" (.getMessage e))
-             (log/error e "Tool execution failed:" tool-id))
-           {:error (str "Tool execution failed: " (.getMessage e))}))
+               :else
+               (log/error e "Tool execution failed:" tool-id))
+             {:error message})))
        (do
          (audit-entry! context tool-id tool arguments
                        {:status "error"

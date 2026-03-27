@@ -66,7 +66,7 @@
 
 (defn enabled?
   []
-  (cfg/boolean-option :backup/enabled? false))
+  (cfg/boolean-option :backup/enabled? true))
 
 (defn backup-directory
   []

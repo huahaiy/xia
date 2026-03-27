@@ -12,6 +12,10 @@
 
 (use-fixtures :each with-test-db)
 
+(deftest configured-max-tool-rounds-defaults-to-one-hundred
+  (db/delete-config! :agent/max-tool-rounds)
+  (is (= 100 (#'xia.agent/configured-max-tool-rounds))))
+
 (deftest process-message-reports-progress
   (let [session-id (db/create-session! :terminal)
         statuses   (atom [])]

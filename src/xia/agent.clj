@@ -14,6 +14,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.ssrf :as ssrf]
             [xia.tool :as tool]
@@ -21,7 +22,7 @@
   (:import [java.util.concurrent Future TimeUnit TimeoutException]
            [java.util.concurrent.locks ReentrantLock]))
 
-(def ^:private default-max-tool-rounds 10)
+(def ^:private default-max-tool-rounds 100)
 (def ^:private default-max-tool-calls-per-round 12)
 (def ^:private default-max-user-message-chars 32768)
 (def ^:private default-max-user-message-tokens 8000)
@@ -250,6 +251,16 @@
            (.interrupt worker))
          true)))))
 
+(defn cancel-all-sessions!
+  "Request cancellation for every currently running agent turn."
+  ([]
+   (cancel-all-sessions! "runtime stopping"))
+  ([reason]
+   (let [session-ids (keys @active-session-runs)]
+     (doseq [session-id session-ids]
+       (cancel-session! session-id reason))
+     (count session-ids))))
+
 (defn session-cancelled?
   [session-id]
   (boolean
@@ -267,6 +278,11 @@
   (when (session-cancelled? session-id)
     (throw (request-cancelled-ex session-id
                                  (cancellation-reason session-id)))))
+
+(defn- throw-if-runtime-stopping!
+  [session-id]
+  (when (contains? #{:stopping :stopped} (runtime-state/phase))
+    (throw (request-cancelled-ex session-id "runtime is stopping"))))
 
 (defn- with-session-run
   [session-id f]
@@ -929,6 +945,8 @@
    {:keys [channel provider-id resource-session-id objective
            max-tool-rounds tool-context]
     :or   {channel :terminal}}]
+  (throw-if-runtime-stopping! parent-session-id)
+  (throw-if-cancelled! parent-session-id)
   (let [parent-trace      (trace-context prompt/*interaction-context*)
         branch-request-id (new-request-id)
         branch-trace      (cond-> (merge parent-trace
@@ -944,6 +962,8 @@
                                                :worker? true
                                                :label task})]
     (try
+      (throw-if-runtime-stopping! child-session-id)
+      (throw-if-cancelled! child-session-id)
       (wm/create-wm! child-session-id)
       (let [result (process-message child-session-id
                                     (branch-task-prompt branch-task objective)
@@ -997,6 +1017,8 @@
         resource-session-id* (or resource-session-id parent-session-id)
         branch-tasks        (->> tasks (map normalize-branch-task) (remove #(str/blank? (:prompt %))) vec)
         task-count          (count branch-tasks)
+        _                   (throw-if-runtime-stopping! parent-session-id)
+        _                   (throw-if-cancelled! parent-session-id)
         max-tasks           (max-branch-tasks)
         max-parallel*       (clojure.core/min (clojure.core/max 1 (long (or max-parallel (max-parallel-branches))))
                                               (clojure.core/max 1 (long max-tasks)))]

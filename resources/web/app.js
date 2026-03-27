@@ -311,7 +311,6 @@ const siteFormSelectorEl = document.getElementById('site-form-selector');
 const siteExtraFieldsEl = document.getElementById('site-extra-fields');
 const siteAutonomousApprovedEl = document.getElementById('site-autonomous-approved');
 const siteStatusEl = document.getElementById('site-status');
-const newSiteEl = document.getElementById('new-site');
 const saveSiteEl = document.getElementById('save-site');
 const deleteSiteEl = document.getElementById('delete-site');
 const remoteBridgeEnabledEl = document.getElementById('remote-bridge-enabled');
@@ -422,6 +421,45 @@ function updateSessionLabel() {
   sessionLabelEl.textContent = state.sessionId
     ? 'Session ' + state.sessionId.slice(0, 8) + '...'
     : 'New local session';
+}
+
+function isClosedSessionResponse(response, data) {
+  if (!response || ![404, 409].includes(response.status)) return false;
+  const message = firstNonEmpty(data && data.error, '').toLowerCase();
+  return message.includes('session');
+}
+
+function resetCurrentSession(statusText) {
+  state.sessionId = '';
+  state.messages = [];
+  state.pendingApproval = null;
+  state.sending = false;
+  state.approvalSubmitting = false;
+  state.liveStatus = null;
+  state.sendStartedAt = 0;
+  state.localDocs = [];
+  state.activeLocalDocId = '';
+  state.activeLocalDoc = null;
+  state.localDocUploading = false;
+  state.artifacts = [];
+  state.activeArtifactId = '';
+  state.activeArtifact = null;
+  state.pendingLocalDocIds = [];
+  state.pendingArtifactIds = [];
+  state.scratchPads = [];
+  state.activePadId = '';
+  state.activePad = null;
+  state.scratchDirty = false;
+  _pollFailures = 0;
+  persistSession();
+  renderApproval();
+  renderMessages();
+  syncLocalDocPanel('No local document selected.');
+  syncArtifactPanel('No artifact selected.');
+  syncScratchEditor('No note selected.');
+  updateComposerState();
+  loadHistorySessions().catch(() => {});
+  setStatus(statusText || 'Session closed. Start a new session.');
 }
 
 function currentActivityText() {
@@ -587,9 +625,17 @@ async function fetchJson(url, options) {
   const response = await safeFetch(url, options || {});
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.error || 'Request failed');
+    throw new Error(normalizeServerErrorMessage(data.error || 'Request failed'));
   }
   return data;
+}
+
+function normalizeServerErrorMessage(message) {
+  const text = firstNonEmpty(message, 'Request failed');
+  if (text.includes('Database not connected. Call (xia.db/connect!) first.')) {
+    return 'Database became unavailable unexpectedly; check server logs.';
+  }
+  return text;
 }
 
 function firstNonEmpty(value, fallback) {
@@ -2598,7 +2644,7 @@ function renderWorkloadRouting() {
   });
 }
 
-function normalizeProviderIdSegment(value) {
+function normalizeIdSegment(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
@@ -2625,8 +2671,8 @@ function ensureProviderId() {
   const current = providerIdEl.value.trim();
   const isEditing = !!state.activeProviderId;
   if (isEditing && current) return current;
-  const templateId = normalizeProviderIdSegment(providerTemplateEl.value);
-  const modelId = normalizeProviderIdSegment(providerModelEl.value);
+  const templateId = normalizeIdSegment(providerTemplateEl.value);
+  const modelId = normalizeIdSegment(providerModelEl.value);
   const base = (templateId || 'provider') + (modelId ? '-' + modelId : '');
   const usedIds = new Set((state.admin.providers || []).map((provider) => provider.id).filter(Boolean));
   let candidate = base;
@@ -2641,6 +2687,37 @@ function ensureProviderId() {
 
 function ensureProviderName() {
   return computedProviderName();
+}
+
+function inferredSiteIdBase() {
+  const explicitName = normalizeIdSegment(siteNameEl.value);
+  if (explicitName) return explicitName;
+  try {
+    const loginUrl = siteLoginUrlEl.value.trim();
+    if (!loginUrl) return 'site';
+    const url = new URL(loginUrl);
+    const host = normalizeIdSegment(url.hostname.replace(/^www\./, ''));
+    const path = normalizeIdSegment(url.pathname);
+    return [host, path].filter(Boolean).join('-') || host || 'site';
+  } catch (_) {
+    return normalizeIdSegment(siteLoginUrlEl.value) || 'site';
+  }
+}
+
+function ensureSiteId() {
+  const current = siteIdEl.value.trim();
+  const isEditing = !!state.activeSiteId;
+  if (isEditing && current) return current;
+  const base = inferredSiteIdBase();
+  const usedIds = new Set((state.admin.sites || []).map((site) => site.id).filter(Boolean));
+  let candidate = base;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = base + '-' + suffix;
+    suffix += 1;
+  }
+  siteIdEl.value = candidate;
+  return candidate;
 }
 
 function scrollCardIntoView(cardEl) {
@@ -2723,7 +2800,7 @@ function suggestedProviderOauthTemplateIds(template) {
 }
 
 function suggestedProviderOauthAccountId(draft) {
-  const base = normalizeProviderIdSegment(draft.id || draft.name || draft.template || 'provider');
+  const base = normalizeIdSegment(draft.id || draft.name || draft.template || 'provider');
   return (base || 'provider') + '-oauth';
 }
 
@@ -3250,7 +3327,6 @@ function updateAdminButtons() {
   newServiceEl.disabled = state.serviceSaving;
   siteIdEl.disabled = state.siteSaving || !!state.activeSiteId;
   saveSiteEl.disabled = state.siteSaving;
-  newSiteEl.disabled = state.siteSaving;
   deleteSiteEl.disabled = state.siteSaving || !state.activeSiteId;
   remoteBridgeEnabledEl.disabled = state.remoteBridgeSaving;
   remoteBridgeInstanceLabelEl.disabled = state.remoteBridgeSaving;
@@ -3387,7 +3463,13 @@ function renderSiteList() {
     'No site logins configured yet.',
     (site) => firstNonEmpty(site.name, site.id),
     siteMeta,
-    selectSite
+    (site) => {
+      if ((site && site.id || '') === state.activeSiteId) {
+        resetSiteForm('Create a site login or select an existing one.');
+        return;
+      }
+      return selectSite(site);
+    }
   );
 }
 
@@ -3844,8 +3926,8 @@ function selectSite(site) {
   sitePasswordFieldEl.value = site.password_field || 'password';
   siteUsernameEl.value = '';
   sitePasswordEl.value = '';
-  siteFormSelectorEl.value = '';
-  siteExtraFieldsEl.value = '';
+  siteFormSelectorEl.value = site.form_selector || '';
+  siteExtraFieldsEl.value = site.extra_fields || '';
   siteAutonomousApprovedEl.checked = !!site.autonomous_approved;
   siteStatusEl.textContent = site.username_configured ? 'Credentials stored.' : 'No credentials stored.';
   renderSiteList();
@@ -5029,11 +5111,13 @@ async function saveSite() {
   siteStatusEl.textContent = 'Saving...';
   updateAdminButtons();
   try {
+    const creatingSite = !state.activeSiteId;
+    const siteId = ensureSiteId();
     const data = await fetchJson('/admin/sites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: siteIdEl.value,
+        id: siteId,
         name: siteNameEl.value,
         login_url: siteLoginUrlEl.value,
         username_field: siteUsernameFieldEl.value,
@@ -5049,8 +5133,12 @@ async function saveSite() {
     state.activeSiteId = site && site.id ? site.id : state.activeSiteId;
     siteUsernameEl.value = '';
     sitePasswordEl.value = '';
-    siteStatusEl.textContent = 'Saved.';
     await loadAdminConfig();
+    if (creatingSite) {
+      resetSiteForm('Site login saved. Add another or select an existing one.');
+    } else {
+      siteStatusEl.textContent = 'Saved.';
+    }
     setStatus('Site login saved');
   } catch (err) {
     siteStatusEl.textContent = err.message || 'Failed to save.';
@@ -5957,7 +6045,15 @@ async function pollApproval() {
   try {
     const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval');
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Failed to load');
+    if (!response.ok) {
+      if (isClosedSessionResponse(response, data)) {
+        resetCurrentSession(response.status === 409
+          ? 'Session closed. Start a new session.'
+          : 'Session expired. Start a new session.');
+        return;
+      }
+      throw new Error(data.error || 'Failed to load');
+    }
     state.pendingApproval = data.pending ? (data.approval || null) : null;
     _pollFailures = 0;
     renderApproval();
@@ -5979,7 +6075,15 @@ async function pollStatus() {
   try {
     const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/status');
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Failed to load');
+    if (!response.ok) {
+      if (isClosedSessionResponse(response, data)) {
+        resetCurrentSession(response.status === 409
+          ? 'Session closed. Start a new session.'
+          : 'Session expired. Start a new session.');
+        return;
+      }
+      throw new Error(data.error || 'Failed to load');
+    }
     state.liveStatus = data.status || null;
     if (_pollFailures >= 5) {
       _pollFailures = 0;
@@ -6048,7 +6152,15 @@ async function sendMessage(text, options) {
     await pollStatus();
     const response = await responsePromise;
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Request failed');
+    if (!response.ok) {
+      if (isClosedSessionResponse(response, data)) {
+        resetCurrentSession(response.status === 409
+          ? 'Session closed. Start a new session.'
+          : 'Session expired. Start a new session.');
+        return;
+      }
+      throw new Error(data.error || 'Request failed');
+    }
     if (data.session_id) {
       state.sessionId = data.session_id;
       persistSession();
@@ -6334,11 +6446,6 @@ newServiceEl.addEventListener('click', () => {
 
 saveServiceEl.addEventListener('click', () => saveService());
 
-newSiteEl.addEventListener('click', () => {
-  resetSiteForm('Create a site login.');
-  siteIdEl.focus();
-});
-
 saveSiteEl.addEventListener('click', () => saveSite());
 deleteSiteEl.addEventListener('click', () => deleteSite());
 saveRemoteBridgeEl.addEventListener('click', () => saveRemoteBridge());
@@ -6361,31 +6468,7 @@ openclawImportSourceEl.addEventListener('keydown', (event) => {
 
 newChatEl.addEventListener('click', () => {
   if (!discardScratchChanges()) return;
-  state.sessionId = '';
-  state.messages = [];
-  state.pendingApproval = null;
-  state.liveStatus = null;
-  state.localDocs = [];
-  state.activeLocalDocId = '';
-  state.activeLocalDoc = null;
-  state.localDocUploading = false;
-  state.artifacts = [];
-  state.activeArtifactId = '';
-  state.activeArtifact = null;
-  state.pendingLocalDocIds = [];
-  state.pendingArtifactIds = [];
-  state.scratchPads = [];
-  state.activePadId = '';
-  state.activePad = null;
-  state.scratchDirty = false;
-  persistSession();
-  renderApproval();
-  renderMessages();
-  syncLocalDocPanel('No local document selected.');
-  syncArtifactPanel('No artifact selected.');
-  syncScratchEditor('No note selected.');
-  loadHistorySessions();
-  setStatus('Ready');
+  resetCurrentSession('Ready');
   composerEl.focus();
 });
 
@@ -6456,6 +6539,10 @@ Promise.all([
 ]).catch(() => {
   setStatus('Some data failed to load — check your connection');
 });
+if (state.sessionId) {
+  pollApproval();
+  if (state.sending) pollStatus();
+}
 let _pollIntervalId = window.setInterval(() => {
   if (state.sessionId) {
     pollApproval();

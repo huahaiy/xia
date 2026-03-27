@@ -3,7 +3,7 @@
 
 {:id          :email-send
  :name        "email-send"
- :description "Send an email through Gmail. Supports basic reply threading fields so you can continue an existing conversation."
+ :description "Send a plain-text email through Gmail. Supports basic reply threading fields so you can continue an existing conversation. The body must be the literal email text only, not JSON, code fences, or a structured tool-argument wrapper."
  :tags        #{:email :gmail :send :communication}
  :approval    :session
  :parameters  {"type"       "object"
@@ -18,7 +18,7 @@
                              "subject"     {"type"        "string"
                                              "description" "Message subject"}
                              "body"        {"type"        "string"
-                                             "description" "Plain-text message body"}
+                                             "description" "Literal plain-text email body only. Do not wrap it in JSON, code fences, or an object with nested content fields."}
                              "in_reply_to" {"type"        "string"
                                              "description" "Optional Message-Id of the message being replied to"}
                              "references"  {"oneOf"       [{"type" "string"}

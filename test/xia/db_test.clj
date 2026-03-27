@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.db :as db]
+            [xia.runtime-state :as runtime-state]
             [xia.test-helpers :as th]))
 
 (use-fixtures :each th/with-test-db)
@@ -40,6 +41,28 @@
       (is (= :terminal (:session/channel entity)))
       (is (integer? (:db/created-at entity)))
       (is (instance? java.util.Date (:created-at session))))))
+
+(deftest set-session-active-overwrites-the-current-flag
+  (let [sid            (db/create-session! :http)
+        session-active (fn []
+                         (:active? (some #(when (= sid (:id %)) %)
+                                         (db/list-sessions))))]
+    (is (true? (session-active)))
+    (db/set-session-active! sid false)
+    (is (false? (session-active)))
+    (db/set-session-active! sid true)
+    (is (true? (session-active)))))
+
+(deftest close-records-debug-event-when-runtime-is-running
+  (runtime-state/mark-running!)
+  (try
+    (db/close!)
+    (let [event (db/last-close-event)]
+      (is (= :running (:phase event)))
+      (is (string? (:db-path event)))
+      (is (seq (:callsite event))))
+    (finally
+      (runtime-state/mark-stopped!))))
 
 (deftest connect-prefetches-managed-embedding-model-before-opening-db
   (let [path      (str (java.nio.file.Files/createTempDirectory

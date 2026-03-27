@@ -207,6 +207,64 @@
         (is (re-find #"(?m)^Subject: Quarterly update$" raw))
         (is (str/includes? raw "\r\n\r\nAll done."))))))
 
+(deftest send-message-extracts-body-text-from-structured-payload
+  (db/register-service! {:id       :gmail
+                         :name     "Gmail"
+                         :base-url "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key "tok"})
+  (let [captured (atom nil)]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (reset! captured req)
+                    {:status 200
+                     :headers {"content-type" "application/json"}
+                     :body "{\"id\":\"sent-2\",\"threadId\":\"thread-9\",\"labelIds\":[\"SENT\"]}"})]
+      (email/send-message "alice@example.com"
+                          "Status"
+                          {"message" {"content" [{"text" "Hello Alice,"}
+                                                 {"text" "The rollout is complete."}]}})
+      (let [payload (json/read-json (:body @captured))
+            raw     (decode-base64url (get payload "raw"))]
+        (is (str/includes? raw "\r\n\r\nHello Alice,\n\nThe rollout is complete."))))))
+
+(deftest send-message-extracts-body-text-from-json-wrapper-string
+  (db/register-service! {:id       :gmail
+                         :name     "Gmail"
+                         :base-url "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key "tok"})
+  (let [captured (atom nil)]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (reset! captured req)
+                    {:status 200
+                     :headers {"content-type" "application/json"}
+                     :body "{\"id\":\"sent-3\",\"threadId\":\"thread-10\",\"labelIds\":[\"SENT\"]}"})]
+      (email/send-message "alice@example.com"
+                          "Status"
+                          "{\"body\":\"Hello Alice,\\n\\nThe rollout is complete.\"}")
+      (let [payload (json/read-json (:body @captured))
+            raw     (decode-base64url (get payload "raw"))]
+        (is (str/includes? raw "\r\n\r\nHello Alice,\n\nThe rollout is complete."))))))
+
+(deftest send-message-rejects-structured-body-without-plain-text
+  (db/register-service! {:id       :gmail
+                         :name     "Gmail"
+                         :base-url "https://gmail.googleapis.com"
+                         :auth-type :bearer
+                         :auth-key "tok"})
+  (let [error (try
+                (email/send-message "alice@example.com"
+                                    "Status"
+                                    "{\"to\":\"alice@example.com\",\"subject\":\"Status\"}")
+                nil
+                (catch clojure.lang.ExceptionInfo e
+                  e))]
+    (is (some? error))
+    (is (= :email/invalid-body (some-> error ex-data :type)))
+    (is (re-find #"plain text" (ex-message error)))))
+
 (deftest delete-message-moves-message-to-trash-by-default
   (db/register-service! {:id        :gmail
                          :name      "Gmail"

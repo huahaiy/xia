@@ -8,7 +8,7 @@
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"
-                                           "description" "The browser session ID from browser-open"}
+                                           "description" "The browser session ID from browser-open or browser-login"}
                              "selector"   {"type"        "string"
                                            "description" "CSS selector for the element to click (e.g. \"#submit-btn\", \"a.next-page\", \"button[type=submit]\")"}}
                "required"   ["session_id" "selector"]}

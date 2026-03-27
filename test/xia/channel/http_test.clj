@@ -13,6 +13,7 @@
             [xia.local-ocr :as local-ocr]
             [xia.paths :as paths]
             [xia.remote-bridge :as remote-bridge]
+            [xia.runtime-state :as runtime-state]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
             [xia.test-helpers :as th :refer [minimal-pdf-bytes with-test-db]])
@@ -298,17 +299,22 @@
         (is (= (str sid) (get body "session_id")))
         (is (= sid @seen-session))))))
 
-(deftest chat-route-rejects-closed-session
+(deftest chat-route-resumes-closed-http-session
   (let [sid (db/create-session! :http)]
     (#'http/set-session-active! sid false)
-    (let [response (#'http/router {:uri            "/chat"
-                                   :request-method :post
-                                   :headers        (ui-headers)
-                                   :body           (request-body {"message" "hello"
-                                                                  "session_id" (str sid)})})
-          body     (response-json response)]
-      (is (= 409 (:status response)))
-      (is (= "session closed" (get body "error"))))))
+    (with-redefs [xia.agent/process-message (fn [session-id _user-message & _]
+                                              (is (= sid session-id))
+                                              "ok")]
+      (let [response (#'http/router {:uri            "/chat"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "hello"
+                                                                    "session_id" (str sid)})})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= "ok" (get body "content")))
+        (is (= (str sid) (get body "session_id")))
+        (is (= true (#'http/session-active? sid)))))))
 
 (deftest chat-route-blocks-non-local-origins
   (let [response (#'http/router {:uri            "/chat"
@@ -848,6 +854,18 @@
       (is (= 200 (:status response)))
       (is (nil? (get body "status"))))))
 
+(deftest session-status-route-resumes-closed-http-session
+  (let [sid (db/create-session! :http)]
+    (#'http/set-session-active! sid false)
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/status")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= (str sid) (get body "session_id")))
+      (is (nil? (get body "status")))
+      (is (= true (#'http/session-active? sid))))))
+
 (deftest scratch-pad-routes-round-trip
   (let [sid         (str (db/create-session! :http))
         create-res  (#'http/router {:uri            (str "/sessions/" sid "/scratch-pads")
@@ -1270,6 +1288,17 @@
         (is (= "recorded" (get submit-body "status")))))
     (is (= true (deref waiter 2000 ::timeout)))))
 
+(deftest approval-route-resumes-closed-http-session
+  (let [sid (db/create-session! :http)]
+    (#'http/set-session-active! sid false)
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/approval")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= false (get body "pending")))
+      (is (= true (#'http/session-active? sid))))))
+
 (deftest command-approval-route-allows-round-trip
   (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
     (let [sid    (str (db/create-session! :command))
@@ -1453,7 +1482,7 @@
     (is (= 1605632 (get local-doc-ocr "spotting_image_max_pixels")))
     (is (= #{"ocr" "formula" "table" "chart" "seal" "spotting"}
            (set (map #(get % "id") (get local-doc-ocr "supported_modes")))))
-    (is (= false (get database-backup "enabled")))
+    (is (= true (get database-backup "enabled")))
     (is (= (backup/backup-directory) (get database-backup "directory")))
     (is (= 24 (get database-backup "interval_hours")))
     (is (= 7 (get database-backup "retain_count")))
@@ -1643,6 +1672,67 @@
     (is (nil? (db/get-config :local-doc/model-summary-provider-id)))
     (is (nil? (db/get-config :local-doc/chunk-summary-max-tokens)))
     (is (nil? (db/get-config :local-doc/doc-summary-max-tokens)))))
+
+(deftest admin-local-doc-summarization-route-returns-503-while-runtime-is-unavailable
+  (runtime-state/mark-stopping!)
+  (try
+    (with-redefs [xia.db/conn (fn []
+                                (throw (ex-info "Database not connected. Call (xia.db/connect!) first." {})))]
+      (let [response (#'http/router {:uri            "/admin/local-doc-summarization"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"model_summaries_enabled" true})})
+            body     (response-json response)]
+        (is (= 503 (:status response)))
+        (is (= "server is restarting; try again in a moment" (get body "error")))))
+    (finally
+      (runtime-state/mark-running!))))
+
+(deftest admin-local-doc-summarization-route-returns-503-when-runtime-disconnects-mid-request
+  (runtime-state/mark-stopping!)
+  (try
+    (with-redefs [xia.channel.http/runtime-available? (constantly true)
+                  xia.db/conn (fn []
+                                (throw (ex-info "Database not connected. Call (xia.db/connect!) first." {})))]
+      (let [response (#'http/router {:uri            "/admin/local-doc-summarization"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"model_summaries_enabled" true})})
+            body     (response-json response)]
+        (is (= 503 (:status response)))
+        (is (= "server is restarting; try again in a moment" (get body "error")))))
+    (finally
+      (runtime-state/mark-running!))))
+
+(deftest admin-local-doc-summarization-route-returns-503-when-disconnect-is-wrapped
+  (with-redefs [xia.channel.http/runtime-available? (constantly true)
+                xia.channel.http/save-config-override! (fn [& _]
+                                                         (throw (ex-info "save failed"
+                                                                         {}
+                                                                         (ex-info "Database not connected. Call (xia.db/connect!) first."
+                                                                                  {}))))]
+    (let [response (#'http/router {:uri            "/admin/local-doc-summarization"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"model_summaries_enabled" true})})
+          body     (response-json response)]
+      (is (= 503 (:status response)))
+      (is (= "database became unavailable unexpectedly; check server logs" (get body "error"))))))
+
+(deftest command-routes-return-503-while-runtime-is-unavailable
+  (runtime-state/mark-stopping!)
+  (try
+    (with-redefs [xia.db/conn (fn []
+                                (throw (ex-info "Database not connected. Call (xia.db/connect!) first." {})))
+                  xia.channel.http/command-channel-token (constantly "command-secret")]
+      (let [response (#'http/router {:uri            "/command/sessions"
+                                     :request-method :post
+                                     :headers        (command-headers)})
+            body     (response-json response)]
+        (is (= 503 (:status response)))
+        (is (= "server is restarting; try again in a moment" (get body "error")))))
+    (finally
+      (runtime-state/mark-running!))))
 
 (deftest admin-local-doc-ocr-route-saves-and-clears-settings
   (db/set-config! :local-doc/ocr-command "/usr/local/bin/llama-cli")
@@ -2339,6 +2429,32 @@
     (is (= "google/gemini-2.5-pro" (get-in body ["provider" "model"])))
     (is (= "openrouter-key" (:llm.provider/api-key provider)))))
 
+(deftest admin-provider-route-infers-api-key-from-matching-provider
+  (db/upsert-provider! {:id                :openrouter-primary
+                        :name              "OpenRouter Primary"
+                        :template          :openrouter
+                        :base-url          "https://openrouter.ai/api/v1"
+                        :model             "openai/gpt-4.1"
+                        :credential-source :api-key
+                        :auth-type         :api-key
+                        :api-key           "openrouter-key"})
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "openrouter-minimax"
+                                                                "name" "OpenRouter Minimax"
+                                                                "template" "openrouter"
+                                                                "base_url" "https://openrouter.ai/api/v1"
+                                                                "model" "minimax/minimax-m2.5:free"
+                                                                "credential_source" "api-key"})})
+        body     (response-json response)
+        provider (db/get-provider :openrouter-minimax)]
+    (is (= 200 (:status response)))
+    (is (= "openrouter-minimax" (get-in body ["provider" "id"])))
+    (is (= "minimax/minimax-m2.5:free" (get-in body ["provider" "model"])))
+    (is (= true (get-in body ["provider" "api_key_configured"])))
+    (is (= "openrouter-key" (:llm.provider/api-key provider)))))
+
 (deftest admin-provider-route-links-oauth-account
   (db/register-oauth-account! {:id            :openai-login
                                :name          "OpenAI Login"
@@ -2474,6 +2590,27 @@
     (is (= "deleted" (get delete-body "status")))
     (is (nil? (db/get-site-cred :github)))))
 
+(deftest admin-site-route-infers-id-when-missing
+  (let [response (#'http/router {:uri            "/admin/sites"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"name" "GitHub Web"
+                                                                "login_url" "https://github.com/login"
+                                                                "username" "hyang"
+                                                                "password" "pw-secret"
+                                                                "autonomous_approved" true})})
+        body     (response-json response)
+        site-id  (get-in body ["site" "id"])
+        site     (some-> site-id keyword db/get-site-cred)]
+    (is (= 200 (:status response)))
+    (is (= "github-web" site-id))
+    (is (= "GitHub Web" (get-in body ["site" "name"])))
+    (is (= "https://github.com/login" (get-in body ["site" "login_url"])))
+    (is (= true (get-in body ["site" "username_configured"])))
+    (is (= true (get-in body ["site" "password_configured"])))
+    (is (= "hyang" (:site-cred/username site)))
+    (is (= "pw-secret" (:site-cred/password site)))))
+
 (deftest start-binds-to-loopback-by-default
   (let [captured (atom nil)]
     (with-redefs [org.httpkit.server/run-server
@@ -2509,3 +2646,20 @@
       (is (= [18790 18791] (mapv :port @attempts)))
       (is (= 18791 (http/current-port)))
       (http/stop!))))
+
+(deftest start-rejects-when-server-is-already-running
+  (let [starts (atom 0)]
+    (with-redefs [org.httpkit.server/run-server
+                  (fn [_handler _opts]
+                    (swap! starts inc)
+                    (fn [] nil))]
+      (http/start! 18790)
+      (try
+        (is (thrown-with-msg?
+              clojure.lang.ExceptionInfo
+              #"already running"
+              (http/start! 18791)))
+        (is (= 1 @starts))
+        (is (= 18790 (http/current-port)))
+        (finally
+          (http/stop!))))))

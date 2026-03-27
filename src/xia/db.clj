@@ -9,6 +9,7 @@
             [taoensso.timbre :as log]
             [xia.crypto :as crypto]
             [xia.paths :as paths]
+            [xia.runtime-state :as runtime-state]
             [xia.sensitive :as sensitive])
   (:import [java.io InputStream]
            [java.net URI]
@@ -434,6 +435,40 @@
 (defonce ^:private llm-provider-atom (atom nil))
 (defonce ^:private db-path-atom (atom nil))
 (defonce ^:private instance-id-atom (atom nil))
+(defonce ^:private last-connect-event-atom (atom nil))
+(defonce ^:private last-close-event-atom (atom nil))
+
+(defn- stack-frame->summary
+  [^StackTraceElement frame]
+  (str (.getClassName frame) "/" (.getMethodName frame) ":" (.getLineNumber frame)))
+
+(defn- capture-callsite
+  [label]
+  (let [throwable (Throwable. label)]
+    {:throwable throwable
+     :summary   (->> (.getStackTrace throwable)
+                     (drop 1)
+                     (map stack-frame->summary)
+                     (take 12)
+                     vec)}))
+
+(defn- lifecycle-event
+  [phase callsite]
+  {:at          (Instant/now)
+   :phase       phase
+   :db-path     @db-path-atom
+   :instance-id @instance-id-atom
+   :callsite    (:summary callsite)})
+
+(defn last-connect-event
+  "Return the most recent successful connect event for debugging."
+  []
+  @last-connect-event-atom)
+
+(defn last-close-event
+  "Return the most recent close event for debugging."
+  []
+  @last-close-event-atom)
 (declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
@@ -775,7 +810,8 @@
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
   ([db-path crypto-opts]
-   (let [instance-id    (paths/resolve-instance-id (:instance-id crypto-opts))
+   (let [callsite       (capture-callsite "db/connect! callsite")
+         instance-id    (paths/resolve-instance-id (:instance-id crypto-opts))
          datalevin-opts (-> (resolve-datalevin-opts crypto-opts)
                             (prepare-managed-embedding-runtime! db-path))
          c              (d/get-conn db-path schema datalevin-opts)]
@@ -787,6 +823,10 @@
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
        (migrate-secrets!)
+       (reset! last-connect-event-atom
+               (assoc (lifecycle-event (runtime-state/phase) callsite)
+                      :db-path db-path
+                      :instance-id instance-id))
        c
        (catch Throwable t
          (close-llm-provider!)
@@ -822,6 +862,19 @@
   @instance-id-atom)
 
 (defn close! []
+  (let [phase    (runtime-state/phase)
+        callsite (capture-callsite "db/close! callsite")
+        event    (lifecycle-event phase callsite)]
+    (reset! last-close-event-atom event)
+    (if (= phase :running)
+      (log/error (:throwable callsite)
+                 "Unexpected db/close! while Xia runtime is still marked running"
+                 "db-path" (:db-path event)
+                 "instance" (:instance-id event))
+      (log/info "Closing database"
+                "phase" (name phase)
+                "db-path" (:db-path event)
+                "instance" (:instance-id event))))
   (close-llm-provider!)
   (close-embedding-provider!)
   (when-let [c @conn-atom]
@@ -1742,23 +1795,21 @@
   "List all sessions with basic metadata, newest first."
   ([] (list-sessions nil))
   ([{:keys [include-workers?] :or {include-workers? false}}]
-   (->> (q '[:find ?s ?sid ?channel ?active ?worker
+   (->> (q '[:find ?s ?sid ?channel
              :where
              [?s :session/id ?sid]
-             [?s :session/channel ?channel]
-             [(get-else $ ?s :session/active? false) ?active]
-             [(get-else $ ?s :session/worker? false) ?worker]])
-        (remove (fn [[_ _ _ _ worker?]]
-                  (and worker? (not include-workers?))))
-        (map (fn [[eid sid channel active? worker?]]
+             [?s :session/channel ?channel]])
+        (map (fn [[eid sid channel]]
                (let [entity-map (raw-entity eid)]
                  {:id         sid
                   :channel    channel
                   :created-at (entity-created-at entity-map)
-                  :active?    active?
-                  :worker?    worker?
+                  :active?    (boolean (:session/active? entity-map))
+                  :worker?    (boolean (:session/worker? entity-map))
                   :parent-id  (:session/parent-id entity-map)
                   :label      (:session/label entity-map)})))
+        (remove (fn [{:keys [worker?]}]
+                  (and worker? (not include-workers?))))
         (sort-by :created-at #(compare %2 %1))
         vec)))
 
@@ -1767,7 +1818,8 @@
   (when-let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                       :where [?e :session/id ?sid]]
                                     session-id))]
-    (transact! [[:db/add session-eid :session/active? (boolean active?)]])
+    (transact! [{:db/id            session-eid
+                 :session/active? (boolean active?)}])
     true))
 
 (defn- session-eid

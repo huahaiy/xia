@@ -4,7 +4,7 @@
 
 {:id          :browser-login
  :name        "browser-login"
- :description "Log into a website using stored credentials. The credentials are loaded securely — they never appear in the conversation. Returns the logged-in page with a session_id for further browsing. Use list-sites to see available sites."
+ :description "Log into a website using stored credentials. The credentials are loaded securely and never appear in the conversation. Returns the logged-in page plus a session_id for continued browsing. After login, keep using that same session_id with browser-read-page, browser-query-elements, browser-click, browser-fill-form, browser-navigate, browser-wait, and browser-screenshot until the task is complete. Use browser-list-sites to see available sites."
  :tags        #{:browser :web :login :auth}
  :approval    :session
  :parameters  {"type"       "object"

@@ -35,6 +35,10 @@
        (sort-by #(.getName ^File %))
        vec))
 
+(deftest backup-enabled-defaults-to-true
+  (db/delete-config! :backup/enabled?)
+  (is (true? (backup/enabled?))))
+
 (deftest run-backup-creates-portable-archive-from-safe-copy
   (let [backup-dir (temp-dir)]
     (db/set-config! :user/name "Backup Test")

@@ -135,6 +135,19 @@
     (is (= :ok
            (call-with-timeout 50 :handler (constantly :ok))))))
 
+(deftest prepare-shutdown-blocks-new-sci-work
+  (sci-env/reset-runtime!)
+  (sci-env/prepare-shutdown!)
+  (let [ex (try
+             (sci-env/eval-string "(+ 1 2)")
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (= :sci/shutdown (:type (ex-data ex)))))
+  (sci-env/reset-runtime!)
+  (is (= 3 (sci-env/eval-string "(+ 1 2)"))))
+
 (deftest file-shell-and-source-access-are-blocked-in-sci
   (doseq [code ["(slurp \"/etc/hosts\")"
                 "(require 'clojure.java.io) (clojure.java.io/reader \"/etc/hosts\")"

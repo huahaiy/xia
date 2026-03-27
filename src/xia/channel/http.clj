@@ -24,6 +24,7 @@
             [xia.paths :as paths]
             [xia.context :as context]
             [xia.remote-bridge :as remote-bridge]
+            [xia.runtime-state :as runtime-state]
             [xia.service :as service-proxy]
             [xia.schedule :as schedule]
             [xia.agent :as agent]
@@ -33,7 +34,7 @@
             [xia.skill.openclaw :as openclaw-skill]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
-    [java.net BindException]
+    [java.net BindException URI]
     [java.nio.charset StandardCharsets]
     [java.nio.file Files LinkOption Path Paths]
     [java.security SecureRandom]
@@ -313,7 +314,7 @@
 ;; WebSocket handler
 ;; ---------------------------------------------------------------------------
 
-(declare protected-route-response)
+(declare protected-route-response with-session-finalize-lock touch-rest-session!)
 
 (defn- finalize-websocket-session!
   [ch]
@@ -583,14 +584,38 @@
              "Content-Disposition" (str "attachment; filename=\"" (quoted-filename filename) "\"")}
    :body    body})
 
+(declare runtime-unavailable-response)
+
+(def ^:private db-disconnected-message
+  "Database not connected. Call (xia.db/connect!) first.")
+
+(defn- runtime-unavailable-throwable?
+  [^Throwable e]
+  (loop [current e
+         seen    #{}]
+    (cond
+      (nil? current)
+      false
+
+      (contains? seen current)
+      false
+
+      :else
+      (let [message (or (throwable-message current)
+                        (some-> (ex-data current) :error str))]
+        (or (str/includes? (or message "") db-disconnected-message)
+            (recur (.getCause current) (conj seen current)))))))
+
 (defn- exception-response
   [^Throwable e]
-  (let [data    (ex-data e)
-        status  (or (:status data) 400)
-        details (not-empty (dissoc data :status :error :type))
-        body    (cond-> {:error (or (:error data) (throwable-message e))}
-                  details (assoc :details details))]
-    (json-response status body)))
+  (if (runtime-unavailable-throwable? e)
+    (runtime-unavailable-response)
+    (let [data    (ex-data e)
+          status  (or (:status data) 400)
+          details (not-empty (dissoc data :status :error :type))
+          body    (cond-> {:error (or (:error data) (throwable-message e))}
+                    details (assoc :details details))]
+      (json-response status body))))
 
 (defn- html-response [body]
   {:status  200
@@ -618,6 +643,33 @@
 (defn- command-unauthorized-response []
   (json-response 401 {:error "missing or invalid command token"}))
 
+(defn- runtime-available?
+  []
+  (try
+    (db/conn)
+    true
+    (catch Exception _
+      false)))
+
+(defn- runtime-unavailable-response []
+  (let [restarting?  (runtime-state/restarting?)
+        error        (if restarting?
+                       "server is restarting; try again in a moment"
+                       "database became unavailable unexpectedly; check server logs")
+        phase        (runtime-state/phase)
+        db-path      (db/current-db-path)
+        instance-id  (db/current-instance-id)
+        last-connect (db/last-connect-event)
+        last-close   (db/last-close-event)]
+    (when-not restarting?
+      (log/error "HTTP request hit database-unavailable state"
+                 "phase" (name phase)
+                 "db-path" db-path
+                 "instance" instance-id
+                 "last-connect" (pr-str last-connect)
+                 "last-close" (pr-str last-close)))
+    (json-response 503 {:error error})))
+
 (defn- protected-route-response
   [req allowed-fn]
   (cond
@@ -627,16 +679,24 @@
     (not (valid-session-secret? req))
     (unauthorized-response)
 
+    (not (runtime-available?))
+    (runtime-unavailable-response)
+
     :else
     (allowed-fn)))
 
 (defn- command-route-response
   [req allowed-fn]
-  (if-let [token (command-channel-token)]
-    (if (= (request-bearer-token req) token)
-      (allowed-fn)
-      (command-unauthorized-response))
-    (command-channel-unavailable-response)))
+  (cond
+    (not (runtime-available?))
+    (runtime-unavailable-response)
+
+    :else
+    (if-let [token (command-channel-token)]
+      (if (= (request-bearer-token req) token)
+        (allowed-fn)
+        (command-unauthorized-response))
+      (command-channel-unavailable-response))))
 
 (defn- approval->body
   [{:keys [approval-id tool-id tool-name description arguments reason policy created-at]}]
@@ -740,17 +800,29 @@
 (defn- session-active?
   [session-id]
   (when-let [eid (session-eid session-id)]
-    (boolean
-      (ffirst (db/q '[:find ?active :in $ ?e
-                      :where
-                      [(get-else $ ?e :session/active? false) ?active]]
-                    eid)))))
+    (boolean (:session/active? (db/entity eid)))))
 
 (defn- set-session-active!
   [session-id active?]
-  (when-let [eid (session-eid session-id)]
-    (db/transact! [[:db/add eid :session/active? active?]])
-    true))
+  (when-let [sid (session-uuid session-id)]
+    (db/set-session-active! sid active?)))
+
+(defn- maybe-resume-http-session!
+  [session-id expected-channel]
+  (when (and (= expected-channel :http)
+             (session-accessible? session-id expected-channel)
+             (not (session-active? session-id)))
+    (when-let [sid (session-uuid session-id)]
+      (with-session-finalize-lock
+        sid
+        (fn []
+          (when (and (session-accessible? sid expected-channel)
+                     (not (session-active? sid)))
+            (set-session-active! sid true)
+            (wm/ensure-wm! sid)
+            (touch-rest-session! sid)
+            (log/info "Resumed HTTP session" (str sid))
+            true))))))
 
 (defn- session-busy?
   [session-id]
@@ -1058,6 +1130,82 @@
   (let [s (some-> value str str/trim)]
     (when (seq s)
       s)))
+
+(defn- normalize-base-url
+  [value]
+  (some-> value nonblank-str (str/replace #"/+$" "")))
+
+(defn- normalize-id-segment
+  [value]
+  (some-> value
+          str
+          str/trim
+          str/lower-case
+          (str/replace #"[^a-z0-9]+" "-")
+          (str/replace #"^-+|-+$" "")
+          not-empty))
+
+(defn- next-available-id
+  [base used-ids]
+  (let [base*    (or (normalize-id-segment base) "item")
+        used-set (set (keep #(when % (name %)) used-ids))]
+    (loop [candidate base*
+           suffix    2]
+      (if (contains? used-set candidate)
+        (recur (str base* "-" suffix) (inc suffix))
+        (keyword candidate)))))
+
+(defn- infer-site-id
+  [data]
+  (let [name-text  (nonblank-str (get data "name"))
+        login-url  (nonblank-str (get data "login_url"))
+        url-base   (when login-url
+                     (try
+                       (let [uri  (URI. login-url)
+                             host (some-> (.getHost uri)
+                                          (str/replace #"^www\." ""))
+                             path (some-> (.getPath uri) nonblank-str)]
+                         (normalize-id-segment
+                           (str/join "-" (filter some? [host path]))))
+                       (catch Exception _
+                         (normalize-id-segment login-url))))
+        base       (or (normalize-id-segment name-text)
+                       url-base
+                       "site")
+        used-ids   (map :site-cred/id (db/list-site-creds))]
+    (next-available-id base used-ids)))
+
+(defn- unique-provider-api-key
+  [providers]
+  (let [api-keys (->> providers
+                      (keep (comp nonblank-str :llm.provider/api-key))
+                      distinct
+                      vec)]
+    (when (= 1 (count api-keys))
+      (first api-keys))))
+
+(defn- infer-reusable-provider-api-key
+  [{:keys [provider-id template-id base-url]}]
+  (let [normalized-base-url (normalize-base-url base-url)
+        providers           (->> (db/list-providers)
+                                 (remove #(= provider-id (:llm.provider/id %)))
+                                 (filter #(= :api-key (llm/provider-credential-source %))))]
+    (or
+      (when (and template-id normalized-base-url)
+        (unique-provider-api-key
+          (filter #(and (= template-id (:llm.provider/template %))
+                        (= normalized-base-url
+                           (normalize-base-url (:llm.provider/base-url %))))
+                  providers)))
+      (when template-id
+        (unique-provider-api-key
+          (filter #(= template-id (:llm.provider/template %))
+                  providers)))
+      (when normalized-base-url
+        (unique-provider-api-key
+          (filter #(= normalized-base-url
+                      (normalize-base-url (:llm.provider/base-url %)))
+                  providers))))))
 
 (defn- parse-keyword-id
   [value field-name]
@@ -1577,7 +1725,7 @@
   ([req]
    (chat-request req :http))
   ([req channel]
-   (let [data          (read-body req)
+  (let [data          (read-body req)
          message       (get data "message")
          session-id    (get data "session_id")
          local-doc-ids (when (sequential? (get data "local_doc_ids"))
@@ -1586,6 +1734,8 @@
          artifact-ids  (when (sequential? (get data "artifact_ids"))
                          (vec (keep #(when (some? %) (str %))
                                     (get data "artifact_ids"))))]
+     (when (and session-id (= channel :http))
+       (maybe-resume-http-session! session-id channel))
      (cond
        (not message)
        {:response (json-response 400 {:error "missing 'message' field"})}
@@ -1661,12 +1811,17 @@
   ([session-id]
    (handle-get-status session-id nil))
   ([session-id expected-channel]
+   (when (and session-id (= expected-channel :http))
+     (maybe-resume-http-session! session-id expected-channel))
    (cond
      (nil? (parse-session-id session-id))
      (json-response 400 {:error "invalid session id"})
 
      (not (session-accessible? session-id expected-channel))
      (json-response 404 {:error "session not found"})
+
+     (not (session-active? session-id))
+     (json-response 409 {:error "session closed"})
 
      :else
      (do
@@ -1678,12 +1833,17 @@
   ([session-id]
    (handle-get-approval session-id nil))
   ([session-id expected-channel]
+   (when (and session-id (= expected-channel :http))
+     (maybe-resume-http-session! session-id expected-channel))
    (cond
      (nil? (parse-session-id session-id))
      (json-response 400 {:error "invalid session id"})
 
      (not (session-accessible? session-id expected-channel))
      (json-response 404 {:error "session not found"})
+
+     (not (session-active? session-id))
+     (json-response 409 {:error "session closed"})
 
      :else
      (do
@@ -2523,6 +2683,7 @@
   (try
     (let [data         (or (read-body req) {})
           provider-id  (parse-keyword-id (get data "id") "id")
+          existing-provider (db/get-provider provider-id)
           base-url     (nonblank-str (get data "base_url"))
           model        (nonblank-str (get data "model"))
           name         (or (nonblank-str (get data "name"))
@@ -2573,7 +2734,14 @@
                                  (throw (ex-info "reuse_api_key_provider_id does not have a stored API key"
                                                  {:field "reuse_api_key_provider_id"
                                                   :value (name reuse-api-key-provider-id)})))))
-          effective-api-key (or api-key reused-api-key)
+          inferred-api-key (when (and (= credential-source :api-key)
+                                      (nil? api-key)
+                                      (nil? reused-api-key)
+                                      (nil? (nonblank-str (:llm.provider/api-key existing-provider))))
+                             (infer-reusable-provider-api-key {:provider-id provider-id
+                                                               :template-id template-id
+                                                               :base-url base-url}))
+          effective-api-key (or api-key reused-api-key inferred-api-key)
           normalized-access-mode (llm/provider-access-mode {:access-mode access-mode
                                                             :credential-source credential-source
                                                             :template template-id
@@ -3233,7 +3401,9 @@
 (defn- handle-save-site [req]
   (try
     (let [data            (or (read-body req) {})
-          site-id         (parse-keyword-id (get data "id") "id")
+          site-id         (if-let [id-text (nonblank-str (get data "id"))]
+                            (parse-keyword-id id-text "id")
+                            (infer-site-id data))
           existing        (db/get-site-cred site-id)
           login-url       (nonblank-str (get data "login_url"))
           name            (or (nonblank-str (get data "name"))
@@ -3613,7 +3783,7 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))
     (catch Exception e
-      (json-response 400 {:error (.getMessage e)}))))
+      (exception-response e))))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle
@@ -3664,8 +3834,10 @@
   ([bind-host port]
    (start! bind-host port nil))
   ([bind-host port {:keys [web-dev?] :or {web-dev? false}}]
-   (when @server-atom
-     (log/warn "Server already running"))
+   (when-let [{:keys [bind-host port]} @server-atom]
+     (throw (ex-info "HTTP/WebSocket server already running"
+                     {:bind-host bind-host
+                      :port port})))
    (configure-web-dev! web-dev?)
    (prompt/register-approval! :http http-approval-handler)
    (prompt/register-approval! :command http-approval-handler)

@@ -863,58 +863,60 @@
             <div class="admin-card" data-settings-section="site-logins">
               <div class="panel-header">
                 <h3 class="panel-title">Site Logins</h3>
-                <button type="button" class="secondary" id="new-site">New site</button>
               </div>
               <div class="admin-list" id="site-list"></div>
-              <div class="field-grid">
-                <div class="field advanced-only">
-                  <label class="field-label">ID</label>
-                  <input type="text" id="site-id" class="text-input" placeholder="github-web">
-                </div>
-                <div class="field">
-                  <label class="field-label">Name</label>
-                  <input type="text" id="site-name" class="text-input" placeholder="GitHub Web">
-                </div>
-                <div class="field full">
-                  <label class="field-label">Login Page URL</label>
-                  <input type="text" id="site-login-url" class="text-input" placeholder="https://github.com/login">
-                </div>
-                <div class="field advanced-only">
-                  <label class="field-label">Username Field Name</label>
-                  <input type="text" id="site-username-field" class="text-input" value="username">
-                </div>
-                <div class="field advanced-only">
-                  <label class="field-label">Password Field Name</label>
-                  <input type="text" id="site-password-field" class="text-input" value="password">
-                </div>
-                <div class="field">
-                  <label class="field-label">Username</label>
-                  <input type="text" id="site-username" class="text-input">
-                </div>
-                <div class="field">
-                  <label class="field-label">Password</label>
-                  <input type="password" id="site-password" class="text-input">
-                </div>
-                <div class="field full advanced-only">
-                  <label class="field-label">Form CSS Selector</label>
-                  <input type="text" id="site-form-selector" class="text-input" placeholder="form[action='/login']">
-                </div>
-                <div class="field full advanced-only">
-                  <label class="field-label">Extra JSON Fields</label>
-                  <textarea id="site-extra-fields" placeholder='{"remember_me": "1"}'></textarea>
-                </div>
-                <div class="field full">
-                  <div class="check-row">
-                    <input type="checkbox" id="site-autonomous-approved">
-                    <label class="check-label" for="site-autonomous-approved">Allow autonomous use of this site login</label>
+              <div class="detail-panel">
+                <div class="detail-header">Login details</div>
+                <div class="field-grid">
+                  <div class="field advanced-only">
+                    <label class="field-label">ID</label>
+                    <input type="text" id="site-id" class="text-input" placeholder="github-web">
+                  </div>
+                  <div class="field">
+                    <label class="field-label">Name</label>
+                    <input type="text" id="site-name" class="text-input" placeholder="GitHub Web">
+                  </div>
+                  <div class="field full">
+                    <label class="field-label">Login Page URL</label>
+                    <input type="text" id="site-login-url" class="text-input" placeholder="https://github.com/login">
+                  </div>
+                  <div class="field advanced-only">
+                    <label class="field-label">Username Field Name</label>
+                    <input type="text" id="site-username-field" class="text-input" value="username">
+                  </div>
+                  <div class="field advanced-only">
+                    <label class="field-label">Password Field Name</label>
+                    <input type="text" id="site-password-field" class="text-input" value="password">
+                  </div>
+                  <div class="field">
+                    <label class="field-label">Username</label>
+                    <input type="text" id="site-username" class="text-input">
+                  </div>
+                  <div class="field">
+                    <label class="field-label">Password</label>
+                    <input type="password" id="site-password" class="text-input">
+                  </div>
+                  <div class="field full advanced-only">
+                    <label class="field-label">Form CSS Selector</label>
+                    <input type="text" id="site-form-selector" class="text-input" placeholder="form[action='/login']">
+                  </div>
+                  <div class="field full advanced-only">
+                    <label class="field-label">Extra JSON Fields</label>
+                    <textarea id="site-extra-fields" placeholder='{"remember_me": "1"}'></textarea>
+                  </div>
+                  <div class="field full">
+                    <div class="check-row">
+                      <input type="checkbox" id="site-autonomous-approved">
+                      <label class="check-label" for="site-autonomous-approved">Allow autonomous use of this site login</label>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class="composer-foot">
-                <div class="admin-status" id="site-status">Loading site logins...</div>
-                <div class="actions">
-                  <button type="button" class="secondary" id="delete-site">Delete</button>
-                  <button type="button" class="primary" id="save-site">Save site login</button>
+                <div class="composer-foot">
+                  <div class="admin-status" id="site-status">Loading site logins...</div>
+                  <div class="actions">
+                    <button type="button" class="secondary" id="delete-site">Delete</button>
+                    <button type="button" class="primary" id="save-site">Save site login</button>
+                  </div>
                 </div>
               </div>
             </div>

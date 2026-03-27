@@ -1,7 +1,8 @@
 {:paths ["src" "resources"]
 
- :deps
- {org.clojure/clojure       {:mvn/version "1.12.4"}
+  :deps
+  {org.clojure/clojure       {:mvn/version "1.12.4"}
+  integrant/integrant       {:mvn/version "0.13.1"}
   org.datalevin/datalevin-embedded {:mvn/version "0.10.13"}
   org.clojure/tools.cli      {:mvn/version "1.4.256"}
 

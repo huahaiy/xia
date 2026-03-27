@@ -5,6 +5,7 @@
    Download, run, answer a few questions, done."
   (:require [clojure.tools.cli :refer [parse-opts]]
             [clojure.string :as str]
+            [integrant.core :as ig]
             [taoensso.timbre :as log]
             [clojure.java.io :as io]
             [xia.crypto :as crypto]
@@ -12,14 +13,8 @@
             [xia.paths :as paths]
             [xia.logging :as logging]
             [xia.pack :as pack]
-            [xia.setup :as setup]
-            [xia.identity :as identity]
-            [xia.hippocampus :as hippo]
-            [xia.instance-supervisor :as instance-supervisor]
-            [xia.llm :as llm]
-            [xia.scheduler :as scheduler]
-            [xia.skill :as skill]
-            [xia.tool :as tool]
+            [xia.runtime-state :as runtime-state]
+            [xia.system]
             [xia.channel.terminal :as terminal]
             [xia.channel.http :as http])
   (:import [java.nio.file Files Paths])
@@ -100,14 +95,6 @@
   (println "  xia pack backup.xia --db /path/to/db")
   (println "  xia pack backup.xia --force"))
 
-;; ---------------------------------------------------------------------------
-;; Startup
-;; ---------------------------------------------------------------------------
-
-(defn- ensure-db-dir! [db-path]
-  (when-let [parent (.getParent (Paths/get db-path (make-array String 0)))]
-    (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0))))
-
 (defn- local-ui-url [bind port]
   (str "http://"
        (if (#{"0.0.0.0" "::" "[::]"} bind) "localhost" bind)
@@ -118,6 +105,25 @@
 (defn- env-value
   [k]
   (System/getenv k))
+
+(defonce ^:private last-stop-event-atom (atom nil))
+
+(defn- stack-frame->summary
+  [^StackTraceElement frame]
+  (str (.getClassName frame) "/" (.getMethodName frame) ":" (.getLineNumber frame)))
+
+(defn- capture-callsite-summary
+  [label]
+  (->> (.getStackTrace (Throwable. label))
+       (drop 1)
+       (map stack-frame->summary)
+       (take 12)
+       vec))
+
+(defn last-stop-event
+  "Return the most recent stop-runtime! event for debugging."
+  []
+  @last-stop-event-atom)
 
 (defn- truthy-env-value?
   [k]
@@ -165,6 +171,8 @@
                   (reset! cached-passphrase passphrase)
                   passphrase)))))))))
 
+(defonce ^:private runtime-system-atom (atom nil))
+
 (declare make-cleanup)
 
 (defn- apply-run-defaults
@@ -189,74 +197,82 @@
             :instance-command instance-command
             :db       db-path})))
 
-(defn- maybe-seed-instance-template!
-  [{:keys [db instance template-instance crypto-opts]}]
-  (when template-instance
-    (if (db/initial-settings-empty?)
-      (let [source-db-path (paths/default-db-path template-instance)
-            target-db-path (.getCanonicalPath (io/file db))
-            source-db-path* (.getCanonicalPath (io/file source-db-path))]
-        (when (= source-db-path* target-db-path)
-          (throw (ex-info "Template instance must be different from the target instance"
-                          {:instance instance
-                           :template-instance template-instance
-                           :db db
-                           :template-db source-db-path})))
-        (when-not (.exists (io/file source-db-path))
-          (throw (ex-info "Template instance database does not exist"
-                          {:instance instance
-                           :template-instance template-instance
-                           :template-db source-db-path})))
-        (let [result (db/seed-initial-settings-from-db! {:source-db-path source-db-path
-                                                         :crypto-opts crypto-opts})]
-          (when (:seeded? result)
-            (log/info "Seeded Xia instance" instance
-                      "from template instance" template-instance
-                      "providers" (:provider-count result)
-                      "oauth-accounts" (:oauth-account-count result)
-                      "services" (:service-count result)
-                      "sites" (:site-count result)
-                      "skipped-secrets" (:skipped-secret-count result)))))
-      (log/info "Skipping template seed for Xia instance" instance
-                "because initial settings already exist"))))
+(def ^:private base-runtime-root-keys
+  [:xia/scheduler])
+
+(def ^:private server-runtime-root-keys
+  [:xia/http])
+
+(defn- system-config
+  [{:keys [db mode crypto-opts instance template-instance
+           instance-command bind port web-dev] :as options}]
+  (let [connect-options (merge {:passphrase-provider (startup-passphrase-provider mode)
+                                :instance-id instance}
+                               crypto-opts)]
+    {:xia/db
+     {:db-path db
+      :connect-options connect-options}
+
+     :xia/runtime-support
+     {:db (ig/ref :xia/db)}
+
+     :xia/instance-supervisor
+     {:db (ig/ref :xia/db)
+      :enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
+      :command instance-command}
+
+     :xia/bootstrap
+     {:db (ig/ref :xia/db)
+      :runtime-support (ig/ref :xia/runtime-support)
+      :instance-supervisor (ig/ref :xia/instance-supervisor)
+      :db-path db
+      :instance instance
+      :template-instance template-instance
+      :mode mode
+      :crypto-opts crypto-opts}
+
+     :xia/identity
+     {:bootstrap (ig/ref :xia/bootstrap)}
+
+     :xia/tool-runtime
+     {:identity (ig/ref :xia/identity)}
+
+     :xia/scheduler
+     {:tool-runtime (ig/ref :xia/tool-runtime)}
+
+     :xia/http
+     {:scheduler (ig/ref :xia/scheduler)
+      :bind-host bind
+      :port port
+      :web-dev? web-dev}
+
+     :xia/options
+     options}))
 
 (defn- initialize-runtime!
-  [{:keys [db mode crypto-opts instance template-instance
-           instance-command] :as options}]
-  (ensure-db-dir! db)
-  (db/connect! db (merge {:passphrase-provider (startup-passphrase-provider mode)
-                          :instance-id instance}
-                         crypto-opts))
-  (hippo/reset-runtime!)
-  (llm/reset-runtime!)
-  (maybe-seed-instance-template! (assoc options :template-instance template-instance))
-  (instance-supervisor/configure! {:enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
-                                   :command instance-command})
-  (log/info "Xia instance" instance)
-  (log/info "Database opened at" db)
-  (log/info "Support directory" (paths/support-dir-path db))
-  (log/info "Master key source" (pr-str (crypto/current-key-source)))
+  ([options]
+   (initialize-runtime! options base-runtime-root-keys))
+  ([options root-keys]
+   (when @runtime-system-atom
+     (throw (ex-info "Xia runtime is already running"
+                     {:root-keys (:root-keys @runtime-system-atom)
+                      :db (get-in @runtime-system-atom [:options :db])})))
+   (let [config  (system-config options)
+         system  (ig/init config root-keys)
+         state   {:config config
+                  :system system
+                  :root-keys (vec root-keys)
+                  :options options}]
+     (reset! runtime-system-atom state)
+     system)))
 
-  ;; First-run setup if needed
-  (when (setup/needs-setup?)
-    (if (= "terminal" mode)
-      (setup/run-setup!)
-      (log/info "Skipping interactive first-run setup in"
-                mode
-                "mode; complete provider onboarding in the local web UI.")))
-
-  ;; Initialize identity and load skills + tools
-  (identity/init-identity!)
-  (let [bundled-count (tool/ensure-bundled-tools!)]
-    (when (pos? (long bundled-count))
-      (log/info "Installed" bundled-count "bundled tools")))
-  (tool/reset-runtime!)
-  (tool/load-all-tools!)
-  (log/info "Loaded" (count (tool/registered-tools)) "tools,"
-            (count (skill/all-enabled-skills)) "skills")
-
-  ;; Start background scheduler
-  (scheduler/start!))
+(defn- halt-runtime!
+  []
+  (when-let [{:keys [system]} @runtime-system-atom]
+    (try
+      (ig/halt! system)
+      (finally
+        (reset! runtime-system-atom nil)))))
 
 (defn start-server-runtime!
   "Start Xia in non-blocking server mode for REPL-driven development."
@@ -266,43 +282,71 @@
                           options))
         bind*    (or bind (:bind options*))
         port*    (or port (:port options*))]
-    (initialize-runtime! options*)
-    (http/start! bind*
-                 port*
-                 {:web-dev? (true? web-dev)})
-    (let [options** (assoc options* :port (or (http/current-port) port*))]
-      (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
-      (println (str "open " (local-ui-url (:bind options**) (:port options**))))
-      options**)))
+    (runtime-state/mark-starting!)
+    (try
+      (initialize-runtime! options* server-runtime-root-keys)
+      (runtime-state/mark-running!)
+      (let [options** (assoc options* :port (or (http/current-port) port*))]
+        (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
+        (println (str "open " (local-ui-url (:bind options**) (:port options**))))
+        options**)
+      (catch Throwable t
+        (try
+          (halt-runtime!)
+          (catch Exception halt-error
+            (log/error halt-error "Failed to halt partially initialized runtime")))
+        (runtime-state/mark-stopped!)
+        (throw t)))))
 
 (defn stop-runtime!
   "Stop Xia runtime components that were started in the current process."
   [options]
-  ((make-cleanup (apply-run-defaults options))))
+  (let [options* (apply-run-defaults options)
+        phase    (runtime-state/phase)
+        event    {:at       (java.time.Instant/now)
+                  :phase    phase
+                  :db-path  (:db options*)
+                  :callsite (capture-callsite-summary "stop-runtime! callsite")}]
+    (reset! last-stop-event-atom event)
+    (log/info "stop-runtime! invoked"
+              "phase" (name phase)
+              "db" (:db options*))
+    ((make-cleanup options*))))
 
 (defn- start!
   [options]
   (let [options* (apply-run-defaults options)]
-    (initialize-runtime! options*)
+    (runtime-state/mark-starting!)
+    (try
+      (initialize-runtime! options*
+                           (case (:mode options*)
+                             "server" server-runtime-root-keys
+                             "both" server-runtime-root-keys
+                             base-runtime-root-keys))
 
-    ;; Start channels based on mode
-    (case (:mode options*)
-      "server"   (do (http/start! (:bind options*)
-                                  (:port options*)
-                                  {:web-dev? (:web-dev options*)})
-                     (let [port* (or (http/current-port) (:port options*))]
-                       (println (str "Xia server running on " (:bind options*) ":" port*))
-                       (println (str "open " (local-ui-url (:bind options*) port*))))
-                     @(promise))
-      "both"     (do (http/start! (:bind options*)
-                                  (:port options*)
-                                  {:web-dev? (:web-dev options*)})
-                     (let [port* (or (http/current-port) (:port options*))]
-                       (println (str "Xia server running on " (:bind options*) ":" port*))
-                       (println (str "open " (local-ui-url (:bind options*) port*))))
-                     (terminal/start!))
-      ;; default: terminal
-      (terminal/start!))))
+      ;; Start channels based on mode
+      (case (:mode options*)
+        "server"   (do (runtime-state/mark-running!)
+                       (let [port* (or (http/current-port) (:port options*))]
+                         (println (str "Xia server running on " (:bind options*) ":" port*))
+                         (println (str "open " (local-ui-url (:bind options*) port*))))
+                       @(promise))
+        "both"     (do (runtime-state/mark-running!)
+                       (let [port* (or (http/current-port) (:port options*))]
+                         (println (str "Xia server running on " (:bind options*) ":" port*))
+                         (println (str "open " (local-ui-url (:bind options*) port*))))
+                       (terminal/start!))
+        ;; default: terminal
+        (do
+          (runtime-state/mark-running!)
+          (terminal/start!)))
+      (catch Throwable t
+        (try
+          (halt-runtime!)
+          (catch Exception halt-error
+            (log/error halt-error "Failed to halt partially initialized runtime")))
+        (runtime-state/mark-stopped!)
+        (throw t)))))
 
 (defn- resolve-run-options
   [options arguments]
@@ -339,43 +383,19 @@
   (let [ran? (atom false)]
     (fn []
       (when (compare-and-set! ran? false true)
+        (runtime-state/mark-stopping!)
         (try
-          (hippo/prepare-shutdown!)
-          (catch Exception e
-            (log/error e "Failed to quiesce hippocampus background work during shutdown")))
-        (try
-          (llm/prepare-shutdown!)
-          (catch Exception e
-            (log/error e "Failed to quiesce LLM background work during shutdown")))
-        (try
-          (http/stop!)
-          (catch Exception e
-            (log/error e "Failed to stop HTTP server during shutdown")))
-        (try
-          (scheduler/stop!)
-          (catch Exception e
-            (log/error e "Failed to stop scheduler during shutdown")))
-        (try
-          (instance-supervisor/shutdown!)
-          (catch Exception e
-            (log/error e "Failed to stop managed Xia instances during shutdown")))
-        (try
-          (hippo/await-background-tasks!)
-          (catch Exception e
-            (log/error e "Failed while waiting for hippocampus background work during shutdown")))
-        (try
-          (llm/await-background-tasks!)
-          (catch Exception e
-            (log/error e "Failed while waiting for LLM background work during shutdown")))
-        (try
-          (db/close!)
-          (catch Exception e
-            (log/error e "Failed to close database during shutdown")))
-        (try
-          (save-archive! options)
-          (catch Exception e
-            (log/error e "Failed to save archive during shutdown")
-            (println (str "Archive save failed: " (.getMessage e)))))))))
+          (try
+            (halt-runtime!)
+            (catch Exception e
+              (log/error e "Failed to halt Xia runtime during shutdown")))
+          (try
+            (save-archive! options)
+            (catch Exception e
+              (log/error e "Failed to save archive during shutdown")
+              (println (str "Archive save failed: " (.getMessage e)))))
+          (finally
+            (runtime-state/mark-stopped!)))))))
 
 (defn- register-shutdown-hook!
   [cleanup]

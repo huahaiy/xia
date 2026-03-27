@@ -47,6 +47,7 @@
 (def ^:dynamic *sci-timeout-state* nil)
 (defonce ^:private sci-worker-seq (AtomicLong. 0))
 (defonce ^:private active-sci-workers (atom {}))
+(defonce ^:private shutdown? (atom false))
 
 (defn- sci-timeout-ex
   [stage timeout-ms]
@@ -511,6 +512,12 @@
                            :timed-out-at (Date.)))
              workers))))
 
+(defn reset-runtime!
+  []
+  (reset! shutdown? false)
+  (reap-finished-sci-workers!)
+  nil)
+
 (defn- sci-worker-thread
   [worker-id stage timeout-ms f result*]
   (let [runner (bound-fn*
@@ -553,8 +560,22 @@
     false)
   (not (.isAlive worker)))
 
+(defn prepare-shutdown!
+  []
+  (reset! shutdown? true)
+  (let [workers (vals (reap-finished-sci-workers!))]
+    (doseq [{:keys [worker-id stage timeout-ms ^Thread thread]} workers]
+      (when (and thread (.isAlive thread))
+        (interrupt-sci-worker! worker-id stage timeout-ms thread)))
+    (count workers)))
+
 (defn- call-with-timeout
   [timeout-ms stage f]
+  (when @shutdown?
+    (throw (ex-info "SCI runtime is shutting down"
+                    {:type :sci/shutdown
+                     :status 503
+                     :stage stage})))
   (ensure-sci-worker-capacity!)
   (let [worker-id (.incrementAndGet ^AtomicLong sci-worker-seq)
         result*  (promise)

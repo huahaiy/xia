@@ -8,7 +8,7 @@
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"session_id"     {"type"        "string"
-                                               "description" "The browser session ID from browser-open"}
+                                               "description" "The browser session ID from browser-open or browser-login"}
                              "fields"         {"type"        "object"
                                                "description" "Map of form field names to values, e.g. {\"q\": \"search query\", \"username\": \"me\"}"}
                              "submit"         {"type"        "boolean"

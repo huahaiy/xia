@@ -1,5 +1,6 @@
 (ns xia.tool-test
-  (:require [clojure.string :as str]
+  (:require [charred.api :as json]
+            [clojure.string :as str]
             [clojure.test :refer :all]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
@@ -11,9 +12,24 @@
             [xia.paths :as paths]
             [xia.prompt :as prompt]
             [xia.test-helpers :as th :refer [with-test-db]]
-            [xia.tool :as tool]))
+            [xia.tool :as tool])
+  (:import [java.nio.charset StandardCharsets]
+           [java.util Base64]))
 
 (use-fixtures :each with-test-db)
+
+(defn- decode-base64url
+  [text]
+  (let [remainder (int (mod (count text) 4))
+        padded    (str text
+                       (case remainder
+                         0 ""
+                         2 "=="
+                         3 "="
+                         1 "==="
+                         ""))]
+    (String. (.decode (Base64/getUrlDecoder) ^String padded)
+             StandardCharsets/UTF_8)))
 
 (deftest safe-tool-runs-without-approval
   (db/install-tool! {:id          :safe-tool
@@ -527,7 +543,19 @@
     (is (contains? (get-in (db/get-tool :browser-login) [:tool/parameters "properties"])
                    "backend"))
     (is (contains? (get-in (db/get-tool :browser-login-interactive) [:tool/parameters "properties"])
-                   "backend"))))
+                   "backend"))
+    (is (str/includes? (:tool/description (db/get-tool :browser-login))
+                       "browser-navigate"))
+    (is (str/includes? (:tool/description (db/get-tool :browser-login))
+                       "browser-query-elements"))
+    (is (str/includes? (:tool/description (db/get-tool :browser-login-interactive))
+                       "browser-read-page"))
+    (is (str/includes? (get-in (db/get-tool :browser-click)
+                               [:tool/parameters "properties" "session_id" "description"])
+                       "browser-login"))
+    (is (str/includes? (get-in (db/get-tool :browser-fill-form)
+                               [:tool/parameters "properties" "session_id" "description"])
+                       "browser-login"))))
 
 (deftest bundled-email-tools-run-through-approved-service
   (tool/ensure-bundled-tools!)
@@ -604,6 +632,34 @@
         (is (= "trashed" (:status deleted)))
         (is (= "m1" (:id deleted)))
         (is (= "Bearer tok" (get-in (first @requests) [:headers "Authorization"])))))))
+
+(deftest bundled-email-send-extracts-structured-body
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :email-send)
+  (db/register-service! {:id                   :gmail
+                         :name                 "Gmail"
+                         :base-url             "https://gmail.googleapis.com"
+                         :auth-type            :bearer
+                         :auth-key             "tok"
+                         :autonomous-approved? true})
+  (let [captured (atom nil)]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (reset! captured req)
+                    {:status 200
+                     :headers {"content-type" "application/json"}
+                     :body "{\"id\":\"sent-structured\",\"threadId\":\"t1\",\"labelIds\":[\"SENT\"]}"})]
+      (let [result (tool/execute-tool :email-send {"to" "boss@example.com"
+                                                   "subject" "Re: Budget"
+                                                   "body" {"message" {"content" [{"text" "Done"}
+                                                                                 {"text" "Please archive the thread."}]}}}
+                                      {:channel          :scheduler
+                                       :autonomous-run?  true
+                                       :approval-bypass? true})
+            payload (json/read-json (:body @captured))
+            raw     (decode-base64url (get payload "raw"))]
+        (is (= "sent" (:status result)))
+        (is (str/includes? raw "\r\n\r\nDone\n\nPlease archive the thread."))))))
 
 (deftest bundled-email-delete-approval-is-cached-per-session
   (tool/ensure-bundled-tools!)

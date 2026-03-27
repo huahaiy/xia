@@ -1,12 +1,13 @@
 (ns xia.core-test
   (:require [clojure.test :refer :all]
-            [xia.core :as core]
-            [xia.crypto :as crypto]
-            [xia.db :as db]
-            [xia.instance-supervisor :as instance-supervisor]
-            [xia.paths :as paths]
-            [xia.pack :as pack]
-            [xia.test-helpers :as th])
+    [xia.core :as core]
+    [xia.crypto :as crypto]
+    [xia.db :as db]
+    [xia.instance-supervisor :as instance-supervisor]
+    [xia.paths :as paths]
+    [xia.pack :as pack]
+    [xia.runtime-state :as runtime-state]
+    [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]))
@@ -14,6 +15,19 @@
 (defn- temp-dir []
   (str (Files/createTempDirectory "xia-core-test"
          (into-array FileAttribute []))))
+
+(defn- reset-core-runtime!
+  []
+  (reset! (var-get #'xia.core/runtime-system-atom) nil)
+  (runtime-state/mark-stopped!))
+
+(use-fixtures :each
+  (fn [f]
+    (reset-core-runtime!)
+    (try
+      (f)
+      (finally
+        (reset-core-runtime!)))))
 
 (defn- encode-key [byte-value]
   (.encodeToString (Base64/getEncoder)
@@ -153,7 +167,7 @@
                  :bind "0.0.0.0"
                  :port 4011
                  :web-dev true}]
-    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [db-path]
+    (with-redefs-fn {#'xia.system/ensure-db-dir! (fn [db-path]
                                                  (swap! calls conj [:ensure-db-dir db-path]))
                      #'xia.db/connect! (fn [db-path crypto-opts]
                                          (swap! calls conj [:db/connect db-path
@@ -162,6 +176,7 @@
                      #'xia.setup/needs-setup? (constantly false)
                      #'xia.setup/run-setup! (fn [] (swap! calls conj :setup/run))
                      #'xia.identity/init-identity! (fn [] (swap! calls conj :identity/init))
+                     #'xia.sci-env/reset-runtime! (fn [] (swap! calls conj :sci/reset))
                      #'xia.instance-supervisor/configure! (fn [opts]
                                                             (swap! calls conj [:instance-supervisor/configure
                                                                                (:enabled? opts)
@@ -189,6 +204,7 @@
     (is (= [[:ensure-db-dir "/tmp/xia-dev-repl"]
             [:db/connect "/tmp/xia-dev-repl" true]
             [:instance-supervisor/configure true nil]
+            :sci/reset
             :identity/init
             :tool/reset
             :tool/load
@@ -205,7 +221,7 @@
                                             (case k
                                               "XIA_ALLOW_INSTANCE_MANAGEMENT" "false"
                                               nil))
-                     #'xia.core/ensure-db-dir! (fn [_] nil)
+                     #'xia.system/ensure-db-dir! (fn [_] nil)
                      #'xia.db/connect! (fn [_ _] nil)
                      #'xia.crypto/current-key-source (fn [] :passphrase)
                      #'xia.setup/needs-setup? (constantly false)
@@ -232,7 +248,7 @@
         options {:db "/tmp/xia-dev-repl"
                  :bind "0.0.0.0"
                  :port 4011}]
-    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [_] nil)
+    (with-redefs-fn {#'xia.system/ensure-db-dir! (fn [_] nil)
                      #'xia.db/connect! (fn [_ _] nil)
                      #'xia.crypto/current-key-source (fn [] :passphrase)
                      #'xia.setup/needs-setup? (constantly false)
@@ -264,7 +280,7 @@
         options {:db "/tmp/xia-dev-repl"
                  :bind "127.0.0.1"
                  :port 4011}]
-    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [_] nil)
+    (with-redefs-fn {#'xia.system/ensure-db-dir! (fn [_] nil)
                      #'xia.db/connect! (fn [_ _] nil)
                      #'xia.crypto/current-key-source (fn [] :passphrase)
                      #'xia.setup/needs-setup? (constantly true)
@@ -284,13 +300,14 @@
 
 (deftest initialize-runtime-resets-background-workers-before-starting-scheduler
   (let [calls (atom [])]
-    (with-redefs-fn {#'xia.core/ensure-db-dir! (fn [_] nil)
+    (with-redefs-fn {#'xia.system/ensure-db-dir! (fn [_] nil)
                      #'xia.db/connect! (fn [_ _] nil)
                      #'xia.crypto/current-key-source (fn [] :passphrase)
                      #'xia.setup/needs-setup? (constantly false)
                      #'xia.identity/init-identity! (fn [] (swap! calls conj :identity/init))
                      #'xia.hippocampus/reset-runtime! (fn [] (swap! calls conj :hippo/reset))
                      #'xia.llm/reset-runtime! (fn [] (swap! calls conj :llm/reset))
+                     #'xia.sci-env/reset-runtime! (fn [] (swap! calls conj :sci/reset))
                      #'xia.instance-supervisor/configure! (fn [_] (swap! calls conj :instance-supervisor/configure))
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
                      #'xia.tool/reset-runtime! (fn [] (swap! calls conj :tool/reset))
@@ -301,9 +318,10 @@
       #(#'xia.core/initialize-runtime! {:db "/tmp/xia-dev-repl"
                                         :mode "server"
                                         :instance "dev"}))
-    (is (= [:hippo/reset
+    (is (= [:instance-supervisor/configure
+            :hippo/reset
             :llm/reset
-            :instance-supervisor/configure
+            :sci/reset
             :identity/init
             :tool/reset
             :tool/load
@@ -312,27 +330,19 @@
 
 (deftest cleanup-stops-managed-instances-before-closing-db
   (let [calls   (atom [])
-        cleanup (#'xia.core/make-cleanup {:db "/tmp/xia-dev-repl"})]
-    (with-redefs-fn {#'xia.hippocampus/prepare-shutdown! (fn [] (swap! calls conj :hippo/prepare))
-                     #'xia.llm/prepare-shutdown! (fn [] (swap! calls conj :llm/prepare))
-                     #'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
-                     #'xia.scheduler/stop! (fn [] (swap! calls conj :scheduler/stop))
-                     #'xia.instance-supervisor/shutdown! (fn [] (swap! calls conj :instance-supervisor/shutdown))
-                     #'xia.hippocampus/await-background-tasks! (fn [] (swap! calls conj :hippo/await))
-                     #'xia.llm/await-background-tasks! (fn [] (swap! calls conj :llm/await))
-                     #'xia.db/close! (fn [] (swap! calls conj :db/close))
+        cleanup (#'xia.core/make-cleanup {:db "/tmp/xia-dev-repl"})
+        system   {:xia/http :running}]
+    (reset! (var-get #'xia.core/runtime-system-atom)
+            {:system system
+             :options {:db "/tmp/xia-dev-repl"}
+             :root-keys [:xia/http]})
+    (with-redefs-fn {#'integrant.core/halt! (fn [running-system]
+                                              (swap! calls conj [:ig/halt running-system]))
                      #'xia.core/save-archive! (fn [_] (swap! calls conj :save-archive))}
       cleanup)
-    (is (= [:hippo/prepare
-            :llm/prepare
-            :http/stop
-            :scheduler/stop
-            :instance-supervisor/shutdown
-            :hippo/await
-            :llm/await
-            :db/close
-            :save-archive]
-           @calls))))
+    (is (= [[:ig/halt system] :save-archive]
+           @calls))
+    (is (nil? @(var-get #'xia.core/runtime-system-atom)))))
 
 (deftest connect-passes-built-in-embedding-provider-ids-to-datalevin
   (let [captured (atom nil)]
@@ -366,22 +376,19 @@
 
 (deftest stop-runtime-stops-process-components
   (let [calls (atom [])]
-    (with-redefs-fn {#'xia.hippocampus/prepare-shutdown! (fn [] (swap! calls conj :hippo/prepare))
-                     #'xia.llm/prepare-shutdown! (fn [] (swap! calls conj :llm/prepare))
-                     #'xia.channel.http/stop! (fn [] (swap! calls conj :http/stop))
-                     #'xia.scheduler/stop! (fn [] (swap! calls conj :scheduler/stop))
-                     #'xia.hippocampus/await-background-tasks! (fn [] (swap! calls conj :hippo/await))
-                     #'xia.llm/await-background-tasks! (fn [] (swap! calls conj :llm/await))
-                     #'xia.db/close! (fn [] (swap! calls conj :db/close))
+    (reset! (var-get #'xia.core/runtime-system-atom)
+            {:system {:xia/scheduler :running}
+             :options {:db "/tmp/xia-dev-repl"}
+             :root-keys [:xia/scheduler]})
+    (with-redefs-fn {#'integrant.core/halt! (fn [running-system]
+                                              (swap! calls conj [:ig/halt running-system]))
                      #'xia.core/save-archive! (fn [options]
                                                 (swap! calls conj [:save-archive (:db options)]))}
       #(core/stop-runtime! {:db "/tmp/xia-dev-repl"}))
-    (is (= [:hippo/prepare
-            :llm/prepare
-            :http/stop
-            :scheduler/stop
-            :hippo/await
-            :llm/await
-            :db/close
+    (is (= [[:ig/halt {:xia/scheduler :running}]
             [:save-archive "/tmp/xia-dev-repl"]]
-           @calls))))
+           @calls))
+    (let [event (core/last-stop-event)]
+      (is (= "/tmp/xia-dev-repl" (:db-path event)))
+      (is (seq (:callsite event))))
+    (is (nil? @(var-get #'xia.core/runtime-system-atom)))))
