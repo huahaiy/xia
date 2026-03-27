@@ -253,6 +253,11 @@ h1 {
   font-size: 1.25rem;
   font-weight: 700;
 }
+.panel-title-count {
+  color: var(--muted);
+  font-size: 0.86em;
+  font-weight: 600;
+}
 .panel-note {
   margin: 4px 0 0;
   color: var(--muted);
@@ -593,12 +598,38 @@ textarea:focus {
 }
 .settings-content {
   padding: 0 0 0 20px;
+  min-width: 0;
+  overflow: hidden;
 }
 .settings-content > .admin-card {
   display: none;
 }
 .settings-content > .admin-card.active-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: auto;
+}
+.settings-content .field-grid {
   display: grid;
+  grid-template-columns: 1fr !important;
+}
+.settings-content .field-grid .field.full {
+  grid-column: auto;
+}
+.settings-content .field-grid .field,
+.settings-content .field-grid .field.full {
+  max-width: 100%;
+  overflow: hidden;
+}
+.settings-content .field-grid .field.field-with-autocomplete {
+  overflow: visible;
+}
+.settings-content .text-input {
+  max-width: 100%;
+}
+.settings-content textarea {
+  min-height: 80px;
 }
 .admin-card {
   border: 1px solid var(--line);
@@ -611,6 +642,105 @@ textarea:focus {
 }
 .admin-card[hidden] { display: none; }
 .admin-card-wide { grid-column: 1 / -1; }
+.workload-route {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.workload-route:last-child { border-bottom: 0; }
+.workload-route-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 6px;
+}
+.workload-route-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.workload-route-name-text {
+  min-width: 0;
+}
+.workload-route-count {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.workload-route-providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.workload-route-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 10px;
+}
+.workload-route-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.workload-route-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+.workload-provider-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  background: var(--accent-light);
+  color: var(--accent-dark);
+  border-radius: 12px;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.workload-route-empty {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-style: italic;
+}
+.info-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+.info-hint:focus-visible {
+  outline: 2px solid rgba(26, 158, 150, 0.35);
+  outline-offset: 2px;
+}
+.floating-info-tooltip {
+  position: fixed;
+  z-index: 1000;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: rgba(26, 29, 33, 0.96);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.45;
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+}
+.floating-info-tooltip[hidden] {
+  display: none;
+}
 .template-grid {
   display: grid;
   gap: 12px;
@@ -652,6 +782,20 @@ textarea:focus {
   color: var(--accent-dark);
   font-size: 0.75rem;
   font-weight: 600;
+}
+.detail-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.detail-header {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent-dark);
 }
 .admin-list {
   display: grid;
@@ -731,10 +875,16 @@ textarea:focus {
 }
 .check-row input { width: 18px; height: 18px; accent-color: var(--accent); }
 .check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--ink);
   font-size: 0.9rem;
   font-weight: 500;
   line-height: 1.4;
+}
+.check-label-text {
+  min-width: 0;
 }
 .secret-note {
   color: var(--muted);
@@ -854,10 +1004,11 @@ textarea:focus {
 }
 .autocomplete-wrap {
   position: relative;
+  z-index: 30;
 }
 .autocomplete-list {
   position: absolute;
-  z-index: 20;
+  z-index: 40;
   top: 100%;
   left: 0;
   right: 0;

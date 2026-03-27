@@ -2278,6 +2278,32 @@
     (is (nil? (:llm.provider/history-budget provider)))
     (is (nil? (:llm.provider/rate-limit-per-minute provider)))))
 
+(deftest admin-provider-route-reuses-api-key-from-another-provider
+  (db/upsert-provider! {:id                :openrouter-primary
+                        :name              "OpenRouter Primary"
+                        :template          :openrouter
+                        :base-url          "https://openrouter.ai/api/v1"
+                        :model             "openai/gpt-4.1"
+                        :credential-source :api-key
+                        :auth-type         :api-key
+                        :api-key           "openrouter-key"})
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "openrouter-gemini"
+                                                                "name" "OpenRouter Gemini"
+                                                                "template" "openrouter"
+                                                                "base_url" "https://openrouter.ai/api/v1"
+                                                                "model" "google/gemini-2.5-pro"
+                                                                "credential_source" "api-key"
+                                                                "reuse_api_key_provider_id" "openrouter-primary"})})
+        body     (response-json response)
+        provider (db/get-provider :openrouter-gemini)]
+    (is (= 200 (:status response)))
+    (is (= "openrouter-gemini" (get-in body ["provider" "id"])))
+    (is (= "google/gemini-2.5-pro" (get-in body ["provider" "model"])))
+    (is (= "openrouter-key" (:llm.provider/api-key provider)))))
+
 (deftest admin-provider-route-links-oauth-account
   (db/register-oauth-account! {:id            :openai-login
                                :name          "OpenAI Login"

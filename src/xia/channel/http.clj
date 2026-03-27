@@ -2493,6 +2493,9 @@
           name         (or (nonblank-str (get data "name"))
                            (name provider-id))
           api-key      (nonblank-str (get data "api_key"))
+          reuse-api-key-provider-id (if (contains? data "reuse_api_key_provider_id")
+                                      (some-> (get data "reuse_api_key_provider_id") nonblank-str keyword)
+                                      nil)
           template-id  (if (contains? data "template")
                          (some-> (get data "template") nonblank-str keyword)
                          nil)
@@ -2525,12 +2528,23 @@
                                                               "rate_limit_per_minute")
           make-default (true? (get data "default"))
           has-default? (some? (db/get-default-provider))
+          reused-api-key (when reuse-api-key-provider-id
+                           (let [provider (db/get-provider reuse-api-key-provider-id)]
+                             (when-not provider
+                               (throw (ex-info "unknown reuse_api_key_provider_id"
+                                               {:field "reuse_api_key_provider_id"
+                                                :value (name reuse-api-key-provider-id)})))
+                             (or (nonblank-str (:llm.provider/api-key provider))
+                                 (throw (ex-info "reuse_api_key_provider_id does not have a stored API key"
+                                                 {:field "reuse_api_key_provider_id"
+                                                  :value (name reuse-api-key-provider-id)})))))
+          effective-api-key (or api-key reused-api-key)
           normalized-access-mode (llm/provider-access-mode {:access-mode access-mode
                                                             :credential-source credential-source
                                                             :template template-id
                                                             :base-url base-url
                                                             :oauth-account oauth-account-id
-                                                            :api-key api-key})]
+                                                            :api-key effective-api-key})]
       (when-not base-url
         (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
       (when-not model
@@ -2575,8 +2589,8 @@
                              (assoc :allow-private-network? allow-private-network?)
                              (contains? data "workloads")
                              (assoc :workloads workloads)
-                             api-key
-                             (assoc :api-key api-key)))
+                             effective-api-key
+                             (assoc :api-key effective-api-key)))
       (when (or make-default (not has-default?))
         (db/set-default-provider! provider-id))
       (when (setup/needs-setup?)
