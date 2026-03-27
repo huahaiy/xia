@@ -174,8 +174,15 @@
               <h2 class="panel-title">History</h2>
             </div>
           </div>
-          <div class="history-grid">
-            <div class="admin-card">
+          <div class="settings-layout">
+            <nav class="settings-nav">
+              <button class="settings-nav-item active" data-section="chat-history">Chat History</button>
+              <button class="settings-nav-item" data-section="scheduled-runs">Scheduled Runs</button>
+              <button class="settings-nav-item" data-section="knowledge-graph">Knowledge Graph</button>
+              <button class="settings-nav-item" data-section="llm-call-log">LLM Call Log</button>
+            </nav>
+            <div class="settings-content">
+            <div class="admin-card" data-settings-section="chat-history">
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">Chat History</h3>
@@ -189,7 +196,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" data-settings-section="scheduled-runs">
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title" title="Recent runs, results, errors, and action trails for each schedule.">Scheduled Runs</h3>
@@ -203,7 +210,7 @@
               </div>
             </div>
 
-            <div class="admin-card admin-card-wide">
+            <div class="admin-card" data-settings-section="knowledge-graph">
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">Knowledge Graph</h3>
@@ -224,7 +231,7 @@
               <div class="admin-status" id="knowledge-status">Search for a person, project, or topic to inspect stored facts.</div>
             </div>
 
-            <div class="admin-card admin-card-wide">
+            <div class="admin-card" data-settings-section="llm-call-log">
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title" title="Inspect prompts, responses, token usage, and latency for every LLM call.">LLM Call Log</h3>
@@ -240,6 +247,7 @@
                 </div>
               </div>
               <div class="admin-status" id="llm-call-status">Loading LLM call log...</div>
+            </div>
             </div>
           </div>
         </section>
@@ -267,8 +275,25 @@
             <div class="admin-status" id="provider-onboarding-status">Choose a provider template to prefill the model form below.</div>
           </div>
 
-	            <div class="admin-grid">
-	              <div class="admin-card">
+	            <div class="settings-layout">
+            <nav class="settings-nav">
+              <button class="settings-nav-item active" data-section="identity">Identity</button>
+              <button class="settings-nav-item" data-section="ai-models">AI Models</button>
+              <button class="settings-nav-item advanced-only" data-section="episode-retention">Episode Retention</button>
+              <button class="settings-nav-item advanced-only" data-section="knowledge-decay">Knowledge Decay</button>
+              <button class="settings-nav-item" data-section="conversation-context">Conversation Context</button>
+              <button class="settings-nav-item" data-section="web-search">Web Search</button>
+              <button class="settings-nav-item" data-section="api-auth">API Auth</button>
+              <button class="settings-nav-item" data-section="doc-summaries">Document Summaries</button>
+              <button class="settings-nav-item" data-section="ocr">OCR</button>
+              <button class="settings-nav-item" data-section="database-backups">Database Backups</button>
+              <button class="settings-nav-item advanced-only" data-section="api-services">API Services</button>
+              <button class="settings-nav-item" data-section="site-logins">Site Logins</button>
+              <button class="settings-nav-item advanced-only" data-section="notification-bridge">Notification Bridge</button>
+              <button class="settings-nav-item advanced-only" data-section="capabilities">Capabilities</button>
+            </nav>
+            <div class="settings-content">
+	              <div class="admin-card" data-settings-section="identity">
               <div class="panel-header">
                 <h3 class="panel-title">Identity</h3>
               </div>
@@ -321,7 +346,7 @@
               </div>
             </div>
 
-	              <div class="admin-card" id="provider-card">
+	              <div class="admin-card" id="provider-card" data-settings-section="ai-models">
               <div class="panel-header">
                 <h3 class="panel-title">AI Models</h3>
               </div>
@@ -405,7 +430,7 @@
               </div>
             </div>
 
-            <div class="admin-card advanced-only">
+            <div class="admin-card" data-settings-section="episode-retention">
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title" title="Keep all processed episodes for the full-resolution window, then retain the highest-scoring older episodes by importance-decay rank.">Episode Retention</h3>
@@ -431,7 +456,7 @@
               </div>
             </div>
 
-            <div class="admin-card advanced-only">
+            <div class="admin-card" data-settings-section="knowledge-decay">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Control how fact confidence decays over time after the grace period. Higher-utility facts still decay more slowly than low-utility ones.">Knowledge Decay</h3>
@@ -465,15 +490,21 @@
               </div>
             </div>
 
-	            <div class="admin-card" id="oauth-account-card">
+	            <div class="admin-card" data-settings-section="conversation-context">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Control how many recent messages stay verbatim in the prompt before older chat history is folded into the rolling recap.">Conversation Context</h3>
                 </div>
               </div>
-              <div class="field" style="max-width:240px">
-                <label class="field-label" for="context-recent-history-message-limit">Recent History Window (Messages)</label>
-                <input type="number" id="context-recent-history-message-limit" class="text-input" min="4" step="1" placeholder="24">
+              <div class="field-grid">
+                <div class="field" style="max-width:240px">
+                  <label class="field-label" for="context-recent-history-message-limit">Recent History Window (Messages)</label>
+                  <input type="number" id="context-recent-history-message-limit" class="text-input" min="4" step="1" placeholder="24">
+                </div>
+                <div class="field" style="max-width:240px">
+                  <label class="field-label" for="context-history-budget">Default History Budget (Tokens)</label>
+                  <input type="number" id="context-history-budget" class="text-input" min="1" step="1" placeholder="8000">
+                </div>
               </div>
               <div class="composer-foot">
                 <div class="admin-status" id="context-status">Loading conversation context settings...</div>
@@ -483,7 +514,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" data-settings-section="web-search">
               <div class="panel-header">
                 <h3 class="panel-title">Web Search</h3>
               </div>
@@ -497,7 +528,7 @@
                     <option value="searxng-json">SearxNG</option>
                   </select>
                 </div>
-                <div class="field">
+                <div class="field" id="search-brave-api-key-field" hidden>
                   <label class="field-label">Brave Search API Key</label>
                   <input type="password" id="search-brave-api-key" class="text-input" placeholder="BSA...">
                   <p class="secret-note">Free tier: 2,000 queries/month at <a href="https://api.search.brave.com" target="_blank">api.search.brave.com</a></p>
@@ -515,9 +546,12 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" id="oauth-account-card" data-settings-section="api-auth">
               <div class="panel-header">
-                <h3 class="panel-title">App Connections</h3>
+                <div>
+                  <h3 class="panel-title">API Auth</h3>
+                  <p class="panel-note">Store OAuth API credentials here. API services can link to them, and providers can reuse them when API sign-in is supported.</p>
+                </div>
                 <button type="button" class="secondary" id="new-oauth-account">New connection</button>
               </div>
               <div class="admin-list" id="oauth-account-list"></div>
@@ -606,7 +640,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" data-settings-section="doc-summaries">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Choose document summary mode: use the extractive default, or switch to local or external model-generated summaries for uploaded documents.">Document Summaries</h3>
@@ -644,7 +678,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" data-settings-section="ocr">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Choose OCR mode: local OCR downloads Xia-managed PaddleOCR models automatically, or external provider routes image OCR through a vision-capable model.">OCR</h3>
@@ -683,7 +717,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" data-settings-section="database-backups">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Schedule automatic portable backups built from a safe LMDB snapshot of the live Datalevin database.">Database Backups</h3>
@@ -725,7 +759,7 @@
               </div>
             </div>
 
-            <div class="admin-card advanced-only">
+            <div class="admin-card" data-settings-section="api-services">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Registered API endpoints Xia can call through the service proxy.">API Services</h3>
@@ -800,7 +834,7 @@
               </div>
             </div>
 
-            <div class="admin-card">
+            <div class="admin-card" data-settings-section="site-logins">
               <div class="panel-header">
                 <h3 class="panel-title">Site Logins</h3>
                 <button type="button" class="secondary" id="new-site">New site</button>
@@ -859,7 +893,7 @@
               </div>
             </div>
 
-            <div class="admin-card admin-card-wide advanced-only">
+            <div class="admin-card" data-settings-section="notification-bridge">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Pair phones for notifications and compact remote status checks without exposing Xia directly.">Notification Bridge</h3>
@@ -918,7 +952,7 @@
               </div>
             </div>
 
-            <div class="admin-card admin-card-wide advanced-only">
+            <div class="admin-card" data-settings-section="capabilities">
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Installed tools and skills currently available to Xia.">Capabilities</h3>
@@ -951,6 +985,7 @@
                   </div>
                 </div>
               </div>
+            </div>
             </div>
           </div>
         </section>

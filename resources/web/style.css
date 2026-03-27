@@ -546,15 +546,59 @@ textarea:focus {
 }
 .hint { color: var(--muted); font-size: 0.84rem; line-height: 1.4; }
 .admin-panel { gap: 18px; }
-.admin-grid {
+.settings-layout {
   display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 0;
+  min-height: 400px;
 }
-.history-grid {
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  border-right: 1px solid var(--line);
+  position: sticky;
+  top: 24px;
+  align-self: start;
+}
+.settings-nav-item {
+  appearance: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 16px;
+  text-align: left;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+  border-left: 2px solid transparent;
+}
+.settings-nav-item:hover {
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: none;
+}
+.settings-nav-item.active {
+  color: var(--accent-dark);
+  background: var(--accent-light);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+.advanced-mode .settings-nav-item.advanced-only {
+  display: block !important;
+}
+.settings-content {
+  padding: 0 0 0 20px;
+}
+.settings-content > .admin-card {
+  display: none;
+}
+.settings-content > .admin-card.active-section {
   display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .admin-card {
   border: 1px solid var(--line);
@@ -707,6 +751,8 @@ textarea:focus {
   color: var(--accent-dark);
   font-size: 0.8rem;
   font-weight: 600;
+  max-width: 100%;
+  white-space: normal;
 }
 .model-capability-note:empty {
   display: none;
@@ -824,6 +870,7 @@ textarea:focus {
   box-shadow: var(--shadow-lg);
 }
 .autocomplete-list[hidden] { display: none; }
+[hidden] { display: none !important; }
 .autocomplete-item {
   display: flex;
   align-items: center;
@@ -859,6 +906,10 @@ textarea:focus {
 .autocomplete-item-badge-vision {
   background: rgba(26, 158, 150, 0.14);
   color: var(--accent-dark);
+}
+.autocomplete-item-badge-context {
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
 }
 .autocomplete-item-badge-text {
   background: rgba(31, 41, 55, 0.08);
@@ -1008,8 +1059,27 @@ textarea:focus {
   color: var(--muted);
 }
 @media (max-width: 980px) {
-  .hero, .workspace, .admin-grid, .history-grid, .knowledge-grid, .llm-log-grid, .capability-grid, .field-grid { grid-template-columns: 1fr; }
-  .admin-card-wide { grid-column: auto; }
+  .hero, .workspace, .knowledge-grid, .llm-log-grid, .capability-grid, .field-grid { grid-template-columns: 1fr; }
+  .settings-layout { grid-template-columns: 1fr; }
+  .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    position: static;
+    padding: 0;
+  }
+  .settings-nav-item {
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    padding: 8px 14px;
+  }
+  .settings-nav-item.active {
+    border-left-color: transparent;
+    border-bottom-color: var(--accent);
+  }
+  .settings-content { padding: 16px 0 0; }
   .shell { padding: 14px; }
   textarea { min-height: 240px; }
   .hero-brand { align-items: flex-start; }

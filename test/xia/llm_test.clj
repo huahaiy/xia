@@ -1,7 +1,6 @@
 (ns xia.llm-test
   (:require [clojure.test :refer :all]
             [charred.api :as json]
-            [xia.llm-account-connector :as llm-account-connector]
             [xia.llm :as llm]))
 
 (deftest build-request-sets-request-timeout
@@ -130,46 +129,9 @@
   (is (= :api
          (llm/provider-access-mode {:llm.provider/access-mode :account
                                     :llm.provider/credential-source :oauth-account})))
-  (is (= :account
+  (is (= :api
          (llm/provider-access-mode {:llm.provider/access-mode :api
                                     :llm.provider/credential-source :browser-session}))))
-
-(deftest chat-simple-can-use-browser-session-account-connector
-  (let [calls (atom [])]
-    (with-redefs [xia.db/get-default-provider
-                  (constantly {:llm.provider/id :openai-account
-                               :llm.provider/template :openai
-                               :llm.provider/access-mode :account
-                               :llm.provider/credential-source :browser-session
-                               :llm.provider/browser-session "browser-session-1"
-                               :llm.provider/model "gpt-5"})
-                  xia.config/positive-long
-                  (fn [_ default-value] default-value)
-                  xia.llm-account-connector/request-chat
-                  (fn [provider messages opts]
-                    (swap! calls conj {:provider provider
-                                       :messages messages
-                                       :opts opts})
-                    {"choices" [{"message" {"content" "browser-account-response"}}]})]
-      (is (= "browser-account-response"
-             (llm/chat-simple [{"role" "user" "content" "hello"}])))
-      (is (= 1 (count @calls)))
-      (is (= "browser-session-1"
-             (get-in (first @calls) [:provider :llm.provider/browser-session]))))))
-
-(deftest openai-account-connector-starts-visible-managed-browser
-  (let [calls (atom [])]
-    (with-redefs [xia.browser/open-session
-                  (fn [url & {:as opts}]
-                    (swap! calls conj {:url url :opts opts})
-                    {:session-id "browser-session-1"})]
-      (let [result (llm-account-connector/start-connection! :openai-browser)]
-        (is (= :openai-browser (:connector result)))
-        (is (= "browser-session-1" (:session-id result)))
-        (is (= {:url "https://chatgpt.com/"
-                :opts {:backend :playwright
-                       :headless false}}
-               (first @calls)))))))
 
 (deftest vision-capable-checks-provider-flag
   (is (true? (llm/vision-capable? {:llm.provider/id :vision
@@ -201,6 +163,25 @@
             :vision-source :model-id}
            (llm/fetch-provider-model-metadata {:base-url "https://api.example.com/v1"
                                                :model "gpt-4o"})))))
+
+(deftest fetch-provider-model-metadata-infers-context-window-and-recommended-budgets
+  (with-redefs [xia.http-client/request
+                (fn [_req]
+                  {:status 200
+                   :body (json/write-json-str {"id" "test-model"
+                                               "context_length" 200000
+                                               "max_input_tokens" 128000
+                                               "capabilities" {"vision" false}})})]
+    (is (= {:id "test-model"
+            :vision? false
+            :vision-source :metadata
+            :context-window 128000
+            :context-window-source :metadata
+            :recommended-system-prompt-budget 24000
+            :recommended-history-budget 72000
+            :recommended-input-budget-cap 96000}
+           (llm/fetch-provider-model-metadata {:base-url "https://api.example.com/v1"
+                                               :model "test-model"})))))
 
 (deftest fetch-provider-models-uses-anthropic-native-headers
   (with-redefs [xia.http-client/request

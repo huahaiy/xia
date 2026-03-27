@@ -17,7 +17,6 @@
             [xia.local-doc :as local-doc]
             [xia.local-ocr :as local-ocr]
             [xia.llm :as llm]
-            [xia.llm-account-connector :as llm-account-connector]
             [xia.llm-provider-template :as llm-provider-template]
             [xia.memory :as memory]
             [xia.oauth :as oauth]
@@ -61,7 +60,7 @@
 (def ^:private session-finalize-lock-count 256)
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private provider-access-modes #{:local :api :account})
-(def ^:private provider-credential-sources #{:none :api-key :oauth-account :browser-session})
+(def ^:private provider-credential-sources #{:none :api-key :oauth-account})
 (def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
 (def ^:private http-port-search-limit 100)
 (def ^:private ms-per-day (* 24 60 60 1000))
@@ -1203,7 +1202,6 @@
         access-mode     (llm/provider-access-mode provider)
         credential-source (llm/provider-credential-source provider)
         oauth-account   (some-> (:llm.provider/oauth-account provider) db/get-oauth-account)
-        browser-session (some-> (:llm.provider/browser-session provider) str)
         health          (llm/provider-health-summary (:llm.provider/id provider))]
     {:id                    provider-id
      :name                  (:llm.provider/name provider)
@@ -1214,9 +1212,6 @@
      :oauth_account         (some-> (:llm.provider/oauth-account provider) name)
      :oauth_account_name    (:oauth.account/name oauth-account)
      :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
-     :browser_session       browser-session
-     :browser_session_connected (boolean (and browser-session
-                                              (llm-account-connector/browser-session-connected? browser-session)))
      :base_url              (:llm.provider/base-url provider)
      :model                 (:llm.provider/model provider)
      :workloads             (->> (:llm.provider/workloads provider)
@@ -1293,7 +1288,8 @@
 
 (defn- conversation-context->admin-body
   []
-  {:recent_history_message_limit (context/recent-history-message-limit-config)})
+  {:recent_history_message_limit (context/recent-history-message-limit-config)
+   :history_budget               (context/history-budget-config)})
 
 (defn- local-doc-summarization->admin-body
   []
@@ -1369,14 +1365,6 @@
    :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
    :expires_at               (instant->str (:oauth.account/expires-at account))
    :connected_at             (instant->str (:oauth.account/connected-at account))})
-
-(defn- provider-account-connection->admin-body
-  [connection]
-  {:connector  (some-> (:connector connection) name)
-   :session_id (:session-id connection)
-   :login_url  (:login-url connection)
-   :connected  (boolean (:connected connection))
-   :message    (:message connection)})
 
 (defn- oauth-template->admin-body
   [template]
@@ -2416,12 +2404,27 @@
 (defn- handle-fetch-provider-models [req]
   (try
     (let [body     (read-body req)
-          base-url (get body "base_url")
-          api-key  (get body "api_key")]
+          provider-id (when (contains? body "provider_id")
+                        (some-> (get body "provider_id") nonblank-str keyword))
+          provider    (when provider-id
+                        (or (db/get-provider provider-id)
+                            (throw (ex-info "unknown provider_id"
+                                            {:field "provider_id"
+                                             :value (name provider-id)}))))
+          base-url    (or (get body "base_url")
+                          (:llm.provider/base-url provider))
+          api-key     (or (nonblank-str (get body "api_key"))
+                          (nonblank-str (:llm.provider/api-key provider)))
+          auth-header (when (and provider
+                                 (nil? api-key)
+                                 (= :oauth-account (llm/provider-credential-source provider)))
+                        (when-let [account-id (:llm.provider/oauth-account provider)]
+                          (oauth/oauth-header (oauth/ensure-account-ready! account-id))))]
       (when-not (nonblank-str base-url)
         (throw (ex-info "base_url is required" {:type :http/bad-request})))
       (let [models (llm/fetch-provider-models {:base-url base-url
-                                               :api-key  api-key})]
+                                               :api-key  api-key
+                                               :auth-header auth-header})]
         (json-response 200 {:models (or models [])})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))
@@ -2431,20 +2434,51 @@
 (defn- handle-fetch-provider-model-metadata [req]
   (try
     (let [body     (read-body req)
-          base-url (get body "base_url")
-          api-key  (get body "api_key")
-          model-id (get body "model")]
+          provider-id (when (contains? body "provider_id")
+                        (some-> (get body "provider_id") nonblank-str keyword))
+          provider    (when provider-id
+                        (or (db/get-provider provider-id)
+                            (throw (ex-info "unknown provider_id"
+                                            {:field "provider_id"
+                                             :value (name provider-id)}))))
+          base-url    (or (get body "base_url")
+                          (:llm.provider/base-url provider))
+          api-key     (or (nonblank-str (get body "api_key"))
+                          (nonblank-str (:llm.provider/api-key provider)))
+          auth-header (when (and provider
+                                 (nil? api-key)
+                                 (= :oauth-account (llm/provider-credential-source provider)))
+                        (when-let [account-id (:llm.provider/oauth-account provider)]
+                          (oauth/oauth-header (oauth/ensure-account-ready! account-id))))
+          model-id    (get body "model")]
       (when-not (nonblank-str base-url)
         (throw (ex-info "base_url is required" {:type :http/bad-request})))
       (when-not (nonblank-str model-id)
         (throw (ex-info "model is required" {:type :http/bad-request})))
-      (let [{:keys [id vision? vision-source]}
+      (let [{:keys [id vision? vision-source
+                    context-window context-window-source
+                    recommended-system-prompt-budget
+                    recommended-history-budget
+                    recommended-input-budget-cap]}
             (llm/fetch-provider-model-metadata {:base-url base-url
                                                :api-key  api-key
+                                               :auth-header auth-header
                                                :model    model-id})]
-        (json-response 200 {:model {:id            id
-                                    :vision        (boolean vision?)
-                                    :vision_source (some-> vision-source name)}})))
+        (json-response 200 {:model (cond-> {:id            id
+                                            :vision        (boolean vision?)
+                                            :vision_source (some-> vision-source name)}
+                                     context-window
+                                     (assoc :context_window context-window
+                                            :context_window_source (some-> context-window-source name))
+
+                                     recommended-system-prompt-budget
+                                     (assoc :recommended_system_prompt_budget recommended-system-prompt-budget)
+
+                                     recommended-history-budget
+                                     (assoc :recommended_history_budget recommended-history-budget)
+
+                                     recommended-input-budget-cap
+                                     (assoc :recommended_input_budget_cap recommended-input-budget-cap))})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))
     (catch Exception e
@@ -2477,9 +2511,6 @@
           oauth-account-id (if (contains? data "oauth_account")
                              (some-> (get data "oauth_account") nonblank-str keyword)
                              nil)
-          browser-session-id (if (contains? data "browser_session")
-                               (some-> (get data "browser_session") nonblank-str)
-                               nil)
           vision?      (when (contains? data "vision")
                          (true? (get data "vision")))
           allow-private-network? (when (contains? data "allow_private_network")
@@ -2499,7 +2530,6 @@
                                                             :template template-id
                                                             :base-url base-url
                                                             :oauth-account oauth-account-id
-                                                            :browser-session browser-session-id
                                                             :api-key api-key})]
       (when-not base-url
         (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
@@ -2514,20 +2544,14 @@
                  (nil? oauth-account-id))
         (throw (ex-info "oauth_account is required for oauth-account credential_source"
                         {:field "oauth_account"})))
-      (when (and (= credential-source :browser-session)
-                 (nil? browser-session-id))
-        (throw (ex-info "browser_session is required for browser-session credential_source"
+      (when (contains? data "browser_session")
+        (throw (ex-info "browser_session is no longer supported; use API key or OAuth API sign-in."
                         {:field "browser_session"})))
       (when (and oauth-account-id
                  (nil? (db/get-oauth-account oauth-account-id)))
         (throw (ex-info "unknown oauth_account"
                         {:field "oauth_account"
                          :value (name oauth-account-id)})))
-      (when (and browser-session-id
-                 (not (llm-account-connector/browser-session-connected? browser-session-id)))
-        (throw (ex-info "unknown or expired browser_session"
-                        {:field "browser_session"
-                         :value browser-session-id})))
       (db/upsert-provider! (cond-> {:id       provider-id
                                     :name     name
                                     :base-url base-url
@@ -2545,8 +2569,6 @@
                                     :auth-type credential-source)
                              (contains? data "oauth_account")
                              (assoc :oauth-account oauth-account-id)
-                             (contains? data "browser_session")
-                             (assoc :browser-session browser-session-id)
                              (contains? data "vision")
                              (assoc :vision? vision?)
                              (contains? data "allow_private_network")
@@ -2643,10 +2665,16 @@
     (let [data                         (or (read-body req) {})
           recent-history-message-limit (when (contains? data "recent_history_message_limit")
                                          (parse-optional-positive-long (get data "recent_history_message_limit")
-                                                                       "recent_history_message_limit"))]
+                                                                       "recent_history_message_limit"))
+          history-budget               (when (contains? data "history_budget")
+                                         (parse-optional-positive-long (get data "history_budget")
+                                                                       "history_budget"))]
       (when (contains? data "recent_history_message_limit")
         (save-config-override! :context/recent-history-message-limit
                                recent-history-message-limit))
+      (when (contains? data "history_budget")
+        (save-config-override! :context/history-budget
+                               history-budget))
       (json-response 200 {:conversation_context (conversation-context->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
@@ -3131,29 +3159,6 @@
                                               (.getMessage e)
                                               pending-account-id)))))))
 
-(defn- handle-start-provider-account-connector [connector-id]
-  (try
-    (let [connector-key (parse-keyword-id connector-id "connector_id")]
-      (json-response 200
-                     {:connection (provider-account-connection->admin-body
-                                   (llm-account-connector/start-connection! connector-key))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-complete-provider-account-connector [connector-id req]
-  (try
-    (let [connector-key  (parse-keyword-id connector-id "connector_id")
-          data           (or (read-body req) {})
-          browser-session (nonblank-str (get data "browser_session"))]
-      (when-not browser-session
-        (throw (ex-info "missing 'browser_session' field"
-                        {:field "browser_session"})))
-      (json-response 200
-                     {:connection (provider-account-connection->admin-body
-                                   (llm-account-connector/complete-connection! connector-key browser-session))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
 (defn- handle-save-site [req]
   (try
     (let [data            (or (read-body req) {})
@@ -3290,8 +3295,6 @@
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
           llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
-          admin-provider-account-start-match (re-matches #"/admin/provider-account-connectors/([^/]+)/start" uri)
-          admin-provider-account-complete-match (re-matches #"/admin/provider-account-connectors/([^/]+)/complete" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
           admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
           admin-oauth-refresh-match (re-matches #"/admin/oauth-accounts/([^/]+)/refresh" uri)]
@@ -3460,12 +3463,6 @@
 
         (and (= method :delete) (= uri "/admin/providers"))
         (protected-route-response req #(handle-delete-provider req))
-
-        (and (= method :post) admin-provider-account-start-match)
-        (protected-route-response req #(handle-start-provider-account-connector (second admin-provider-account-start-match)))
-
-        (and (= method :post) admin-provider-account-complete-match)
-        (protected-route-response req #(handle-complete-provider-account-connector (second admin-provider-account-complete-match) req))
 
         (and (= method :post) (= uri "/admin/memory-retention"))
         (protected-route-response req #(handle-save-memory-retention req))

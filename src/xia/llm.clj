@@ -6,7 +6,6 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.llm-account-connector :as account-connector]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http]
@@ -1075,8 +1074,6 @@
     (cond
       (keyword? auth-type) auth-type
       (string? auth-type)  (keyword auth-type)
-      (some? (or (:llm.provider/browser-session provider)
-                 (:browser-session provider))) :browser-session
       (some? (or (:llm.provider/oauth-account provider)
                  (:oauth-account provider))) :oauth-account
       (seq (or (:llm.provider/api-key provider)
@@ -1087,7 +1084,6 @@
   "Return the normalized access mode for a provider.
 
    :local   = built-in/local runtime access
-   :account = web account session access
    :api     = programmatic API credential access"
   [provider]
   (let [access-mode (or (:llm.provider/access-mode provider)
@@ -1098,9 +1094,6 @@
         base-url    (or (:llm.provider/base-url provider)
                         (:base-url provider))]
     (cond
-      (= :browser-session credential-source)
-      :account
-
       (or (= :oauth-account credential-source)
           (= :api-key credential-source))
       :api
@@ -1132,9 +1125,6 @@
     (when-let [account-id (or (:llm.provider/oauth-account provider)
                               (:oauth-account provider))]
       (oauth/oauth-header (oauth/ensure-account-ready! account-id)))
-
-    :browser-session
-    nil
 
     nil))
 
@@ -1337,64 +1327,60 @@
 
 (defn- attempt-chat
   [messages opts {:keys [provider provider-id workload]}]
-  (if (account-connector/connector-id provider)
-    (do
-      (check-rate-limit! provider-id provider workload)
-      (account-connector/request-chat provider messages opts))
-    (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
-          model     (or (:llm.provider/model provider) (:model provider))
-          provider-family (provider-family-from-base-url base-url)
-          api-key   (provider-api-key provider)
-          auth-header (provider-auth-header provider)
-          request-config {:base-url base-url
-                          :provider-family provider-family
-                          :api-key api-key
-                          :auth-header auth-header
-                          :model model
-                          :allow-private-network? (provider-allows-private-network? provider)}
-          _         (check-rate-limit! provider-id provider workload)
-          req       (build-request request-config messages opts)
-          fallback-req (when (streaming-request? opts)
-                         (build-request request-config
-                                        messages
-                                        (dissoc opts :on-delta)))
-          _         (log/debug "LLM request via provider" provider-id
-                               "to" base-url
-                               "model" model
-                               (when workload (str "workload " workload)))
-          resp      (if (streaming-request? opts)
-                      (stream-chat-response provider-family
-                                            req
-                                            fallback-req
-                                            opts
-                                            provider-id
-                                            workload)
-                      (http/request req))
-          status    (:status resp)]
-      (when (not= 200 status)
-        (throw (ex-info (str "LLM request failed with status " status)
-                        {:status      status
-                         :headers     (:headers resp)
-                         :body        (:body resp)
-                         :provider-id provider-id
-                          :workload    workload})))
-      (let [response (if (:streamed? resp)
-                       (or (:response resp)
-                           (normalize-chat-response provider-family
-                                                    (parse-json-body (:body resp)
-                                                                     provider-id
-                                                                     workload)))
-                       (normalize-chat-response provider-family
-                                                (parse-json-body (:body resp)
-                                                                 provider-id
-                                                                 workload)))]
-        (when (:stream-recovered? resp)
-          (maybe-report-recovered-stream-content! opts
-                                                  provider-id
-                                                  workload
-                                                  (:stream-partial-content resp)
-                                                  response))
-        response))))
+  (let [base-url  (or (:llm.provider/base-url provider) (:base-url provider))
+        model     (or (:llm.provider/model provider) (:model provider))
+        provider-family (provider-family-from-base-url base-url)
+        api-key   (provider-api-key provider)
+        auth-header (provider-auth-header provider)
+        request-config {:base-url base-url
+                        :provider-family provider-family
+                        :api-key api-key
+                        :auth-header auth-header
+                        :model model
+                        :allow-private-network? (provider-allows-private-network? provider)}
+        _         (check-rate-limit! provider-id provider workload)
+        req       (build-request request-config messages opts)
+        fallback-req (when (streaming-request? opts)
+                       (build-request request-config
+                                      messages
+                                      (dissoc opts :on-delta)))
+        _         (log/debug "LLM request via provider" provider-id
+                             "to" base-url
+                             "model" model
+                             (when workload (str "workload " workload)))
+        resp      (if (streaming-request? opts)
+                    (stream-chat-response provider-family
+                                          req
+                                          fallback-req
+                                          opts
+                                          provider-id
+                                          workload)
+                    (http/request req))
+        status    (:status resp)]
+    (when (not= 200 status)
+      (throw (ex-info (str "LLM request failed with status " status)
+                      {:status      status
+                       :headers     (:headers resp)
+                       :body        (:body resp)
+                       :provider-id provider-id
+                        :workload    workload})))
+    (let [response (if (:streamed? resp)
+                     (or (:response resp)
+                         (normalize-chat-response provider-family
+                                                  (parse-json-body (:body resp)
+                                                                   provider-id
+                                                                   workload)))
+                     (normalize-chat-response provider-family
+                                              (parse-json-body (:body resp)
+                                                               provider-id
+                                                               workload)))]
+      (when (:stream-recovered? resp)
+        (maybe-report-recovered-stream-content! opts
+                                                provider-id
+                                                workload
+                                                (:stream-partial-content resp)
+                                                response))
+      response)))
 
 (defn- attempt-provider-round
   [messages opts attempts]
@@ -1583,9 +1569,9 @@
 
 (defn fetch-provider-models
   "Fetch available models from a provider's /models endpoint.
-   Accepts a map with :base-url and optionally :api-key.
+   Accepts a map with :base-url and optionally :api-key or :auth-header.
    Returns a sorted vector of model ID strings."
-  [{:keys [base-url api-key]}]
+  [{:keys [base-url api-key auth-header]}]
   (let [provider-family (provider-family-from-base-url base-url)
         base-url        (normalize-base-url base-url)
         api-key         (some-> api-key str/trim not-empty)
@@ -1593,7 +1579,8 @@
         resp            (http/request {:url     (str base-url "/models")
                             :method  :get
                             :headers (provider-api-headers provider-family
-                                                           {:api-key api-key})
+                                                           {:api-key api-key
+                                                            :auth-header auth-header})
                             :allow-private-network? allow-private?
                             :timeout 15000
                             :request-label "Fetch provider models"})]
@@ -1699,6 +1686,165 @@
       {:vision? false
        :source :model-id})))
 
+(def ^:private model-context-window-paths
+  [["context_length"]
+   ["context_window"]
+   ["context_window_tokens"]
+   ["max_context_tokens"]
+   ["max_context_length"]
+   ["max_input_tokens"]
+   ["max_prompt_tokens"]
+   ["input_token_limit"]
+   ["max_sequence_length"]
+   ["max_model_len"]
+   ["architecture" "context_length"]
+   ["architecture" "max_context_tokens"]
+   ["architecture" "max_input_tokens"]
+   ["capabilities" "context_length"]
+   ["capabilities" "context_window"]
+   ["capabilities" "max_input_tokens"]
+   ["limits" "context_length"]
+   ["limits" "context_window"]
+   ["limits" "max_context_tokens"]
+   ["limits" "max_input_tokens"]])
+
+(def ^:private model-context-window-max 10000000)
+(def ^:private recommended-context-input-max 160000)
+(def ^:private recommended-system-budget-max 24000)
+(def ^:private recommended-min-system-budget 256)
+(def ^:private recommended-min-history-budget 256)
+
+(defn- parse-positive-long
+  [value]
+  (try
+    (let [parsed
+          (cond
+            (integer? value) (long value)
+            (number? value) (long (Math/floor (double value)))
+            (string? value)
+            (let [normalized (-> value
+                                 str/trim
+                                 str/lower-case
+                                 (str/replace #"[,_\s]" ""))]
+              (cond
+                (re-matches #"[0-9]+" normalized)
+                (Long/parseLong normalized)
+
+                (re-matches #"[0-9]+k" normalized)
+                (* 1000 (Long/parseLong (subs normalized 0 (dec (count normalized)))))
+
+                (re-matches #"[0-9]+m" normalized)
+                (* 1000000 (Long/parseLong (subs normalized 0 (dec (count normalized)))))
+
+                :else nil))
+            :else nil)]
+      (when (and parsed
+                 (<= 512 parsed model-context-window-max))
+        parsed))
+    (catch Exception _
+      nil)))
+
+(defn- get-map-value
+  [m key]
+  (when (map? m)
+    (let [key-name (some-> key name)]
+      (or (get m key)
+          (when key-name
+            (or (get m key-name)
+                (get m (keyword key-name))))))))
+
+(defn- get-in-map-values
+  [m path]
+  (reduce (fn [acc key]
+            (get-map-value acc key))
+          m
+          path))
+
+(defn- context-window-key?
+  [key]
+  (when-let [normalized (some-> key
+                                name
+                                str/lower-case
+                                (str/replace "-" "_"))]
+    (and (not (or (str/includes? normalized "output")
+                  (str/includes? normalized "completion")
+                  (str/includes? normalized "response")
+                  (str/includes? normalized "generated")
+                  (str/includes? normalized "reasoning")))
+         (or (= normalized "context_length")
+             (= normalized "context_window")
+             (= normalized "context_window_tokens")
+             (= normalized "max_context_tokens")
+             (= normalized "max_context_length")
+             (= normalized "max_input_tokens")
+             (= normalized "max_prompt_tokens")
+             (= normalized "input_token_limit")
+             (= normalized "max_sequence_length")
+             (= normalized "max_model_len")
+             (str/includes? normalized "context_token")
+             (str/includes? normalized "context_length")
+             (str/includes? normalized "max_input_token")
+             (str/includes? normalized "max_prompt_token")))))
+
+(defn- nested-context-window-values
+  ([value]
+   (nested-context-window-values value 0))
+  ([value depth]
+   (if (> (long depth) 4)
+     []
+     (cond
+       (map? value)
+       (mapcat (fn [[k v]]
+                 (concat
+                   (when (context-window-key? k)
+                     (when-let [parsed (parse-positive-long v)]
+                       [parsed]))
+                   (nested-context-window-values v (inc depth))))
+               value)
+
+       (sequential? value)
+       (mapcat #(nested-context-window-values % (inc depth)) value)
+
+       :else
+       []))))
+
+(defn- infer-model-context-window
+  [model]
+  (let [explicit-values (->> model-context-window-paths
+                             (map #(get-in-map-values model %))
+                             (keep parse-positive-long)
+                             vec)
+        nested-values   (->> (nested-context-window-values model)
+                             (keep parse-positive-long)
+                             vec)
+        candidates      (if (seq explicit-values)
+                          explicit-values
+                          nested-values)]
+    (when (seq candidates)
+      {:context-window (apply min candidates)
+       :source :metadata})))
+
+(defn- recommended-model-budgets
+  [context-window]
+  (let [window           (long context-window)
+        input-budget-cap (-> (* 0.75 (double window))
+                             Math/floor
+                             long
+                             (long-max 512)
+                             (long-min recommended-context-input-max))
+        max-system       (long-max recommended-min-system-budget
+                                   (- input-budget-cap recommended-min-history-budget))
+        system-target    (long (Math/round (* 0.25 (double input-budget-cap))))
+        system-budget    (-> system-target
+                             (long-max recommended-min-system-budget)
+                             (long-min recommended-system-budget-max)
+                             (long-min max-system))
+        history-budget   (long-max recommended-min-history-budget
+                                   (- input-budget-cap system-budget))]
+    {:system-prompt-budget system-budget
+     :history-budget history-budget
+     :input-budget-cap input-budget-cap}))
+
 (defn- encode-model-path-segment
   [model-id]
   (when-let [value (some-> model-id str)]
@@ -1707,9 +1853,9 @@
 
 (defn fetch-provider-model-metadata
   "Fetch a single model's metadata from /models/{id} and infer whether it
-   accepts image input. Falls back to model-id inference when the provider
-   does not expose a usable metadata endpoint."
-  [{:keys [base-url api-key model]}]
+   accepts image input and context-window hints. Falls back to model-id
+   inference when the provider does not expose a usable metadata endpoint."
+  [{:keys [base-url api-key auth-header model]}]
   (let [model-id        (some-> model str/trim not-empty)
         provider-family (provider-family-from-base-url base-url)
         base-url        (normalize-base-url base-url)
@@ -1725,17 +1871,32 @@
         resp            (http/request {:url     metadata-url
                                        :method  :get
                                        :headers (provider-api-headers provider-family
-                                                                      {:api-key api-key})
+                                                                      {:api-key api-key
+                                                                       :auth-header auth-header})
                                        :allow-private-network? allow-private?
                                        :timeout 15000
                                        :request-label "Fetch provider model metadata"})]
     (if (= 200 (:status resp))
       (let [body                  (json/read-json (:body resp))
             body                  (if (map? body) body {"id" model-id})
-            {:keys [vision? source]} (infer-model-vision (assoc body "id" (or (get body "id") model-id)))]
-        {:id model-id
-         :vision? vision?
-         :vision-source source})
+            body                  (assoc body "id" (or (get body "id") model-id))
+            {:keys [vision? source]} (infer-model-vision body)
+            context-meta          (infer-model-context-window body)
+            context-window        (:context-window context-meta)
+            context-window-source (:source context-meta)
+            budgets               (when context-window
+                                    (recommended-model-budgets context-window))]
+        (cond-> {:id model-id
+                 :vision? vision?
+                 :vision-source source}
+          context-window
+          (assoc :context-window context-window
+                 :context-window-source context-window-source)
+
+          budgets
+          (assoc :recommended-system-prompt-budget (:system-prompt-budget budgets)
+                 :recommended-history-budget (:history-budget budgets)
+                 :recommended-input-budget-cap (:input-budget-cap budgets))))
       fallback)))
 
 (defn chat-simple

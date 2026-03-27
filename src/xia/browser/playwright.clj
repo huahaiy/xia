@@ -30,6 +30,7 @@
                                   :bootstrapped? false
                                   :browser-installed? false
                                   :browser-executable nil
+                                  :browser-channel nil
                                   :driver-resource-fs nil
                                   :driver-resource-fs-owned? false}))
 (defonce ^:private runtime-lock (Object.))
@@ -55,6 +56,13 @@
 
 (defn- browsers-path []
   (cfg/string-option :browser/playwright-browsers-path nil))
+
+(defn- normalize-channel
+  [value]
+  (some-> value str str/trim not-empty))
+
+(defn- configured-channel []
+  (normalize-channel (cfg/string-option :browser/playwright-channel nil)))
 
 (defn- playwright-env
   []
@@ -288,12 +296,17 @@
 
 (defn- launch-browser
   ([^Playwright playwright]
-   (launch-browser playwright (headless?)))
+   (launch-browser playwright (headless?) (configured-channel)))
   ([^Playwright playwright headless-override]
-   (.launch (.chromium playwright)
-            (doto (BrowserType$LaunchOptions.)
-              (.setHeadless (boolean headless-override))
-              (.setTimeout (double (timeout-ms)))))))
+   (launch-browser playwright headless-override (configured-channel)))
+  ([^Playwright playwright headless-override channel]
+   (let [launch-opts (doto (BrowserType$LaunchOptions.)
+                       (.setHeadless (boolean headless-override))
+                       (.setTimeout (double (timeout-ms))))
+         channel*    (normalize-channel channel)]
+     (when channel*
+       (.setChannel launch-opts channel*))
+     (.launch (.chromium playwright) launch-opts))))
 
 (defn- stop-runtime!
   []
@@ -316,6 +329,7 @@
                        :bootstrapped? false
                        :browser-installed? false
                        :browser-executable nil
+                       :browser-channel nil
                        :driver-resource-fs nil
                        :driver-resource-fs-owned? false}))))
 
@@ -323,7 +337,8 @@
   []
   (let [{:keys [bootstrapped?
                 browser-installed?
-                browser-executable]} @runtime
+                browser-executable
+                browser-channel]} @runtime
         running? (runtime-running? @runtime)]
     (cond
       (not (enabled?))
@@ -334,6 +349,7 @@
        :bootstrapped? false
        :headless? (headless?)
        :browser browser-name
+       :browser-channel browser-channel
        :browser-installed? false
        :browser-executable nil
        :status :disabled
@@ -347,6 +363,7 @@
        :bootstrapped? true
        :headless? (headless?)
        :browser browser-name
+       :browser-channel browser-channel
        :browser-installed? (boolean browser-installed?)
        :browser-executable browser-executable
        :status :running
@@ -360,6 +377,7 @@
        :bootstrapped? true
        :headless? (headless?)
        :browser browser-name
+       :browser-channel browser-channel
        :browser-installed? (boolean browser-installed?)
        :browser-executable browser-executable
        :status :ready
@@ -377,6 +395,7 @@
            :bootstrapped? false
            :headless? (headless?)
            :browser browser-name
+           :browser-channel browser-channel
            :browser-installed? false
            :browser-executable nil
            :status :unavailable
@@ -391,6 +410,7 @@
            :bootstrapped? false
            :headless? (headless?)
            :browser browser-name
+           :browser-channel browser-channel
            :browser-installed? true
            :browser-executable executable
            :status :available
@@ -404,6 +424,7 @@
            :bootstrapped? false
            :headless? (headless?)
            :browser browser-name
+           :browser-channel browser-channel
            :browser-installed? false
            :browser-executable executable
            :status :missing-browser
@@ -428,12 +449,14 @@
       (let [playwright (create-playwright)]
         (try
           (let [{:keys [installed? executable]} (ensure-browser-installed! playwright)
-                browser (launch-browser playwright)
+                launch-channel (configured-channel)
+                browser (launch-browser playwright (headless?) launch-channel)
                 state {:playwright playwright
                        :browser browser
                        :bootstrapped? true
                        :browser-installed? (boolean installed?)
-                       :browser-executable executable}]
+                       :browser-executable executable
+                       :browser-channel launch-channel}]
             (reset! runtime state)
             state)
           (catch Exception e
@@ -811,15 +834,21 @@
     (install-request-guard! ops context)))
 
 (defn- session-browser
-  [runtime* headless-override]
-  (let [configured-headless (headless?)]
-    (if (or (nil? headless-override)
-            (= (boolean headless-override) configured-headless))
+  [runtime* headless-override channel-override]
+  (let [configured-headless (headless?)
+        configured-channel  (normalize-channel (:browser-channel runtime*))
+        effective-headless  (if (nil? headless-override)
+                              configured-headless
+                              (boolean headless-override))
+        effective-channel   (or (normalize-channel channel-override)
+                                configured-channel)]
+    (if (and (= effective-headless configured-headless)
+             (= effective-channel configured-channel))
       [(:browser runtime*) false]
-      [(launch-browser ^Playwright (:playwright runtime*) headless-override) true])))
+      [(launch-browser ^Playwright (:playwright runtime*) effective-headless effective-channel) true])))
 
 (defn- create-session!
-  [ops session-id url js-enabled storage-state created-at-ms headless-override]
+  [ops session-id url js-enabled storage-state created-at-ms headless-override channel-override]
   (evict-expired! ops)
   (when (>= (.size sessions) (long (or (:max-sessions ops) 5)))
     (throw (ex-info (str "Too many browser sessions (max " (or (:max-sessions ops) 5)
@@ -827,7 +856,7 @@
                     {:active (.size sessions)})))
   ((:validate-url! ops) url)
   (let [runtime* (ensure-runtime!)
-        [browser owned-browser?] (session-browser runtime* headless-override)
+        [browser owned-browser?] (session-browser runtime* headless-override channel-override)
         context (new-context ops {:browser browser} js-enabled storage-state)
         page (.newPage ^BrowserContext context)
         sess (atom {:context context
@@ -872,6 +901,7 @@
                                   (get snapshot "browser_state")
                                   (or (get snapshot "created_at_ms")
                                       (now-ms))
+                                  nil
                                   nil)]
         (persist-session! ops session-id)
         sess))))
@@ -1036,9 +1066,9 @@
         (runtime-status))))
   (install-browser-deps!* [_ opts]
     (install-browser-deps! opts))
-  (open-session* [_ url {:keys [js storage-state headless]}]
+  (open-session* [_ url {:keys [js storage-state headless channel]}]
     (let [session-id (str (random-uuid))
-          _sess (create-session! ops session-id url (if (nil? js) true js) storage-state nil headless)
+          _sess (create-session! ops session-id url (if (nil? js) true js) storage-state nil headless channel)
           session-atom (.get sessions session-id)]
       (session-page-result session-id (current-page-or-throw session-id session-atom))))
   (navigate* [_ session-id url]

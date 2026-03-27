@@ -11,7 +11,7 @@
   (install-browser-deps!* [this opts]
     "Install or preview browser system dependencies for this backend.")
   (open-session* [this url opts]
-    "Open a new browser session. Backends may honor :js, :storage-state, and backend-specific options such as :headless in opts.")
+    "Open a new browser session. Backends may honor :js, :storage-state, and backend-specific options such as :headless or :channel in opts.")
   (navigate* [this session-id url]
     "Navigate an existing session to a new URL.")
   (click* [this session-id selector]

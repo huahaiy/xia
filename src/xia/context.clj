@@ -219,6 +219,10 @@
   []
   (configured-recent-history-message-limit))
 
+(defn history-budget-config
+  []
+  (configured-history-budget))
+
 (defn- scale-budget
   [budget total]
   (let [base-total (max 1 (long (:total budget)))

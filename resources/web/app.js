@@ -203,10 +203,13 @@ const retentionRetainedCountEl = document.getElementById('retention-retained-cou
 const retentionStatusEl = document.getElementById('retention-status');
 const saveRetentionEl = document.getElementById('save-retention');
 const contextRecentHistoryMessageLimitEl = document.getElementById('context-recent-history-message-limit');
+const contextHistoryBudgetEl = document.getElementById('context-history-budget');
 const contextStatusEl = document.getElementById('context-status');
 const saveContextEl = document.getElementById('save-context');
 const searchBackendEl = document.getElementById('search-backend');
 const searchBraveApiKeyEl = document.getElementById('search-brave-api-key');
+const searchBraveApiKeyFieldEl = document.getElementById('search-brave-api-key-field')
+  || (searchBraveApiKeyEl ? searchBraveApiKeyEl.closest('.field') : null);
 const searchSearxngUrlEl = document.getElementById('search-searxng-url');
 const searchStatusEl = document.getElementById('search-status');
 const saveSearchEl = document.getElementById('save-search');
@@ -362,7 +365,35 @@ tabLinks.forEach((link) => {
 
 advancedToggleEl.addEventListener('change', () => {
   document.body.classList.toggle('advanced-mode', advancedToggleEl.checked);
+  // If current section is advanced-only and we turned off advanced, switch to identity
+  if (!advancedToggleEl.checked) {
+    const activeNav = document.querySelector('.settings-nav-item.active');
+    if (activeNav && activeNav.classList.contains('advanced-only')) {
+      switchSettingsSection('identity');
+    }
+  }
 });
+
+// Section navigation (shared by Settings and History tabs)
+function createSectionSwitcher(containerId) {
+  const container = document.getElementById(containerId);
+  const navItems = container.querySelectorAll('.settings-nav-item');
+  const cards = container.querySelectorAll('.settings-content > .admin-card');
+
+  function switchSection(sectionId) {
+    navItems.forEach(item => item.classList.toggle('active', item.dataset.section === sectionId));
+    cards.forEach(card => card.classList.toggle('active-section', card.dataset.settingsSection === sectionId));
+  }
+
+  navItems.forEach(item => item.addEventListener('click', () => switchSection(item.dataset.section)));
+  return switchSection;
+}
+
+const switchSettingsSection = createSectionSwitcher('settings-tab');
+switchSettingsSection('identity');
+
+const switchHistorySection = createSectionSwitcher('history-tab');
+switchHistorySection('chat-history');
 
 uploadBtnEl.addEventListener('click', () => fileInputEl.click());
 localUploadBtnEl.addEventListener('click', () => fileInputEl.click());
@@ -946,7 +977,9 @@ function providerCredentialSourcesForAccessMode(template, accessMode) {
   const credentialSources = Array.isArray(mode && mode.credential_sources)
     ? mode.credential_sources.filter(Boolean)
     : [];
-  return credentialSources.length ? credentialSources : ['api-key'];
+  const supportedCredentialSources = credentialSources.filter((source) =>
+    source === 'none' || source === 'api-key' || source === 'oauth-account');
+  return supportedCredentialSources.length ? supportedCredentialSources : ['api-key'];
 }
 
 function defaultProviderTemplateId() {
@@ -970,7 +1003,6 @@ function defaultProviderAccessMode(template) {
 
 function defaultProviderCredentialSource(template, accessMode) {
   const credentialSources = providerCredentialSourcesForAccessMode(template, accessMode);
-  if (credentialSources.includes('browser-session')) return 'browser-session';
   if (credentialSources.includes('oauth-account')) return 'oauth-account';
   if (credentialSources.includes('api-key')) return 'api-key';
   if (credentialSources.includes('none')) return 'none';
@@ -978,11 +1010,19 @@ function defaultProviderCredentialSource(template, accessMode) {
 }
 
 function providerCredentialSource(provider) {
-  if (provider && provider.credential_source) return provider.credential_source;
-  if (provider && provider.auth_type) return provider.auth_type;
-  if (provider && provider.browser_session) return 'browser-session';
+  if (provider && (provider.credential_source === 'none'
+    || provider.credential_source === 'api-key'
+    || provider.credential_source === 'oauth-account')) {
+    return provider.credential_source;
+  }
+  if (provider && (provider.auth_type === 'none'
+    || provider.auth_type === 'api-key'
+    || provider.auth_type === 'oauth-account')) {
+    return provider.auth_type;
+  }
   if (provider && provider.oauth_account) return 'oauth-account';
   if (provider && provider.api_key_configured) return 'api-key';
+  if (provider && provider.browser_session) return 'api-key';
   return 'none';
 }
 
@@ -994,6 +1034,61 @@ function providerAccessMode(provider) {
   if (credentialSource === 'api-key') return 'api';
   if (provider && provider.template === 'ollama') return 'local';
   return 'api';
+}
+
+function currentProviderRecord() {
+  return (state.admin.providers || []).find((provider) => provider.id === state.activeProviderId) || null;
+}
+
+function providerModelFetchCredentialState() {
+  const credentialSource = providerCredentialSourceEl.value;
+  const provider = currentProviderRecord();
+  if (credentialSource === 'none' || credentialSource === 'local' || !credentialSource) {
+    return { enabled: true, reason: '' };
+  }
+  if (credentialSource === 'api-key') {
+    if (providerApiKeyEl.value.trim()) {
+      return { enabled: true, reason: '' };
+    }
+    if (provider && providerCredentialSource(provider) === 'api-key' && provider.api_key_configured) {
+      return { enabled: true, reason: '' };
+    }
+    return {
+      enabled: false,
+      reason: 'Enter an API key before fetching models.'
+    };
+  }
+  if (credentialSource === 'oauth-account') {
+    const accountId = providerOauthAccountEl.value.trim()
+      || ((provider && providerCredentialSource(provider) === 'oauth-account' && provider.oauth_account) || '');
+    const account = (state.admin.oauthAccounts || []).find((entry) => entry.id === accountId) || null;
+    if (account && account.connected) {
+      return { enabled: true, reason: '' };
+    }
+    if (accountId) {
+      return {
+        enabled: false,
+        reason: 'Connect the selected API sign-in before fetching models.'
+      };
+    }
+    if ((state.admin.oauthAccounts || []).length) {
+      return {
+        enabled: false,
+        reason: 'Choose a connected API sign-in before fetching models.'
+      };
+    }
+    return {
+      enabled: false,
+      reason: 'Set up an API sign-in before fetching models.'
+    };
+  }
+  if (credentialSource === 'browser-session') {
+    return {
+      enabled: false,
+      reason: 'Fetching models requires an API credential for this provider.'
+    };
+  }
+  return { enabled: true, reason: '' };
 }
 
 function providerMeta(provider) {
@@ -1030,6 +1125,18 @@ function providerMeta(provider) {
       : '';
     bits.push(label + suffix);
   }
+  if (provider.system_prompt_budget || provider.history_budget) {
+    const budgetParts = [];
+    if (provider.system_prompt_budget) {
+      budgetParts.push('system ' + formatTokenCountFull(provider.system_prompt_budget));
+    }
+    if (provider.history_budget) {
+      budgetParts.push('history ' + formatTokenCountFull(provider.history_budget));
+    }
+    if (budgetParts.length) {
+      bits.push('Budgets: ' + budgetParts.join(', '));
+    }
+  }
   if (provider.default) bits.push('Default');
   if (credentialSource === 'api-key' || ((credentialSource !== 'oauth-account' && credentialSource !== 'browser-session') && provider.api_key_configured)) {
     bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
@@ -1052,6 +1159,25 @@ function providerSignInOptionLabel(option) {
   }
 }
 
+function oauthAccountSupportsConnectNow(account) {
+  if (!account) return false;
+  if ((account.connection_mode || 'oauth-flow') === 'manual-token') return false;
+  return !!String(account.authorize_url || '').trim()
+    && !!String(account.token_url || '').trim()
+    && !!String(account.client_id || '').trim()
+    && !!account.client_secret_configured;
+}
+
+function selectedProviderOauthAccount() {
+  const accounts = state.admin.oauthAccounts || [];
+  if (!accounts.length) return null;
+  const selectedId = String(providerOauthAccountEl.value || '').trim();
+  if (selectedId) {
+    return accounts.find((entry) => (entry.id || '') === selectedId) || null;
+  }
+  return accounts.length === 1 ? (accounts[0] || null) : null;
+}
+
 function providerPrimaryAction(template, accessMode, credentialSource) {
   if (!template) return null;
   if (credentialSource === 'browser-session' && template.account_connector) {
@@ -1064,6 +1190,14 @@ function providerPrimaryAction(template, accessMode, credentialSource) {
     };
   }
   if (credentialSource === 'oauth-account' || (accessMode === 'account' && !template.account_connector)) {
+    const linkedAccount = selectedProviderOauthAccount();
+    if (linkedAccount && !linkedAccount.connected && oauthAccountSupportsConnectNow(linkedAccount)) {
+      return {
+        kind: 'oauth-connect',
+        label: 'Connect API Sign-In',
+        accountId: linkedAccount.id || ''
+      };
+    }
     return {
       kind: 'oauth',
       label: 'Set Up API Sign-In'
@@ -1163,8 +1297,15 @@ function currentProviderPrimaryAction() {
 
 async function openProviderPrimaryAction(action, options = {}) {
   if (!action) return;
+  if (action.kind === 'oauth-connect') {
+    await beginProviderOauthSetup({
+      quickConnect: true,
+      accountId: action.accountId || ''
+    });
+    return;
+  }
   if (action.kind === 'oauth') {
-    beginProviderOauthSetup();
+    await beginProviderOauthSetup();
     return;
   }
   if (action.kind === 'browser-session' && action.connectorId) {
@@ -1233,6 +1374,10 @@ function providerModelFetchState() {
       reason: 'Enter a compatible Base URL before fetching models.'
     };
   }
+  const credentialState = providerModelFetchCredentialState();
+  if (!credentialState.enabled) {
+    return credentialState;
+  }
   return { enabled: true, reason: '' };
 }
 
@@ -1265,7 +1410,7 @@ function renderProviderCredentialSourceOptions() {
   const accessMode = providerAccessModeEl.value || defaultProviderAccessMode(template);
   const credentialSources = template
     ? providerCredentialSourcesForAccessMode(template, accessMode)
-    : ['none', 'api-key', 'oauth-account', 'browser-session'];
+    : ['none', 'api-key', 'oauth-account'];
   const previous = providerCredentialSourceEl.value;
   providerCredentialSourceEl.replaceChildren();
   credentialSources.forEach((credentialSource) => {
@@ -1280,44 +1425,68 @@ function renderProviderCredentialSourceOptions() {
 }
 
 function renderProviderOauthAccountOptions() {
+  const accounts = state.admin.oauthAccounts || [];
   const previous = providerOauthAccountEl.value;
   providerOauthAccountEl.replaceChildren();
-  const blank = document.createElement('option');
-  blank.value = '';
-  blank.textContent = 'Choose an API sign-in';
-  providerOauthAccountEl.appendChild(blank);
-  (state.admin.oauthAccounts || []).forEach((account) => {
+  accounts.forEach((account) => {
     const option = document.createElement('option');
     option.value = account.id || '';
     option.textContent = firstNonEmpty(account.name, account.id)
       + (account.connected ? ' (connected)' : ' (not connected)');
     providerOauthAccountEl.appendChild(option);
   });
-  providerOauthAccountEl.value = previous || '';
+  providerOauthAccountEl.value = accounts.some((account) => (account.id || '') === previous)
+    ? previous
+    : ((accounts[0] && accounts[0].id) || '');
+}
+
+function syncProviderOauthAccountSelection() {
+  if (providerCredentialSourceEl.value !== 'oauth-account') {
+    return;
+  }
+  const accounts = state.admin.oauthAccounts || [];
+  if (!accounts.length) {
+    return;
+  }
+  if (!providerOauthAccountEl.value
+      || !accounts.some((account) => (account.id || '') === providerOauthAccountEl.value)) {
+    providerOauthAccountEl.value = (accounts[0] && accounts[0].id) || '';
+  }
 }
 
 function providerOauthAccountStatusNote() {
   if (providerCredentialSourceEl.value !== 'oauth-account') {
     return '';
   }
-  if (!(state.admin.oauthAccounts || []).length) {
+  const accounts = state.admin.oauthAccounts || [];
+  if (!accounts.length) {
+    return 'No API sign-in saved yet. Use Set Up API Sign-In to make one.';
+  }
+  if (accounts.length === 1 && accounts[0] && accounts[0].connected) {
     return '';
   }
   if (!providerOauthAccountEl.value) {
     return 'Choose a connected API sign-in for this provider, or use Set Up API Sign-In to make one.';
   }
-  const account = (state.admin.oauthAccounts || []).find((entry) => entry.id === providerOauthAccountEl.value);
+  const account = accounts.find((entry) => entry.id === providerOauthAccountEl.value);
   if (!account) {
     return 'Choose a connected API sign-in for this provider, or use Set Up API Sign-In to make one.';
   }
-  return account.connected
-    ? 'This provider will use the linked OAuth API credential.'
-    : 'The linked OAuth API sign-in still needs to be connected.';
+  if (account.connected) {
+    return 'This provider will use the linked OAuth API credential.';
+  }
+  if (oauthAccountSupportsConnectNow(account)) {
+    return 'Click Connect API Sign-In to complete OAuth and link this provider.';
+  }
+  return 'The linked OAuth API sign-in is missing OAuth client details. Use Set Up API Sign-In first.';
 }
 
 function providerPrimaryActionTooltip(primaryAction) {
   if (providerCredentialSourceEl.value !== 'oauth-account') {
     return '';
+  }
+  if (primaryAction && primaryAction.label === 'Connect API Sign-In') {
+    return 'Starts OAuth immediately using the selected saved API sign-in.';
   }
   if (!primaryAction || primaryAction.label !== 'Set Up API Sign-In') {
     return '';
@@ -1345,15 +1514,18 @@ function syncProviderAuthInputs() {
   const credentialSource = providerCredentialSourceEl.value;
   const providerSaving = state.providerSaving;
   const template = providerTemplateById(providerTemplateEl.value);
+  const oauthAccounts = state.admin.oauthAccounts || [];
+  const hideOauthAccountPicker = credentialSource !== 'oauth-account' || oauthAccounts.length === 1;
   const actions = providerVisibleActions(template, accessMode, credentialSource);
   const primaryAction = actions[0] || null;
   const accountAction = actions.find((action) => action.label === 'Open Account') || null;
   const docsAction = actions.find((action) => action.label === 'Open Docs') || null;
+  syncProviderOauthAccountSelection();
   providerTemplateEl.disabled = providerSaving;
   providerAccessModeEl.disabled = providerSaving;
   providerCredentialSourceEl.disabled = providerSaving;
-  providerOauthAccountEl.hidden = credentialSource !== 'oauth-account';
-  providerOauthAccountEl.disabled = providerSaving || credentialSource !== 'oauth-account';
+  providerOauthAccountEl.hidden = hideOauthAccountPicker;
+  providerOauthAccountEl.disabled = providerSaving || hideOauthAccountPicker;
   providerApiKeyEl.disabled = providerSaving || credentialSource !== 'api-key';
   providerBrowserSessionNoteEl.hidden = credentialSource !== 'browser-session';
   providerConfigureOauthEl.hidden = !primaryAction;
@@ -1373,6 +1545,7 @@ function syncProviderAuthInputs() {
   providerOpenDocsEl.hidden = !docsAction;
   providerOpenDocsEl.href = docsAction ? docsAction.url : '';
   providerOauthAccountNoteEl.textContent = providerOauthAccountStatusNote();
+  providerOauthAccountNoteEl.hidden = !providerOauthAccountNoteEl.textContent;
   providerBrowserSessionNoteEl.textContent = providerBrowserSessionStatusNote();
 }
 
@@ -1384,6 +1557,33 @@ function providerModelCapabilityKey(baseUrl, modelId) {
   return String(baseUrl || '').trim() + '::' + String(modelId || '').trim();
 }
 
+function parsePositiveInteger(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const rounded = Math.round(number);
+  return rounded > 0 ? rounded : null;
+}
+
+function formatTokenCountCompact(value) {
+  const count = parsePositiveInteger(value);
+  if (!count) return '';
+  if (count >= 1000000) {
+    const millions = count / 1000000;
+    return (Number.isInteger(millions) ? String(millions) : String(Math.round(millions * 10) / 10)) + 'M';
+  }
+  if (count >= 1000) {
+    const thousands = count / 1000;
+    return (Number.isInteger(thousands) ? String(thousands) : String(Math.round(thousands * 10) / 10)) + 'K';
+  }
+  return String(count);
+}
+
+function formatTokenCountFull(value) {
+  const count = parsePositiveInteger(value);
+  if (!count) return '';
+  return count.toLocaleString();
+}
+
 function cachedProviderModelCapability(modelId) {
   const normalizedModelId = String(modelId || '').trim();
   const baseUrl = providerBaseUrlEl.value.trim();
@@ -1391,33 +1591,106 @@ function cachedProviderModelCapability(modelId) {
   return state.providerModelCapabilities[providerModelCapabilityKey(baseUrl, normalizedModelId)] || null;
 }
 
-function setProviderModelVision(modelId, vision) {
+function setProviderModelCapability(modelId, capability = {}) {
   const normalizedModelId = (modelId || '').trim();
   const baseUrl = providerBaseUrlEl.value.trim();
+  const normalizedCapability = {
+    vision: !!capability.vision
+  };
+  const contextWindow = parsePositiveInteger(capability.contextWindow);
+  const recommendedSystemPromptBudget = parsePositiveInteger(capability.recommendedSystemPromptBudget);
+  const recommendedHistoryBudget = parsePositiveInteger(capability.recommendedHistoryBudget);
+  const recommendedInputBudgetCap = parsePositiveInteger(capability.recommendedInputBudgetCap);
+  if (contextWindow) {
+    normalizedCapability.contextWindow = contextWindow;
+  }
+  if (capability.contextWindowSource) {
+    normalizedCapability.contextWindowSource = String(capability.contextWindowSource);
+  }
+  if (recommendedSystemPromptBudget) {
+    normalizedCapability.recommendedSystemPromptBudget = recommendedSystemPromptBudget;
+  }
+  if (recommendedHistoryBudget) {
+    normalizedCapability.recommendedHistoryBudget = recommendedHistoryBudget;
+  }
+  if (recommendedInputBudgetCap) {
+    normalizedCapability.recommendedInputBudgetCap = recommendedInputBudgetCap;
+  }
   state.providerModelVisionModelId = normalizedModelId;
-  state.providerModelVision = !!vision;
+  state.providerModelVision = normalizedCapability.vision;
   if (normalizedModelId && baseUrl) {
-    state.providerModelCapabilities[providerModelCapabilityKey(baseUrl, normalizedModelId)] = { vision: !!vision };
+    state.providerModelCapabilities[providerModelCapabilityKey(baseUrl, normalizedModelId)] = normalizedCapability;
   }
   renderProviderModelCapabilityNote();
   if (state.providerModels.length && !providerModelListEl.hidden) {
     renderProviderModelList();
   }
+  return normalizedCapability;
+}
+
+function setProviderModelVision(modelId, vision, metadata = {}) {
+  return setProviderModelCapability(modelId, Object.assign({}, metadata, { vision: !!vision }));
+}
+
+function currentProviderModelCapability() {
+  const modelId = providerModelEl.value.trim();
+  if (!modelId) return null;
+  const cached = cachedProviderModelCapability(modelId);
+  if (cached) return cached;
+  if (modelId === state.providerModelVisionModelId) {
+    return { vision: !!state.providerModelVision };
+  }
+  return null;
+}
+
+function clearProviderBudgetAutoFlags() {
+  delete providerSystemPromptBudgetEl.dataset.autoBudget;
+  delete providerHistoryBudgetEl.dataset.autoBudget;
+}
+
+function setProviderBudgetAutoFlags(options = {}) {
+  if (options.system) {
+    providerSystemPromptBudgetEl.dataset.autoBudget = 'metadata';
+  }
+  if (options.history) {
+    providerHistoryBudgetEl.dataset.autoBudget = 'metadata';
+  }
+}
+
+function maybeApplyProviderBudgetsFromMetadata(capability) {
+  const result = { systemApplied: false, historyApplied: false };
+  if (!capability) return result;
+  const recommendedSystem = parsePositiveInteger(capability.recommendedSystemPromptBudget);
+  const recommendedHistory = parsePositiveInteger(capability.recommendedHistoryBudget);
+  if (!recommendedSystem || !recommendedHistory) return result;
+  const canApplySystem = !providerSystemPromptBudgetEl.value.trim()
+    || providerSystemPromptBudgetEl.dataset.autoBudget === 'metadata';
+  const canApplyHistory = !providerHistoryBudgetEl.value.trim()
+    || providerHistoryBudgetEl.dataset.autoBudget === 'metadata';
+  if (canApplySystem) {
+    providerSystemPromptBudgetEl.value = String(recommendedSystem);
+    result.systemApplied = true;
+  }
+  if (canApplyHistory) {
+    providerHistoryBudgetEl.value = String(recommendedHistory);
+    result.historyApplied = true;
+  }
+  if (result.systemApplied || result.historyApplied) {
+    setProviderBudgetAutoFlags({
+      system: result.systemApplied,
+      history: result.historyApplied
+    });
+  }
+  return result;
 }
 
 function currentProviderVision() {
-  const modelId = providerModelEl.value.trim();
-  if (!modelId) return false;
-  const cached = cachedProviderModelCapability(modelId);
-  if (cached) return !!cached.vision;
-  return modelId === state.providerModelVisionModelId && !!state.providerModelVision;
+  const capability = currentProviderModelCapability();
+  return !!(capability && capability.vision);
 }
 
 function currentProviderModelVisionKnown() {
-  const modelId = providerModelEl.value.trim();
-  if (!modelId) return false;
-  if (cachedProviderModelCapability(modelId)) return true;
-  return modelId === state.providerModelVisionModelId;
+  return !!currentProviderModelCapability();
 }
 
 function renderProviderModelCapabilityNote() {
@@ -1432,25 +1705,39 @@ function renderProviderModelCapabilityNote() {
     providerModelCapabilityNoteEl.textContent = '';
     return;
   }
-  const cached = cachedProviderModelCapability(modelId);
-  const supportsVision = cached ? !!cached.vision : !!state.providerModelVision;
-  providerModelCapabilityNoteEl.textContent = supportsVision
-    ? 'Image input: supported.'
-    : 'Image input: not supported.';
+  const capability = currentProviderModelCapability() || { vision: false };
+  const bits = [];
+  bits.push(capability.vision ? 'Image input: supported.' : 'Image input: not supported.');
+  if (capability.contextWindow) {
+    bits.push('Context window: ' + formatTokenCountFull(capability.contextWindow) + ' tokens.');
+  }
+  if (capability.recommendedSystemPromptBudget && capability.recommendedHistoryBudget) {
+    bits.push('Suggested budgets: '
+      + formatTokenCountCompact(capability.recommendedSystemPromptBudget)
+      + ' system / '
+      + formatTokenCountCompact(capability.recommendedHistoryBudget)
+      + ' history.');
+  }
+  providerModelCapabilityNoteEl.textContent = bits.join(' ');
 }
 
-function providerModelBadgeState(modelId) {
+function providerModelBadgeStates(modelId) {
   const normalizedModelId = String(modelId || '').trim();
   if (state.providerModelMetadataLoading
       && normalizedModelId
       && normalizedModelId === state.providerModelMetadataModelId) {
-    return { label: 'Checking...', kind: 'checking' };
+    return [{ label: 'Checking...', kind: 'checking' }];
   }
   const cached = cachedProviderModelCapability(normalizedModelId);
-  if (!cached) return null;
-  return cached.vision
+  if (!cached) return [];
+  const badges = [];
+  if (cached.contextWindow) {
+    badges.push({ label: formatTokenCountCompact(cached.contextWindow) + ' ctx', kind: 'context' });
+  }
+  badges.push(cached.vision
     ? { label: 'Image', kind: 'vision' }
-    : { label: 'Text', kind: 'text' };
+    : { label: 'Text', kind: 'text' });
+  return badges;
 }
 
 function clearProviderModelVisionIfModelChanged() {
@@ -1468,6 +1755,7 @@ async function fetchProviderModelMetadata(modelId) {
   const normalizedModelId = (modelId || '').trim();
   const baseUrl = providerBaseUrlEl.value.trim();
   const apiKey = providerApiKeyEl.value.trim();
+  const providerId = state.activeProviderId || undefined;
   if (!baseUrl || !normalizedModelId) return;
   state.providerModelMetadataLoading = true;
   state.providerModelMetadataModelId = normalizedModelId;
@@ -1481,6 +1769,7 @@ async function fetchProviderModelMetadata(modelId) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        provider_id: providerId,
         base_url: baseUrl,
         api_key: apiKey || undefined,
         model: normalizedModelId
@@ -1488,10 +1777,25 @@ async function fetchProviderModelMetadata(modelId) {
     });
     if (providerModelEl.value.trim() !== normalizedModelId) return;
     const model = data.model || {};
-    setProviderModelVision(normalizedModelId, !!model.vision);
-    providerStatusEl.textContent = !!model.vision
+    const capability = setProviderModelVision(normalizedModelId, !!model.vision, {
+      contextWindow: model.context_window,
+      contextWindowSource: model.context_window_source,
+      recommendedSystemPromptBudget: model.recommended_system_prompt_budget,
+      recommendedHistoryBudget: model.recommended_history_budget,
+      recommendedInputBudgetCap: model.recommended_input_budget_cap
+    });
+    const appliedBudgets = maybeApplyProviderBudgetsFromMetadata(capability);
+    const statusBits = [];
+    statusBits.push(capability.vision
       ? 'Selected model supports image input.'
-      : 'Selected model appears text-only.';
+      : 'Selected model appears text-only.');
+    if (capability.contextWindow) {
+      statusBits.push('Context window: ' + formatTokenCountFull(capability.contextWindow) + ' tokens.');
+    }
+    if (appliedBudgets.systemApplied || appliedBudgets.historyApplied) {
+      statusBits.push('Budgets auto-set from model metadata.');
+    }
+    providerStatusEl.textContent = statusBits.join(' ');
   } catch (err) {
     if (providerModelEl.value.trim() !== normalizedModelId) return;
     setProviderModelVision('', false);
@@ -1513,7 +1817,14 @@ function maybeFetchProviderModelMetadata() {
   if (!providerModelWasFetched(modelId)) return;
   const cached = cachedProviderModelCapability(modelId);
   if (cached) {
-    setProviderModelVision(modelId, !!cached.vision);
+    setProviderModelVision(modelId, !!cached.vision, {
+      contextWindow: cached.contextWindow,
+      contextWindowSource: cached.contextWindowSource,
+      recommendedSystemPromptBudget: cached.recommendedSystemPromptBudget,
+      recommendedHistoryBudget: cached.recommendedHistoryBudget,
+      recommendedInputBudgetCap: cached.recommendedInputBudgetCap
+    });
+    maybeApplyProviderBudgetsFromMetadata(cached);
     return;
   }
   if (modelId === state.providerModelVisionModelId) return;
@@ -1555,13 +1866,13 @@ function renderProviderModelList() {
       label.textContent = modelId;
     }
     btn.appendChild(label);
-    var badgeState = providerModelBadgeState(modelId);
-    if (badgeState) {
+    var badgeStates = providerModelBadgeStates(modelId);
+    badgeStates.forEach(function (badgeState) {
       var badge = document.createElement('span');
       badge.className = 'autocomplete-item-badge autocomplete-item-badge-' + badgeState.kind;
       badge.textContent = badgeState.label;
       btn.appendChild(badge);
-    }
+    });
     btn.addEventListener('mousedown', function (e) {
       e.preventDefault();
       providerModelEl.value = modelId;
@@ -1589,6 +1900,7 @@ function escapeHtml(text) {
 async function fetchProviderModels() {
   var baseUrl = providerBaseUrlEl.value.trim();
   var apiKey = providerApiKeyEl.value.trim();
+  var providerId = state.activeProviderId || undefined;
   var fetchState = providerModelFetchState();
   if (!fetchState.enabled) {
     providerStatusEl.textContent = fetchState.reason;
@@ -1601,7 +1913,11 @@ async function fetchProviderModels() {
     var data = await fetchJson('/admin/provider-models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base_url: baseUrl, api_key: apiKey || undefined })
+      body: JSON.stringify({
+        provider_id: providerId,
+        base_url: baseUrl,
+        api_key: apiKey || undefined
+      })
     });
     state.providerModels = Array.isArray(data.models) ? data.models : [];
     providerStatusEl.textContent = state.providerModels.length
@@ -1868,6 +2184,8 @@ function captureProviderDraft() {
     workloads: parseProviderWorkloadsInput(),
     systemPromptBudget: providerSystemPromptBudgetEl.value,
     historyBudget: providerHistoryBudgetEl.value,
+    systemPromptBudgetAuto: providerSystemPromptBudgetEl.dataset.autoBudget === 'metadata',
+    historyBudgetAuto: providerHistoryBudgetEl.dataset.autoBudget === 'metadata',
     rateLimitPerMinute: providerRateLimitEl.value,
     vision: currentProviderVision(),
     apiKey: providerApiKeyEl.value,
@@ -1895,6 +2213,11 @@ function restoreProviderDraft(draft, options = {}) {
   providerWorkloadsEl.value = Array.isArray(draft.workloads) ? draft.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = draft.systemPromptBudget || '';
   providerHistoryBudgetEl.value = draft.historyBudget || '';
+  clearProviderBudgetAutoFlags();
+  setProviderBudgetAutoFlags({
+    system: !!draft.systemPromptBudgetAuto,
+    history: !!draft.historyBudgetAuto
+  });
   providerRateLimitEl.value = draft.rateLimitPerMinute || '';
   setProviderModelVision(draft.model || '', !!draft.vision);
   providerApiKeyEl.value = draft.apiKey || '';
@@ -2025,7 +2348,7 @@ async function beginProviderBrowserSessionSetup(connectorId, options = {}) {
   }
 }
 
-function beginProviderOauthSetup() {
+async function beginProviderOauthSetup(options = {}) {
   if (providerAccessModeEl.value !== 'account') {
     providerAccessModeEl.value = 'account';
     renderProviderCredentialSourceOptions();
@@ -2038,7 +2361,9 @@ function beginProviderOauthSetup() {
   syncProviderAuthInputs();
   const draft = captureProviderDraft();
   const template = providerTemplateById(draft.template);
-  const linkedAccount = (state.admin.oauthAccounts || []).find((account) => account.id === draft.oauthAccount);
+  const requestedAccountId = String(options.accountId || '').trim();
+  const linkedAccountId = requestedAccountId || String(draft.oauthAccount || '').trim();
+  const linkedAccount = (state.admin.oauthAccounts || []).find((account) => (account.id || '') === linkedAccountId);
   state.providerDraft = draft;
   state.pendingProviderOauthFlow = {
     accountId: linkedAccount ? linkedAccount.id : '',
@@ -2047,6 +2372,11 @@ function beginProviderOauthSetup() {
 
   if (linkedAccount) {
     selectOauthAccount(linkedAccount);
+    if (options.quickConnect && !linkedAccount.connected && oauthAccountSupportsConnectNow(linkedAccount)) {
+      providerStatusEl.textContent = 'Opening OAuth sign-in...';
+      await connectOauthAccount();
+      return;
+    }
     oauthAccountStatusEl.textContent = linkedAccount.connected
       ? 'Review or refresh this linked sign-in.'
       : 'Finish connecting this linked sign-in, then return to the model form.';
@@ -2390,11 +2720,12 @@ function updateAdminButtons() {
   providerIdEl.disabled = state.providerSaving || !!state.activeProviderId;
   providerTemplateEl.disabled = state.providerSaving;
   syncProviderModelFetchUi();
-  saveProviderEl.disabled = state.providerSaving || state.providerModelMetadataLoading;
+  saveProviderEl.disabled = state.providerSaving;
   deleteProviderEl.disabled = state.providerSaving || !state.activeProviderId;
   providerConfigureOauthEl.setAttribute('aria-disabled',
     (state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction()) ? 'true' : 'false');
   contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;
+  contextHistoryBudgetEl.disabled = state.contextSaving;
   saveContextEl.disabled = state.contextSaving;
   saveRetentionEl.disabled = state.retentionSaving;
   saveKnowledgeDecayEl.disabled = state.knowledgeDecaySaving;
@@ -2614,6 +2945,7 @@ function resetProviderForm(statusText) {
   providerWorkloadsEl.value = '';
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
+  clearProviderBudgetAutoFlags();
   providerRateLimitEl.value = '';
   setProviderModelVision('', false);
   providerApiKeyEl.value = '';
@@ -2659,11 +2991,19 @@ function defaultConversationContextStatus() {
   return '';
 }
 
+function syncWebSearchInputs() {
+  const backend = searchBackendEl.value || '';
+  if (searchBraveApiKeyFieldEl) {
+    searchBraveApiKeyFieldEl.hidden = backend !== 'brave-json';
+  }
+}
+
 function renderWebSearchSettings() {
   const settings = state.admin.webSearch || {};
   searchBackendEl.value = settings.backend || '';
   searchBraveApiKeyEl.value = settings.brave_api_key || '';
   searchSearxngUrlEl.value = settings.searxng_url || '';
+  syncWebSearchInputs();
 }
 
 async function saveWebSearch() {
@@ -2689,12 +3029,14 @@ async function saveWebSearch() {
 function renderConversationContextSettings() {
   const settings = state.admin.conversationContext || {};
   contextRecentHistoryMessageLimitEl.value = settings.recent_history_message_limit || '';
+  contextHistoryBudgetEl.value = settings.history_budget || '';
   contextStatusEl.textContent = state.contextStatus || defaultConversationContextStatus();
   updateAdminButtons();
 }
 
 function resetConversationContextForm(statusText) {
   contextRecentHistoryMessageLimitEl.value = '';
+  contextHistoryBudgetEl.value = '';
   contextStatusEl.textContent = statusText || 'Configure how much recent chat stays verbatim in prompt context.';
   updateAdminButtons();
 }
@@ -2917,6 +3259,7 @@ function selectProvider(provider) {
   providerWorkloadsEl.value = Array.isArray(provider.workloads) ? provider.workloads.join(', ') : '';
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
+  clearProviderBudgetAutoFlags();
   providerRateLimitEl.value = provider.rate_limit_per_minute || '';
   setProviderModelVision(provider.model || '', !!provider.vision);
   providerApiKeyEl.value = '';
@@ -3783,6 +4126,17 @@ async function saveProvider() {
   try {
     const providerId = ensureProviderId();
     const providerName = ensureProviderName();
+    const template = providerTemplateById(providerTemplateEl.value);
+    const rawAccessMode = providerAccessModeEl.value;
+    const accessMode = (rawAccessMode === 'api' || rawAccessMode === 'local' || rawAccessMode === 'account')
+      ? rawAccessMode
+      : defaultProviderAccessMode(template);
+    const rawCredentialSource = providerCredentialSourceEl.value;
+    const credentialSource = (rawCredentialSource === 'none'
+      || rawCredentialSource === 'api-key'
+      || rawCredentialSource === 'oauth-account')
+      ? rawCredentialSource
+      : defaultProviderCredentialSource(template, accessMode);
     const data = await fetchJson('/admin/providers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3792,10 +4146,11 @@ async function saveProvider() {
         template: providerTemplateEl.value,
         base_url: providerBaseUrlEl.value,
         model: providerModelEl.value,
-        access_mode: providerAccessModeEl.value,
-        credential_source: providerCredentialSourceEl.value,
-        oauth_account: providerOauthAccountEl.value,
-        browser_session: providerBrowserSessionEl.value,
+        access_mode: accessMode,
+        credential_source: credentialSource,
+        oauth_account: credentialSource === 'oauth-account'
+          ? providerOauthAccountEl.value
+          : '',
         workloads: parseProviderWorkloadsInput(),
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
@@ -3859,7 +4214,8 @@ async function saveConversationContext() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        recent_history_message_limit: contextRecentHistoryMessageLimitEl.value
+        recent_history_message_limit: contextRecentHistoryMessageLimitEl.value,
+        history_budget: contextHistoryBudgetEl.value
       })
     });
     state.admin.conversationContext = data.conversation_context || state.admin.conversationContext;
@@ -5429,6 +5785,15 @@ providerOauthAccountEl.addEventListener('change', () => {
   syncProviderAuthInputs();
   updateAdminButtons();
 });
+providerApiKeyEl.addEventListener('input', () => {
+  syncProviderModelFetchUi();
+});
+providerSystemPromptBudgetEl.addEventListener('input', () => {
+  delete providerSystemPromptBudgetEl.dataset.autoBudget;
+});
+providerHistoryBudgetEl.addEventListener('input', () => {
+  delete providerHistoryBudgetEl.dataset.autoBudget;
+});
 providerConfigureOauthEl.addEventListener('click', async (event) => {
   const action = currentProviderPrimaryAction();
   const disabled = providerConfigureOauthEl.getAttribute('aria-disabled') === 'true';
@@ -5451,6 +5816,7 @@ saveProviderEl.addEventListener('click', () => saveProvider());
 deleteProviderEl.addEventListener('click', () => deleteProvider());
 saveContextEl.addEventListener('click', () => saveConversationContext());
 saveSearchEl.addEventListener('click', () => saveWebSearch());
+searchBackendEl.addEventListener('change', () => syncWebSearchInputs());
 saveRetentionEl.addEventListener('click', () => saveMemoryRetention());
 saveKnowledgeDecayEl.addEventListener('click', () => saveKnowledgeDecay());
 saveLocalDocSummarizationEl.addEventListener('click', () => saveLocalDocSummarization());
@@ -5594,6 +5960,7 @@ renderKnowledgeFacts();
 resetProviderForm('Loading...');
 resetConversationContextForm('Loading...');
 resetMemoryRetentionForm('Loading...');
+syncWebSearchInputs();
 renderLocalDocSummarizationSettings();
 renderLocalDocOcrSettings();
 renderDatabaseBackupSettings();

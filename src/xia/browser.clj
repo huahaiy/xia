@@ -214,13 +214,16 @@
      :js — enable JavaScript (default true)
      :backend — browser backend keyword/string (default :auto)
      :storage-state — optional backend-specific serialized storage state
-     :headless — optional backend-specific headless override"
-  [url & {:keys [js backend storage-state headless] :or {js true}}]
+     :headless — optional backend-specific headless override
+     :channel — optional backend-specific browser channel (for Playwright,
+                values like \"chrome\" or \"msedge\")"
+  [url & {:keys [js backend storage-state headless channel] :or {js true}}]
   (browser.backend/open-session* (backend-by-id (resolve-open-backend-id backend))
                                  url
                                  {:js js
                                   :storage-state storage-state
-                                  :headless headless}))
+                                  :headless headless
+                                  :channel channel}))
 
 (defn navigate
   "Navigate to a new URL in an existing session.

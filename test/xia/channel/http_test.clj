@@ -143,7 +143,7 @@
     (is (re-find #"Archive After Bottom \(Days\)" (:body response)))
     (is (re-find #"Workloads" (:body response)))
     (is (re-find #"System Prompt Budget" (:body response)))
-    (is (re-find #"App Connections" (:body response)))
+    (is (re-find #"API Auth" (:body response)))
     (is (re-find #"Service Preset" (:body response)))
     (is (re-find #"Apply preset" (:body response)))
     (is (re-find #"Add to API list" (:body response)))
@@ -1385,6 +1385,9 @@
           body     (response-json response)
           provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
           openai-template (first (filter #(= "openai" (get % "id")) (get body "llm_provider_templates")))
+          qwen-template (first (filter #(= "qwen" (get % "id")) (get body "llm_provider_templates")))
+          glm-template (first (filter #(= "glm" (get % "id")) (get body "llm_provider_templates")))
+          custom-template (first (filter #(= "custom" (get % "id")) (get body "llm_provider_templates")))
           conversation-context (get body "conversation_context")
           memory-retention (get body "memory_retention")
           knowledge-decay (get body "knowledge_decay")
@@ -1422,11 +1425,12 @@
     (is (= true (get provider "default")))
     (is (= ["assistant" "history-compaction"] (get provider "workloads")))
     (is (= 16000 (get provider "system_prompt_budget")))
-    (is (= 32000 (get provider "history_budget")))
-    (is (= 75 (get provider "rate_limit_per_minute")))
-    (is (= 75 (get provider "effective_rate_limit_per_minute")))
-    (is (= 24 (get conversation-context "recent_history_message_limit")))
-    (is (= 182 (get memory-retention "full_resolution_days")))
+	    (is (= 32000 (get provider "history_budget")))
+	    (is (= 75 (get provider "rate_limit_per_minute")))
+	    (is (= 75 (get provider "effective_rate_limit_per_minute")))
+	    (is (= 24 (get conversation-context "recent_history_message_limit")))
+	    (is (= 8000 (get conversation-context "history_budget")))
+	    (is (= 182 (get memory-retention "full_resolution_days")))
     (is (= 365 (get memory-retention "decay_half_life_days")))
     (is (= 8 (get memory-retention "retained_count")))
     (is (= 182 (get knowledge-decay "grace_period_days")))
@@ -1462,16 +1466,22 @@
     (is (every? (set (map #(get % "id") (get body "llm_provider_templates")))
                 ["claude" "custom" "deepseek" "gemini" "glm"
                  "minimax" "ollama" "openai" "openrouter" "qwen"]))
-    (is (= #{"browser-session" "api-key"} (set (get openai-template "auth_types"))))
-    (is (= "account" (get-in openai-template ["access_modes" 0 "id"])))
+    (is (= #{"api-key"} (set (get openai-template "auth_types"))))
+    (is (= "api" (get-in openai-template ["access_modes" 0 "id"])))
     (is (= true (get-in openai-template ["access_modes" 0 "default"])))
-    (is (= "browser-session" (get-in openai-template ["access_modes" 0 "credential_sources" 0])))
-    (is (= "openai-browser" (get openai-template "account_connector")))
+    (is (= "api-key" (get-in openai-template ["access_modes" 0 "credential_sources" 0])))
+    (is (= #{"api-key"} (set (get qwen-template "auth_types"))))
+    (is (= ["api-key"] (get-in qwen-template ["access_modes" 0 "credential_sources"])))
+    (is (= #{"api-key"} (set (get glm-template "auth_types"))))
+    (is (= ["api-key"] (get-in glm-template ["access_modes" 0 "credential_sources"])))
+    (is (= #{"api-key" "none"} (set (get custom-template "auth_types"))))
+    (is (= ["api-key"] (get-in custom-template ["access_modes" 0 "credential_sources"])))
+    (is (nil? (get openai-template "account_connector")))
     (is (= "https://platform.openai.com/" (get openai-template "account_url")))
     (is (= "https://platform.openai.com/api-keys" (get openai-template "api_key_url")))
     (is (= "https://help.openai.com/en/articles/4936850-where-do-i-find-my-api-key"
            (get openai-template "docs_url")))
-    (is (= ["google" "microsoft" "apple"] (get openai-template "sign_in_options")))
+    (is (= [] (get openai-template "sign_in_options")))
     (is (= #{"github" "google" "gmail" "microsoft"}
            (set (map #(get % "id") templates))))
     (is (= "{\"access_type\":\"offline\",\"prompt\":\"consent\"}"
@@ -1552,19 +1562,25 @@
   (let [save-response (#'http/router {:uri            "/admin/context"
                                       :request-method :post
                                       :headers        (ui-headers)
-                                      :body           (request-body {"recent_history_message_limit" "40"})})
+                                      :body           (request-body {"recent_history_message_limit" "40"
+                                                                     "history_budget" "12000"})})
         save-body     (response-json save-response)]
     (is (= 200 (:status save-response)))
     (is (= 40 (get-in save-body ["conversation_context" "recent_history_message_limit"])))
-    (is (= "40" (db/get-config :context/recent-history-message-limit))))
+    (is (= 12000 (get-in save-body ["conversation_context" "history_budget"])))
+    (is (= "40" (db/get-config :context/recent-history-message-limit)))
+    (is (= "12000" (db/get-config :context/history-budget))))
   (let [clear-response (#'http/router {:uri            "/admin/context"
                                        :request-method :post
                                        :headers        (ui-headers)
-                                       :body           (request-body {"recent_history_message_limit" ""})})
+                                       :body           (request-body {"recent_history_message_limit" ""
+                                                                      "history_budget" ""})})
         clear-body     (response-json clear-response)]
     (is (= 200 (:status clear-response)))
     (is (= 24 (get-in clear-body ["conversation_context" "recent_history_message_limit"])))
-    (is (nil? (db/get-config :context/recent-history-message-limit)))))
+    (is (= 8000 (get-in clear-body ["conversation_context" "history_budget"])))
+    (is (nil? (db/get-config :context/recent-history-message-limit)))
+    (is (nil? (db/get-config :context/history-budget)))))
 
 (deftest admin-remote-bridge-route-saves-config
   (let [response (#'http/router {:uri            "/admin/remote-bridge"
@@ -2135,6 +2151,94 @@
       (is (= true (get-in body ["model" "vision"])))
       (is (= "metadata" (get-in body ["model" "vision_source"]))))))
 
+(deftest admin-provider-model-metadata-route-returns-context-window-and-recommended-budgets
+  (with-redefs [xia.llm/fetch-provider-model-metadata
+                (fn [_]
+                  {:id "gpt-5"
+                   :vision? true
+                   :vision-source :metadata
+                   :context-window 128000
+                   :context-window-source :metadata
+                   :recommended-system-prompt-budget 24000
+                   :recommended-history-budget 72000
+                   :recommended-input-budget-cap 96000})]
+    (let [response (#'http/router {:uri            "/admin/provider-model-metadata"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"base_url" "https://api.example.com/v1"
+                                                                  "api_key" "sk-test"
+                                                                  "model" "gpt-5"})})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= 128000 (get-in body ["model" "context_window"])))
+      (is (= "metadata" (get-in body ["model" "context_window_source"])))
+      (is (= 24000 (get-in body ["model" "recommended_system_prompt_budget"])))
+      (is (= 72000 (get-in body ["model" "recommended_history_budget"])))
+      (is (= 96000 (get-in body ["model" "recommended_input_budget_cap"]))))))
+
+(deftest admin-provider-models-route-uses-saved-provider-api-key
+  (db/upsert-provider! {:id                :claude
+                        :name              "Claude"
+                        :base-url          "https://api.anthropic.com/v1"
+                        :api-key           "sk-stored"
+                        :model             "claude-sonnet-4-5"
+                        :credential-source :api-key
+                        :auth-type         :api-key})
+  (with-redefs [xia.llm/fetch-provider-models
+                (fn [{:keys [base-url api-key auth-header]}]
+                  (is (= "https://api.anthropic.com/v1" base-url))
+                  (is (= "sk-stored" api-key))
+                  (is (nil? auth-header))
+                  ["claude-haiku-4-5" "claude-sonnet-4-5"])]
+    (let [response (#'http/router {:uri            "/admin/provider-models"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"provider_id" "claude"})})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= ["claude-haiku-4-5" "claude-sonnet-4-5"]
+             (get body "models"))))))
+
+(deftest admin-provider-model-metadata-route-uses-linked-oauth-account
+  (db/register-oauth-account! {:id            :qwen-login
+                               :name          "Qwen Login"
+                               :authorize-url "https://example.com/oauth/authorize"
+                               :token-url     "https://example.com/oauth/token"
+                               :client-id     "client-id"
+                               :access-token  "oauth-token"
+                               :token-type    "Bearer"})
+  (db/upsert-provider! {:id                :qwen
+                        :name              "Qwen"
+                        :base-url          "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                        :model             "qwen-max"
+                        :credential-source :oauth-account
+                        :auth-type         :oauth-account
+                        :oauth-account     :qwen-login})
+  (with-redefs [xia.oauth/ensure-account-ready!
+                (constantly {:oauth.account/access-token "oauth-token"
+                             :oauth.account/token-type "Bearer"})
+                xia.oauth/oauth-header
+                (constantly "Bearer oauth-token")
+                xia.llm/fetch-provider-model-metadata
+                (fn [{:keys [base-url api-key auth-header model]}]
+                  (is (= "https://dashscope.aliyuncs.com/compatible-mode/v1" base-url))
+                  (is (nil? api-key))
+                  (is (= "Bearer oauth-token" auth-header))
+                  (is (= "qwen-max" model))
+                  {:id "qwen-max"
+                   :vision? false
+                   :vision-source :metadata})]
+    (let [response (#'http/router {:uri            "/admin/provider-model-metadata"
+                                   :request-method :post
+                                   :headers        (ui-headers)
+                                   :body           (request-body {"provider_id" "qwen"
+                                                                  "model" "qwen-max"})})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= "qwen-max" (get-in body ["model" "id"])))
+      (is (= false (get-in body ["model" "vision"])))
+      (is (= "metadata" (get-in body ["model" "vision_source"]))))))
+
 (deftest admin-provider-route-rejects-oversized-request-body
   (let [response (#'http/router {:uri            "/admin/providers"
                                  :request-method :post
@@ -2209,63 +2313,35 @@
     (is (= :oauth-account (:llm.provider/auth-type provider)))
     (is (= :openai-login (:llm.provider/oauth-account provider)))))
 
-(deftest admin-provider-route-links-browser-session-account
-  (with-redefs [xia.llm-account-connector/browser-session-connected? (constantly true)]
-    (let [response (#'http/router {:uri            "/admin/providers"
-                                   :request-method :post
-                                   :headers        (ui-headers)
-                                   :body           (request-body {"id" "openai-account"
-                                                                  "name" "OpenAI Account"
-                                                                  "template" "openai"
-                                                                  "base_url" "https://api.openai.com/v1"
-                                                                  "model" "gpt-5"
-                                                                  "access_mode" "account"
-                                                                  "credential_source" "browser-session"
-                                                                  "browser_session" "browser-session-1"
-                                                                  "default" true})})
-          body     (response-json response)
-          provider (db/get-provider :openai-account)]
-      (is (= 200 (:status response)))
-      (is (= "browser-session" (get-in body ["provider" "credential_source"])))
-      (is (= "browser-session" (get-in body ["provider" "auth_type"])))
-      (is (= "browser-session-1" (get-in body ["provider" "browser_session"])))
-      (is (= true (get-in body ["provider" "browser_session_connected"])))
-      (is (= :account (:llm.provider/access-mode provider)))
-      (is (= :browser-session (:llm.provider/credential-source provider)))
-      (is (= :browser-session (:llm.provider/auth-type provider)))
-      (is (= "browser-session-1" (:llm.provider/browser-session provider))))))
+(deftest admin-provider-route-rejects-browser-session-field
+  (let [response (#'http/router {:uri            "/admin/providers"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "openai-account"
+                                                                "name" "OpenAI Account"
+                                                                "template" "openai"
+                                                                "base_url" "https://api.openai.com/v1"
+                                                                "model" "gpt-5"
+                                                                "access_mode" "api"
+                                                                "credential_source" "api-key"
+                                                                "api_key" "openai-key"
+                                                                "browser_session" "browser-session-1"
+                                                                "default" true})})
+        body     (response-json response)]
+    (is (= 400 (:status response)))
+    (is (str/includes? (or (get body "error") "")
+                       "browser_session is no longer supported"))))
 
-(deftest admin-provider-account-connector-routes-start-and-complete
-  (with-redefs [xia.llm-account-connector/start-connection!
-                (fn [connector]
-                  (is (= :openai-browser connector))
-                  {:connector  :openai-browser
-                   :session-id "browser-session-1"
-                   :login-url  "https://chatgpt.com/"
-                   :message    "Start sign-in"})
-                xia.llm-account-connector/complete-connection!
-                (fn [connector session-id]
-                  (is (= :openai-browser connector))
-                  (is (= "browser-session-1" session-id))
-                  {:connector  :openai-browser
-                   :session-id session-id
-                   :connected  true
-                   :message    "Connected"})]
-    (let [start-response (#'http/router {:uri            "/admin/provider-account-connectors/openai-browser/start"
-                                         :request-method :post
-                                         :headers        (ui-headers)})
-          start-body     (response-json start-response)
-          complete-response (#'http/router {:uri            "/admin/provider-account-connectors/openai-browser/complete"
-                                            :request-method :post
-                                            :headers        (ui-headers)
-                                            :body           (request-body {"browser_session" "browser-session-1"})})
-          complete-body     (response-json complete-response)]
-      (is (= 200 (:status start-response)))
-      (is (= "openai-browser" (get-in start-body ["connection" "connector"])))
-      (is (= "browser-session-1" (get-in start-body ["connection" "session_id"])))
-      (is (= 200 (:status complete-response)))
-      (is (= true (get-in complete-body ["connection" "connected"])))
-      (is (= "Connected" (get-in complete-body ["connection" "message"]))))))
+(deftest admin-provider-account-connector-routes-removed
+  (let [start-response (#'http/router {:uri            "/admin/provider-account-connectors/openai-browser/start"
+                                       :request-method :post
+                                       :headers        (ui-headers)})
+        complete-response (#'http/router {:uri            "/admin/provider-account-connectors/openai-browser/complete"
+                                          :request-method :post
+                                          :headers        (ui-headers)
+                                          :body           (request-body {"browser_session" "browser-session-1"})})]
+    (is (= 404 (:status start-response)))
+    (is (= 404 (:status complete-response)))))
 
 (deftest admin-service-route-preserves-secret-and-clears-unused-header
   (db/register-service! {:id          :github
