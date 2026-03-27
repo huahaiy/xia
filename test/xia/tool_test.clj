@@ -1,5 +1,5 @@
 (ns xia.tool-test
-  (:require [charred.api :as json]
+  (:require [clojure.string :as str]
             [clojure.test :refer :all]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
@@ -570,13 +570,18 @@
                        :headers {"content-type" "application/json"}
                        :body "{\"id\":\"sent-1\",\"threadId\":\"t1\",\"labelIds\":[\"SENT\"]}"}
 
-                      (and (= :post (:method req))
-                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify" (:url req))
-                           (= ["TRASH"] (get (json/read-json (:body req)) "addLabelIds"))
-                           (= ["INBOX" "UNREAD"] (get (json/read-json (:body req)) "removeLabelIds")))
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1" (:url req))
+                           (= "metadata" (get-in req [:query-params "format"])))
                       {:status 200
                        :headers {"content-type" "application/json"}
-                       :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\"}"}
+
+                      (and (= :post (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/threads/t1/trash" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"t1\",\"messages\":[{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}]}"}
 
                       :else
                       (throw (ex-info "Unexpected Gmail request" {:request req}))))]
@@ -619,9 +624,26 @@
       (with-redefs [http-client/request
                     (fn [req]
                       (swap! requests* conj req)
-                      {:status 200
-                       :headers {"content-type" "application/json"}
-                       :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"})]
+                      (cond
+                        (and (= :get (:method req))
+                             (re-matches #"https://gmail\.googleapis\.com/gmail/v1/users/me/messages/m[12]" (:url req))
+                             (= "metadata" (get-in req [:query-params "format"])))
+                        {:status 200
+                         :headers {"content-type" "application/json"}
+                         :body (if (str/ends-with? (:url req) "/m1")
+                                 "{\"id\":\"m1\",\"threadId\":\"t1\"}"
+                                 "{\"id\":\"m2\",\"threadId\":\"t2\"}")}
+
+                        (and (= :post (:method req))
+                             (re-matches #"https://gmail\.googleapis\.com/gmail/v1/users/me/threads/t[12]/trash" (:url req)))
+                        {:status 200
+                         :headers {"content-type" "application/json"}
+                         :body (if (str/ends-with? (:url req) "/t1/trash")
+                                 "{\"id\":\"t1\",\"messages\":[{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}]}"
+                                 "{\"id\":\"t2\",\"messages\":[{\"id\":\"m2\",\"threadId\":\"t2\",\"labelIds\":[\"TRASH\"]}]}")}
+
+                        :else
+                        (throw (ex-info "Unexpected Gmail request" {:request req}))))]
         (is (= "trashed"
                (:status (tool/execute-tool :email-delete
                                            {"message_id" "m1"}
@@ -633,7 +655,7 @@
                                            {:channel :terminal
                                             :session-id session-id}))))
         (is (= 1 @approvals*))
-        (is (= 2 (count @requests*))))
+        (is (= 4 (count @requests*))))
       (finally
         (prompt/register-approval! :terminal nil)
         (tool/clear-session-approvals! session-id)))))

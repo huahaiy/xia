@@ -364,26 +364,44 @@
 (defn delete-message
   "Delete a Gmail message.
 
-   By default this removes the message from the inbox and adds the Trash label.
-   Pass :permanent? true to permanently delete it instead."
+   By default this moves the message's whole thread to Trash so the
+   conversation leaves the inbox. Pass :permanent? true to permanently delete
+   the whole thread instead."
   [message-id & {:keys [service-id permanent?]}]
   (let [service-id (resolve-service-id service-id)
         message-id (nonblank-str message-id)]
     (when-not message-id
       (throw (ex-info "message-id is required"
                       {:type :email/missing-message-id})))
-    (let [status   (if permanent? "deleted" "trashed")
-          method   (if permanent? :delete :post)
-          path     (if permanent?
-                     (str "/gmail/v1/users/me/messages/" message-id)
-                     (str "/gmail/v1/users/me/messages/" message-id "/modify"))
-          opts     (when-not permanent?
-                     {:body {"addLabelIds"    ["TRASH"]
-                             "removeLabelIds" ["INBOX" "UNREAD"]}})
-          response (apply gmail-request service-id method path (mapcat identity opts))
-          body     (:body response)]
+    (let [message   (fetch-message service-id message-id "metadata")
+          thread-id (nonblank-str (get message "threadId"))
+          status    (if permanent? "deleted" "trashed")
+          method    (if permanent? :delete :post)
+          path      (cond
+                      thread-id
+                      (if permanent?
+                        (str "/gmail/v1/users/me/threads/" thread-id)
+                        (str "/gmail/v1/users/me/threads/" thread-id "/trash"))
+
+                      permanent?
+                      (str "/gmail/v1/users/me/messages/" message-id)
+
+                      :else
+                      (str "/gmail/v1/users/me/messages/" message-id "/modify"))
+          opts      (when (and (not permanent?) (nil? thread-id))
+                      {:body {"addLabelIds"    ["TRASH"]
+                              "removeLabelIds" ["INBOX" "UNREAD"]}})
+          response  (apply gmail-request service-id method path (mapcat identity opts))
+          body      (:body response)
+          labels    (or (get body "labelIds")
+                        (some->> (get body "messages")
+                                 (filter #(= message-id (get % "id")))
+                                 first
+                                 (#(get % "labelIds"))))]
       {:service-id (name service-id)
        :status     status
-       :id         (or (get body "id") message-id)
-       :thread-id  (get body "threadId")
-       :labels     (vec (or (get body "labelIds") []))})))
+       :id         message-id
+       :thread-id  (or (get body "id")
+                       (get body "threadId")
+                       thread-id)
+       :labels     (vec (or labels []))})))

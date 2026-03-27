@@ -213,13 +213,26 @@
                          :base-url  "https://gmail.googleapis.com"
                          :auth-type :bearer
                          :auth-key  "tok"})
-  (let [captured (atom nil)]
+  (let [requests (atom [])]
     (with-redefs [xia.http-client/request
                   (fn [req]
-                    (reset! captured req)
-                    {:status 200
-                     :headers {"content-type" "application/json"}
-                     :body "{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}"})]
+                    (swap! requests conj req)
+                    (cond
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1" (:url req))
+                           (= "metadata" (get-in req [:query-params "format"])))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\"}"}
+
+                      (and (= :post (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/threads/t1/trash" (:url req)))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"t1\",\"messages\":[{\"id\":\"m1\",\"threadId\":\"t1\",\"labelIds\":[\"TRASH\"]}]}"}
+
+                      :else
+                      (throw (ex-info "Unexpected request" {:request req}))))]
       (let [result (email/delete-message "m1")]
         (is (= {:service-id "gmail"
                 :status "trashed"
@@ -227,13 +240,11 @@
                 :thread-id "t1"
                 :labels ["TRASH"]}
                result))
-        (is (= :post (:method @captured)))
-        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify"
-               (:url @captured)))
-        (is (= "application/json" (get-in @captured [:headers "Content-Type"])))
-        (let [payload (json/read-json (:body @captured))]
-          (is (= ["TRASH"] (get payload "addLabelIds")))
-          (is (= ["INBOX" "UNREAD"] (get payload "removeLabelIds"))))))))
+        (is (= 2 (count @requests)))
+        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1"
+               (:url (first @requests))))
+        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/threads/t1/trash"
+               (:url (second @requests))))))))
 
 (deftest delete-message-permanently-deletes-when-requested
   (db/register-service! {:id        :gmail
@@ -241,20 +252,35 @@
                          :base-url  "https://gmail.googleapis.com"
                          :auth-type :bearer
                          :auth-key  "tok"})
-  (let [captured (atom nil)]
+  (let [requests (atom [])]
     (with-redefs [xia.http-client/request
                   (fn [req]
-                    (reset! captured req)
-                    {:status 204
-                     :headers {}
-                     :body ""})]
+                    (swap! requests conj req)
+                    (cond
+                      (and (= :get (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1" (:url req))
+                           (= "metadata" (get-in req [:query-params "format"])))
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body "{\"id\":\"m1\",\"threadId\":\"t1\"}"}
+
+                      (and (= :delete (:method req))
+                           (= "https://gmail.googleapis.com/gmail/v1/users/me/threads/t1" (:url req)))
+                      {:status 204
+                       :headers {}
+                       :body "{}"}
+
+                      :else
+                      (throw (ex-info "Unexpected request" {:request req}))))]
       (let [result (email/delete-message "m1" :permanent? true)]
         (is (= {:service-id "gmail"
                 :status "deleted"
                 :id "m1"
-                :thread-id nil
+                :thread-id "t1"
                 :labels []}
                result))
-        (is (= :delete (:method @captured)))
+        (is (= 2 (count @requests)))
         (is (= "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1"
-               (:url @captured)))))))
+               (:url (first @requests))))
+        (is (= "https://gmail.googleapis.com/gmail/v1/users/me/threads/t1"
+               (:url (second @requests))))))))

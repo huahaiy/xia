@@ -69,7 +69,7 @@
 
       <div id="chat-tab" class="tab-panel active">
         <main class="workspace">
-          <section class="panel">
+          <section class="panel chat-panel">
             <div class="panel-header">
               <h2 class="panel-title">Chat</h2>
               <button type="button" class="secondary" id="copy-transcript">Copy transcript</button>
@@ -77,21 +77,23 @@
             <div class="messages" id="messages">
               <div class="empty">Start with a paste or a prompt. This interface is here to bridge the gap when Xia needs local material that cannot be read directly from disk.</div>
             </div>
-            <div class="activity-status" id="activity-status"></div>
-            <form class="composer" id="composer-form">
-              <div class="field">
-                <textarea id="composer" placeholder="Paste context or type a message... (Cmd+Enter to send)"></textarea>
-              </div>
-              <div class="composer-foot">
-                <div class="hint">Shift+Enter for new line. Cmd+Enter to send.</div>
-                <div class="actions">
-                  <input type="file" id="file-input" hidden multiple accept=".c,.cc,.clj,.cljs,.cljc,.cpp,.csv,.docx,.edn,.htm,.html,.java,.js,.json,.log,.md,.markdown,.pdf,.pptx,.py,.rb,.sh,.sql,.text,.ts,.tsv,.txt,.xlsx,.xml,.yaml,.yml,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation">
-                  <button type="button" class="secondary" id="upload-btn" title="Upload local documents">📎</button>
-                  <button type="button" class="secondary" id="clear-input" disabled>Clear</button>
-                  <button type="submit" class="primary" id="send" disabled>Send to Xia</button>
+            <div class="chat-compose-area">
+              <div class="activity-status" id="activity-status"></div>
+              <form class="composer" id="composer-form">
+                <div class="field">
+                  <textarea id="composer" placeholder="Paste context or type a message... (Cmd+Enter to send)"></textarea>
                 </div>
-              </div>
-            </form>
+                <div class="composer-foot">
+                  <div class="hint">Shift+Enter for new line. Cmd+Enter to send.</div>
+                  <div class="actions">
+                    <input type="file" id="file-input" hidden multiple accept=".c,.cc,.clj,.cljs,.cljc,.cpp,.csv,.docx,.edn,.htm,.html,.java,.js,.json,.log,.md,.markdown,.pdf,.pptx,.py,.rb,.sh,.sql,.text,.ts,.tsv,.txt,.xlsx,.xml,.yaml,.yml,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+                    <button type="button" class="secondary" id="upload-btn" title="Upload local documents">📎</button>
+                    <button type="button" class="secondary" id="clear-input" disabled>Clear</button>
+                    <button type="submit" class="primary" id="send" disabled>Send to Xia</button>
+                  </div>
+                </div>
+              </form>
+            </div>
           </section>
           <aside class="side-stack">
             <section class="panel">
