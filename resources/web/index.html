@@ -262,6 +262,7 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">Chat History</h3>
+                  <p class="panel-note">Review prior chat sessions and reopen their transcripts.</p>
                 </div>
                 <button type="button" class="secondary" id="refresh-history-sessions">Refresh</button>
               </div>
@@ -276,6 +277,7 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title" title="Recent runs, results, errors, and action trails for each schedule.">Scheduled Runs</h3>
+                  <p class="panel-note">Inspect recent automated runs, outcomes, and failures.</p>
                 </div>
                 <button type="button" class="secondary" id="refresh-history-schedules">Refresh</button>
               </div>
@@ -290,6 +292,7 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">Knowledge Graph</h3>
+                  <p class="panel-note">Search stored entities and inspect the facts Xia remembers.</p>
                 </div>
                 <div class="actions knowledge-search">
                   <input type="search" id="knowledge-query" class="text-input" placeholder="Search people, places, projects...">
@@ -311,6 +314,7 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title" title="Inspect prompts, responses, token usage, and latency for every LLM call.">LLM Call Log</h3>
+                  <p class="panel-note">Audit prompts, responses, tools, and model usage for each LLM call.</p>
                 </div>
                 <button type="button" class="secondary" id="refresh-llm-calls">Refresh</button>
               </div>
@@ -400,7 +404,7 @@
                     <label class="check-label" for="identity-controller-enabled">Allow this Xia to start and stop managed child Xia instances</label>
                   </div>
                 </div>
-                <div class="field full">
+                <div class="field full advanced-only">
                   <label class="field-label">Instance ID</label>
                   <input type="text" id="identity-instance-id" class="text-input" readonly>
                 </div>

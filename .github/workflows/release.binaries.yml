@@ -160,6 +160,7 @@ jobs:
             cd dist
             zip -r "../${{ steps.names.outputs.archive }}" "${{ steps.names.outputs.folder }}"
           )
+          shasum -a 256 "${{ steps.names.outputs.archive }}" > "${{ steps.names.outputs.archive }}.sha256"
 
       - name: Package native binary (Windows)
         if: runner.os == 'Windows'
@@ -170,12 +171,16 @@ jobs:
           Copy-Item "target/native-image/${{ matrix.binary-name }}" (Join-Path $folder "${{ matrix.binary-name }}")
           Copy-Item "README.md","LICENSE" $folder
           Compress-Archive -Path $folder -DestinationPath "${{ steps.names.outputs.archive }}" -Force
+          $hash = (Get-FileHash "${{ steps.names.outputs.archive }}" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "${{ steps.names.outputs.archive }}.sha256" -Value "$hash  ${{ steps.names.outputs.archive }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          path: ${{ steps.names.outputs.archive }}
+          path: |
+            ${{ steps.names.outputs.archive }}
+            ${{ steps.names.outputs.archive }}.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -198,4 +203,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "$RELEASE_TAG" release-assets/*.zip --clobber
+          gh release upload "$RELEASE_TAG" release-assets/*.zip release-assets/*.sha256 --clobber

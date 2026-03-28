@@ -29,6 +29,35 @@ own DB/support directories and a shared workspace with other Xia instances, Xia
 does not access your local file system at all. User-initiated file uploads and
 imports are supported, but they stay explicit and scoped.
 
+## Install
+
+Install the latest Xia release from GitHub Releases:
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huahaiy/xia/main/script/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/huahaiy/xia/main/script/install.ps1 | iex
+```
+
+Defaults:
+
+- macOS / Linux installs to `~/.local/bin/xia`
+- Windows installs to `%LOCALAPPDATA%\Programs\Xia\bin\xia.exe`
+- each installer downloads the matching native release zip from GitHub Releases
+- if a checksum sidecar is published, the installer verifies it before install
+
+To pin a specific version on macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huahaiy/xia/main/script/install.sh | sh -s -- --version v0.1.0
+```
+
 ## Quick Start
 
 Start Xia normally on a terminal:

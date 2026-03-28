@@ -11,6 +11,8 @@
 (def test-uber-file "target/xia-tests.jar")
 (def generated-test-src-dir "target/generated-test-src")
 (def basis (delay (b/create-basis {:project "deps.edn"})))
+(def test-basis (delay (b/create-basis {:project "deps.edn"
+                                        :aliases [:test]})))
 (def compiler-bindings
   {#'*warn-on-reflection* true
    #'*unchecked-math* :warn-on-boxed})
@@ -169,11 +171,11 @@
   (write-native-resource-config! test-class-dir ["fixtures/"])
   (write-native-test-runner!)
   (b/copy-dir {:src-dirs [generated-test-src-dir] :target-dir test-class-dir})
-  (b/compile-clj {:basis @basis
+  (b/compile-clj {:basis @test-basis
                   :ns-compile '[xia.native-test-runner]
                   :class-dir test-class-dir
                   :bindings compiler-bindings})
   (b/uber {:class-dir test-class-dir
            :uber-file test-uber-file
-           :basis @basis
+           :basis @test-basis
            :main 'xia.native-test-runner}))
