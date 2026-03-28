@@ -375,6 +375,9 @@ sidebarAccordionEls.forEach((accordion) => {
     sidebarAccordionEls.forEach((other) => {
       if (other !== accordion) other.open = false;
     });
+    if (accordion.id === 'shared-workspace-accordion') {
+      loadSharedWorkspaceItems().catch(() => {});
+    }
   });
 });
 

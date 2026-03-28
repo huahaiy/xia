@@ -842,7 +842,6 @@
        (crypto/configure! db-path crypto-opts)
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
-       (migrate-secrets!)
        (reset! last-connect-event-atom
                (assoc (lifecycle-event (runtime-state/phase) callsite)
                       :db-path db-path
@@ -1092,47 +1091,53 @@
              {}
              entity-map))
 
-(defn- migrate-secret-attr! [eid attr value]
+(defn- migrate-secret-attr-tx [eid attr value]
   (when (and (string? value)
              (not (str/blank? value))
-                (not (crypto/encrypted? value)))
-    (transact! [[:db/add eid attr (crypto/encrypt value (attr-aad attr))]])
-    1))
+             (not (crypto/encrypted? value)))
+    [:db/add eid attr value]))
 
-(defn- migrate-secret-config! [eid config-key value]
+(defn- migrate-secret-config-tx [eid config-key value]
   (when (and (sensitive/secret-config-key? config-key)
              (string? value)
              (not (str/blank? value))
              (not (crypto/encrypted? value)))
-    (transact! [[:db/add eid :config/value (crypto/encrypt value (config-aad config-key))]])
-    1))
+    {:db/id eid
+     :config/key config-key
+     :config/value value}))
+
+(def ^:private secret-migration-batch-size 200)
 
 (defn- migrate-secrets!
   []
-  (let [db (d/db (conn))
-        config-count
-        (reduce
-          +
-          0
-          (map (fn [[eid k v]]
-                 (or (migrate-secret-config! eid k v) 0))
-               (d/q '[:find ?e ?k ?v
-                      :where
-                      [?e :config/key ?k]
-                      [?e :config/value ?v]]
-                    db)))
-        attr-count
-        (reduce
-          +
-          0
-          (for [attr sensitive/encrypted-attrs
-                [eid value] (d/q '[:find ?e ?v
-                                   :in $ ?attr
-                                   :where
-                                   [?e ?attr ?v]]
-                                 db attr)]
-            (or (migrate-secret-attr! eid attr value) 0)))]
-    (+ (long config-count) (long attr-count))))
+  (let [config-tx
+        (into []
+              (keep (fn [[eid k v]]
+                      (migrate-secret-config-tx eid k v)))
+              (vec
+                (q '[:find ?e ?k ?v
+                     :where
+                     [?e :config/key ?k]
+                     [?e :config/value ?v]])))
+        attr-tx
+        (into []
+              (keep identity)
+              (for [attr sensitive/encrypted-attrs
+                    [eid value] (vec
+                                  (q '[:find ?e ?v
+                                       :in $ ?attr
+                                       :where
+                                       [?e ?attr ?v]]
+                                     attr))]
+                (migrate-secret-attr-tx eid attr value)))
+        tx-data (into config-tx attr-tx)]
+    (when (seq tx-data)
+      (log/info "Migrating" (count tx-data) "legacy secret values in"
+                (count (partition-all secret-migration-batch-size tx-data))
+                "batches"))
+    (doseq [batch (partition-all secret-migration-batch-size tx-data)]
+      (transact! batch))
+    (count tx-data)))
 
 ;; ---------------------------------------------------------------------------
 ;; Config

@@ -11,22 +11,22 @@
     :oauth.account/refresh-token
     :remote.device/push-token
     :site-cred/username
-    :site-cred/password
-    :session/history-recap
+    :site-cred/password})
+
+(def sandbox-only-secret-attrs
+  "DB attributes that are redacted from sandboxed code but not encrypted at rest."
+  #{:session/history-recap
     :session/tool-recap
     :message/content
+    :message/tool-calls
+    :message/tool-result
     :llm.log/messages
     :llm.log/tools
     :llm.log/response
     :llm.log/error
     :audit.event/data
     :schedule-run/result
-    :schedule-run/error})
-
-(def sandbox-only-secret-attrs
-  "DB attributes that are redacted from sandboxed code but not encrypted at rest."
-  #{:message/tool-calls
-    :message/tool-result
+    :schedule-run/error
     :schedule-run/actions})
 
 (def secret-attr-namespaces

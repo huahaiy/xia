@@ -4,7 +4,7 @@
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.schedule :as schedule]
-            [xia.test-helpers :refer [with-test-db]]))
+            [xia.test-helpers :as th :refer [with-test-db]]))
 
 (use-fixtures :each with-test-db)
 
@@ -76,7 +76,7 @@
     (is (crypto/encrypted? raw-value))
     (is (= "gho_secret" (db/get-config :token/github)))))
 
-(deftest llm-log-payloads-are-encrypted-at-rest
+(deftest llm-log-payloads-are-stored-in-plaintext-at-rest
   (let [call-id (random-uuid)]
     (db/log-llm-call! {:id call-id
                        :session-id (random-uuid)
@@ -90,16 +90,16 @@
     (let [eid (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))
           raw (raw-entity eid)
           call (db/get-llm-call call-id)]
-      (is (crypto/encrypted? (:llm.log/messages raw)))
-      (is (crypto/encrypted? (:llm.log/response raw)))
-      (is (crypto/encrypted? (:llm.log/tools raw)))
-      (is (crypto/encrypted? (:llm.log/error raw)))
+      (is (= "[{\"role\":\"user\",\"content\":\"secret\"}]" (:llm.log/messages raw)))
+      (is (= "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}" (:llm.log/response raw)))
+      (is (= "[{\"name\":\"browser-open\"}]" (:llm.log/tools raw)))
+      (is (= "provider error" (:llm.log/error raw)))
       (is (= "[{\"role\":\"user\",\"content\":\"secret\"}]" (:messages call)))
       (is (= "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}" (:response call)))
       (is (= "[{\"name\":\"browser-open\"}]" (:tools call)))
       (is (= "provider error" (:error call))))))
 
-(deftest audit-event-payloads-are-encrypted-at-rest
+(deftest audit-event-payloads-are-stored-in-plaintext-at-rest
   (let [event-id (random-uuid)
         sid (db/create-session! :http)]
     (db/log-audit-event! {:id event-id
@@ -112,7 +112,8 @@
     (let [eid (ffirst (db/q '[:find ?e :in $ ?id :where [?e :audit.event/id ?id]] event-id))
           raw (raw-entity eid)
           event (first (db/session-audit-events sid))]
-      (is (crypto/encrypted? (:audit.event/data raw)))
+      (is (= "{\"approved\":true,\"arguments\":{\"secret\":\"value\"}}"
+             (:audit.event/data raw)))
       (is (= {"approved" true
               "arguments" {"secret" "value"}}
              (:data event))))))
@@ -138,8 +139,8 @@
                             (map (fn [[eid role]] [role (raw-entity eid)]))
                             (into {}))
           messages     (db/session-messages sid)]
-      (is (crypto/encrypted? (:message/content (:user raw-messages))))
-      (is (crypto/encrypted? (:message/content (:assistant raw-messages))))
+      (is (= "pasted local secret" (:message/content (:user raw-messages))))
+      (is (= "checking service" (:message/content (:assistant raw-messages))))
       (is (= {:calls tool-calls}
              (:message/tool-calls (:assistant raw-messages))))
       (is (= {:result {"token" "top-secret"}}
@@ -191,7 +192,7 @@
                :workload nil}]
              messages)))))
 
-(deftest schedule-run-payloads-are-encrypted-at-rest
+(deftest schedule-run-payloads-are-stored-in-plaintext-at-rest
   (schedule/create-schedule!
     {:id :security-hist
      :spec {:minute #{0} :hour #{9}}
@@ -210,8 +211,8 @@
                                 [?e :schedule-run/schedule-id :security-hist]]))
         raw     (raw-entity eid)
         history (schedule/schedule-history :security-hist)]
-    (is (crypto/encrypted? (:schedule-run/result raw)))
-    (is (crypto/encrypted? (:schedule-run/error raw)))
+    (is (= "{\"records\":[\"secret\"]}" (:schedule-run/result raw)))
+    (is (= "token leak" (:schedule-run/error raw)))
     (is (= {:events [{:tool-id "service-call"
                       :status "blocked"
                       :arguments {"endpoint" "/gmail/v1/messages"}}]}
@@ -237,7 +238,46 @@
     (is (crypto/encrypted? (:service/auth-key raw)))
     (is (= "legacy-token" (:service/auth-key svc)))))
 
-(deftest plaintext-transcripts-are-migrated
+(deftest plaintext-secret-migration-batches-configs-and-attrs
+  (d/transact! (db/conn)
+               [{:service/id        :legacy-batch
+                 :service/base-url  "https://legacy.example"
+                 :service/auth-type :bearer
+                 :service/auth-key  "legacy-batch-token"
+                 :service/enabled?  true}
+                {:config/key   :token/github
+                 :config/value "gho_batch_secret"}])
+  (#'xia.db/migrate-secrets!)
+  (let [eid       (ffirst (db/q '[:find ?e :where [?e :service/id :legacy-batch]]))
+        raw       (raw-entity eid)
+        raw-value (ffirst (db/q '[:find ?v :where
+                                  [?e :config/key :token/github]
+                                  [?e :config/value ?v]]))]
+    (is (crypto/encrypted? (:service/auth-key raw)))
+    (is (crypto/encrypted? raw-value))
+    (is (= "legacy-batch-token" (:service/auth-key (db/get-service :legacy-batch))))
+    (is (= "gho_batch_secret" (db/get-config :token/github)))))
+
+(deftest plaintext-secret-migration-commits-in-batches
+  (let [orig-transact! xia.db/transact!
+        batch-sizes    (atom [])]
+    (doseq [n (range 450)]
+      (d/transact! (db/conn)
+                   [{:service/id        (keyword (str "legacy-batch-" n))
+                     :service/base-url  (str "https://legacy-" n ".example")
+                     :service/auth-type :bearer
+                     :service/auth-key  (str "token-" n)
+                     :service/enabled?  true}]))
+    (with-redefs [xia.db/transact!
+                  (fn [tx-data]
+                    (swap! batch-sizes conj (count tx-data))
+                    (orig-transact! tx-data))]
+      (#'xia.db/migrate-secrets!))
+    (is (= [200 200 50] @batch-sizes))
+    (is (= "token-0" (:service/auth-key (db/get-service :legacy-batch-0))))
+    (is (= "token-449" (:service/auth-key (db/get-service :legacy-batch-449))))))
+
+(deftest plaintext-transcripts-are-left-plain-by-migration
   (let [sid         (db/create-session! :terminal)
         session-eid (ffirst (db/q '[:find ?e :in $ ?sid
                                     :where [?e :session/id ?sid]]
@@ -255,7 +295,7 @@
                                  message-id))
           raw      (raw-entity eid)
           messages (db/session-messages sid)]
-      (is (crypto/encrypted? (:message/content raw)))
+      (is (= "legacy transcript" (:message/content raw)))
       (is (= {:calls [{"id" "call_1"}]} (:message/tool-calls raw)))
       (is (= "legacy transcript" (:content (first messages))))
       (is (= [{"id" "call_1"}] (:tool-calls (first messages)))))))

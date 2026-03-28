@@ -354,7 +354,6 @@
                      #'xia.crypto/configure! (fn [& _] nil)
                      #'xia.db/init-embedding-provider! (fn [_ _] ::embedding-provider)
                      #'xia.db/init-llm-provider! (fn [_ _] nil)
-                     #'xia.db/migrate-secrets! (fn [] nil)
                      #'datalevin.core/close (fn [_] nil)}
       #(try
          (db/connect! "/tmp/xia-dev-connect"

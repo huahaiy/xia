@@ -86,7 +86,6 @@
                                      #'xia.crypto/configure! (fn [& _] nil)
                                      #'xia.db/init-embedding-provider! (fn [& _] nil)
                                      #'xia.db/init-llm-provider! (fn [& _] nil)
-                                     #'xia.db/migrate-secrets! (fn [] nil)
                                      #'datalevin.core/close (fn [_] nil)}
                       #(try
                          (db/connect! path {:local-llm-provider false
@@ -96,6 +95,25 @@
     (is (= [:download :get-conn]
            (mapv #(if (vector? %) (first %) %) @calls)))
     (is (.contains ^String output "Downloading Xia embedding model"))))
+
+(deftest connect-does-not-run-secret-migration-on-startup
+  (let [called? (atom false)]
+    (with-redefs-fn {#'datalevin.core/get-conn (fn [_db-path _schema _opts] ::conn)
+                     #'xia.db/download-file! (fn [& _] nil)
+                     #'xia.crypto/configure! (fn [& _] nil)
+                     #'xia.db/init-embedding-provider! (fn [& _] nil)
+                     #'xia.db/init-llm-provider! (fn [& _] nil)
+                     #'xia.db/migrate-secrets! (fn []
+                                                (reset! called? true)
+                                                0)
+                     #'datalevin.core/close (fn [_] nil)}
+      #(try
+         (db/connect! "/tmp/xia-dev-connect"
+                      {:local-llm-provider false
+                       :passphrase-provider (constantly "xia-test-passphrase")})
+         (finally
+           (db/close!))))
+    (is (false? @called?))))
 
 (deftest seed-initial-settings-from-db-copies-template-config
   (let [target-path (db/current-db-path)

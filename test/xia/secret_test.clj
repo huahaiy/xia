@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [xia.db :as db]
             [xia.secret :as secret]
+            [xia.sensitive :as sensitive]
             [xia.test-helpers :refer [with-test-db]]))
 
 (use-fixtures :each with-test-db)
@@ -43,6 +44,17 @@
   (testing "non-secret config keys"
     (is (not (secret/secret-config-key? :user/name)))
     (is (not (secret/secret-config-key? :context/budget)))))
+
+(deftest encrypted-attr?-test
+  (testing "credentials stay encrypted at rest"
+    (is (sensitive/encrypted-attr? :llm.provider/api-key))
+    (is (sensitive/encrypted-attr? :oauth.account/access-token))
+    (is (sensitive/encrypted-attr? :site-cred/password)))
+  (testing "transcript and audit payloads stay plaintext at rest"
+    (is (not (sensitive/encrypted-attr? :message/content)))
+    (is (not (sensitive/encrypted-attr? :llm.log/response)))
+    (is (not (sensitive/encrypted-attr? :audit.event/data)))
+    (is (not (sensitive/encrypted-attr? :schedule-run/result)))))
 
 ;; ---------------------------------------------------------------------------
 ;; safe-get-config tests
