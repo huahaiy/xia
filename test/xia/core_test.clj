@@ -216,8 +216,8 @@
     (is (= [[:ensure-db-dir "/tmp/xia-dev-repl"]
             [:db/connect "/tmp/xia-dev-repl" true]
             [:instance-supervisor/configure true nil]
-            :sci/reset
             :identity/init
+            :sci/reset
             :tool/reset
             :tool/load
             :scheduler/start
@@ -333,8 +333,8 @@
     (is (= [:instance-supervisor/configure
             :hippo/reset
             :llm/reset
-            :sci/reset
             :identity/init
+            :sci/reset
             :tool/reset
             :tool/load
             :scheduler/start]

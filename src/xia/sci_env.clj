@@ -48,6 +48,7 @@
 (defonce ^:private sci-worker-seq (AtomicLong. 0))
 (defonce ^:private active-sci-workers (atom {}))
 (defonce ^:private shutdown? (atom false))
+(defonce ^:private current-ctx* (atom nil))
 
 (defn- sci-timeout-ex
   [stage timeout-ms]
@@ -322,7 +323,13 @@
      :classes    {'java.util.Date java.util.Date
                   'java.util.UUID java.util.UUID}}))
 
-(defonce ^:private default-ctx (delay (make-ctx)))
+(defn- current-ctx
+  []
+  (or @current-ctx*
+      (let [ctx (make-ctx)]
+        (if (compare-and-set! current-ctx* nil ctx)
+          ctx
+          @current-ctx*))))
 
 (defn- sci-eval-timeout-ms
   []
@@ -516,6 +523,7 @@
   []
   (reset! shutdown? false)
   (reap-finished-sci-workers!)
+  (reset! current-ctx* (make-ctx))
   nil)
 
 (defn- sci-worker-thread
@@ -567,6 +575,7 @@
     (doseq [{:keys [worker-id stage timeout-ms ^Thread thread]} workers]
       (when (and thread (.isAlive thread))
         (interrupt-sci-worker! worker-id stage timeout-ms thread)))
+    (reset! current-ctx* nil)
     (count workers)))
 
 (defn- call-with-timeout
@@ -601,7 +610,7 @@
   [code-str]
   (call-with-timeout (sci-eval-timeout-ms)
                      :eval
-                     #(sci/eval-string* @default-ctx
+                     #(sci/eval-string* (current-ctx)
                                         (instrument-code-string code-str))))
 
 (defn call-fn

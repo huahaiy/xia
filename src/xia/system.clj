@@ -69,17 +69,24 @@
   [_ {:keys [db]}]
   (hippo/reset-runtime!)
   (llm/reset-runtime!)
-  (sci-env/reset-runtime!)
   {:db db})
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
   (agent/cancel-all-sessions! "runtime stopping")
-  (sci-env/prepare-shutdown!)
   (hippo/prepare-shutdown!)
   (llm/prepare-shutdown!)
   (hippo/await-background-tasks!)
   (llm/await-background-tasks!))
+
+(defmethod ig/init-key :xia/sci-runtime
+  [_ {:keys [db]}]
+  (sci-env/reset-runtime!)
+  {:db db})
+
+(defmethod ig/halt-key! :xia/sci-runtime
+  [_ _]
+  (sci-env/prepare-shutdown!))
 
 (defmethod ig/init-key :xia/instance-supervisor
   [_ {:keys [db enabled? command]}]
@@ -130,7 +137,7 @@
   nil)
 
 (defmethod ig/init-key :xia/tool-runtime
-  [_ {:keys [identity]}]
+  [_ {:keys [identity sci-runtime]}]
   (let [bundled-count (tool/ensure-bundled-tools!)]
     (when (pos? (long bundled-count))
       (log/info "Installed" bundled-count "bundled tools")))
@@ -138,7 +145,8 @@
   (tool/load-all-tools!)
   (log/info "Loaded" (count (tool/registered-tools)) "tools,"
             (count (skill/all-enabled-skills)) "skills")
-  {:identity identity})
+  {:identity identity
+   :sci-runtime sci-runtime})
 
 (defmethod ig/halt-key! :xia/tool-runtime
   [_ _]

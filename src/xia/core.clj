@@ -218,6 +218,9 @@
      :xia/runtime-support
      {:db (ig/ref :xia/db)}
 
+     :xia/sci-runtime
+     {:db (ig/ref :xia/db)}
+
      :xia/instance-supervisor
      {:db (ig/ref :xia/db)
       :enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
@@ -237,7 +240,8 @@
      {:bootstrap (ig/ref :xia/bootstrap)}
 
      :xia/tool-runtime
-     {:identity (ig/ref :xia/identity)}
+     {:identity (ig/ref :xia/identity)
+      :sci-runtime (ig/ref :xia/sci-runtime)}
 
      :xia/scheduler
      {:tool-runtime (ig/ref :xia/tool-runtime)}
