@@ -569,15 +569,22 @@
    "   }"
    "   return raw.replace(/\\\\/g, '\\\\\\\\').replace(/\"/g, '\\\\\"');"
    " };"
+   " const idAttr = (el) => {"
+   "   if (!el || typeof el.getAttribute !== 'function') return null;"
+   "   const value = el.getAttribute('id');"
+   "   return value && String(value).trim() ? String(value) : null;"
+   " };"
    " const selectorFor = (el) => {"
-   "   if (el.id) {"
-   "     return `[id=\"${escapeAttr(el.id)}\"]`;"
+   "   const ownId = idAttr(el);"
+   "   if (ownId) {"
+   "     return `[id=\"${escapeAttr(ownId)}\"]`;"
    "   }"
    "   const parts = [];"
    "   let node = el;"
    "   while (node && node.nodeType === 1) {"
-   "     if (node.id) {"
-   "       parts.unshift(`[id=\"${escapeAttr(node.id)}\"]`);"
+   "     const nodeId = idAttr(node);"
+   "     if (nodeId) {"
+   "       parts.unshift(`[id=\"${escapeAttr(nodeId)}\"]`);"
    "       break;"
    "     }"
    "     const tag = node.tagName.toLowerCase();"
@@ -639,7 +646,7 @@
    "     visible: visible(el),"
    "     disabled: !!el.disabled,"
    "     text: textFor(el),"
-   "     id: el.id || null,"
+   "     id: idAttr(el),"
    "     name: el.getAttribute('name'),"
    "     type: fieldType(el),"
    "     role: el.getAttribute('role'),"
@@ -1023,6 +1030,12 @@
     (when (pos? (.count ^Locator locator))
       (.first ^Locator locator))))
 
+(defn- missing-form-fields
+  [^Locator form fields]
+  (->> (keys fields)
+       (remove #(field-locator form %))
+       vec))
+
 (defn- fill-locator!
   [^Locator locator value]
   (let [tag-name (some-> (.evaluate locator "el => el.tagName.toLowerCase()") str/lower-case)
@@ -1117,11 +1130,18 @@
       (fill-locator! (.first ^Locator locator) value)
       (persist-session! ops session-id)
       (session-page-result session-id page)))
-  (fill-form* [_ session-id fields {:keys [form-selector submit]}]
+  (fill-form* [_ session-id fields {:keys [form-selector submit require-all-fields?]}]
     (let [_sess (get-session ops session-id)
           session-atom (.get sessions session-id)
           page (current-page-or-throw session-id session-atom)
-          form (form-locator page form-selector)]
+          form (form-locator page form-selector)
+          missing-fields (missing-form-fields form fields)]
+      (when (and require-all-fields? (seq missing-fields))
+        (throw (ex-info "Configured form fields not found on page"
+                        {:session-id session-id
+                         :url (.url ^Page page)
+                         :form-selector form-selector
+                         :missing-fields missing-fields})))
       (doseq [[field-name value] fields]
         (if-let [locator (field-locator form field-name)]
           (fill-locator! locator value)

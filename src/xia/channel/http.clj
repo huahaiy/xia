@@ -637,6 +637,13 @@
 (defn- unauthorized-response []
   (json-response 401 {:error "missing or invalid local session secret"}))
 
+(defn- handle-local-session-bootstrap
+  [req]
+  (if-not (trusted-local-origin? req)
+    (forbidden-response)
+    (-> (json-response 200 {:ok true})
+        (assoc-in [:headers "Set-Cookie"] (session-cookie-header)))))
+
 (defn- command-channel-unavailable-response []
   (json-response 503 {:error "command channel is not configured"}))
 
@@ -3542,6 +3549,9 @@
       (cond
         (and (= method :get) (= uri "/"))
         (handle-home req)
+
+        (and (= method :get) (= uri "/local-session"))
+        (handle-local-session-bootstrap req)
 
         (and (= method :get) (contains? web-static-assets uri))
         (static-asset-response uri)

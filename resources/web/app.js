@@ -573,10 +573,40 @@ function setStatus(text) {
   syncStatus();
 }
 
-function safeFetch(url, options) {
+async function isLocalSessionSecretResponse(response) {
+  if (!response || response.status !== 401) return false;
+  const contentType = firstNonEmpty(response.headers && response.headers.get('content-type'), '').toLowerCase();
+  if (!contentType.includes('application/json')) return false;
+  try {
+    const data = await response.clone().json();
+    const message = firstNonEmpty(data && data.error, '').toLowerCase();
+    return message.includes('local session secret');
+  } catch (_err) {
+    return false;
+  }
+}
+
+async function refreshLocalSessionCookie() {
+  return dedup('local-session-cookie', async () => {
+    const response = await fetch('/local-session', {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+    if (!response.ok) {
+      throw new Error('Failed to refresh local session');
+    }
+    return response;
+  });
+}
+
+async function safeFetch(url, options, retryingLocalSession) {
   const opts = Object.assign({}, options);
   opts.headers = Object.assign({ 'X-Requested-With': 'XMLHttpRequest' }, opts.headers || {});
-  return fetch(url, opts);
+  const response = await fetch(url, opts);
+  if (!retryingLocalSession && await isLocalSessionSecretResponse(response)) {
+    await refreshLocalSessionCookie();
+    return safeFetch(url, options, true);
+  }
+  return response;
 }
 
 function escapeHtml(str) {

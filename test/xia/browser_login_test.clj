@@ -132,12 +132,13 @@
                                           :approval-bypass? true
                                           :audit-log        (atom [])}]
     (with-redefs [xia.browser/open-session (fn [_url & _] {:session-id "sess-1"})
-                  xia.browser/fill-form    (fn [session-id fields & {:keys [form-selector submit]}]
+                  xia.browser/fill-form    (fn [session-id fields & {:keys [form-selector submit require-all-fields?]}]
                                              (is (= "sess-1" session-id))
                                              (is (= {"username" "hyang"
                                                      "password" "pw"}
                                                     fields))
                                              (is (nil? form-selector))
+                                             (is (= true require-all-fields?))
                                              (is (= true submit))
                                              {:session-id session-id
                                               :content "ok"})]
@@ -156,11 +157,12 @@
                                            (is (= "https://portal.example/login" url))
                                            (is (= :playwright backend))
                                            {:session-id "sess-1"})
-                xia.browser/fill-form    (fn [session-id fields & {:keys [submit]}]
+                xia.browser/fill-form    (fn [session-id fields & {:keys [submit require-all-fields?]}]
                                            (is (= "sess-1" session-id))
                                            (is (= {"username" "hyang"
                                                    "password" "pw"}
                                                   fields))
+                                           (is (= true require-all-fields?))
                                            (is (= true submit))
                                            {:session-id session-id
                                             :content "ok"})]
@@ -178,16 +180,160 @@
   (with-redefs [xia.browser/open-session (fn [url & _]
                                            (is (= "https://wiki.example/login" url))
                                            {:session-id "sess-1"})
-                xia.browser/fill-form    (fn [session-id fields & {:keys [submit]}]
+                xia.browser/fill-form    (fn [session-id fields & {:keys [submit require-all-fields?]}]
                                            (is (= "sess-1" session-id))
                                            (is (= {"username" "hyang"
                                                    "password" "pw"}
                                                   fields))
+                                           (is (= true require-all-fields?))
                                            (is (= true submit))
                                            {:session-id session-id
                                             :content "ok"})]
     (is (= {:session-id "sess-1" :content "ok"}
            (browser/login ":juji-wiki")))))
+
+(deftest login-accepts-site-id-string-with-colon-space-and-quotes
+  (db/register-site-cred!
+    {:id             :juji-wiki
+     :login-url      "https://wiki.example/login"
+     :username-field "username"
+     :password-field "password"
+     :username       "hyang"
+     :password       "pw"})
+  (with-redefs [xia.browser/open-session (fn [url & _]
+                                           (is (= "https://wiki.example/login" url))
+                                           {:session-id "sess-1"})
+                xia.browser/fill-form    (fn [session-id fields & {:keys [submit require-all-fields?]}]
+                                           (is (= "sess-1" session-id))
+                                           (is (= {"username" "hyang"
+                                                   "password" "pw"}
+                                                  fields))
+                                           (is (= true require-all-fields?))
+                                           (is (= true submit))
+                                           {:session-id session-id
+                                            :content "ok"})]
+    (is (= {:session-id "sess-1" :content "ok"}
+           (browser/login ": \"juji-wiki\"")))))
+
+(deftest login-follows-likely-login-link-when-fields-are-missing
+  (db/register-site-cred!
+    {:id             :wiki
+     :login-url      "https://wiki.example/"
+     :username-field "username"
+     :password-field "password"
+     :username       "hyang"
+     :password       "pw"})
+  (let [fill-attempts (atom 0)
+        clicked (atom [])]
+    (with-redefs [xia.browser/open-session  (fn [url & _]
+                                              (is (= "https://wiki.example/" url))
+                                              {:session-id "sess-1"})
+                  xia.browser/fill-form     (fn [session-id fields & {:keys [form-selector submit require-all-fields?]}]
+                                              (swap! fill-attempts inc)
+                                              (is (= "sess-1" session-id))
+                                              (is (= {"username" "hyang"
+                                                      "password" "pw"}
+                                                     fields))
+                                              (is (nil? form-selector))
+                                              (is (= true require-all-fields?))
+                                              (is (= true submit))
+                                              (if (= 1 @fill-attempts)
+                                                (throw (ex-info "Configured form fields not found on page"
+                                                                {:session-id session-id
+                                                                 :missing-fields ["username" "password"]}))
+                                                {:session-id session-id
+                                                 :content "ok"}))
+                  xia.browser/query-elements (fn [_session-id & {:keys [text-contains]}]
+                                              {:elements (if (= text-contains "sign in")
+                                                           [{:selector "#sign-in"
+                                                             :text "Sign in"}]
+                                                           [])})
+                  xia.browser/click         (fn [session-id selector]
+                                              (is (= "sess-1" session-id))
+                                              (swap! clicked conj selector)
+                                              {:session-id session-id})]
+      (is (= {:session-id "sess-1" :content "ok"}
+             (browser/login :wiki)))
+      (is (= 2 @fill-attempts))
+      (is (= ["#sign-in"] @clicked)))))
+
+(deftest login-infers-username-and-password-field-names-from-page
+  (db/register-site-cred!
+    {:id             :wiki
+     :login-url      "https://wiki.example/"
+     :username-field "username"
+     :password-field "password"
+     :username       "hyang"
+     :password       "pw"})
+  (let [fill-attempts (atom 0)]
+    (with-redefs [xia.browser/open-session  (fn [_url & _]
+                                              {:session-id "sess-1"})
+                  xia.browser/fill-form     (fn [session-id fields & {:keys [form-selector submit require-all-fields?]}]
+                                              (swap! fill-attempts inc)
+                                              (is (= "sess-1" session-id))
+                                              (is (= true require-all-fields?))
+                                              (is (= true submit))
+                                              (if (= 1 @fill-attempts)
+                                                (do
+                                                  (is (= {"username" "hyang"
+                                                          "password" "pw"}
+                                                         fields))
+                                                  (is (nil? form-selector))
+                                                  (throw (ex-info "Configured form fields not found on page"
+                                                                  {:session-id session-id
+                                                                   :missing-fields ["username" "password"]})))
+                                                (do
+                                                  (is (= {"u" "hyang"
+                                                          "p" "pw"}
+                                                         fields))
+                                                  (is (= "#login-form" form-selector))
+                                                  {:session-id session-id
+                                                   :content "ok"})))
+                  xia.browser/query-elements (fn [_session-id & {:keys [kind]}]
+                                              {:elements (if (= kind :fields)
+                                                           [{:name "u"
+                                                             :type "text"
+                                                             :visible true
+                                                             :index 7
+                                                             :form_selector "#login-form"}
+                                                            {:name "p"
+                                                             :type "password"
+                                                             :visible true
+                                                             :index 8
+                                                             :form_selector "#login-form"}]
+                                                           [])})
+                  xia.browser/click         (fn [& _]
+                                              (throw (ex-info "unexpected click" {})))]
+      (is (= {:session-id "sess-1" :content "ok"}
+             (browser/login :wiki)))
+      (is (= 2 @fill-attempts)))))
+
+(deftest login-surfaces-missing-fields-when-no-login-target-is-found
+  (db/register-site-cred!
+    {:id             :wiki
+     :login-url      "https://wiki.example/"
+     :username-field "username"
+     :password-field "password"
+     :username       "hyang"
+     :password       "pw"})
+  (with-redefs [xia.browser/open-session  (fn [_url & _]
+                                            {:session-id "sess-1"})
+                xia.browser/fill-form     (fn [session-id _fields & _]
+                                            (throw (ex-info "Configured form fields not found on page"
+                                                            {:session-id session-id
+                                                             :missing-fields ["username" "password"]})))
+                xia.browser/query-elements (fn [_session-id & _]
+                                            {:elements []})
+                xia.browser/click         (fn [& _]
+                                            (throw (ex-info "unexpected click" {})))]
+    (let [result (try
+                   (browser/login :wiki)
+                   (catch Exception e
+                     {:message (.getMessage e)
+                      :data (ex-data e)}))]
+      (is (= "Configured form fields not found on page" (:message result)))
+      (is (= #{"username" "password"}
+             (set (:missing-fields (:data result))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt mechanism
@@ -232,11 +378,12 @@
                                              (is (= "https://example.com/login" url))
                                              (is (= :playwright backend))
                                              {:session-id "sess-1"})
-                  xia.browser/fill-form    (fn [session-id fields & {:keys [submit]}]
+                  xia.browser/fill-form    (fn [session-id fields & {:keys [submit require-all-fields?]}]
                                              (is (= "sess-1" session-id))
                                              (is (= {"user" "hyang"
                                                      "password" "pw"}
                                                     fields))
+                                             (is (= true require-all-fields?))
                                              (is (= true submit))
                                              {:session-id session-id
                                               :content "ok"})]

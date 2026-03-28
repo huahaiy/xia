@@ -205,6 +205,8 @@
 ;; Public API — exposed to SCI sandbox
 ;; ---------------------------------------------------------------------------
 
+(declare normalize-browser-url)
+
 (defn open-session
   "Open a new browser session and navigate to a URL.
 
@@ -219,7 +221,7 @@
                 values like \"chrome\" or \"msedge\")"
   [url & {:keys [js backend storage-state headless channel] :or {js true}}]
   (browser.backend/open-session* (backend-by-id (resolve-open-backend-id backend))
-                                 url
+                                 (or (normalize-browser-url url) url)
                                  (cond-> {:js js
                                           :storage-state storage-state
                                           :headless headless}
@@ -232,7 +234,7 @@
   [session-id url]
   (browser.backend/navigate* (backend-by-id (session-backend-id session-id))
                              session-id
-                             url))
+                             (or (normalize-browser-url url) url)))
 
 (defn click
   "Click an element matching a CSS selector.
@@ -258,17 +260,19 @@
      session-id — browser session
      fields     — map of field name/id to value
      opts:
-       :form-selector — CSS selector for the form (default: first form)
-       :submit        — true to submit after filling (default false)
+       :form-selector       — CSS selector for the form (default: first form)
+       :submit              — true to submit after filling (default false)
+       :require-all-fields? — true to fail if any requested field is missing
 
    Returns the page content (after submit if :submit true)."
-  [session-id fields & {:keys [form-selector submit]
+  [session-id fields & {:keys [form-selector submit require-all-fields?]
                         :or {submit false}}]
   (browser.backend/fill-form* (backend-by-id (session-backend-id session-id))
                               session-id
                               fields
                               {:form-selector form-selector
-                               :submit submit}))
+                               :submit submit
+                               :require-all-fields? require-all-fields?}))
 
 (defn read-page
   "Read the current page content in a session.
@@ -372,7 +376,7 @@
   (let [snapshot (or (read-session-snapshot session-id)
                      (throw (ex-info "No resumable browser session snapshot found"
                                      {:session-id session-id})))
-        target-url (or url
+        target-url (or (normalize-browser-url url)
                        (get snapshot "current_url")
                        (throw (ex-info "Browser session snapshot has no current URL"
                                        {:session-id session-id})))
@@ -413,28 +417,216 @@
 ;; Login helpers — credential injection without LLM exposure
 ;; ---------------------------------------------------------------------------
 
+(defn- unwrap-delimited-text
+  [value]
+  (loop [text (some-> value str/trim)]
+    (let [text* (some-> text
+                        (str/replace #"^:+\s*" "")
+                        str/trim)
+          quote (when (and (string? text*)
+                           (>= (count text*) 2)
+                           (#{"\"" "'" "`"} (subs text* 0 1))
+                           (= (subs text* 0 1)
+                              (subs text* (dec (count text*)) (count text*))))
+                  (subs text* 0 1))
+          next-text (if quote
+                      (subs text* 1 (dec (count text*)))
+                      text*)]
+      (if (= text next-text)
+        (not-empty next-text)
+        (recur next-text)))))
+
+(defn- normalize-browser-url
+  [url]
+  (some-> url
+          unwrap-delimited-text
+          str/trim
+          not-empty))
+
 (defn- normalize-site-id
   [site-id]
   (cond
     (keyword? site-id)
-    (let [site-ns   (namespace site-id)
-          site-name (name site-id)]
-      (if (str/starts-with? site-name ":")
-        (keyword site-ns (str/replace site-name #"^:+" ""))
-        site-id))
+    (or (some-> (str site-id)
+                unwrap-delimited-text
+                keyword)
+        site-id)
 
     (symbol? site-id)
     (recur (name site-id))
 
     (string? site-id)
     (some-> site-id
-            str/trim
-            (str/replace #"^:+" "")
-            not-empty
+            unwrap-delimited-text
             keyword)
 
     :else
     site-id))
+
+(def ^:private login-target-needles
+  ["sign in" "signin" "log in" "login"])
+
+(defn- login-field-missing-ex?
+  [e]
+  (boolean (seq (:missing-fields (ex-data e)))))
+
+(defn- login-target-score
+  [{:keys [text href selector]}]
+  (let [haystack (->> [text href selector]
+                      (map #(some-> % str/lower-case))
+                      (remove str/blank?)
+                      (str/join " "))]
+    (cond
+      (or (str/includes? haystack "logout")
+          (str/includes? haystack "log out")
+          (str/includes? haystack "sign out"))
+      -100
+
+      (or (str/includes? haystack "sign in")
+          (str/includes? haystack "log in"))
+      40
+
+      (or (str/includes? haystack "signin")
+          (str/includes? haystack "login"))
+      30
+
+      :else
+      0)))
+
+(defn- likely-login-target
+  [session-id]
+  (->> login-target-needles
+       (mapcat (fn [needle]
+                 (or (:elements (query-elements session-id
+                                               :kind :interactive
+                                               :visible-only true
+                                               :text-contains needle
+                                               :limit 20))
+                     [])))
+       (filter :selector)
+       (reduce (fn [acc candidate]
+                 (assoc acc (:selector candidate) candidate))
+               {})
+       vals
+       (sort-by (juxt (comp - login-target-score) :selector))
+       first))
+
+(defn- login-field-key
+  [field]
+  (or (:name field) (:id field)))
+
+(def ^:private ignored-username-field-types
+  #{"hidden" "submit" "button" "checkbox" "radio" "password" "reset"})
+
+(defn- login-field-haystack
+  [field]
+  (->> [(:name field)
+        (:id field)
+        (:placeholder field)
+        (:aria-label field)
+        (:title field)
+        (:text field)
+        (:selector field)]
+       (map #(some-> % str str/lower-case))
+       (remove str/blank?)
+       (str/join " ")))
+
+(defn- username-field-score
+  [field password-field]
+  (let [haystack       (login-field-haystack field)
+        type-name      (some-> (:type field) str str/lower-case)
+        index          (long (or (:index field) 0))
+        password-index (long (or (:index password-field) Long/MAX_VALUE))
+        proximity      (Math/abs (- index password-index))]
+    [(cond
+       (or (str/includes? haystack "username")
+           (str/includes? haystack "user name"))
+       4
+
+       (or (str/includes? haystack "email")
+           (str/includes? haystack "e-mail")
+           (str/includes? haystack "login"))
+       3
+
+       (or (= haystack "u")
+           (= haystack "user")
+           (str/includes? haystack "user"))
+       2
+
+       :else
+       0)
+     (cond
+       (= type-name "email") 2
+       (#{"text" "search" "input"} type-name) 1
+       :else 0)
+     (if (< index password-index) 0 1)
+     proximity
+     index]))
+
+(defn- inferred-login-attempt
+  [session-id username password extra-fields]
+  (let [fields            (or (:elements (query-elements session-id
+                                                         :kind :fields
+                                                         :visible-only false
+                                                         :limit 200))
+                              [])
+        password-field    (->> fields
+                               (filter #(and (login-field-key %)
+                                             (true? (:visible %))
+                                             (= "password" (some-> (:type %) str str/lower-case))))
+                               first)
+        password-key      (some-> password-field login-field-key str)
+        username-field    (when password-field
+                            (->> fields
+                                 (filter #(and (login-field-key %)
+                                               (true? (:visible %))
+                                               (= (:form_selector %) (:form_selector password-field))
+                                               (not (contains? ignored-username-field-types
+                                                               (some-> (:type %) str str/lower-case)))))
+                                 (sort-by #(username-field-score % password-field))
+                                 first))
+        username-key      (some-> username-field login-field-key str)
+        field-values      (cond-> (or extra-fields {})
+                            username-key (assoc username-key username)
+                            password-key (assoc password-key password))]
+    (when (and username-key password-key)
+      {:form-selector (:form_selector password-field)
+       :field-values  field-values
+       :username-field username-key
+       :password-field password-key})))
+
+(defn- submit-login-form!
+  [session-id field-values form-selector]
+  (fill-form session-id
+             field-values
+             :form-selector form-selector
+             :require-all-fields? true
+             :submit true))
+
+(defn- maybe-open-login-and-submit!
+  [session-id {:keys [field-values form-selector username password extra-fields]}]
+  (try
+    (submit-login-form! session-id field-values form-selector)
+    (catch Exception e
+      (if-not (login-field-missing-ex? e)
+        (throw e)
+        (if-let [inferred (inferred-login-attempt session-id username password extra-fields)]
+          (submit-login-form! session-id (:field-values inferred) (:form-selector inferred))
+          (if-let [candidate (likely-login-target session-id)]
+            (do
+              (click session-id (:selector candidate))
+              (try
+                (submit-login-form! session-id field-values form-selector)
+                (catch Exception retry-e
+                  (if-not (login-field-missing-ex? retry-e)
+                    (throw retry-e)
+                    (if-let [inferred (inferred-login-attempt session-id username password extra-fields)]
+                      (submit-login-form! session-id (:field-values inferred) (:form-selector inferred))
+                      (throw (ex-info "Configured form fields not found after following a likely login link"
+                                      (assoc (ex-data retry-e)
+                                             :login-target candidate)
+                                      retry-e)))))))
+            (throw e)))))))
 
 (defn login
   "Log into a site using stored credentials.
@@ -489,10 +681,12 @@
                                 password-field password}
                          (map? extra-fields) (merge extra-fields))]
       (try
-        (let [login-result (fill-form session-id
-                                      field-values
-                                      :form-selector form-selector
-                                      :submit true)]
+        (let [login-result (maybe-open-login-and-submit! session-id
+                                                         {:field-values field-values
+                                                          :form-selector form-selector
+                                                          :username username
+                                                          :password password
+                                                          :extra-fields extra-fields})]
           (autonomous/audit! {:type       "site-login"
                               :site-id    (name site-id)
                               :session-id session-id
@@ -540,7 +734,12 @@
                       fields)
         result (open-session url :backend backend)
         session-id (:session-id result)
-        page-result (fill-form session-id field-values :submit true)]
+        page-result (maybe-open-login-and-submit! session-id
+                                                  {:field-values field-values
+                                                   :form-selector nil
+                                                   :username (get field-values "username")
+                                                   :password (get field-values "password")
+                                                   :extra-fields {}})]
     (println "  login submitted.")
     (println)
     page-result))

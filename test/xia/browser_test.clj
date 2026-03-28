@@ -132,6 +132,23 @@
        "</main>"
        "</body></html>"))
 
+(defn- id-shadow-login-html
+  []
+  (str "<!doctype html>"
+       "<html><head><meta charset='utf-8'><title>Shadowed Login</title></head>"
+       "<body>"
+       "<main>"
+       "<form method='post' action='/login'>"
+       "<input type='hidden' name='sectok' value='abc123' />"
+       "<input type='hidden' name='id' value='start' />"
+       "<input type='hidden' name='do' value='login' />"
+       "<label>Username <input name='u' type='text' /></label>"
+       "<label>Password <input name='p' type='password' /></label>"
+       "<button type='submit'>Log In</button>"
+       "</form>"
+       "</main>"
+       "</body></html>"))
+
 (defn- with-spa-server
   [f]
   (let [port (ephemeral-port)
@@ -189,6 +206,33 @@
                      {:status 404
                       :headers {"content-type" "text/plain"}
                       :body "not found"}))
+                 {:ip "127.0.0.1"
+                  :port port})
+        base-url (str "http://127.0.0.1:" port)]
+    (try
+      (f base-url)
+      (finally
+        (server)))))
+
+(defn- with-id-shadow-login-server
+  [f]
+  (let [port (ephemeral-port)
+        server (http-server/run-server
+                 (fn [{:keys [uri]}]
+                   (case uri
+                     "/"
+                     {:status 200
+                      :headers {"content-type" "text/html; charset=utf-8"}
+                      :body (id-shadow-login-html)}
+
+                     "/favicon.ico"
+                     {:status 404
+                      :headers {"content-type" "text/plain"}
+                      :body ""}
+
+                     {:status 200
+                      :headers {"content-type" "text/html; charset=utf-8"}
+                      :body (id-shadow-login-html)}))
                  {:ip "127.0.0.1"
                   :port port})
         base-url (str "http://127.0.0.1:" port)]
@@ -510,6 +554,63 @@
       (finally
         (browser/close-session (:session-id result))))))
 
+(deftest open-session-normalizes-colon-prefixed-quoted-url
+  (let [seen (atom nil)
+        backend
+        (reify browser.backend/BrowserBackend
+          (backend-id [_] :playwright)
+          (runtime-status* [_] nil)
+          (bootstrap-runtime!* [_ _opts] nil)
+          (install-browser-deps!* [_ _opts] nil)
+          (open-session* [_ url _opts]
+            (reset! seen url)
+            {:session-id "sess-1"})
+          (navigate* [_ _session-id _url] nil)
+          (click* [_ _session-id _selector] nil)
+          (fill-selector* [_ _session-id _selector _value _opts] nil)
+          (fill-form* [_ _session-id _fields _opts] nil)
+          (read-page* [_ _session-id] nil)
+          (query-elements* [_ _session-id _opts] nil)
+          (screenshot* [_ _session-id _opts] nil)
+          (wait-for-page* [_ _session-id _opts] nil)
+          (close-session* [_ _session-id] nil)
+          (close-all-sessions!* [_] nil)
+          (list-sessions* [_] []))]
+    (with-redefs-fn {(ns-resolve 'xia.browser 'resolve-open-backend-id) (constantly :playwright)
+                     (ns-resolve 'xia.browser 'backend-by-id) (fn [_] backend)}
+      #(do
+         (browser/open-session ": \"https://wiki.juji-inc.com/start\"")
+         (is (= "https://wiki.juji-inc.com/start" @seen))))))
+
+(deftest navigate-normalizes-colon-prefixed-quoted-url
+  (let [seen (atom nil)
+        backend
+        (reify browser.backend/BrowserBackend
+          (backend-id [_] :playwright)
+          (runtime-status* [_] nil)
+          (bootstrap-runtime!* [_ _opts] nil)
+          (install-browser-deps!* [_ _opts] nil)
+          (open-session* [_ _url _opts] nil)
+          (navigate* [_ session-id url]
+            (is (= "sess-1" session-id))
+            (reset! seen url)
+            {:session-id session-id})
+          (click* [_ _session-id _selector] nil)
+          (fill-selector* [_ _session-id _selector _value _opts] nil)
+          (fill-form* [_ _session-id _fields _opts] nil)
+          (read-page* [_ _session-id] nil)
+          (query-elements* [_ _session-id _opts] nil)
+          (screenshot* [_ _session-id _opts] nil)
+          (wait-for-page* [_ _session-id _opts] nil)
+          (close-session* [_ _session-id] nil)
+          (close-all-sessions!* [_] nil)
+          (list-sessions* [_] []))]
+    (with-redefs-fn {(ns-resolve 'xia.browser 'backend-by-id) (fn [_] backend)
+                     (ns-resolve 'xia.browser 'session-backend-id) (constantly :playwright)}
+      #(do
+         (browser/navigate "sess-1" ": \"https://wiki.juji-inc.com/start\"")
+         (is (= "https://wiki.juji-inc.com/start" @seen))))))
+
 (deftest open-session-auto-surfaces-playwright-failure
   (let [calls (atom [])
         playwright-backend
@@ -789,6 +890,57 @@
                                                                 :interval-ms 100})]
               (is (= true (:matched after-submit)))
               (is (re-find #"Result for widgets" (:content after-submit)))))
+          (finally
+            (browser.backend/close-all-sessions!* backend)))))))
+
+(deftest ^:integration playwright-fill-form-can-require-all-fields
+  (db/set-config! :browser/playwright-enabled? "true")
+  (with-spa-server
+    (fn [base-url]
+      (let [{:keys [backend]} (test-playwright-backend)]
+        (try
+          (let [opened (browser.backend/open-session* backend (str base-url "/") {:js true})
+                sid    (:session-id opened)]
+            (try
+              (browser.backend/fill-form* backend sid
+                                          {"username" "hyang"
+                                           "password" "pw"}
+                                          {:form-selector "#search-form"
+                                           :require-all-fields? true
+                                           :submit true})
+              (is false "Expected strict form fill to fail when fields are missing")
+              (catch clojure.lang.ExceptionInfo e
+                (is (= "Configured form fields not found on page" (.getMessage e)))
+                (is (= "#search-form" (:form-selector (ex-data e))))
+                (is (= sid (:session-id (ex-data e))))
+                (is (= #{"username" "password"}
+                       (set (:missing-fields (ex-data e))))))))
+          (finally
+            (browser.backend/close-all-sessions!* backend)))))))
+
+(deftest ^:integration playwright-query-elements-form-selector-ignores-shadowed-form-id-property
+  (db/set-config! :browser/playwright-enabled? "true")
+  (with-id-shadow-login-server
+    (fn [base-url]
+      (let [{:keys [backend]} (test-playwright-backend)]
+        (try
+          (let [opened (browser.backend/open-session* backend (str base-url "/") {:js true})
+                sid    (:session-id opened)
+                fields (browser.backend/query-elements* backend sid
+                                                       {:kind :fields
+                                                        :visible-only false
+                                                        :limit 50})
+                password-field (first (filter #(= "p" (:name %)) (:elements fields)))
+                form-selector  (:form_selector password-field)]
+            (is (string? form-selector))
+            (is (not (str/includes? form-selector "[object HTMLInputElement]")))
+            (let [filled (browser.backend/fill-form* backend sid
+                                                     {"u" "hyang"
+                                                      "p" "pw"}
+                                                     {:form-selector form-selector
+                                                      :require-all-fields? true
+                                                      :submit false})]
+              (is (= :playwright (:backend filled)))))
           (finally
             (browser.backend/close-all-sessions!* backend)))))))
 

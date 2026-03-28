@@ -340,6 +340,25 @@
     (is (= 401 (:status response)))
     (is (= "missing or invalid local session secret" (get body "error")))))
 
+(deftest local-session-bootstrap-allows-local-origin
+  (let [response (#'http/router {:uri "/local-session"
+                                 :request-method :get
+                                 :headers {"origin" "http://localhost:3008"}})
+        body     (response-json response)
+        cookie   (get-in response [:headers "Set-Cookie"])]
+    (is (= 200 (:status response)))
+    (is (= true (get body "ok")))
+    (is (string? cookie))
+    (is (str/includes? cookie "xia-local-session="))))
+
+(deftest local-session-bootstrap-blocks-non-local-origin
+  (let [response (#'http/router {:uri "/local-session"
+                                 :request-method :get
+                                 :headers {"origin" "https://evil.example"}})
+        body     (response-json response)]
+    (is (= 403 (:status response)))
+    (is (= "forbidden origin" (get body "error")))))
+
 (deftest chat-route-allows-local-origins-with-session-secret
   (with-redefs [xia.agent/process-message (fn [_session-id _user-message & _] "ok")]
     (let [response (#'http/router {:uri            "/chat"
