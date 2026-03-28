@@ -43,6 +43,7 @@ const state = {
     sites: [],
     tools: [],
     skills: [],
+    managedInstances: [],
     remoteBridge: null,
     remoteDevices: [],
     remoteEvents: [],
@@ -83,6 +84,7 @@ const state = {
   activeOauthAccountId: '',
   activeServiceId: '',
   activeSiteId: '',
+  activeSkillId: '',
   providerSaving: false,
   workloadRoutingSaving: false,
   providerAccountConnecting: false,
@@ -99,6 +101,8 @@ const state = {
   oauthSaving: false,
   serviceSaving: false,
   siteSaving: false,
+  skillSaving: false,
+  managedInstanceStoppingId: '',
   remoteBridgeSaving: false,
   remotePairing: false,
   localDocSummarizationStatus: 'Loading document summary settings...',
@@ -108,6 +112,7 @@ const state = {
   databaseBackupStatus: 'Loading database backup settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
   remotePairStatus: 'Paste a pairing token from the mobile app to authorize a phone.',
+  littleXiaStatus: 'Loading child Xia instances...',
   openclawImporting: false,
   openclawImportStatus: 'Import a ClawHub zip URL or a local OpenClaw skill path.',
   openclawImportReport: null,
@@ -124,6 +129,8 @@ const approvalReasonEl = document.getElementById('approval-reason');
 const approvalArgsEl = document.getElementById('approval-args');
 const allowApprovalEl = document.getElementById('allow-approval');
 const denyApprovalEl = document.getElementById('deny-approval');
+const providerOnboardingModalEl = document.getElementById('provider-onboarding-modal');
+const providerOnboardingModalBodyEl = document.getElementById('provider-onboarding-modal-body');
 const messagesEl = document.getElementById('messages');
 const composerEl = document.getElementById('composer');
 const sendEl = document.getElementById('send');
@@ -135,7 +142,6 @@ const scratchListEl = document.getElementById('scratch-list');
 const scratchTitleEl = document.getElementById('scratch-title');
 const scratchEditorEl = document.getElementById('scratch-editor');
 const scratchStatusEl = document.getElementById('scratch-status');
-const newScratchEl = document.getElementById('new-scratch');
 const saveScratchEl = document.getElementById('save-scratch');
 const deleteScratchEl = document.getElementById('delete-scratch');
 const insertScratchEl = document.getElementById('insert-scratch');
@@ -329,6 +335,15 @@ const remoteSnapshotListEl = document.getElementById('remote-snapshot-list');
 const remoteEventListEl = document.getElementById('remote-event-list');
 const toolListEl = document.getElementById('tool-list');
 const skillListEl = document.getElementById('skill-list');
+const skillIdEl = document.getElementById('skill-id');
+const skillNameEl = document.getElementById('skill-name');
+const skillDescriptionEl = document.getElementById('skill-description');
+const skillTagsEl = document.getElementById('skill-tags');
+const skillEnabledEl = document.getElementById('skill-enabled');
+const skillContentEl = document.getElementById('skill-content');
+const skillStatusEl = document.getElementById('skill-status');
+const saveSkillEl = document.getElementById('save-skill');
+const deleteSkillEl = document.getElementById('delete-skill');
 const openclawImportSourceEl = document.getElementById('openclaw-import-source');
 const openclawImportStrictEl = document.getElementById('openclaw-import-strict');
 const openclawImportButtonEl = document.getElementById('openclaw-import-button');
@@ -351,10 +366,19 @@ const artifactScratchEl = document.getElementById('artifact-scratch');
 const artifactDownloadEl = document.getElementById('artifact-download');
 const artifactDeleteEl = document.getElementById('artifact-delete');
 const sharedWorkspaceListEl = document.getElementById('shared-workspace-list');
+const littleXiaListEl = document.getElementById('little-xia-list');
 const sidebarAccordionEls = Array.from(document.querySelectorAll('.sidebar-accordion'));
 const tabLinks = document.querySelectorAll('.tab-link');
 const tabPanels = document.querySelectorAll('.tab-panel');
 const advancedToggleEl = document.getElementById('advanced-toggle');
+const providerOnboardingPlaceholderEl = document.createComment('provider-onboarding-placeholder');
+if (providerOnboardingEl && providerOnboardingEl.parentNode) {
+  providerOnboardingEl.parentNode.insertBefore(providerOnboardingPlaceholderEl, providerOnboardingEl);
+}
+const providerCardPlaceholderEl = document.createComment('provider-card-placeholder');
+if (providerCardEl && providerCardEl.parentNode) {
+  providerCardEl.parentNode.insertBefore(providerCardPlaceholderEl, providerCardEl);
+}
 
 function switchTab(tabId) {
   tabLinks.forEach((link) => {
@@ -373,10 +397,13 @@ sidebarAccordionEls.forEach((accordion) => {
   accordion.addEventListener('toggle', () => {
     if (!accordion.open) return;
     sidebarAccordionEls.forEach((other) => {
-      if (other !== accordion) other.open = false;
+    if (other !== accordion) other.open = false;
     });
     if (accordion.id === 'shared-workspace-accordion') {
       loadSharedWorkspaceItems().catch(() => {});
+    }
+    if (accordion.id === 'little-xia-accordion') {
+      loadManagedInstances().catch(() => {});
     }
   });
 });
@@ -412,6 +439,36 @@ switchSettingsSection('identity');
 
 const switchHistorySection = createSectionSwitcher('history-tab');
 switchHistorySection('chat-history');
+
+function restoreNodeAfterPlaceholder(node, placeholder) {
+  if (!node || !placeholder || !placeholder.parentNode) return;
+  const parent = placeholder.parentNode;
+  const next = placeholder.nextSibling;
+  if (next) {
+    parent.insertBefore(node, next);
+  } else {
+    parent.appendChild(node);
+  }
+}
+
+function syncProviderOnboardingModal() {
+  const shouldOpen = !!state.setupRequired && !state.admin.providers.length;
+  if (!providerOnboardingModalEl || !providerOnboardingModalBodyEl || !providerOnboardingEl || !providerCardEl) {
+    return;
+  }
+  if (shouldOpen) {
+    providerOnboardingModalBodyEl.replaceChildren(providerOnboardingEl, providerCardEl);
+    providerOnboardingModalEl.hidden = false;
+    providerOnboardingModalEl.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
+    return;
+  }
+  restoreNodeAfterPlaceholder(providerOnboardingEl, providerOnboardingPlaceholderEl);
+  restoreNodeAfterPlaceholder(providerCardEl, providerCardPlaceholderEl);
+  providerOnboardingModalEl.hidden = true;
+  providerOnboardingModalEl.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+}
 
 uploadBtnEl.addEventListener('click', () => fileInputEl.click());
 localUploadBtnEl.addEventListener('click', () => fileInputEl.click());
@@ -865,6 +922,25 @@ function skillMeta(skill) {
   }
   if (skill.description) bits.push(skill.description);
   return bits.join(' • ');
+}
+
+function inferredSkillIdBase() {
+  return normalizeIdSegment(skillNameEl.value) || 'skill';
+}
+
+function ensureSkillId() {
+  const current = skillIdEl.value.trim();
+  if (current) return current;
+  const base = inferredSkillIdBase();
+  const usedIds = new Set((state.admin.skills || []).map((skill) => skill.id).filter(Boolean));
+  let candidate = base;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = base + '-' + suffix;
+    suffix += 1;
+  }
+  skillIdEl.value = candidate;
+  return candidate;
 }
 
 function formatOpenClawImportReport(report) {
@@ -2373,7 +2449,6 @@ function buildProviderTemplateCard(template) {
   useButton.textContent = 'Use Template';
   useButton.disabled = state.providerSaving;
   useButton.addEventListener('click', () => {
-    switchTab('settings-tab');
     if (!state.activeProviderId) {
       resetProviderForm('Create a model from a template.');
     }
@@ -2383,6 +2458,7 @@ function buildProviderTemplateCard(template) {
       preserveModel: false,
       statusText: 'Template applied. Save the model when ready.'
     });
+    providerCardEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
   });
   actions.appendChild(useButton);
   providerVisibleActions(template,
@@ -2404,7 +2480,6 @@ function buildProviderTemplateCard(template) {
       button.disabled = state.providerSaving || state.oauthSaving;
       button.addEventListener('click', async () => {
         if (action.kind === 'oauth') {
-          switchTab('settings-tab');
           if (!state.activeProviderId) {
             resetProviderForm('Create a model from a template.');
           }
@@ -2414,6 +2489,7 @@ function buildProviderTemplateCard(template) {
             preserveModel: false,
             statusText: 'Template applied. Finish setting up sign-in, then save the model.'
           });
+          providerCardEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
         }
         await openProviderPrimaryAction(action, {
           statusEl: providerOnboardingStatusEl,
@@ -2434,6 +2510,7 @@ function renderProviderOnboarding() {
   providerOnboardingEl.hidden = !needsOnboarding;
   providerTemplateListEl.replaceChildren();
   if (!needsOnboarding) {
+    syncProviderOnboardingModal();
     return;
   }
   const templates = state.admin.llmProviderTemplates || [];
@@ -2443,11 +2520,13 @@ function renderProviderOnboarding() {
     empty.textContent = 'No provider templates are available yet.';
     providerTemplateListEl.appendChild(empty);
     providerOnboardingStatusEl.textContent = 'Add a model manually below.';
+    syncProviderOnboardingModal();
     return;
   }
   templates.forEach((template) => {
     providerTemplateListEl.appendChild(buildProviderTemplateCard(template));
   });
+  syncProviderOnboardingModal();
 }
 
 function sortedUniqueStrings(values) {
@@ -3374,6 +3453,14 @@ function updateAdminButtons() {
   siteIdEl.disabled = state.siteSaving || !!state.activeSiteId;
   saveSiteEl.disabled = state.siteSaving;
   deleteSiteEl.disabled = state.siteSaving || !state.activeSiteId;
+  skillIdEl.disabled = state.skillSaving || !!state.activeSkillId;
+  skillNameEl.disabled = state.skillSaving;
+  skillDescriptionEl.disabled = state.skillSaving;
+  skillTagsEl.disabled = state.skillSaving;
+  skillEnabledEl.disabled = state.skillSaving;
+  skillContentEl.disabled = state.skillSaving;
+  saveSkillEl.disabled = state.skillSaving;
+  deleteSkillEl.disabled = state.skillSaving || !state.activeSkillId;
   remoteBridgeEnabledEl.disabled = state.remoteBridgeSaving;
   remoteBridgeInstanceLabelEl.disabled = state.remoteBridgeSaving;
   remoteBridgeRelayUrlEl.disabled = state.remoteBridgeSaving;
@@ -3519,7 +3606,7 @@ function renderSiteList() {
   );
 }
 
-function renderCapabilities() {
+function renderToolList() {
   renderCapabilityList(
     toolListEl,
     state.admin.tools,
@@ -3528,12 +3615,29 @@ function renderCapabilities() {
       .filter(Boolean)
       .join(' • ')
   );
-  renderCapabilityList(
+}
+
+function renderSkillList() {
+  renderSelectableList(
     skillListEl,
     state.admin.skills,
+    state.activeSkillId,
     'No skills installed.',
-    skillMeta
+    (skill) => firstNonEmpty(skill.name, skill.id),
+    skillMeta,
+    (skill) => {
+      if ((skill && skill.id || '') === state.activeSkillId) {
+        resetSkillForm('Create a skill or select an existing one.');
+        return;
+      }
+      return loadSkill(skill.id);
+    }
   );
+}
+
+function renderCapabilities() {
+  renderToolList();
+  renderSkillList();
   renderRemoteBridge();
   renderOpenClawImport();
 }
@@ -3789,6 +3893,19 @@ function renderDatabaseBackupSettings() {
   updateAdminButtons();
 }
 
+function resetSkillForm(statusText) {
+  state.activeSkillId = '';
+  skillIdEl.value = '';
+  skillNameEl.value = '';
+  skillDescriptionEl.value = '';
+  skillTagsEl.value = '';
+  skillEnabledEl.checked = true;
+  skillContentEl.value = '';
+  skillStatusEl.textContent = statusText || 'Create a skill or select an existing one.';
+  renderSkillList();
+  updateAdminButtons();
+}
+
 function resetOauthAccountForm(statusText) {
   state.activeOauthAccountId = '';
   oauthAccountIdEl.value = '';
@@ -3978,6 +4095,33 @@ function selectSite(site) {
   siteStatusEl.textContent = site.username_configured ? 'Credentials stored.' : 'No credentials stored.';
   renderSiteList();
   updateAdminButtons();
+}
+
+async function loadSkill(skillId) {
+  if (!skillId) return;
+  state.activeSkillId = skillId;
+  skillStatusEl.textContent = 'Loading skill...';
+  renderSkillList();
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/skills/' + encodeURIComponent(skillId));
+    const skill = data.skill || {};
+    if (state.activeSkillId !== skillId) return;
+    skillIdEl.value = skill.id || '';
+    skillNameEl.value = skill.name || '';
+    skillDescriptionEl.value = skill.description || '';
+    skillTagsEl.value = Array.isArray(skill.tags) ? skill.tags.join(', ') : '';
+    skillEnabledEl.checked = skill.enabled !== false;
+    skillContentEl.value = skill.content || '';
+    skillStatusEl.textContent = 'Loaded.';
+    renderSkillList();
+  } catch (err) {
+    if (state.activeSkillId === skillId) {
+      resetSkillForm(err.message || 'Failed to load skill.');
+    }
+  } finally {
+    updateAdminButtons();
+  }
 }
 
 async function selectHistorySession(session) {
@@ -4481,6 +4625,7 @@ async function loadAdminConfigImpl() {
     state.admin.sites = Array.isArray(data.sites) ? data.sites : [];
     state.admin.tools = Array.isArray(data.tools) ? data.tools : [];
     state.admin.skills = Array.isArray(data.skills) ? data.skills : [];
+    state.admin.managedInstances = Array.isArray(data.managed_instances) ? data.managed_instances : [];
     state.admin.remoteBridge = data.remote_bridge || null;
     state.admin.remoteDevices = Array.isArray(data.remote_devices) ? data.remote_devices : [];
     state.admin.remoteEvents = Array.isArray(data.remote_events) ? data.remote_events : [];
@@ -4491,6 +4636,11 @@ async function loadAdminConfigImpl() {
     state.databaseBackupStatus = defaultDatabaseBackupStatus();
     state.remoteBridgeStatus = defaultRemoteBridgeStatus();
     state.remotePairStatus = defaultRemotePairStatus();
+    state.littleXiaStatus = state.admin.managedInstances.length
+      ? ''
+      : (state.admin.capabilities && state.admin.capabilities.instance_management_configured === false
+        ? 'Controller mode is off.'
+        : 'No child Xia instances.');
     state.workloadRoutingDraft = buildWorkloadRoutingDraft(state.admin.providers);
     state.workloadRoutingStatus = state.admin.providers.length
       ? 'Assign which models handle each workload here.'
@@ -4499,9 +4649,11 @@ async function loadAdminConfigImpl() {
     const oauthAccount = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);
     const service = state.admin.services.find((entry) => entry.id === state.activeServiceId);
     const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);
+    const skill = state.admin.skills.find((entry) => entry.id === state.activeSkillId);
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
     renderIdentitySettings();
+    renderLittleXiaList();
     renderProviderTemplateOptions();
     renderProviderAccessModeOptions();
     renderProviderCredentialSourceOptions();
@@ -4536,10 +4688,14 @@ async function loadAdminConfigImpl() {
     } else if (!state.activeSiteId) {
       resetSiteForm('Create a site login or select an existing one.');
     }
+    if (skill) {
+      await loadSkill(skill.id);
+    } else if (!state.activeSkillId) {
+      resetSkillForm('Create a skill or select an existing one.');
+    }
     renderProviderOnboarding();
     renderCapabilities();
     if (state.setupRequired && !state.admin.providers.length) {
-      switchTab('settings-tab');
       setStatus('Connect a model to start chatting');
     }
   } catch (err) {
@@ -4648,6 +4804,7 @@ async function importOpenClawSkill() {
       import: data.import || null,
       skill: data.skill || null
     };
+    state.activeSkillId = firstNonEmpty(data.skill && data.skill.id, state.activeSkillId);
     await loadAdminConfig();
     const importedName = firstNonEmpty(data.skill && data.skill.name, firstNonEmpty(data.import && data.import.name, 'skill'));
     const warningCount = Array.isArray(data.import && data.import.warnings) ? data.import.warnings.length : 0;
@@ -5232,6 +5389,60 @@ async function deleteSite() {
   }
 }
 
+async function saveSkill() {
+  if (state.skillSaving) return;
+  state.skillSaving = true;
+  skillStatusEl.textContent = 'Saving...';
+  updateAdminButtons();
+  try {
+    const skillId = ensureSkillId();
+    const data = await fetchJson('/admin/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: skillId,
+        name: skillNameEl.value,
+        description: skillDescriptionEl.value,
+        tags: skillTagsEl.value,
+        enabled: skillEnabledEl.checked,
+        content: skillContentEl.value
+      })
+    });
+    const skill = data.skill || null;
+    state.activeSkillId = skill && skill.id ? skill.id : skillId;
+    await loadAdminConfig();
+    skillStatusEl.textContent = 'Saved.';
+    setStatus('Skill saved');
+  } catch (err) {
+    skillStatusEl.textContent = err.message || 'Failed to save.';
+  } finally {
+    state.skillSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function deleteSkill() {
+  if (!state.activeSkillId || state.skillSaving) return;
+  if (!window.confirm('Delete this skill?')) return;
+  state.skillSaving = true;
+  skillStatusEl.textContent = 'Deleting...';
+  updateAdminButtons();
+  try {
+    await fetchJson('/admin/skills/' + encodeURIComponent(state.activeSkillId), {
+      method: 'DELETE'
+    });
+    state.activeSkillId = '';
+    resetSkillForm('Deleted.');
+    await loadAdminConfig();
+    setStatus('Deleted skill');
+  } catch (err) {
+    skillStatusEl.textContent = err.message || 'Failed to delete.';
+  } finally {
+    state.skillSaving = false;
+    updateAdminButtons();
+  }
+}
+
 function renderApproval() {
   const approval = state.pendingApproval;
   approvalPanelEl.hidden = !approval;
@@ -5668,6 +5879,85 @@ function renderSharedWorkspaceList() {
   });
 }
 
+function littleXiaMeta(instance) {
+  const bits = [];
+  if (instance && instance.base_url) bits.push(instance.base_url);
+  if (instance && instance.template_instance) bits.push('Template ' + instance.template_instance);
+  if (instance && instance.pid) bits.push('PID ' + instance.pid);
+  if (instance && instance.started_at) bits.push('Started ' + formatDateTime(instance.started_at));
+  if (instance && instance.exited_at) bits.push('Exited ' + formatDateTime(instance.exited_at));
+  if (instance && typeof instance.exit_code === 'number') bits.push('Exit ' + instance.exit_code);
+  if (instance && instance.attached === false) bits.push('Detached from controller process');
+  return bits.join(' • ');
+}
+
+function renderLittleXiaList() {
+  if (!littleXiaListEl) return;
+  littleXiaListEl.replaceChildren();
+  const instances = Array.isArray(state.admin.managedInstances) ? state.admin.managedInstances : [];
+  if (!instances.length) {
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    if (state.admin.capabilities && state.admin.capabilities.instance_management_configured === false) {
+      empty.textContent = 'Controller mode is off.';
+    } else {
+      empty.textContent = firstNonEmpty(state.littleXiaStatus, 'No child Xia instances.');
+    }
+    littleXiaListEl.appendChild(empty);
+    return;
+  }
+  instances.forEach((instance) => {
+    const card = document.createElement('div');
+    card.className = 'admin-item little-xia-item';
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'admin-item-title-row';
+
+    const title = document.createElement('div');
+    title.className = 'admin-item-title';
+    title.textContent = firstNonEmpty(instance.service_name, instance.instance_id, 'Little Xia');
+    titleRow.appendChild(title);
+
+    const badges = document.createElement('div');
+    badges.className = 'admin-item-badges';
+    const stateBadge = document.createElement('span');
+    stateBadge.className = 'admin-item-capability-badge';
+    stateBadge.textContent = firstNonEmpty(instance.state, 'unknown');
+    badges.appendChild(stateBadge);
+    titleRow.appendChild(badges);
+
+    const meta = document.createElement('div');
+    meta.className = 'admin-item-meta';
+    meta.textContent = littleXiaMeta(instance);
+
+    const actions = document.createElement('div');
+    actions.className = 'little-xia-actions';
+
+    if (instance && instance.base_url) {
+      const open = document.createElement('a');
+      open.className = 'secondary-link';
+      open.href = instance.base_url;
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      open.textContent = 'Open';
+      actions.appendChild(open);
+    }
+
+    const stop = document.createElement('button');
+    stop.type = 'button';
+    stop.className = 'secondary';
+    stop.textContent = state.managedInstanceStoppingId === instance.instance_id ? 'Stopping...' : 'Stop';
+    stop.disabled = !instance.instance_id || state.managedInstanceStoppingId === instance.instance_id;
+    stop.addEventListener('click', () => stopManagedInstance(instance));
+    actions.appendChild(stop);
+
+    card.appendChild(titleRow);
+    if (meta.textContent) card.appendChild(meta);
+    card.appendChild(actions);
+    littleXiaListEl.appendChild(card);
+  });
+}
+
 function formatBytes(bytes) {
   if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return bytes + ' B';
@@ -5845,6 +6135,54 @@ async function loadSharedWorkspaceItems() {
     state.sharedWorkspaceStatus = err.message || 'Failed to load shared workspace.';
   }
   renderSharedWorkspaceList();
+}
+
+async function loadManagedInstances() {
+  state.littleXiaStatus = 'Loading child Xia instances...';
+  renderLittleXiaList();
+  try {
+    const data = await fetchJson('/admin/managed-instances');
+    state.admin.managedInstances = Array.isArray(data.instances) ? data.instances : [];
+    state.littleXiaStatus = state.admin.managedInstances.length
+      ? ''
+      : 'No child Xia instances.';
+  } catch (err) {
+    state.admin.managedInstances = [];
+    state.littleXiaStatus = err.message || 'Failed to load child Xia instances.';
+  }
+  renderLittleXiaList();
+}
+
+async function stopManagedInstance(instance) {
+  if (!instance || !instance.instance_id || state.managedInstanceStoppingId) return;
+  const label = firstNonEmpty(instance.service_name, instance.instance_id);
+  if (!window.confirm('Stop ' + label + '?')) return;
+  state.managedInstanceStoppingId = instance.instance_id;
+  renderLittleXiaList();
+  try {
+    const data = await fetchJson('/admin/managed-instances/'
+      + encodeURIComponent(instance.instance_id)
+      + '/stop', {
+      method: 'POST'
+    });
+    const updated = data.instance || null;
+    if (updated && updated.instance_id) {
+      state.admin.managedInstances = (state.admin.managedInstances || []).map((entry) =>
+        entry.instance_id === updated.instance_id ? updated : entry);
+    } else {
+      await loadManagedInstances();
+    }
+    state.littleXiaStatus = state.admin.managedInstances.length ? '' : 'No child Xia instances.';
+    renderLittleXiaList();
+    setStatus('Stopped ' + label);
+  } catch (err) {
+    state.littleXiaStatus = err.message || 'Failed to stop child Xia instance.';
+    renderLittleXiaList();
+    setStatus('Failed');
+  } finally {
+    state.managedInstanceStoppingId = '';
+    renderLittleXiaList();
+  }
 }
 
 async function loadArtifact(artifactId) {
@@ -6339,6 +6677,7 @@ async function sendMessage(text, options) {
     await loadHistorySessions();
     await loadArtifacts();
     await loadSharedWorkspaceItems();
+    await loadManagedInstances();
     state.liveStatus = null;
     setStatus('Ready');
   } catch (err) {
@@ -6433,7 +6772,6 @@ scratchEditorEl.addEventListener('keydown', (event) => {
 allowApprovalEl.addEventListener('click', () => submitApproval('allow'));
 denyApprovalEl.addEventListener('click', () => submitApproval('deny'));
 
-newScratchEl.addEventListener('click', () => createScratchPad());
 saveScratchEl.addEventListener('click', () => saveScratchPad());
 deleteScratchEl.addEventListener('click', () => deleteScratchPad());
 insertScratchEl.addEventListener('click', () => insertScratchIntoComposer());
@@ -6619,6 +6957,8 @@ saveServiceEl.addEventListener('click', () => saveService());
 
 saveSiteEl.addEventListener('click', () => saveSite());
 deleteSiteEl.addEventListener('click', () => deleteSite());
+saveSkillEl.addEventListener('click', () => saveSkill());
+deleteSkillEl.addEventListener('click', () => deleteSkill());
 saveRemoteBridgeEl.addEventListener('click', () => saveRemoteBridge());
 pairRemoteDeviceEl.addEventListener('click', () => pairRemoteDevice());
 remotePairingTokenEl.addEventListener('input', () => updateAdminButtons());
@@ -6693,16 +7033,19 @@ renderDatabaseBackupSettings();
 resetOauthAccountForm('Loading...');
 resetServiceForm('Loading...');
 resetSiteForm('Loading...');
+resetSkillForm('Loading...');
 renderCapabilities();
 updateAdminButtons();
 updateComposerState();
 renderSharedWorkspaceList();
+renderLittleXiaList();
 bindStaticInfoHints();
 composerEl.focus();
 Promise.all([
   loadSessionMessages(),
   loadLocalDocs(),
   loadSharedWorkspaceItems(),
+  loadManagedInstances(),
   loadArtifacts(),
   loadScratchPads(),
   loadAdminConfig(),

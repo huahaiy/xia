@@ -30,6 +30,7 @@
             [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.setup :as setup]
+            [xia.skill :as skill]
             [xia.summarizer :as summarizer]
             [xia.skill.openclaw :as openclaw-skill]
             [xia.workspace :as workspace]
@@ -52,6 +53,7 @@
 (defonce ^:private session-statuses (atom {})) ; session-id string → latest status map
 (defonce ^:private web-dev-state (atom {:enabled? false
                                         :root nil}))
+(defonce ^:private command-shutdown-handler-atom (atom nil))
 
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
@@ -651,6 +653,28 @@
 (defn- command-unauthorized-response []
   (json-response 401 {:error "missing or invalid command token"}))
 
+(defn register-command-shutdown-handler!
+  [handler]
+  (reset! command-shutdown-handler-atom handler)
+  nil)
+
+(defn clear-command-shutdown-handler!
+  []
+  (reset! command-shutdown-handler-atom nil)
+  nil)
+
+(defn- handle-command-shutdown
+  [_req]
+  (if-let [handler @command-shutdown-handler-atom]
+    (do
+      (future
+        (try
+          (handler)
+          (catch Throwable e
+            (log/error e "Command shutdown handler failed"))))
+      (json-response 202 {:status "stopping"}))
+    (json-response 503 {:error "shutdown control unavailable"})))
+
 (defn- runtime-available?
   []
   (try
@@ -1236,6 +1260,26 @@
         used-ids   (map :site-cred/id (db/list-site-creds))]
     (next-available-id base used-ids)))
 
+(defn- infer-skill-id
+  [data]
+  (let [name-text (nonblank-str (get data "name"))
+        base      (or (normalize-id-segment name-text)
+                      "skill")
+        used-ids  (map :skill/id (db/list-skills))]
+    (next-available-id base used-ids)))
+
+(defn- parse-skill-tags
+  [value]
+  (let [parts (cond
+                (string? value) (str/split value #"[,\n]")
+                (sequential? value) value
+                :else nil)]
+    (->> parts
+         (map nonblank-str)
+         (keep normalize-id-segment)
+         (map keyword)
+         set)))
+
 (defn- unique-provider-api-key
   [providers]
   (let [api-keys (->> providers
@@ -1553,6 +1597,23 @@
      :enabled                (boolean (:service/enabled? service))
      :auth_key_configured    (boolean (nonblank-str (:service/auth-key service)))}))
 
+(defn- managed-instance->admin-body
+  [instance]
+  {:instance_id       (:instance_id instance)
+   :service_id        (:service_id instance)
+   :service_name      (:service_name instance)
+   :base_url          (:base_url instance)
+   :port              (:port instance)
+   :pid               (:pid instance)
+   :state             (:state instance)
+   :alive             (boolean (:alive instance))
+   :attached          (boolean (:attached instance))
+   :template_instance (:template_instance instance)
+   :log_path          (:log_path instance)
+   :started_at        (instant->str (:started_at instance))
+   :exited_at         (instant->str (:exited_at instance))
+   :exit_code         (:exit_code instance)})
+
 (defn- oauth-account->admin-body
   [account]
   {:id                       (some-> (:oauth.account/id account) name)
@@ -1665,6 +1726,11 @@
                          sort
                          vec)
    :imported_from_openclaw (boolean (:skill/imported-from-openclaw? skill))})
+
+(defn- skill->detail-body
+  [skill]
+  (assoc (skill->body skill)
+         :content (:skill/content skill)))
 
 (defn- skill->admin-body
   [skill]
@@ -2645,6 +2711,19 @@
       (json-response 404 {:error "fact not found"}))
     (json-response 400 {:error "invalid fact id"})))
 
+(defn- handle-list-managed-instances
+  [_req]
+  (json-response 200
+                 {:instances (mapv managed-instance->admin-body
+                                   (instance-supervisor/list-managed-instances))}))
+
+(defn- handle-stop-managed-instance
+  [instance-id]
+  (let [stopped (instance-supervisor/stop-instance! instance-id)]
+    (json-response 200
+                   {:status "stopped"
+                    :instance (managed-instance->admin-body stopped)})))
+
 (defn- handle-admin-config [_req]
   (let [providers        (db/list-providers)
         setup-required?  (or (empty? providers)
@@ -2660,8 +2739,11 @@
                   :personality (:personality soul "")
                   :guidelines  (:guidelines soul "")})
      :instance {:id (or (db/current-instance-id)
-                        paths/default-instance-id)}
+                        paths/default-instance-id)
+                :parent_instance_id (instance-supervisor/parent-instance-id)}
      :capabilities (instance-supervisor/capabilities)
+     :managed_instances (mapv managed-instance->admin-body
+                              (instance-supervisor/list-managed-instances))
      :storage {:db_path     (:db-path storage-layout)
                :support_dir (:support-dir storage-layout)
                :workspace_root (:workspace-root storage-layout)
@@ -3565,6 +3647,65 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
+(defn- handle-save-skill [req]
+  (try
+    (let [data        (or (read-body req) {})
+          skill-id    (if-let [id-text (nonblank-str (get data "id"))]
+                        (parse-keyword-id id-text "id")
+                        (infer-skill-id data))
+          existing    (db/get-skill skill-id)
+          skill-name  (or (nonblank-str (get data "name"))
+                          (:skill/name existing)
+                          (name skill-id))
+          description (if (contains? data "description")
+                        (or (nonblank-str (get data "description")) "")
+                        (:skill/description existing))
+          content     (if (contains? data "content")
+                        (str (or (get data "content") ""))
+                        (or (:skill/content existing) ""))
+          version     (if (contains? data "version")
+                        (nonblank-str (get data "version"))
+                        (:skill/version existing))
+          enabled?    (if (contains? data "enabled")
+                        (true? (get data "enabled"))
+                        (when (contains? existing :skill/enabled?)
+                          (:skill/enabled? existing)))
+          tags        (if (contains? data "tags")
+                        (parse-skill-tags (get data "tags"))
+                        nil)
+          saved       (skill/save-skill! {:id          skill-id
+                                          :name        skill-name
+                                          :description description
+                                          :content     content
+                                          :version     version
+                                          :tags        tags
+                                          :enabled?    enabled?})]
+      (json-response 200 {:skill (skill->detail-body saved)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-get-skill [skill-id]
+  (try
+    (let [skill-key (parse-keyword-id skill-id "skill_id")
+          saved     (db/get-skill skill-key)]
+      (if saved
+        (json-response 200 {:skill (skill->detail-body saved)})
+        (json-response 404 {:error "skill not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-delete-skill [skill-id]
+  (try
+    (let [skill-key (parse-keyword-id skill-id "skill_id")]
+      (if (db/get-skill skill-key)
+        (do
+          (db/remove-skill! skill-key)
+          (json-response 200 {:status "deleted"
+                              :skill_id (name skill-key)}))
+        (json-response 404 {:error "skill not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
 (defn- handle-import-openclaw-skill [req]
   (try
     (let [data    (or (read-body req) {})
@@ -3653,7 +3794,9 @@
           knowledge-node-facts-match (re-matches #"/knowledge/nodes/([^/]+)/facts" uri)
           knowledge-fact-match (re-matches #"/knowledge/facts/([^/]+)" uri)
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
+          admin-managed-instance-stop-match (re-matches #"/admin/managed-instances/([^/]+)/stop" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
+          admin-skill-match  (re-matches #"/admin/skills/([^/]+)" uri)
           llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
           admin-oauth-connect-match (re-matches #"/admin/oauth-accounts/([^/]+)/connect" uri)
@@ -3691,6 +3834,9 @@
 
         (and (= method :post) (= uri "/command/chat"))
         (command-route-response req #(handle-chat req :command))
+
+        (and (= method :post) (= uri "/command/shutdown"))
+        (command-route-response req #(handle-command-shutdown req))
 
         (and (= method :delete) command-session-close-match)
         (command-route-response req #(handle-close-session (second command-session-close-match) :command))
@@ -3829,6 +3975,12 @@
         (and (= method :get) (= uri "/admin/config"))
         (protected-route-response req #(handle-admin-config req))
 
+        (and (= method :get) (= uri "/admin/managed-instances"))
+        (protected-route-response req #(handle-list-managed-instances req))
+
+        (and (= method :post) admin-managed-instance-stop-match)
+        (protected-route-response req #(handle-stop-managed-instance (second admin-managed-instance-stop-match)))
+
         (and (= method :post) (= uri "/admin/providers"))
         (protected-route-response req #(handle-save-provider req))
 
@@ -3889,14 +4041,23 @@
         (and (= method :post) (= uri "/admin/services"))
         (protected-route-response req #(handle-save-service req))
 
-	        (and (= method :post) (= uri "/admin/sites"))
-	        (protected-route-response req #(handle-save-site req))
+        (and (= method :post) (= uri "/admin/sites"))
+        (protected-route-response req #(handle-save-site req))
+
+        (and (= method :post) (= uri "/admin/skills"))
+        (protected-route-response req #(handle-save-skill req))
 
 	        (and (= method :post) (= uri "/admin/skills/import-openclaw"))
 	        (protected-route-response req #(handle-import-openclaw-skill req))
 
 	        (and (= method :delete) admin-site-match)
 	        (protected-route-response req #(handle-delete-site (second admin-site-match)))
+
+        (and (= method :get) admin-skill-match)
+        (protected-route-response req #(handle-get-skill (second admin-skill-match)))
+
+        (and (= method :delete) admin-skill-match)
+        (protected-route-response req #(handle-delete-skill (second admin-skill-match)))
 
         (and (= method :get) (= uri "/skills"))
         (protected-route-response req #(handle-skills req))
@@ -4013,6 +4174,7 @@
     (prompt/register-status! :websocket nil)
     (reset! pending-approvals {})
     (reset! session-statuses {})
+    (clear-command-shutdown-handler!)
     (configure-web-dev! false)
     (reset! server-atom nil)
     (log/info "Server stopped")))

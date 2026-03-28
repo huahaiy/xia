@@ -23,6 +23,9 @@ body {
   color: var(--ink);
   background: var(--bg);
 }
+body.modal-open {
+  overflow: hidden;
+}
 .shell {
   position: relative;
   z-index: 1;
@@ -369,6 +372,43 @@ h1 {
   background: rgba(255, 251, 245, 0.95);
 }
 .approval-panel[hidden] { display: none; }
+.modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal-shell[hidden] {
+  display: none;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(6px);
+}
+.modal-dialog {
+  position: relative;
+  width: min(1040px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 18px;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  background:
+    linear-gradient(180deg, rgba(247, 248, 250, 0.96), rgba(255, 255, 255, 0.94));
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.24);
+}
+.modal-card-stack {
+  display: grid;
+  gap: 16px;
+}
+.modal-card-stack > .admin-card {
+  margin: 0;
+}
 .approval-summary {
   display: grid;
   gap: 10px;
@@ -717,6 +757,23 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   border-color: rgba(26, 158, 150, 0.28);
   background: var(--accent-light);
   text-decoration: none;
+}
+.little-xia-list {
+  display: grid;
+  gap: 8px;
+}
+.little-xia-item {
+  gap: 8px;
+}
+.little-xia-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.little-xia-actions .secondary-link {
+  padding: 6px 2px;
 }
 .scratch-item {
   width: 100%;
@@ -1484,6 +1541,11 @@ textarea:focus {
 @media (max-width: 980px) {
   .hero, .workspace, .knowledge-grid, .llm-log-grid, .capability-grid, .field-grid { grid-template-columns: 1fr; }
   .settings-layout { grid-template-columns: 1fr; }
+  .modal-shell { padding: 12px; }
+  .modal-dialog {
+    max-height: calc(100vh - 24px);
+    padding: 12px;
+  }
   .settings-nav {
     flex-direction: row;
     overflow-x: auto;

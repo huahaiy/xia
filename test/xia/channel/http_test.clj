@@ -77,6 +77,13 @@
 (defn- response-json [response]
   (json/read-json (:body response)))
 
+(defn- with-temp-workspace-root*
+  [f]
+  (let [root (str (Files/createTempDirectory "xia-http-workspace-test"
+                                             (into-array FileAttribute [])))]
+    (with-redefs [paths/shared-workspace-root (constantly root)]
+      (f root))))
+
 (defn- x25519-public-key []
   (let [generator (KeyPairGenerator/getInstance "X25519")]
     (.initialize generator (NamedParameterSpec. "X25519"))
@@ -432,6 +439,21 @@
                                [?s :session/id ?sid]
                                [?s :session/channel ?channel]]
                              sid))))))))
+
+(deftest command-shutdown-route-invokes-registered-handler
+  (let [called (promise)]
+    (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
+      (http/register-command-shutdown-handler! #(deliver called :stopped))
+      (try
+        (let [response (#'http/router {:uri            "/command/shutdown"
+                                       :request-method :post
+                                       :headers        (command-headers)})
+              body     (response-json response)]
+          (is (= 202 (:status response)))
+          (is (= "stopping" (get body "status")))
+          (is (= :stopped (deref called 1000 ::timeout))))
+        (finally
+          (http/clear-command-shutdown-handler!))))))
 
 (deftest chat-route-allows-direct-local-client-with-session-secret
   (with-redefs [xia.agent/process-message (fn [_session-id _user-message & _] "ok")]
@@ -1218,24 +1240,26 @@
     (is (= [] (get empty-body "artifacts")))))
 
 (deftest workspace-routes-list-and-download-files
-  (let [item         (workspace/write-note! "# Shared note")
-        list-res     (#'http/router {:uri "/workspace/items"
-                                     :request-method :get
-                                     :headers (ui-headers)})
-        list-body    (response-json list-res)
-        download-res (#'http/router {:uri (str "/workspace/items/" (:id item) "/download")
-                                     :request-method :get
-                                     :headers (ui-headers)})]
-    (is (= 200 (:status list-res)))
-    (is (= paths/default-workspace-id (get list-body "workspace_id")))
-    (is (= (str (:id item)) (get-in list-body ["items" 0 "id"])))
-    (is (= (:name item) (get-in list-body ["items" 0 "name"])))
-    (is (= (str "/workspace/items/" (:id item) "/download")
-           (get-in list-body ["items" 0 "download_url"])))
-    (is (= 200 (:status download-res)))
-    (is (= "text/markdown; charset=utf-8" (get-in download-res [:headers "Content-Type"])))
-    (is (re-find #"attachment; filename=\"note\.md\"" (get-in download-res [:headers "Content-Disposition"])))
-    (is (= "# Shared note" (String. ^bytes (:body download-res) StandardCharsets/UTF_8)))))
+  (with-temp-workspace-root*
+    (fn [_root]
+      (let [item         (workspace/write-note! "# Shared note")
+            list-res     (#'http/router {:uri "/workspace/items"
+                                         :request-method :get
+                                         :headers (ui-headers)})
+            list-body    (response-json list-res)
+            download-res (#'http/router {:uri (str "/workspace/items/" (:id item) "/download")
+                                         :request-method :get
+                                         :headers (ui-headers)})]
+        (is (= 200 (:status list-res)))
+        (is (= paths/default-workspace-id (get list-body "workspace_id")))
+        (is (= (str (:id item)) (get-in list-body ["items" 0 "id"])))
+        (is (= (:name item) (get-in list-body ["items" 0 "name"])))
+        (is (= (str "/workspace/items/" (:id item) "/download")
+               (get-in list-body ["items" 0 "download_url"])))
+        (is (= 200 (:status download-res)))
+        (is (= "text/markdown; charset=utf-8" (get-in download-res [:headers "Content-Type"])))
+        (is (re-find #"attachment; filename=\"note\.md\"" (get-in download-res [:headers "Content-Disposition"])))
+        (is (= "# Shared note" (String. ^bytes (:body download-res) StandardCharsets/UTF_8)))))))
 
 (deftest knowledge-routes-search-list-and-forget-facts
   (let [alice-eid      (th/seed-node! "Alice Johnson" "person")
@@ -1506,6 +1530,14 @@
                       :source-name "demo-skill.zip"
                       :import-warnings ["Ignored unsupported frontmatter field `homepage`."]
                       :imported-from-openclaw? true})
+  (db/save-managed-child! {:id                :ops-child
+                           :name              "Ops Child"
+                           :service-id        :xia-managed-instance-ops-child
+                           :service-name      "Ops Child"
+                           :base-url          "http://127.0.0.1:4115"
+                           :template-instance "base-config"
+                           :state             :running
+                           :started-at        (java.util.Date.)})
   (instance-supervisor/configure! {:enabled? true
                                    :command "/opt/xia/bin/xia"})
   (instance-supervisor/set-instance-management-enabled! true)
@@ -1532,22 +1564,27 @@
           site     (first (filter #(= "github" (get % "id")) (get body "sites")))
           tool     (first (filter #(= "demo-tool" (get % "id")) (get body "tools")))
           skill    (first (filter #(= "demo-skill" (get % "id")) (get body "skills")))
+          managed-instance (first (filter #(= "ops-child" (get % "instance_id")) (get body "managed_instances")))
           remote-bridge (get body "remote_bridge")
           remote-devices (get body "remote_devices")
           remote-events (get body "remote_events")
           remote-snapshot (get body "remote_snapshot")]
       (is (= 200 (:status response)))
       (is (= false (get body "setup_required")))
-      (is (= "General personal assistant for everyday digital work."
+      (is (= "Personal Assistant"
              (get-in body ["identity" "role"])))
       (is (= "default" (get-in body ["instance" "id"])))
       (is (= true (get-in body ["capabilities" "instance_management_configured"])))
       (is (= true (get-in body ["capabilities" "instance_management_enabled"])))
+      (is (= nil (get-in body ["instance" "parent_instance_id"])))
       (is (= (paths/absolute-path (db/current-db-path))
              (get-in body ["storage" "db_path"])))
       (is (= (paths/absolute-path (paths/support-dir-path (db/current-db-path)))
              (get-in body ["storage" "support_dir"])))
     (is (= true (get provider "api_key_configured")))
+    (is (= "ops-child" (get managed-instance "instance_id")))
+    (is (= "running" (get managed-instance "state")))
+    (is (= "http://127.0.0.1:4115" (get managed-instance "base_url")))
     (is (not (contains? provider "api_key")))
     (is (= "openai" (get provider "template")))
     (is (= "api" (get provider "access_mode")))
@@ -2014,6 +2051,67 @@
       (finally
         (doseq [file (reverse (file-seq root))]
           (Files/deleteIfExists (.toPath ^File file)))))))
+
+(deftest admin-skill-routes-save-load-and-delete
+  (let [save-response (#'http/router {:uri            "/admin/skills"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"name" "Email Drafting"
+                                                                     "description" "Write concise emails."
+                                                                     "tags" "email, drafting"
+                                                                     "enabled" true
+                                                                     "content" "# Email Drafting\n\n## Tone\n\nBe concise."})})
+        save-body     (response-json save-response)
+        skill-id      (get-in save-body ["skill" "id"])
+        load-response (#'http/router {:uri            (str "/admin/skills/" skill-id)
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        load-body     (response-json load-response)]
+    (is (= 200 (:status save-response)))
+    (is (= "email-drafting" skill-id))
+    (is (= ["drafting" "email"] (get-in save-body ["skill" "tags"])))
+    (is (= "# Email Drafting\n\n## Tone\n\nBe concise." (get-in save-body ["skill" "content"])))
+    (is (= "Write concise emails." (:skill/description (db/get-skill :email-drafting))))
+    (is (= 200 (:status load-response)))
+    (is (= "Email Drafting" (get-in load-body ["skill" "name"])))
+    (is (= "# Email Drafting\n\n## Tone\n\nBe concise." (get-in load-body ["skill" "content"])))
+    (let [delete-response (#'http/router {:uri            (str "/admin/skills/" skill-id)
+                                          :request-method :delete
+                                          :headers        (ui-headers)})
+          delete-body     (response-json delete-response)]
+      (is (= 200 (:status delete-response)))
+      (is (= "email-drafting" (get delete-body "skill_id")))
+      (is (nil? (db/get-skill :email-drafting))))))
+
+(deftest admin-skill-route-preserves-import-metadata-when-editing
+  (db/install-skill! {:id                      :browser-guide
+                      :name                    "Browser Guide"
+                      :description             "Imported skill"
+                      :content                 "# Browser Guide\n\nUse the browser."
+                      :source-format           :openclaw-dir
+                      :source-path             "/tmp/browser-guide"
+                      :source-name             "browser-guide"
+                      :import-warnings         ["warning"]
+                      :imported-from-openclaw? true})
+  (let [response (#'http/router {:uri            "/admin/skills"
+                                 :request-method :post
+                                 :headers        (ui-headers)
+                                 :body           (request-body {"id" "browser-guide"
+                                                                "name" "Browser Guide"
+                                                                "description" "Edited locally"
+                                                                "tags" "browser, docs"
+                                                                "enabled" false
+                                                                "content" "# Browser Guide\n\n## Steps\n\nInspect first."})})
+        body     (response-json response)
+        skill    (db/get-skill :browser-guide)]
+    (is (= 200 (:status response)))
+    (is (= "openclaw-dir" (get-in body ["skill" "source_format"])))
+    (is (= "/tmp/browser-guide" (get-in body ["skill" "source_path"])))
+    (is (= true (get-in body ["skill" "imported_from_openclaw"])))
+    (is (= ["warning"] (get-in body ["skill" "import_warnings"])))
+    (is (= "Edited locally" (:skill/description skill)))
+    (is (= false (:skill/enabled? skill)))
+    (is (= #{:browser :docs} (:skill/tags skill)))))
 
 (deftest admin-memory-retention-route-saves-and-clears-settings
   (let [save-response (#'http/router {:uri            "/admin/memory-retention"
@@ -2621,6 +2719,40 @@
                                           :body           (request-body {"browser_session" "browser-session-1"})})]
     (is (= 404 (:status start-response)))
     (is (= 404 (:status complete-response)))))
+
+(deftest admin-managed-instance-routes-list-and-stop
+  (db/save-managed-child! {:id                :ops-child
+                           :name              "Ops Child"
+                           :service-id        :xia-managed-instance-ops-child
+                           :service-name      "Ops Child"
+                           :base-url          "http://127.0.0.1:4115"
+                           :template-instance "base-config"
+                           :state             :running
+                           :started-at        (java.util.Date.)})
+  (let [list-response (#'http/router {:uri            "/admin/managed-instances"
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+        list-body     (response-json list-response)]
+    (is (= 200 (:status list-response)))
+    (is (= "ops-child" (get-in list-body ["instances" 0 "instance_id"])))
+    (is (= "running" (get-in list-body ["instances" 0 "state"]))))
+  (with-redefs [xia.instance-supervisor/stop-instance!
+                (fn [instance-id & _]
+                  {:instance_id instance-id
+                   :service_id "xia-managed-instance-ops-child"
+                   :service_name "Ops Child"
+                   :base_url "http://127.0.0.1:4115"
+                   :state "exited"
+                   :alive false
+                   :attached false})]
+    (let [stop-response (#'http/router {:uri            "/admin/managed-instances/ops-child/stop"
+                                        :request-method :post
+                                        :headers        (ui-headers)})
+          stop-body     (response-json stop-response)]
+      (is (= 200 (:status stop-response)))
+      (is (= "stopped" (get stop-body "status")))
+      (is (= "ops-child" (get-in stop-body ["instance" "instance_id"])))
+      (is (= "exited" (get-in stop-body ["instance" "state"]))))))
 
 (deftest admin-service-route-preserves-secret-and-clears-unused-header
   (db/register-service! {:id          :github

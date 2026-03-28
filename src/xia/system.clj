@@ -100,6 +100,7 @@
                                   :instance instance
                                   :template-instance template-instance
                                   :crypto-opts crypto-opts})
+  (instance-supervisor/record-parent-link-from-env!)
   (log/info "Xia instance" instance)
   (log/info "Database opened at" db-path)
   (log/info "Support directory" (paths/support-dir-path db-path))

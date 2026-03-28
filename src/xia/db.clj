@@ -344,6 +344,22 @@
    :service/autonomous-approved? {:db/valueType :db.type/boolean}
    :service/enabled?    {:db/valueType :db.type/boolean}
 
+   ;; --- Managed Child Xia Instances (controller-side durable supervision records) ---
+   :managed.child/id          {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :managed.child/name        {:db/valueType :db.type/string}
+   :managed.child/service-id  {:db/valueType :db.type/keyword}
+   :managed.child/service-name {:db/valueType :db.type/string}
+   :managed.child/base-url    {:db/valueType :db.type/string}
+   :managed.child/template-instance {:db/valueType :db.type/string}
+   :managed.child/state       {:db/valueType :db.type/keyword}
+   :managed.child/pid         {:db/valueType :db.type/long}
+   :managed.child/log-path    {:db/valueType :db.type/string}
+   :managed.child/created-at  {:db/valueType :db.type/instant}
+   :managed.child/updated-at  {:db/valueType :db.type/instant}
+   :managed.child/started-at  {:db/valueType :db.type/instant}
+   :managed.child/exited-at   {:db/valueType :db.type/instant}
+   :managed.child/exit-code   {:db/valueType :db.type/long}
+
    ;; --- OAuth Accounts (authorization-code + PKCE / refresh-token auth) ---
    :oauth.account/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :oauth.account/name          {:db/valueType :db.type/string}
@@ -2169,6 +2185,73 @@
                 (some? imported-from-openclaw?) (assoc :skill/imported-from-openclaw? imported-from-openclaw?)
                 doc (assoc :skill/doc doc))]))
 
+(defn save-skill!
+  [{:keys [id name description content doc version tags enabled? installed-at
+           source-format source-path source-url source-name
+           import-warnings imported-from-openclaw?
+           clear-doc?]}]
+  (let [eid      (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] id))
+        existing (when eid (raw-entity eid))
+        new-tags (if (some? tags) tags (or (:skill/tags existing) #{}))
+        base-map  (cond-> {:skill/id           id
+                           :skill/name         (or name
+                                                   (:skill/name existing)
+                                                   (clojure.core/name id))
+                           :skill/description  (or description
+                                                   (:skill/description existing)
+                                                   "")
+                           :skill/content      (or content
+                                                   (:skill/content existing)
+                                                   "")
+                           :skill/version      (or version
+                                                   (:skill/version existing)
+                                                   "0.1.0")
+                           :skill/tags         new-tags
+                           :skill/enabled?     (if (some? enabled?)
+                                                 enabled?
+                                                 (if (contains? existing :skill/enabled?)
+                                                   (:skill/enabled? existing)
+                                                   true))
+                           :skill/installed-at (or installed-at
+                                                   (:skill/installed-at existing)
+                                                   (java.util.Date.))}
+                    (or source-format
+                        (:skill/source-format existing))
+                    (assoc :skill/source-format (or source-format
+                                                    (:skill/source-format existing)))
+                    (or source-path
+                        (:skill/source-path existing))
+                    (assoc :skill/source-path (or source-path
+                                                  (:skill/source-path existing)))
+                    (or source-url
+                        (:skill/source-url existing))
+                    (assoc :skill/source-url (or source-url
+                                                 (:skill/source-url existing)))
+                    (or source-name
+                        (:skill/source-name existing))
+                    (assoc :skill/source-name (or source-name
+                                                  (:skill/source-name existing)))
+                    (or (seq import-warnings)
+                        (seq (:skill/import-warnings existing)))
+                    (assoc :skill/import-warnings (or import-warnings
+                                                      (:skill/import-warnings existing)))
+                    (or (some? imported-from-openclaw?)
+                        (contains? existing :skill/imported-from-openclaw?))
+                    (assoc :skill/imported-from-openclaw? (if (some? imported-from-openclaw?)
+                                                            imported-from-openclaw?
+                                                            (:skill/imported-from-openclaw? existing)))
+                    doc
+                    (assoc :skill/doc doc))
+        tx-data   (vec
+                    (concat
+                      (for [tag (:skill/tags existing)
+                            :when (not (contains? new-tags tag))]
+                        [:db/retract eid :skill/tags tag])
+                      (when (and clear-doc? eid (contains? existing :skill/doc))
+                        [[:db/retract eid :skill/doc (:skill/doc existing)]])
+                      [base-map]))]
+    (transact! tx-data)))
+
 (defn get-skill [skill-id]
   (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
     (when eid (raw-entity eid))))
@@ -2176,6 +2259,10 @@
 (defn list-skills []
   (let [eids (q '[:find ?e :where [?e :skill/id _]])]
     (mapv #(raw-entity (first %)) eids)))
+
+(defn remove-skill! [skill-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
+    (transact! [[:db/retractEntity eid]])))
 
 (defn enable-skill! [skill-id enabled?]
   (transact! [{:skill/id skill-id :skill/enabled? enabled?}]))
@@ -2368,6 +2455,140 @@
 
 (defn enable-service! [service-id enabled?]
   (transact! [{:service/id service-id :service/enabled? enabled?}]))
+
+;; ---------------------------------------------------------------------------
+;; Managed child Xia instances (durable controller-side records)
+;; ---------------------------------------------------------------------------
+
+(defn save-managed-child!
+  [{:keys [id name service-id service-name base-url template-instance state pid
+           log-path started-at exited-at exit-code]}]
+  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :managed.child/id ?id]] id))
+        current (when eid (raw-entity eid))
+        now     (java.util.Date.)
+        tx-data (cond-> [{:managed.child/id         id
+                          :managed.child/name       (or name
+                                                        (:managed.child/name current)
+                                                        (clojure.core/name id))
+                          :managed.child/created-at (or (:managed.child/created-at current)
+                                                        now)
+                          :managed.child/updated-at now}]
+                  service-id
+                  (update 0 assoc :managed.child/service-id service-id)
+
+                  service-name
+                  (update 0 assoc :managed.child/service-name service-name)
+
+                  base-url
+                  (update 0 assoc :managed.child/base-url base-url)
+
+                  template-instance
+                  (update 0 assoc :managed.child/template-instance template-instance)
+
+                  state
+                  (update 0 assoc :managed.child/state state)
+
+                  (some? pid)
+                  (update 0 assoc :managed.child/pid (long pid))
+
+                  log-path
+                  (update 0 assoc :managed.child/log-path log-path)
+
+                  started-at
+                  (update 0 assoc :managed.child/started-at started-at)
+
+                  exited-at
+                  (update 0 assoc :managed.child/exited-at exited-at)
+
+                  (some? exit-code)
+                  (update 0 assoc :managed.child/exit-code (long exit-code))
+
+                  (and eid
+                       (nil? service-id)
+                       (contains? current :managed.child/service-id))
+                  (conj [:db/retract eid
+                         :managed.child/service-id
+                         (:managed.child/service-id current)])
+
+                  (and eid
+                       (nil? service-name)
+                       (contains? current :managed.child/service-name))
+                  (conj [:db/retract eid
+                         :managed.child/service-name
+                         (:managed.child/service-name current)])
+
+                  (and eid
+                       (nil? base-url)
+                       (contains? current :managed.child/base-url))
+                  (conj [:db/retract eid
+                         :managed.child/base-url
+                         (:managed.child/base-url current)])
+
+                  (and eid
+                       (nil? template-instance)
+                       (contains? current :managed.child/template-instance))
+                  (conj [:db/retract eid
+                         :managed.child/template-instance
+                         (:managed.child/template-instance current)])
+
+                  (and eid
+                       (nil? state)
+                       (contains? current :managed.child/state))
+                  (conj [:db/retract eid
+                         :managed.child/state
+                         (:managed.child/state current)])
+
+                  (and eid
+                       (nil? pid)
+                       (contains? current :managed.child/pid))
+                  (conj [:db/retract eid
+                         :managed.child/pid
+                         (:managed.child/pid current)])
+
+                  (and eid
+                       (nil? log-path)
+                       (contains? current :managed.child/log-path))
+                  (conj [:db/retract eid
+                         :managed.child/log-path
+                         (:managed.child/log-path current)])
+
+                  (and eid
+                       (nil? started-at)
+                       (contains? current :managed.child/started-at))
+                  (conj [:db/retract eid
+                         :managed.child/started-at
+                         (:managed.child/started-at current)])
+
+                  (and eid
+                       (nil? exited-at)
+                       (contains? current :managed.child/exited-at))
+                  (conj [:db/retract eid
+                         :managed.child/exited-at
+                         (:managed.child/exited-at current)])
+
+                  (and eid
+                       (nil? exit-code)
+                       (contains? current :managed.child/exit-code))
+                  (conj [:db/retract eid
+                         :managed.child/exit-code
+                         (:managed.child/exit-code current)]))]
+    (transact! tx-data)))
+
+(defn get-managed-child
+  [instance-id]
+  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :managed.child/id ?id]] instance-id))]
+    (when eid
+      (raw-entity eid))))
+
+(defn list-managed-children
+  []
+  (let [eids (q '[:find ?e :where [?e :managed.child/id _]])]
+    (mapv #(raw-entity (first %)) eids)))
+
+(defn remove-managed-child!
+  [instance-id]
+  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :managed.child/id ?id]] instance-id))]
+    (transact! [[:db/retractEntity eid]])))
 
 ;; ---------------------------------------------------------------------------
 ;; OAuth accounts

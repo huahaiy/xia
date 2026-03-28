@@ -174,6 +174,7 @@
 (defonce ^:private runtime-system-atom (atom nil))
 
 (declare make-cleanup)
+(declare stop-runtime!)
 
 (defn- apply-run-defaults
   [options]
@@ -274,6 +275,13 @@
       (finally
         (reset! runtime-system-atom nil)))))
 
+(defn- register-http-runtime-controls!
+  [options root-keys]
+  (if (some #{:xia/http} root-keys)
+    (http/register-command-shutdown-handler!
+      #(stop-runtime! options))
+    (http/clear-command-shutdown-handler!)))
+
 (defn start-server-runtime!
   "Start Xia in non-blocking server mode for REPL-driven development."
   [{:keys [bind port web-dev] :as options}]
@@ -285,6 +293,7 @@
     (runtime-state/mark-starting!)
     (try
       (initialize-runtime! options* server-runtime-root-keys)
+      (register-http-runtime-controls! options* server-runtime-root-keys)
       (runtime-state/mark-running!)
       (let [options** (assoc options* :port (or (http/current-port) port*))]
         (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
@@ -318,11 +327,12 @@
   (let [options* (apply-run-defaults options)]
     (runtime-state/mark-starting!)
     (try
-      (initialize-runtime! options*
-                           (case (:mode options*)
-                             "server" server-runtime-root-keys
-                             "both" server-runtime-root-keys
-                             base-runtime-root-keys))
+      (let [root-keys (case (:mode options*)
+                        "server" server-runtime-root-keys
+                        "both" server-runtime-root-keys
+                        base-runtime-root-keys)]
+        (initialize-runtime! options* root-keys)
+        (register-http-runtime-controls! options* root-keys))
 
       ;; Start channels based on mode
       (case (:mode options*)
@@ -385,10 +395,11 @@
       (when (compare-and-set! ran? false true)
         (runtime-state/mark-stopping!)
         (try
-          (try
-            (halt-runtime!)
-            (catch Exception e
-              (log/error e "Failed to halt Xia runtime during shutdown")))
+        (try
+          (http/clear-command-shutdown-handler!)
+          (halt-runtime!)
+          (catch Exception e
+            (log/error e "Failed to halt Xia runtime during shutdown")))
           (try
             (save-archive! options)
             (catch Exception e

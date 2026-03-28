@@ -1,6 +1,7 @@
 (ns xia.core-test
   (:require [clojure.test :refer :all]
     [xia.core :as core]
+    [xia.channel.http]
     [xia.crypto :as crypto]
     [xia.db :as db]
     [xia.instance-supervisor :as instance-supervisor]
@@ -19,6 +20,7 @@
 (defn- reset-core-runtime!
   []
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
+  (xia.channel.http/clear-command-shutdown-handler!)
   (runtime-state/mark-stopped!))
 
 (use-fixtures :each

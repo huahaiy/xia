@@ -67,6 +67,13 @@
         </div>
       </section>
 
+      <div class="modal-shell" id="provider-onboarding-modal" hidden aria-hidden="true">
+        <div class="modal-backdrop"></div>
+        <div class="modal-dialog onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-onboarding-title">
+          <div class="modal-card-stack" id="provider-onboarding-modal-body"></div>
+        </div>
+      </div>
+
       <div id="chat-tab" class="tab-panel active">
         <main class="workspace">
           <section class="panel chat-panel">
@@ -108,9 +115,6 @@
                 </div>
               </summary>
               <div class="accordion-body">
-                <div class="accordion-toolbar">
-                  <button type="button" class="secondary" id="new-scratch">New note</button>
-                </div>
                 <div class="scratch-workspace">
                   <div class="scratch-list" id="scratch-list">
                     <div class="scratch-empty">No notes.</div>
@@ -214,6 +218,23 @@
               </summary>
               <div class="accordion-body">
                 <div class="shared-workspace-list" id="shared-workspace-list">
+                  <div class="scratch-empty">Loading...</div>
+                </div>
+              </div>
+            </details>
+            <details class="panel sidebar-accordion" id="little-xia-accordion">
+              <summary class="accordion-summary">
+                <div class="accordion-title-wrap">
+                  <div class="accordion-title-line">
+                    <span class="panel-title">Little Xia</span>
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="Child Xia instances this controller launched or manages."
+                          data-tooltip="Child Xia instances this controller launched or manages.">?</span>
+                  </div>
+                </div>
+              </summary>
+              <div class="accordion-body">
+                <div class="little-xia-list" id="little-xia-list">
                   <div class="scratch-empty">Loading...</div>
                 </div>
               </div>
@@ -323,11 +344,12 @@
           <div class="admin-card admin-card-wide" id="provider-onboarding" hidden>
             <div class="panel-header">
               <div>
-                <h3 class="panel-title" title="Choose how Xia should talk to an AI model. The first connected model becomes the default, and you can add more later.">Connect Your First Model</h3>
+                <h3 class="panel-title" id="provider-onboarding-title" title="Choose how Xia should talk to an AI model. The first connected model becomes the default, and you can add more later.">Connect Your First Model</h3>
+                <p class="panel-note">Choose a provider template, finish setup, and save the first model here.</p>
               </div>
             </div>
             <div class="template-grid" id="provider-template-list"></div>
-            <div class="admin-status" id="provider-onboarding-status">Choose a provider template to prefill the model form below.</div>
+            <div class="admin-status" id="provider-onboarding-status">Choose a provider template to prefill the setup form below.</div>
           </div>
 
 	            <div class="settings-layout">
@@ -335,23 +357,27 @@
               <button class="settings-nav-item active" data-section="identity">Identity</button>
               <button class="settings-nav-item" data-section="ai-models">AI Models</button>
               <button class="settings-nav-item" data-section="workload-routing">Workload Routing</button>
-              <button class="settings-nav-item advanced-only" data-section="episode-retention">Episode Retention</button>
-              <button class="settings-nav-item advanced-only" data-section="knowledge-decay">Knowledge Decay</button>
-              <button class="settings-nav-item" data-section="conversation-context">Conversation Context</button>
-              <button class="settings-nav-item" data-section="web-search">Web Search</button>
+              <button class="settings-nav-item" data-section="skills">Skills</button>
+              <button class="settings-nav-item" data-section="site-logins">Site Logins</button>
               <button class="settings-nav-item" data-section="api-auth">API Auth</button>
               <button class="settings-nav-item" data-section="doc-summaries">Document Summaries</button>
               <button class="settings-nav-item" data-section="ocr">OCR</button>
+              <button class="settings-nav-item" data-section="web-search">Web Search</button>
+              <button class="settings-nav-item" data-section="conversation-context">Conversation Context</button>
               <button class="settings-nav-item" data-section="database-backups">Database Backups</button>
+              <button class="settings-nav-item advanced-only" data-section="episode-retention">Episode Retention</button>
+              <button class="settings-nav-item advanced-only" data-section="knowledge-decay">Knowledge Decay</button>
               <button class="settings-nav-item advanced-only" data-section="api-services">API Services</button>
-              <button class="settings-nav-item" data-section="site-logins">Site Logins</button>
               <button class="settings-nav-item advanced-only" data-section="notification-bridge">Notification Bridge</button>
-              <button class="settings-nav-item advanced-only" data-section="capabilities">Capabilities</button>
+              <button class="settings-nav-item advanced-only" data-section="tools">Tools</button>
             </nav>
             <div class="settings-content">
 	              <div class="admin-card" data-settings-section="identity">
               <div class="panel-header">
-                <h3 class="panel-title">Identity</h3>
+                <div>
+                  <h3 class="panel-title">Identity</h3>
+                  <p class="panel-note">Set Xia's name, role, and core behavior.</p>
+                </div>
               </div>
               <div class="field-grid">
                 <div class="field">
@@ -404,7 +430,10 @@
 
 	              <div class="admin-card" id="provider-card" data-settings-section="ai-models">
               <div class="panel-header">
-                <h3 class="panel-title">AI Models <span class="panel-title-count" id="provider-count-label">(0 models)</span></h3>
+                <div>
+                  <h3 class="panel-title">AI Models <span class="panel-title-count" id="provider-count-label">(0 models)</span></h3>
+                  <p class="panel-note">Add and configure the models Xia can use.</p>
+                </div>
               </div>
               <div class="admin-list" id="provider-list"></div>
               <div class="detail-panel">
@@ -424,19 +453,6 @@
                     <label class="field-label">ID</label>
                     <input type="text" id="provider-id" class="text-input" placeholder="openai">
                   </div>
-                  <div class="field full advanced-only" id="provider-base-url-field">
-                    <label class="field-label">Base URL</label>
-                    <input type="text" id="provider-base-url" class="text-input" placeholder="https://api.openai.com/v1">
-                  </div>
-                  <div class="field field-with-autocomplete">
-                    <label class="field-label">Model Name</label>
-                    <div class="autocomplete-wrap">
-                      <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o" autocomplete="off">
-                      <div class="autocomplete-list" id="provider-model-list" hidden></div>
-                    </div>
-                    <button type="button" class="secondary" id="fetch-provider-models" style="margin-top:6px">Fetch models</button>
-                    <p class="secret-note model-capability-note" id="provider-model-capability-note"></p>
-                  </div>
                   <div class="field">
                     <label class="field-label">Connection Model</label>
                     <select id="provider-access-mode" class="text-input"></select>
@@ -451,6 +467,24 @@
                     <input type="hidden" id="provider-browser-session">
                     <p class="secret-note" id="provider-browser-session-note"></p>
                   </div>
+                  <div class="field full">
+                    <label class="field-label">API Key</label>
+                    <input type="password" id="provider-api-key" class="text-input" placeholder="sk-...">
+                    <p class="secret-note" id="provider-api-key-note" hidden></p>
+                  </div>
+                  <div class="field full advanced-only" id="provider-base-url-field">
+                    <label class="field-label">Base URL</label>
+                    <input type="text" id="provider-base-url" class="text-input" placeholder="https://api.openai.com/v1">
+                  </div>
+                  <div class="field field-with-autocomplete">
+                    <label class="field-label">Model Name</label>
+                    <div class="autocomplete-wrap">
+                      <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o" autocomplete="off">
+                      <div class="autocomplete-list" id="provider-model-list" hidden></div>
+                    </div>
+                    <button type="button" class="secondary" id="fetch-provider-models" style="margin-top:6px">Fetch models</button>
+                    <p class="secret-note model-capability-note" id="provider-model-capability-note"></p>
+                  </div>
                   <div class="field advanced-only">
                     <label class="field-label">System Prompt Budget</label>
                     <input type="number" id="provider-system-prompt-budget" class="text-input" min="1" step="1" placeholder="16000">
@@ -462,11 +496,6 @@
                   <div class="field advanced-only">
                     <label class="field-label">Rate Limit / Minute</label>
                     <input type="number" id="provider-rate-limit-per-minute" class="text-input" min="1" step="1" placeholder="60">
-                  </div>
-                  <div class="field full">
-                    <label class="field-label">API Key</label>
-                    <input type="password" id="provider-api-key" class="text-input" placeholder="sk-...">
-                    <p class="secret-note" id="provider-api-key-note" hidden></p>
                   </div>
                   <div class="field full">
                     <div class="check-row">
@@ -487,9 +516,11 @@
 
             <div class="admin-card" data-settings-section="workload-routing">
               <div class="panel-header">
-                <h3 class="panel-title" title="Each workload can be served by multiple providers using round-robin with health-aware failover.">Workload Routing</h3>
+                <div>
+                  <h3 class="panel-title" title="Each workload can be served by multiple providers using round-robin with health-aware failover.">Workload Routing</h3>
+                  <p class="panel-note">Choose which models handle each workload and fallback.</p>
+                </div>
               </div>
-              <p class="secret-note">Each workload can have multiple providers, requests are distributed via round-robin, and unassigned workloads fall back to the default model.</p>
               <div id="workload-routing-list"></div>
               <div class="composer-foot">
                 <div class="admin-status" id="workload-routing-status">Loading workload routing...</div>
@@ -503,6 +534,7 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title" title="Keep all processed episodes for the full-resolution window, then retain the highest-scoring older episodes by importance-decay rank.">Episode Retention</h3>
+                  <p class="panel-note">Control how long detailed past episodes stay available.</p>
                 </div>
               </div>
               <div class="field-grid">
@@ -529,6 +561,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Control how fact confidence decays over time after the grace period. Higher-utility facts still decay more slowly than low-utility ones.">Knowledge Decay</h3>
+                <p class="panel-note">Control how stored facts lose confidence over time.</p>
                 </div>
               </div>
               <div class="field-grid">
@@ -563,6 +596,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Control how many recent messages stay verbatim in the prompt before older chat history is folded into the rolling recap.">Conversation Context</h3>
+                <p class="panel-note">Control how much recent chat stays directly in the prompt.</p>
                 </div>
               </div>
               <div class="field-grid">
@@ -595,7 +629,10 @@
 
             <div class="admin-card" data-settings-section="web-search">
               <div class="panel-header">
-                <h3 class="panel-title">Web Search</h3>
+                <div>
+                  <h3 class="panel-title">Web Search</h3>
+                  <p class="panel-note">Pick the search backend Xia uses for web lookups.</p>
+                </div>
               </div>
               <div class="field-grid">
                 <div class="field">
@@ -629,7 +666,7 @@
               <div class="panel-header">
                 <div>
                   <h3 class="panel-title">API Auth</h3>
-                  <p class="panel-note">Store OAuth API credentials here. Preset-backed connections create matching API services automatically, and providers can reuse them when API sign-in is supported.</p>
+                  <p class="panel-note">Store OAuth or token credentials Xia and providers can reuse.</p>
                 </div>
               </div>
               <div class="admin-list" id="oauth-account-list"></div>
@@ -723,6 +760,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Choose document summary mode: use the extractive default, or switch to local or external model-generated summaries for uploaded documents.">Document Summaries</h3>
+                <p class="panel-note">Choose how uploaded documents are summarized.</p>
                 </div>
               </div>
               <div class="field-grid">
@@ -761,6 +799,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Choose OCR mode: local OCR downloads Xia-managed PaddleOCR models automatically, or external provider routes image OCR through a vision-capable model.">OCR</h3>
+                <p class="panel-note">Choose how Xia extracts text from images and scanned files.</p>
                 </div>
               </div>
               <div class="field-grid">
@@ -800,6 +839,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Schedule automatic portable backups built from a safe LMDB snapshot of the live Datalevin database.">Database Backups</h3>
+                <p class="panel-note">Schedule automatic backups of Xia's database.</p>
                 </div>
               </div>
               <div class="field-grid">
@@ -842,6 +882,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Registered API endpoints Xia can call through the service proxy.">API Services</h3>
+                <p class="panel-note">Register external APIs Xia can call through the service proxy.</p>
                 </div>
                 <button type="button" class="secondary" id="new-service">New service</button>
               </div>
@@ -915,7 +956,10 @@
 
             <div class="admin-card" data-settings-section="site-logins">
               <div class="panel-header">
-                <h3 class="panel-title">Site Logins</h3>
+                <div>
+                  <h3 class="panel-title">Site Logins</h3>
+                  <p class="panel-note">Store website login details for browser-based tasks.</p>
+                </div>
               </div>
               <div class="admin-list" id="site-list"></div>
               <div class="detail-panel">
@@ -978,6 +1022,7 @@
               <div class="panel-header">
                 <div>
                 <h3 class="panel-title" title="Pair phones for notifications and compact remote status checks without exposing Xia directly.">Notification Bridge</h3>
+                <p class="panel-note">Pair remote devices for notifications and status snapshots.</p>
                 </div>
               </div>
               <div class="capability-grid bridge-grid">
@@ -1033,37 +1078,87 @@
               </div>
             </div>
 
-            <div class="admin-card" data-settings-section="capabilities">
+            <div class="admin-card" data-settings-section="skills">
               <div class="panel-header">
                 <div>
-                <h3 class="panel-title" title="Installed tools and skills currently available to Xia.">Capabilities</h3>
+                <h3 class="panel-title" title="Installed skills and skill imports currently available to Xia.">Skills</h3>
+                <p class="panel-note">Write, edit, import, and enable reusable skills.</p>
                 </div>
               </div>
-              <div class="capability-grid">
-                <div class="field">
-                  <label class="field-label">Tools</label>
-                  <div class="capability-list" id="tool-list"></div>
-                </div>
-                <div class="field">
-                  <label class="field-label">Skills</label>
-                  <div class="capability-list" id="skill-list"></div>
-                  <div class="field capability-import-field">
-                    <label class="field-label" for="openclaw-import-source">Import OpenClaw Skill</label>
-                    <input
-                      type="text"
-                      id="openclaw-import-source"
-                      class="text-input"
-                      placeholder="https://clawhub.ai/...zip or /path/to/skill.zip">
-                    <div class="check-row">
-                      <input type="checkbox" id="openclaw-import-strict" checked>
-                      <label class="check-label" for="openclaw-import-strict">Reject unsupported metadata instead of ignoring it</label>
-                    </div>
-                    <div class="actions">
-                      <button type="button" class="primary" id="openclaw-import-button">Import skill</button>
-                    </div>
-                    <div class="admin-status" id="openclaw-import-status">Import a ClawHub zip URL or a local OpenClaw skill path.</div>
-                    <pre class="history-code capability-import-result" id="openclaw-import-result" hidden></pre>
+              <div class="admin-list" id="skill-list"></div>
+              <div class="detail-panel">
+                <div class="detail-header">Skill Details</div>
+                <div class="field-grid">
+                  <div class="field advanced-only">
+                    <label class="field-label">ID</label>
+                    <input type="text" id="skill-id" class="text-input" placeholder="email-drafting">
                   </div>
+                  <div class="field">
+                    <label class="field-label">Name</label>
+                    <input type="text" id="skill-name" class="text-input" placeholder="Email Drafting">
+                  </div>
+                  <div class="field full">
+                    <label class="field-label">Description</label>
+                    <input type="text" id="skill-description" class="text-input" placeholder="Short summary shown in the skill list.">
+                  </div>
+                  <div class="field full">
+                    <label class="field-label">Tags</label>
+                    <input type="text" id="skill-tags" class="text-input" placeholder="email, drafting, tone">
+                  </div>
+                  <div class="field full">
+                    <div class="check-row">
+                      <input type="checkbox" id="skill-enabled" checked>
+                      <label class="check-label" for="skill-enabled">Enable this skill for Xia</label>
+                    </div>
+                  </div>
+                  <div class="field full">
+                    <label class="field-label">Content</label>
+                    <textarea id="skill-content" class="scratch-editor" placeholder="# Email Drafting&#10;&#10;## Tone&#10;&#10;Be concise and professional."></textarea>
+                  </div>
+                </div>
+                <div class="composer-foot">
+                  <div class="admin-status" id="skill-status">Loading skills...</div>
+                  <div class="actions">
+                    <button type="button" class="secondary" id="delete-skill">Delete</button>
+                    <button type="button" class="primary" id="save-skill">Save skill</button>
+                  </div>
+                </div>
+              </div>
+              <div class="detail-panel">
+                <div class="detail-header">Import Skill</div>
+                <div class="field-grid">
+                  <div class="field capability-import-field">
+                  <label class="field-label" for="openclaw-import-source">Import OpenClaw Skill</label>
+                  <input
+                    type="text"
+                    id="openclaw-import-source"
+                    class="text-input"
+                    placeholder="https://clawhub.ai/...zip or /path/to/skill.zip">
+                  <div class="check-row">
+                    <input type="checkbox" id="openclaw-import-strict" checked>
+                    <label class="check-label" for="openclaw-import-strict">Reject unsupported metadata instead of ignoring it</label>
+                  </div>
+                  <div class="actions">
+                    <button type="button" class="primary" id="openclaw-import-button">Import skill</button>
+                  </div>
+                  <div class="admin-status" id="openclaw-import-status">Import a ClawHub zip URL or a local OpenClaw skill path.</div>
+                  <pre class="history-code capability-import-result" id="openclaw-import-result" hidden></pre>
+                </div>
+              </div>
+              </div>
+            </div>
+
+            <div class="admin-card advanced-only" data-settings-section="tools">
+              <div class="panel-header">
+                <div>
+                <h3 class="panel-title" title="Installed tools currently available to Xia.">Tools</h3>
+                <p class="panel-note">Review the installed tools available to Xia.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label class="field-label">Installed Tools</label>
+                  <div class="capability-list" id="tool-list"></div>
                 </div>
               </div>
             </div>
@@ -1073,7 +1168,7 @@
       </div>
 
       <footer class="hero footer">
-        <p class="lead">Xia v0.1.0 • Built for local work with online power.</p>
+        <p class="lead">Xia v0.1.0 • Secure and portable agent for online work.</p>
         <div class="footer-links">
           <a href="https://github.com/huahaiy/xia" target="_blank" rel="noopener">GitHub</a>
           <span>•</span>

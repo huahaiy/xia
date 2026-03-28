@@ -8,12 +8,12 @@
 
 (deftest init-identity-adds-default-role
   (identity/init-identity!)
-  (is (= "General personal assistant for everyday digital work."
+  (is (= "Personal Assistant"
          (:role (identity/get-soul)))))
 
 (deftest system-prompt-guides-resume-reply-style
   (let [prompt (identity/system-prompt)]
-    (is (str/includes? prompt "## Role\nGeneral personal assistant for everyday digital work."))
+    (is (str/includes? prompt "## Role\nPersonal Assistant"))
     (is (str/includes? prompt
                        "If resumable state is found, briefly summarize what you recovered and propose the next step."))
     (is (str/includes? prompt

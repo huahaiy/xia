@@ -82,6 +82,47 @@
     (log/info "Imported skill:" skill-name)
     skill-def))
 
+(defn save-skill!
+  "Create or update a skill authored locally.
+   Preserves source metadata for imported skills while allowing their content
+   to be edited."
+  [skill-def]
+  (let [{:keys [id name description content version tags enabled?]} skill-def
+        existing   (when id (db/get-skill id))
+        skill-name (or name
+                       (:skill/name existing)
+                       (some-> id clojure.core/name))]
+    (when-not id
+      (throw (ex-info "Skill definition must have an :id" {:def skill-def})))
+    (when-not (some? content)
+      (throw (ex-info "Skill definition must have :content" {:def skill-def})))
+    (let [base-skill {:id                     id
+                      :name                   skill-name
+                      :description            (or description (:skill/description existing) "")
+                      :content                content
+                      :version                (or version (:skill/version existing) "0.1.0")
+                      :tags                   (if (some? tags) tags (or (:skill/tags existing) #{}))
+                      :enabled?               (if (some? enabled?)
+                                                enabled?
+                                                (if (contains? existing :skill/enabled?)
+                                                  (:skill/enabled? existing)
+                                                  true))
+                      :source-format          (:skill/source-format existing)
+                      :source-path            (:skill/source-path existing)
+                      :source-url             (:skill/source-url existing)
+                      :source-name            (:skill/source-name existing)
+                      :import-warnings        (:skill/import-warnings existing)
+                      :imported-from-openclaw? (:skill/imported-from-openclaw? existing)}]
+      (try
+        (db/save-skill! (assoc base-skill :doc (ensure-markdown-header content skill-name)))
+        (catch Exception e
+          (if (str/includes? (str (.getMessage e)) "both content and subheaders")
+            (do
+              (log/info "Skill" skill-name "has mixed content/subheaders — storing without idoc index")
+              (db/save-skill! (assoc base-skill :clear-doc? true)))
+            (throw e)))))
+    (db/get-skill id)))
+
 (defn import-skill-file!
   "Import a skill from a file. Supports:
    - .edn  — EDN map or vector of maps with :id, :content, etc.

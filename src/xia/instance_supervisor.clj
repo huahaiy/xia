@@ -27,6 +27,8 @@
 (def ^:private managed-service-prefix "xia-managed-instance-")
 (def ^:private allowed-bind-hosts #{"127.0.0.1" "localhost" "::1" "[::1]"})
 (def ^:private instance-management-config-key :instance/management-enabled?)
+(def ^:private parent-instance-config-key :instance/parent-instance-id)
+(def ^:private parent-instance-env "XIA_PARENT_INSTANCE_ID")
 
 (defonce ^:private capability-state (atom {:enabled? false
                                            :command nil}))
@@ -287,6 +289,35 @@
       (catch Exception e
         (log/warn e "Failed to disable managed Xia service" service-id)))))
 
+(defn parent-instance-id
+  []
+  (some-> (db/get-config parent-instance-config-key)
+          paths/normalize-instance-id))
+
+(defn record-parent-link-from-env!
+  []
+  (when-let [parent-instance-id* (some-> (env-value parent-instance-env)
+                                         nonblank-string
+                                         paths/normalize-instance-id)]
+    (db/set-config! parent-instance-config-key parent-instance-id*)
+    {:parent_instance_id parent-instance-id*}))
+
+(defn- persist-managed-child!
+  [{:keys [instance-id service-id service-name base-url template-instance state pid
+           log-path started-at exited-at exit-code]}]
+  (db/save-managed-child! {:id                (keyword instance-id)
+                           :name              (or service-name instance-id)
+                           :service-id        (some-> service-id keyword)
+                           :service-name      service-name
+                           :base-url          base-url
+                           :template-instance template-instance
+                           :state             state
+                           :pid               pid
+                           :log-path          log-path
+                           :started-at        started-at
+                           :exited-at         exited-at
+                           :exit-code         exit-code}))
+
 (defn- public-status
   [{:keys [instance-id service-id service-name base-url port process started-at
            exited-at exit-code log-path state template-instance]}]
@@ -298,11 +329,29 @@
    :pid               (some-> process process-pid)
    :state             (name state)
    :alive             (boolean (and process (process-alive? process)))
+   :attached          true
    :template_instance template-instance
    :log_path          log-path
    :started_at        started-at
    :exited_at         exited-at
    :exit_code         exit-code})
+
+(defn- persisted-status
+  [record]
+  {:instance_id       (some-> (:managed.child/id record) name)
+   :service_id        (some-> (:managed.child/service-id record) name)
+   :service_name      (:managed.child/service-name record)
+   :base_url          (:managed.child/base-url record)
+   :port              nil
+   :pid               (:managed.child/pid record)
+   :state             (some-> (:managed.child/state record) name)
+   :alive             false
+   :attached          false
+   :template_instance (:managed.child/template-instance record)
+   :log_path          (:managed.child/log-path record)
+   :started_at        (:managed.child/started-at record)
+   :exited_at         (:managed.child/exited-at record)
+   :exit_code         (:managed.child/exit-code record)})
 
 (defn- mark-exited!
   [instance-id process]
@@ -316,6 +365,11 @@
                    (assoc :state :exited
                           :exited-at exited-at
                           :exit-code exit-code)))
+        (persist-managed-child! (-> entry
+                                    (assoc :state :exited
+                                           :pid nil
+                                           :exited-at exited-at
+                                           :exit-code exit-code)))
         (disable-managed-service! service-id)))))
 
 (defn- start-exit-watcher!
@@ -329,39 +383,138 @@
 
 (defn list-managed-instances
   []
-  (->> @managed-instances
-       vals
-       (sort-by (fn [entry]
-                  [(str (:instance-id entry))]))
-       (mapv public-status)))
+  (let [persisted (->> (db/list-managed-children)
+                       (map persisted-status)
+                       (map (fn [entry] [(:instance_id entry) entry]))
+                       (into {}))
+        runtime   (->> @managed-instances
+                       vals
+                       (map public-status)
+                       (map (fn [entry] [(:instance_id entry) entry]))
+                       (into {}))]
+    (->> (merge-with merge persisted runtime)
+         vals
+         (sort-by (fn [entry]
+                    [(str (:instance_id entry))]))
+         vec)))
 
 (defn instance-status
   [instance-id]
-  (some-> (get @managed-instances
-               (normalize-instance-id instance-id
-                                      "instance_id"
-                                      :instance-supervisor/invalid-instance-id))
-          public-status))
+  (let [instance-id* (normalize-instance-id instance-id
+                                            "instance_id"
+                                            :instance-supervisor/invalid-instance-id)]
+    (some (fn [entry]
+            (when (= instance-id* (:instance_id entry))
+              entry))
+          (list-managed-instances))))
+
+(defn- wait-until-stopped!
+  [base-url wait-ms]
+  (let [deadline (+ (System/currentTimeMillis)
+                    (long (or wait-ms default-stop-timeout-ms)))]
+    (loop []
+      (cond
+        (not (child-ready? base-url))
+        true
+
+        (>= (System/currentTimeMillis) deadline)
+        false
+
+        :else
+        (do
+          (Thread/sleep poll-interval-ms)
+          (recur))))))
+
+(defn- shutdown-detached-instance!
+  [instance-id timeout-ms]
+  (let [instance-id* (normalize-instance-id instance-id
+                                            "instance_id"
+                                            :instance-supervisor/invalid-instance-id)
+        record       (or (db/get-managed-child (keyword instance-id*))
+                         (throw (ex-info "Managed Xia instance not found"
+                                         {:type :instance-supervisor/not-found
+                                          :instance-id instance-id*})))
+        status       (persisted-status record)
+        service-id   (or (:service_id status)
+                         (throw (ex-info "Managed Xia instance cannot be stopped because its controller link is incomplete"
+                                         {:type :instance-supervisor/unreachable
+                                          :instance-id instance-id*})))
+        service      (db/get-service (keyword service-id))
+        token        (some-> service :service/auth-key nonblank-string)
+        base-url     (or (:base_url status)
+                         (some-> service :service/base-url nonblank-string))]
+    (when-not (and service token base-url)
+      (throw (ex-info "Managed Xia instance cannot be stopped because its controller link is incomplete"
+                      {:type :instance-supervisor/unreachable
+                       :instance-id instance-id*
+                       :service-id service-id})))
+    (persist-managed-child! {:instance-id       instance-id*
+                             :service-id        service-id
+                             :service-name      (:service_name status)
+                             :base-url          base-url
+                             :template-instance (:template_instance status)
+                             :state             :stopping
+                             :pid               nil
+                             :log-path          (:log_path status)
+                             :started-at        (:started_at status)
+                             :exited-at         nil
+                             :exit-code         nil})
+    (try
+      (let [response (http-client/request {:method :post
+                                           :url (str base-url "/command/shutdown")
+                                           :headers {"Authorization" (str "Bearer " token)}
+                                           :timeout (long timeout-ms)
+                                           :as :text
+                                           :allow-private-network? true})
+            status-code (:status response)]
+        (when-not (<= 200 (long status-code) 299)
+          (throw (ex-info "Child Xia shutdown request failed"
+                          {:type :instance-supervisor/shutdown-failed
+                           :instance-id instance-id*
+                           :service-id service-id
+                           :status status-code
+                           :body (:body response)}))))
+      (catch Throwable t
+        (when (child-ready? base-url)
+          (throw t))))
+    (let [stopped? (wait-until-stopped! base-url timeout-ms)
+          exited-at (Date.)]
+      (when stopped?
+        (disable-managed-service! service-id))
+      (persist-managed-child! {:instance-id       instance-id*
+                               :service-id        service-id
+                               :service-name      (:service_name status)
+                               :base-url          base-url
+                               :template-instance (:template_instance status)
+                               :state             (if stopped? :exited :stopping)
+                               :pid               nil
+                               :log-path          (:log_path status)
+                               :started-at        (:started_at status)
+                               :exited-at         (when stopped? exited-at)
+                               :exit-code         nil})
+      (instance-status instance-id*))))
 
 (defn- stop-managed-instance!
   [instance-id timeout-ms]
   (let [instance-id* (normalize-instance-id instance-id
                                             "instance_id"
                                             :instance-supervisor/invalid-instance-id)
-        entry        (or (get @managed-instances instance-id*)
-                         (throw (ex-info "Managed Xia instance not found"
-                                         {:type :instance-supervisor/not-found
-                                          :instance-id instance-id*})))
+        entry        (get @managed-instances instance-id*)
         process      (:process entry)]
-    (swap! managed-instances assoc instance-id*
-           (assoc entry :state :stopping))
-    (when (and process (process-alive? process))
-      (destroy-process! process false)
-      (when-not (wait-for-exit process timeout-ms)
-        (destroy-process! process true)
-        (wait-for-exit process timeout-ms)))
-    (mark-exited! instance-id* process)
-    (public-status (get @managed-instances instance-id*))))
+    (if-not entry
+      (shutdown-detached-instance! instance-id* timeout-ms)
+      (do
+        (swap! managed-instances assoc instance-id*
+               (assoc entry :state :stopping))
+        (persist-managed-child! (-> entry
+                                    (assoc :state :stopping)))
+        (when (and process (process-alive? process))
+          (destroy-process! process false)
+          (when-not (wait-for-exit process timeout-ms)
+            (destroy-process! process true)
+            (wait-for-exit process timeout-ms)))
+        (mark-exited! instance-id* process)
+        (public-status (get @managed-instances instance-id*))))))
 
 (defn start-instance!
   [instance-id & {:keys [template-instance port bind service-id service-name
@@ -405,6 +558,7 @@
                                   args
                                   {"XIA_ALLOW_INSTANCE_MANAGEMENT" "false"
                                    "XIA_COMMAND_TOKEN" token
+                                   parent-instance-env parent-instance-id
                                    "XIA_INSTANCE_COMMAND" nil}
                                   log-path)
           entry   {:instance-id instance-id*
@@ -437,6 +591,8 @@
                              :allow-private-network? true
                              :autonomous-approved?   autonomous-approved*
                              :enabled?               true})
+          (persist-managed-child! (-> running-entry
+                                      (assoc :pid (process-pid process))))
           (swap! managed-instances assoc instance-id* running-entry)
           (start-exit-watcher! instance-id* process)
           (public-status running-entry))
