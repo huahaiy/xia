@@ -3402,8 +3402,7 @@ function updateAdminButtons() {
   saveProviderEl.disabled = state.providerSaving;
   deleteProviderEl.disabled = state.providerSaving || !state.activeProviderId;
   saveWorkloadRoutingEl.disabled = state.workloadRoutingSaving
-    || !state.admin.providers.length
-    || !workloadRoutingHasChanges();
+    || !state.admin.providers.length;
   providerConfigureOauthEl.setAttribute('aria-disabled',
     (state.providerSaving || state.oauthSaving || !currentProviderPrimaryAction()) ? 'true' : 'false');
   contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;

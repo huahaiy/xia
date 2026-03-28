@@ -9,8 +9,8 @@
 
 Xia (/ɕja/, pronounced "shyah") is a portable personal AI assistant for
 online work. It runs as a single local application, remembers context across
-sessions, works with any OpenAI-compatible LLM models, and helps with web
-research, browser automation, authenticated APIs, and recurring tasks.
+sessions, works with any LLM models, and helps with web research, browser
+automation, authenticated APIs, and recurring online tasks.
 
 ## What Xia Is For
 
@@ -23,10 +23,11 @@ system:
 - calling authenticated APIs through stored service connections
 - running recurring background tasks on a schedule
 
-Xia is not a local computer-control agent. It does not access arbitrary
-files on your machine or drive your terminal like a coding assistant.
-User-initiated uploads and imports are supported, but they stay explicit and
-scoped.
+Xia is not a local computer-control agent. It does not access arbitrary files on
+your machine or drive your terminal like a coding assistant. In fact, except its
+own DB/support directories and a shared workspace with other Xia instances, Xia
+does not access your local file system at all. User-initiated file uploads and
+imports are supported, but they stay explicit and scoped.
 
 ## Quick Start
 
@@ -35,6 +36,8 @@ Start Xia normally:
 ```bash
 xia
 ```
+
+You will be asked to create a master passphrase.
 
 Create a portable archive:
 
@@ -53,20 +56,19 @@ What to expect:
 - Xia stores its state in its
   [database](https://github.com/datalevin/datalevin), so conversations, memory,
   settings, and saved connections travel together.
-- The local web UI is intended to be the main interface for non-technical users.
-- Semantic memory recall uses a local embedding model. On first use, Xia will
-  download the default
+  - The [local web UI](http://localhost:3008) is intended to be the main
+  interface for users. - Semantic memory recall uses a local embedding model. On
+  first use, Xia will download the default
   [`nomic-embed-text-v2-moe`](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe)
-  GGUF model, which is about 512 MiB. You can switch to a bigger model if your
+  model, which is about 512 MiB. You can switch to a bigger model if your
   computer supports it.
 - Browser automation uses [Playwright](https://playwright.dev/). On first use,
-  Xia may also install Playwright browser binaries, and on Linux it can preview
-  or run Playwright's system dependency setup as a separate explicit step.
-- Local-document summarization defaults to extractive summaries. If you opt into
-  model-generated summaries, Xia can use either a local model or an external
-  OpenAI-compatible provider.
+  Xia may install Playwright browser binaries.
+- Local-document summarization defaults to heuristic extractive summaries. If
+  you opt into model-generated summaries, Xia can use either a local model or an
+  external provider.
 - You still provide your own LLM provider credentials, and you can use multiple
-  LLMs at the same time.
+  LLMs at the same time and assign different LLM to different workloads.
 - None of your credentials or secrets is exposed to LLM providers. Prompt
   injection cannot reveal secrets due to the lack of access. Security is
   one of Xia's main value propositions.
@@ -130,14 +132,12 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 
 - secrets are encrypted at rest in the database
 - tools run inside a restricted sandbox
+- tools do not have ambient access to your host file system
 - authenticated API calls go through a capability proxy instead of exposing raw
   credentials
 - the local web UI uses a local session secret and local-origin checks
-- Xia is designed around online work, not arbitrary local file access
-- explicit user uploads and imports are supported, but Xia still does not give
-  tools ambient access to your host file system
 
 ## More Documentation
 
-- Multi-instance setup and template seeding: [doc/multi-instance.md](doc/multi-instance.md)
 - Technical and implementation details: [doc/impl.md](doc/impl.md)
+- Multi-instance setup and template seeding: [doc/multi-instance.md](doc/multi-instance.md)
