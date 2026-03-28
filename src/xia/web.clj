@@ -599,6 +599,29 @@
        (distinct)
        vec))
 
+(defn extract-readable-html
+  "Extract focused readable content from an HTML string.
+
+   Removes common navigation/chrome noise, prefers article/main-like regions,
+   and returns compact markdown-like content plus links found in that primary
+   content area."
+  [url html & {:keys [title include-links]
+               :or   {include-links true}}]
+  (let [^String base-url (or url "about:blank")
+        ^Document doc    (Jsoup/parse ^String (or html "") ^String base-url)
+        _                (doseq [^Element el (.select doc ^String noise-selectors)]
+                           (.remove el))
+        ^Element main    (find-main-content doc)
+        raw-content      (element->markdown main include-links)
+        fallback-content (some-> doc .body .text str/trim)
+        content          (if (seq raw-content)
+                           raw-content
+                           (or fallback-content ""))]
+    {:url base-url
+     :title (or title (.title doc))
+     :content content
+     :links (extract-links main)}))
+
 (defn- truncate-to-tokens
   "Truncate text to approximately max-tokens (4 chars/token estimate)."
   [^String text max-tokens]
@@ -648,21 +671,18 @@
         (if (or (str/includes? content-type "text/html")
                 (str/includes? content-type "application/xhtml"))
           ;; HTML response — parse and extract
-          (let [^String base-url (or final-url url)
-                ^Document doc    (Jsoup/parse ^String body ^String base-url)
-                _      (doseq [^Element el (.select doc ^String noise-selectors)]
-                         (.remove el))
-                ^Element main   (find-main-content doc)
-                title  (.title doc)
-                raw    (element->markdown main include-links)
-                content (truncate-to-tokens raw max-tokens)
-                links  (when include-links (extract-links main))]
+          (let [{:keys [title content links]}
+                (extract-readable-html (or final-url url)
+                                       body
+                                       :include-links include-links)
+                raw-content content
+                content (truncate-to-tokens raw-content max-tokens)]
             {:success?   true
              :url        (or final-url url)
              :title      title
              :content    content
              :links      (or links [])
-             :truncated? (not= raw content)})
+             :truncated? (not= raw-content content)})
           ;; Non-HTML — return raw text truncated
           (let [content (truncate-to-tokens (or body "") max-tokens)]
             {:success?   true

@@ -6,7 +6,8 @@
             [taoensso.timbre :as log]
             [xia.browser.backend :as backend]
             [xia.browser.query :as browser.query]
-            [xia.config :as cfg])
+            [xia.config :as cfg]
+            [xia.web :as web])
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
            [com.microsoft.playwright.impl.driver Driver]
@@ -526,22 +527,14 @@
   (let [^String html* (or html "")
         ^String url* (or url "about:blank")
         ^Document doc (Jsoup/parse html* url*)
-        text (page-text doc)
-        [content truncated?] (truncate-content text)
+        {:keys [title content links]}
+        (web/extract-readable-html url* html* :title title :include-links false)
+        [content truncated?] (truncate-content content)
         forms (.select doc "form")
-        links (->> (.select doc "a[href]")
-                   (keep (fn [^Element a]
-                           (let [text* (str/trim (.text a))
-                                 href (.attr a "href")]
-                             (when (and (seq text*)
-                                        (seq href)
-                                        (not (str/starts-with? href "javascript:")))
-                               {:text text*
-                                :url href}))))
-                   vec)
+        links (vec links)
         link-preview-limit (long browser.query/default-link-preview-limit)]
     {:url url
-     :title (or title (.title doc))
+     :title title
      :content content
      :form_count (count forms)
      :forms (mapv (fn [^Element f]
@@ -788,6 +781,24 @@
   (when (zero? (.size sessions))
     (stop-runtime!)))
 
+(defn- least-recently-used-live-session-id
+  []
+  (some->> (seq sessions)
+           (sort-by (fn [[_ sess]]
+                      (long (or (:last-access @sess)
+                                (:created-at-ms @sess)
+                                0))))
+           first
+           key))
+
+(defn- evict-one-live-session!
+  [ops]
+  (when-let [session-id (least-recently-used-live-session-id)]
+    (log/info "Evicting least recently used live browser session" session-id)
+    (persist-session! ops session-id)
+    (close-live-session! session-id)
+    true))
+
 (defn- install-request-guard!
   [ops ^BrowserContext context]
   (.route context "**/*"
@@ -850,7 +861,9 @@
 (defn- create-session!
   [ops session-id url js-enabled storage-state created-at-ms headless-override channel-override]
   (evict-expired! ops)
-  (when (>= (.size sessions) (long (or (:max-sessions ops) 5)))
+  (when (and (>= (.size sessions) (long (or (:max-sessions ops) 5)))
+             (not (evict-one-live-session! ops))
+             (>= (.size sessions) (long (or (:max-sessions ops) 5))))
     (throw (ex-info (str "Too many browser sessions (max " (or (:max-sessions ops) 5)
                          "). Close one first.")
                     {:active (.size sessions)})))

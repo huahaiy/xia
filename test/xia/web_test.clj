@@ -248,6 +248,27 @@
     (is (= "A" (:text (first links))))
     (is (= "https://a.com" (:url (first links))))))
 
+(deftest extract-readable-html-prefers-main-content-over-nav-sitemap
+  (let [nav-links (apply str
+                         (for [i (range 1 120)]
+                           (str "<a href='/namespace/" i "'>Namespace " i "</a> ")))
+        html (str "<!doctype html>"
+                  "<html><head><title>Docs</title></head><body>"
+                  "<nav>" nav-links "</nav>"
+                  "<main><article><h1>Actual Guide</h1>"
+                  "<p>Important operational steps live here.</p>"
+                  "<a href='/guides/next'>Next</a>"
+                  "</article></main>"
+                  "</body></html>")
+        result (web/extract-readable-html "https://docs.example.com/start" html :include-links false)]
+    (is (= "Docs" (:title result)))
+    (is (re-find #"Actual Guide" (:content result)))
+    (is (re-find #"Important operational steps" (:content result)))
+    (is (not (re-find #"Namespace 90" (:content result))))
+    (is (= [{:text "Next"
+             :url "https://docs.example.com/guides/next"}]
+           (:links result)))))
+
 (deftest skips-javascript-links
   (let [doc   (Jsoup/parse "<body><a href=\"javascript:void(0)\">Bad</a><a href=\"https://ok.com\">OK</a></body>"
                            "https://example.com")

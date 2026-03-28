@@ -167,6 +167,28 @@
     (is (= {:session-id "sess-1" :content "ok"}
            (browser/login :portal :backend :playwright)))))
 
+(deftest login-accepts-site-id-string-with-leading-colon
+  (db/register-site-cred!
+    {:id             :juji-wiki
+     :login-url      "https://wiki.example/login"
+     :username-field "username"
+     :password-field "password"
+     :username       "hyang"
+     :password       "pw"})
+  (with-redefs [xia.browser/open-session (fn [url & _]
+                                           (is (= "https://wiki.example/login" url))
+                                           {:session-id "sess-1"})
+                xia.browser/fill-form    (fn [session-id fields & {:keys [submit]}]
+                                           (is (= "sess-1" session-id))
+                                           (is (= {"username" "hyang"
+                                                   "password" "pw"}
+                                                  fields))
+                                           (is (= true submit))
+                                           {:session-id session-id
+                                            :content "ok"})]
+    (is (= {:session-id "sess-1" :content "ok"}
+           (browser/login ":juji-wiki")))))
+
 ;; ---------------------------------------------------------------------------
 ;; Prompt mechanism
 ;; ---------------------------------------------------------------------------

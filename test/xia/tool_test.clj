@@ -128,6 +128,34 @@
         (prompt/register-approval! :terminal nil)
         (tool/clear-session-approvals! session-id)))))
 
+(deftest browser-tools-share-session-approval-scope
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :browser-open)
+  (tool/load-tool! :browser-query-elements)
+  (let [calls      (atom 0)
+        session-id (random-uuid)]
+    (prompt/register-approval! :terminal
+                               (fn [_]
+                                 (swap! calls inc)
+                                 true))
+    (try
+      (db/set-config! :browser/playwright-enabled? "true")
+      (let [opened (tool/execute-tool :browser-open {"url" "https://example.com"
+                                                     "backend" "playwright"}
+                                      {:channel :terminal
+                                       :session-id session-id})]
+        (is (= :playwright (:backend opened)))
+        (is (string? (:session-id opened)))
+        (is (= :playwright
+               (:backend (tool/execute-tool :browser-query-elements {"session_id" (:session-id opened)}
+                                            {:channel :terminal
+                                             :session-id session-id}))))
+        (is (= 1 @calls)))
+      (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)
+        (browser/close-all-sessions!)))))
+
 (deftest privileged-tool-reports-status-updates
   (db/install-tool! {:id          :status-tool
                      :name        "status-tool"
@@ -231,6 +259,26 @@
           names (set (map #(get-in % [:function :name]) defs))]
       (is (contains? names "web-search"))
       (is (not (contains? names "schedule-manage"))))))
+
+(deftest browser-login-interactive-is-hidden-outside-terminal
+  (tool/ensure-bundled-tools!)
+  (let [terminal-names (set (map #(get-in % [:function :name])
+                                 (tool/tool-definitions {:channel :terminal})))
+        http-names     (set (map #(get-in % [:function :name])
+                                 (tool/tool-definitions {:channel :http})))]
+    (is (contains? terminal-names "browser-login-interactive"))
+    (is (not (contains? http-names "browser-login-interactive")))))
+
+(deftest browser-login-interactive-blocks-outside-terminal
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :browser-login-interactive)
+  (let [result (tool/execute-tool :browser-login-interactive
+                                  {"url" "https://example.com/login"
+                                   "fields" [{"name" "email"
+                                              "label" "Email"}]}
+                                  {:channel :http})]
+    (is (= "Tool browser-login-interactive blocked: interactive login is only available in terminal sessions"
+           (:error result)))))
 
 (deftest tool-definitions-fall-back-to-all-visible-tools-without-match
   (tool/reset-runtime!)
@@ -896,31 +944,39 @@
   (tool/ensure-bundled-tools!)
   (tool/load-tool! :browser-screenshot)
   (db/set-config! :browser/playwright-enabled? "true")
-  (let [opened (browser/open-session "https://example.com" :backend :playwright)
+  (let [approval-session-id (random-uuid)
+        opened (browser/open-session "https://example.com" :backend :playwright)
         session-id (:session-id opened)]
+    (prompt/register-approval! :terminal (fn [_] true))
     (try
       (let [result (tool/execute-tool :browser-screenshot {"session_id" session-id
                                                            "full_page" true
                                                            "detail" "high"}
-                                      {:channel :scheduler})]
+                                      {:channel :terminal
+                                       :session-id approval-session-id})]
         (is (= session-id (:session-id result)))
         (is (= :playwright (:backend result)))
         (is (= true (:full_page result)))
         (is (= "high" (:detail result)))
         (is (string? (:image_data_url result))))
       (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! approval-session-id)
         (browser/close-session session-id)))))
 
 (deftest browser-query-elements-tool-executes-through-sci
   (tool/ensure-bundled-tools!)
   (tool/load-tool! :browser-query-elements)
-  (let [opened (browser/open-session "https://example.com" :backend :playwright)
+  (let [approval-session-id (random-uuid)
+        opened (browser/open-session "https://example.com" :backend :playwright)
         session-id (:session-id opened)]
+    (prompt/register-approval! :terminal (fn [_] true))
     (try
       (let [result (tool/execute-tool :browser-query-elements {"session_id" session-id
                                                                "kind" "links"
                                                                "limit" 1}
-                                      {:channel :scheduler})]
+                                      {:channel :terminal
+                                       :session-id approval-session-id})]
         (is (= session-id (:session-id result)))
         (is (= :playwright (:backend result)))
         (is (= :links (:kind result)))
@@ -928,6 +984,8 @@
         (is (pos? (:total_count result)))
         (is (string? (get-in result [:elements 0 :selector]))))
       (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! approval-session-id)
         (browser/close-session session-id)))))
 
 (deftest local-doc-tools-execute-through-sci
@@ -1002,19 +1060,24 @@
         result (tool/execute-tool :artifact-create {}
                                   {:channel :terminal
                                    :session-id sid})]
-    (is (= "Tool execution failed: missing artifact content"
+    (is (= "Tool artifact-create failed: missing artifact content"
            (:error result)))))
 
 (deftest browser-open-tool-accepts-playwright-backend
   (tool/ensure-bundled-tools!)
   (tool/load-tool! :browser-open)
   (db/set-config! :browser/playwright-enabled? "true")
-  (let [result (tool/execute-tool :browser-open {"url" "https://example.com"
-                                                 "backend" "playwright"}
-                                  {:channel :scheduler})]
+  (let [approval-session-id (random-uuid)]
+    (prompt/register-approval! :terminal (fn [_] true))
+    (let [result (tool/execute-tool :browser-open {"url" "https://example.com"
+                                                   "backend" "playwright"}
+                                    {:channel :terminal
+                                     :session-id approval-session-id})]
     (try
       (is (= :playwright (:backend result)))
       (is (= "Example Domain" (:title result)))
       (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! approval-session-id)
         (when-let [session-id (:session-id result)]
-          (browser/close-session session-id))))))
+          (browser/close-session session-id)))))))

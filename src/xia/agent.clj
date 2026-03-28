@@ -281,7 +281,7 @@
 
 (defn- throw-if-runtime-stopping!
   [session-id]
-  (when (contains? #{:stopping :stopped} (runtime-state/phase))
+  (when (= :stopping (runtime-state/phase))
     (throw (request-cancelled-ex session-id "runtime is stopping"))))
 
 (defn- with-session-run

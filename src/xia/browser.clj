@@ -220,10 +220,11 @@
   [url & {:keys [js backend storage-state headless channel] :or {js true}}]
   (browser.backend/open-session* (backend-by-id (resolve-open-backend-id backend))
                                  url
-                                 {:js js
-                                  :storage-state storage-state
-                                  :headless headless
-                                  :channel channel}))
+                                 (cond-> {:js js
+                                          :storage-state storage-state
+                                          :headless headless}
+                                   (some? channel)
+                                   (assoc :channel channel))))
 
 (defn navigate
   "Navigate to a new URL in an existing session.
@@ -412,6 +413,29 @@
 ;; Login helpers — credential injection without LLM exposure
 ;; ---------------------------------------------------------------------------
 
+(defn- normalize-site-id
+  [site-id]
+  (cond
+    (keyword? site-id)
+    (let [site-ns   (namespace site-id)
+          site-name (name site-id)]
+      (if (str/starts-with? site-name ":")
+        (keyword site-ns (str/replace site-name #"^:+" ""))
+        site-id))
+
+    (symbol? site-id)
+    (recur (name site-id))
+
+    (string? site-id)
+    (some-> site-id
+            str/trim
+            (str/replace #"^:+" "")
+            not-empty
+            keyword)
+
+    :else
+    site-id))
+
 (defn login
   "Log into a site using stored credentials.
 
@@ -425,7 +449,8 @@
   Returns:
      The logged-in page content with session-id for further browsing."
   [site-id & {:keys [backend]}]
-  (let [cred (db/get-site-cred site-id)]
+  (let [site-id (normalize-site-id site-id)
+        cred (db/get-site-cred site-id)]
     (when-not cred
       (throw (ex-info (str "No site credentials registered for: " (name site-id)
                            ". Register with xia.db/register-site-cred!")

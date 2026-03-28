@@ -5,6 +5,7 @@
  :name           "browser-query-elements"
  :description    "Inspect the current browser page and return paginated elements. Use this on large or complex pages when the default browser-open/browser-read-page snapshot does not show the link, button, form, or field you need."
  :tags           #{:browser :web :inspect :dom :query}
+ :approval       :session
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"
                   "properties" {"session_id" {"type"        "string"

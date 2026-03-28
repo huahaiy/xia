@@ -113,20 +113,54 @@
     :policy :session
     :autonomous-scope :service
     :reason "uses stored email service credentials"}
+   {:match "xia.browser/open-session"
+    :policy :session
+    :session-scope :browser
+    :autonomous-scope nil
+    :reason "uses live browser automation"}
+   {:match "xia.browser/navigate"
+    :policy :session
+    :session-scope :browser
+    :autonomous-scope nil
+    :reason "uses live browser automation"}
+   {:match "xia.browser/read-page"
+    :policy :session
+    :session-scope :browser
+    :autonomous-scope nil
+    :reason "uses live browser automation"}
+   {:match "xia.browser/query-elements"
+    :policy :session
+    :session-scope :browser
+    :autonomous-scope nil
+    :reason "uses live browser automation"}
+   {:match "xia.browser/wait-for-page"
+    :policy :session
+    :session-scope :browser
+    :autonomous-scope nil
+    :reason "uses live browser automation"}
+   {:match "xia.browser/screenshot"
+    :policy :session
+    :session-scope :browser
+    :autonomous-scope nil
+    :reason "uses live browser automation"}
    {:match "xia.browser/login-interactive"
     :policy :session
+    :session-scope :browser
     :autonomous-scope nil
     :reason "prompts for interactive credentials"}
    {:match "xia.browser/login"
     :policy :session
+    :session-scope :browser
     :autonomous-scope :site
     :reason "uses stored site credentials"}
    {:match "xia.browser/fill-form"
     :policy :session
+    :session-scope :browser
     :autonomous-scope nil
     :reason "submits data into live browser sessions"}
    {:match "xia.browser/click"
     :policy :session
+    :session-scope :browser
     :autonomous-scope nil
     :reason "can trigger live browser actions"}
    {:match "xia.schedule/create-schedule!"
@@ -293,13 +327,26 @@
 
 (defn- tool-approval-policy
   [tool]
-  (let [{:keys [policy] :as decision} (or (explicit-approval-policy tool)
-                                          (inferred-approval-policy tool))]
+  (let [{:keys [policy] :as decision} (merge (inferred-approval-policy tool)
+                                             (explicit-approval-policy tool))]
     (assoc decision :policy (case policy
                               :session :session
                               :always  :always
                               :auto    :auto
                               :auto))))
+
+(defn- tool-channel-compatible?
+  [tool context]
+  (case (:tool/id tool)
+    :browser-login-interactive
+    (= :terminal (or (:channel context) :terminal))
+    true))
+
+(defn- tool-channel-block-message
+  [tool]
+  (case (:tool/id tool)
+    :browser-login-interactive "interactive login is only available in terminal sessions"
+    (str "tool " (name (:tool/id tool)) " is not available on this channel")))
 
 (defn- tool-description-for-llm
   [tool context]
@@ -364,6 +411,7 @@
 (defn- tool-visible?
   [tool context]
   (let [requires-vision? (contains? (set (:tool/tags tool)) :vision)
+        channel-compatible? (tool-channel-compatible? tool context)
         vision-allowed?  (or (not requires-vision?)
                              (llm/vision-capable? (:assistant-provider context))
                              (llm/vision-capable? (:assistant-provider-id context)))
@@ -373,7 +421,8 @@
                               (= :auto policy)
                               (not (contains? branch-worker-blocked-tool-ids
                                               (:tool/id tool))))]
-    (and vision-allowed?
+    (and channel-compatible?
+         vision-allowed?
          (cond
            branch-worker? branch-allowed?
            (autonomous-run? context)
@@ -527,18 +576,24 @@
                             details)))
 
 (defn- approved-for-session?
-  [session-id tool-id]
-  (contains? (get @session-approvals session-id #{}) tool-id))
+  [session-id approval-key]
+  (contains? (get @session-approvals session-id #{}) approval-key))
 
 (defn- remember-session-approval!
-  [session-id tool-id]
+  [session-id approval-key]
   (when session-id
-    (swap! session-approvals update session-id (fnil conj #{}) tool-id)))
+    (swap! session-approvals update session-id (fnil conj #{}) approval-key)))
+
+(defn- session-approval-key
+  [tool-id tool]
+  (or (:session-scope (tool-approval-policy tool))
+      tool-id))
 
 (defn- ensure-approved
   [tool-id tool arguments context]
   (let [{:keys [policy reason]} (tool-approval-policy tool)
         session-id              (:session-id context)
+        approval-key            (session-approval-key tool-id tool)
         autonomous?             (autonomous-run? context)
         bypass?                 (autonomous-tool-allowed? tool context)
         tool-name               (or (:tool/name tool) (name tool-id))
@@ -568,7 +623,7 @@
          :mode     :not-required}
 
         :session
-        (if (and session-id (approved-for-session? session-id tool-id))
+        (if (and session-id (approved-for-session? session-id approval-key))
           {:allowed? true
            :policy   policy
            :mode     :session-cached}
@@ -580,7 +635,7 @@
                              :tool-name tool-name})
             (if (prompt/approve! request)
               (do
-                (remember-session-approval! session-id tool-id)
+                (remember-session-approval! session-id approval-key)
                 {:allowed? true
                  :policy   policy
                  :mode     :interactive})
@@ -628,17 +683,23 @@
   ([tool-id arguments context]
    (if-let [{:keys [tool handler]} (get @registry tool-id)]
      (if (fn? handler)
-       (try
-         (binding [prompt/*interaction-context* (assoc context
+        (try
+          (binding [prompt/*interaction-context* (assoc context
                                                        :tool-id tool-id
                                                        :tool-name (or (:tool/name tool)
                                                                       (name tool-id)))
                    wm/*session-id*            (or (:resource-session-id context)
                                                   (:session-id context))]
-           (let [branch-blocked? (and (:branch-worker? context)
+           (let [channel-blocked? (not (tool-channel-compatible? tool context))
+                 branch-blocked? (and (:branch-worker? context)
                                       (not (tool-visible? tool context)))
                  {:keys [allowed? error policy mode]}
-                 (if branch-blocked?
+                 (if channel-blocked?
+                   {:allowed? false
+                    :error    (tool-channel-block-message tool)
+                    :policy   :channel
+                    :mode     :channel-blocked}
+                   (if branch-blocked?
                    {:allowed? false
                     :error    (str "tool " (name tool-id)
                                    " is not available to branch workers")
@@ -647,7 +708,7 @@
                    (ensure-approved tool-id
                                     tool
                                     arguments
-                                    context))]
+                                    context)))]
              (if allowed?
                (do
                  (prompt/status! {:state    :running

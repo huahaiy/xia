@@ -5,6 +5,7 @@
  :name        "browser-screenshot"
  :description "Capture a screenshot from the current Playwright browser session for visual interpretation, such as charts, diagrams, maps, or layout issues. Do not use this to bypass CAPTCHAs or anti-bot challenges."
  :tags        #{:browser :web :vision :image :screenshot}
+ :approval    :session
  :execution-mode :parallel-safe
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"

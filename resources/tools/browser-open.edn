@@ -8,6 +8,7 @@
  :name        "browser-open"
  :description "Open a headless browser session and load a URL. Returns the page content, forms, and links along with a session_id for subsequent browser actions. Use this when you need to interact with a website (fill forms, click buttons). For simple page reading, use web-fetch instead."
  :tags        #{:browser :web :navigation :open}
+ :approval    :session
  :parameters  {"type"       "object"
                "properties" {"url" {"type"        "string"
                                     "description" "The URL to open"}

@@ -441,19 +441,22 @@
 ;; Session limit
 ;; ---------------------------------------------------------------------------
 
-(deftest ^:integration session-limit-enforced
-  (let [sids (atom [])]
+(deftest ^:integration session-limit-evicts-least-recently-used-live-session
+  (let [sids         (atom [])
+        opened-extra (atom nil)]
     (try
-      ;; Open max sessions
       (dotimes [_ 5]
         (let [r (browser/open-session "https://example.com")]
           (swap! sids conj (:session-id r))))
-      ;; One more should fail
-      (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo #"Too many browser sessions"
-            (browser/open-session "https://example.com")))
+      (reset! opened-extra (browser/open-session "https://example.com"))
+      (is (string? (:session-id @opened-extra)))
+      (let [restored (browser/read-page (first @sids))]
+        (is (= (first @sids) (:session-id restored)))
+        (is (= "Example Domain" (:title restored))))
       (finally
-        (doseq [sid @sids]
+        (doseq [sid (distinct (cond-> @sids
+                                @opened-extra
+                                (conj (:session-id @opened-extra))))]
           (browser/close-session sid))))))
 
 ;; ---------------------------------------------------------------------------
@@ -472,6 +475,32 @@
     (is (contains? result :truncated?))
     (is (contains? result :session-id))
     (browser/close-session sid)))
+
+(deftest playwright-document->map-prefers-main-content-over-nav-sitemap
+  (let [nav-links (apply str
+                         (for [i (range 1 250)]
+                           (str "<a href='/namespace/" i "'>Namespace " i "</a> ")))
+        html (str "<!doctype html>"
+                  "<html><head><title>Docs Home</title></head><body>"
+                  "<nav>" nav-links "</nav>"
+                  "<main><article>"
+                  "<h1>Cluster Restore Guide</h1>"
+                  "<p>Use this guide to restore a cluster from backup.</p>"
+                  "<a href='/guides/restore/next'>Next step</a>"
+                  "</article></main>"
+                  "</body></html>")
+        result (call-playwright-private 'document->map
+                                        "https://docs.example.com/guides/restore"
+                                        nil
+                                        html)]
+    (is (= "Docs Home" (:title result)))
+    (is (re-find #"Cluster Restore Guide" (:content result)))
+    (is (re-find #"restore a cluster from backup" (:content result)))
+    (is (not (re-find #"Namespace 200" (:content result))))
+    (is (= 1 (:link_count result)))
+    (is (= [{:text "Next step"
+             :url "https://docs.example.com/guides/restore/next"}]
+           (:links result)))))
 
 (deftest open-session-uses-configured-default-backend-when-auto
   (db/set-config! :browser/backend-default "auto")

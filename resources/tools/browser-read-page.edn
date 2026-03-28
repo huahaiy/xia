@@ -3,8 +3,9 @@
 
 {:id          :browser-read-page
  :name        "browser-read-page"
- :description "Read the current page in a browser session without clicking or navigating. Use after browser-wait or when you want a fresh snapshot of the current page state."
+ :description "Read a focused snapshot of the current page in a browser session without clicking or navigating. The snapshot prefers primary article/main content over sidebar or sitemap chrome. Use browser-query-elements when you need the raw DOM, sidebar links, or controls outside the main content area."
  :tags        #{:browser :web :read :page}
+ :approval    :session
  :parameters  {"type"       "object"
                "properties" {"session_id" {"type"        "string"
                                            "description" "The browser session ID to inspect"}}
