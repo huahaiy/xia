@@ -31,7 +31,7 @@
    :db (paths/default-db-path)
    :bind "127.0.0.1"
    :port 3008
-   :mode "terminal"
+   :mode "both"
    :web-dev false})
 
 (def cli-options
@@ -44,7 +44,7 @@
    ["-p" "--port PORT" "HTTP/WebSocket port"
     :default (:port default-run-options)
     :parse-fn #(Integer/parseInt %)]
-   ["-m" "--mode MODE" "Run mode: terminal, server, both"
+   ["-m" "--mode MODE" "Run mode: both, server, terminal"
     :default (:mode default-run-options)]
    [nil "--web-dev" "Enable live-reloading local web assets from resources/web"]
    ["-l" "--log-file PATH" "Write INFO+ logs to this file (or set XIA_LOG_FILE)"]
@@ -66,10 +66,11 @@
   (println summary)
   (println)
   (println "Examples:")
-  (println "  xia                     Start in terminal mode")
+  (println "  xia                     Start terminal and web server")
   (println "  xia backup.xia          Open a packed Xia archive directly")
   (println "  xia pack                Create a portable archive at <db>.xia")
   (println "  xia pack backup.xia     Create a portable archive at a specific path")
+  (println "  xia --mode terminal     Start terminal mode")
   (println "  xia --mode server       Start HTTP/WebSocket server only")
   (println "  xia --mode both         Start both terminal and server")
   (println "  xia --mode both --web-dev  Live-reload resources/web during UI work")
@@ -346,7 +347,7 @@
                          (println (str "Xia server running on " (:bind options*) ":" port*))
                          (println (str "open " (local-ui-url (:bind options*) port*))))
                        (terminal/start!))
-        ;; default: terminal
+        ;; default: terminal fallback for unexpected modes
         (do
           (runtime-state/mark-running!)
           (terminal/start!)))

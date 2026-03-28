@@ -131,6 +131,16 @@
     (is (= "server" (:mode @started)))
     (is (= true (:web-dev @started)))))
 
+(deftest main-defaults-to-both-mode
+  (let [started (atom nil)]
+    (with-redefs-fn {#'xia.core/start! (fn [options] (reset! started options))
+                     #'xia.logging/configure! (fn [_] nil)
+                     #'xia.core/register-shutdown-hook! (fn [_] ::hook)
+                     #'xia.core/remove-shutdown-hook! (fn [_] nil)
+                     #'xia.core/make-cleanup (fn [_] (fn [] nil))}
+      #(core/-main))
+    (is (= "both" (:mode @started)))))
+
 (deftest resolve-run-options-uses-instance-scoped-default-db-path
   (with-redefs-fn {#'xia.paths/env-value (constantly nil)}
     #(let [options (#'xia.core/resolve-run-options {:instance "Ops Helper"} [])]
