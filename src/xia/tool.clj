@@ -12,6 +12,7 @@
             [clojure.string :as str]
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
+            [xia.audit :as audit]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -568,12 +569,19 @@
 
 (defn- audit-entry!
   [context tool-id tool arguments details]
-  (autonomous/audit! context
-                     (merge {:type      "tool"
-                             :tool-id   (name tool-id)
-                             :tool-name (or (:tool/name tool) (name tool-id))
-                             :arguments arguments}
-                            details)))
+  (let [entry (merge {:type      "tool"
+                      :tool-id   (name tool-id)
+                      :tool-name (or (:tool/name tool) (name tool-id))
+                      :arguments arguments}
+                     details)]
+    (autonomous/audit! context entry)
+    (audit/log! context
+                {:actor        :assistant
+                 :type         :tool-execution
+                 :llm-call-id  (:llm-call-id context)
+                 :tool-id      (name tool-id)
+                 :tool-call-id (:tool-call-id context)
+                 :data         entry})))
 
 (defn- approved-for-session?
   [session-id approval-key]

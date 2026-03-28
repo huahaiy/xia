@@ -9,6 +9,7 @@
   (:require [taoensso.timbre :as log]
             [charred.api :as json]
             [clojure.string :as str]
+            [xia.audit :as audit]
             [xia.config :as cfg]
             [xia.context :as context]
             [xia.db :as db]
@@ -373,19 +374,19 @@
                        :max-tokens     max-tokens})))))
 
 (defn- call-model
-  [messages tools provider-id & {:keys [on-delta]}]
+  [messages tools provider-id & {:keys [on-delta session-id]}]
   (cond
     (and provider-id (seq tools))
-    (llm/chat-with-tools messages tools :provider-id provider-id :on-delta on-delta)
+    (llm/chat-message messages :provider-id provider-id :tools tools :session-id session-id :on-delta on-delta)
 
     provider-id
-    (llm/chat-simple messages :provider-id provider-id :on-delta on-delta)
+    (llm/chat-message messages :provider-id provider-id :session-id session-id :on-delta on-delta)
 
     (seq tools)
-    (llm/chat-with-tools messages tools :on-delta on-delta)
+    (llm/chat-message messages :tools tools :session-id session-id :on-delta on-delta)
 
     :else
-    (llm/chat-simple messages :on-delta on-delta)))
+    (llm/chat-message messages :session-id session-id :on-delta on-delta)))
 
 (defn- report-status!
   [message & {:as extra}]
@@ -582,6 +583,28 @@
        (remove str/blank?)
        vec))
 
+(defn- response-provenance
+  [response]
+  (let [m (meta response)]
+    {:llm-call-id (or (:llm-call-id m)
+                      (:llm-call-id response))
+     :provider-id (or (:provider-id m)
+                      (:provider-id response))
+     :model       (or (:model m)
+                      (:model response))
+     :workload    (or (:workload m)
+                      (:workload response))}))
+
+(defn- tool-call-summary
+  [tool-calls]
+  (mapv (fn [tool-call]
+          {:id        (get tool-call "id")
+           :name      (or (get-in tool-call ["function" "name"])
+                          (get tool-call "name"))
+           :arguments (or (get-in tool-call ["function" "arguments"])
+                          (get tool-call "arguments"))})
+        (or tool-calls [])))
+
 (defn- save-schedule-checkpoint!
   [execution-context checkpoint]
   (when-let [schedule-id (:schedule-id execution-context)]
@@ -646,7 +669,9 @@
 (defn- execute-tool-call
   [{:keys [tool-call func-name args tool-id]} context]
   (throw-if-cancelled! (:session-id context))
-  (let [result (tool/execute-tool tool-id args context)]
+  (let [result (tool/execute-tool tool-id args (assoc context
+                                                      :tool-call-id (get tool-call "id")
+                                                      :tool-name func-name))]
     (throw-if-cancelled! (:session-id context))
     (log/debug "Tool call completed"
                (merge {:func-name func-name
@@ -655,6 +680,7 @@
                       (trace-context context)))
     {:role         "tool"
      :tool_call_id (get tool-call "id")
+     :tool_name    func-name
      :result       (sanitized-tool-result result)
      :content      (tool-result-content result)
      :follow-up-messages (multimodal-follow-up-messages result context)}))
@@ -780,9 +806,15 @@
                 (throw-if-cancelled! session-id)
                 (validate-user-message! user-message)
                 (throw-if-cancelled! session-id)
-                (db/add-message! session-id :user user-message
-                                 :local-doc-ids local-doc-ids
-                                 :artifact-ids artifact-ids)
+                (let [user-message-id (db/add-message! session-id :user user-message
+                                                       :local-doc-ids local-doc-ids
+                                                       :artifact-ids artifact-ids)]
+                  (audit/log! request-context
+                              {:actor      :user
+                               :type       :user-message
+                               :message-id user-message-id
+                               :data       {:local-doc-ids (vec (or local-doc-ids []))
+                                            :artifact-ids  (vec (or artifact-ids []))}}))
                 (report-status! "Updating working memory"
                                 :phase :working-memory)
                 (best-effort-update-working-memory! session-id
@@ -831,6 +863,7 @@
                             response   (call-model messages
                                                    tools
                                                    assistant-provider-id
+                                                   :session-id session-id
                                                    :on-delta (fn [delta]
                                                                (throw-if-cancelled! session-id)
                                                                (progress-reporter delta)
@@ -840,10 +873,11 @@
                         (if has-tools?
                           (do
                             (when (>= (long round) max-tool-rounds*)
-                              (throw (ex-info "Too many tool-calling rounds"
-                                              {:rounds         round
-                                               :max-tool-rounds max-tool-rounds*})))
-                            (let [tool-calls    (get response "tool_calls")
+                                              (throw (ex-info "Too many tool-calling rounds"
+                                                              {:rounds         round
+                                                               :max-tool-rounds max-tool-rounds*})))
+                            (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
+                                  tool-calls    (get response "tool_calls")
                                   assistant-msg {:role       "assistant"
                                                  :content    (get response "content" "")
                                                  :tool_calls tool-calls}
@@ -858,23 +892,47 @@
                                                                   :tool-count tool-count)
                                                   (throw-if-cancelled! session-id)
                                                   (execute-tool-calls tool-calls
-                                                                      execution-context))
+                                                                      (assoc execution-context
+                                                                             :llm-call-id llm-call-id
+                                                                             :provider-id provider-id
+                                                                             :model model
+                                                                             :workload workload)))
                                   _             (throw-if-cancelled! session-id)
                                   tool-history  (mapv #(select-keys % [:role :tool_call_id :content])
                                                       tool-results)
                                   follow-up-messages (->> tool-results
                                                           (mapcat :follow-up-messages)
                                                           vec)]
-                              (db/add-message! session-id :assistant
-                                               (get response "content" "")
-                                               :tool-calls tool-calls
-                                               :local-doc-ids local-doc-ids
-                                               :artifact-ids artifact-ids)
+                              (let [assistant-message-id
+                                    (db/add-message! session-id :assistant
+                                                     (get response "content" "")
+                                                     :tool-calls tool-calls
+                                                     :llm-call-id llm-call-id
+                                                     :provider-id provider-id
+                                                     :model model
+                                                     :workload workload
+                                                     :local-doc-ids local-doc-ids
+                                                     :artifact-ids artifact-ids)]
+                                (audit/log! execution-context
+                                            {:actor       :assistant
+                                             :type        :llm-response
+                                             :message-id  assistant-message-id
+                                             :llm-call-id llm-call-id
+                                             :data        {:provider-id (some-> provider-id name)
+                                                           :model model
+                                                           :workload (some-> workload name)
+                                                           :tool-calls (tool-call-summary tool-calls)}}))
                               (doseq [tr tool-results]
                                 (db/add-message! session-id :tool
                                                  nil
                                                  :tool-result (:result tr)
-                                                 :tool-id (:tool_call_id tr)))
+                                                 :tool-id (:tool_call_id tr)
+                                                 :tool-call-id (:tool_call_id tr)
+                                                 :tool-name (:tool_name tr)
+                                                 :llm-call-id llm-call-id
+                                                 :provider-id provider-id
+                                                 :model model
+                                                 :workload workload))
                               (save-schedule-checkpoint!
                                 execution-context
                                 {:phase :tool
@@ -892,13 +950,28 @@
                                          (into tool-history)
                                          (into follow-up-messages))
                                      (inc round))))
-                          (let [text (if (string? response) response (get response "content" ""))]
+                          (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
+                                text (get response "content" "")]
                             (throw-if-cancelled! session-id)
                             (report-status! "Preparing response"
                                             :phase :finalizing)
-                            (db/add-message! session-id :assistant text
-                                             :local-doc-ids local-doc-ids
-                                             :artifact-ids artifact-ids)
+                            (let [assistant-message-id
+                                  (db/add-message! session-id :assistant text
+                                                   :llm-call-id llm-call-id
+                                                   :provider-id provider-id
+                                                   :model model
+                                                   :workload workload
+                                                   :local-doc-ids local-doc-ids
+                                                   :artifact-ids artifact-ids)]
+                              (audit/log! execution-context
+                                          {:actor       :assistant
+                                           :type        :llm-response
+                                           :message-id  assistant-message-id
+                                           :llm-call-id llm-call-id
+                                           :data        {:provider-id (some-> provider-id name)
+                                                         :model model
+                                                         :workload (some-> workload name)
+                                                         :tool-calls []}}))
                             (launch-fact-utility-review! used-fact-eids user-message text)
                             (prompt/status! {:state :done
                                              :phase :complete

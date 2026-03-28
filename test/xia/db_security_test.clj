@@ -76,6 +76,47 @@
     (is (crypto/encrypted? raw-value))
     (is (= "gho_secret" (db/get-config :token/github)))))
 
+(deftest llm-log-payloads-are-encrypted-at-rest
+  (let [call-id (random-uuid)]
+    (db/log-llm-call! {:id call-id
+                       :session-id (random-uuid)
+                       :provider-id :openrouter
+                       :model "moonshotai/kimi-k2.5"
+                       :messages "[{\"role\":\"user\",\"content\":\"secret\"}]"
+                       :response "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
+                       :tools "[{\"name\":\"browser-open\"}]"
+                       :error "provider error"
+                       :status :ok})
+    (let [eid (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))
+          raw (raw-entity eid)
+          call (db/get-llm-call call-id)]
+      (is (crypto/encrypted? (:llm.log/messages raw)))
+      (is (crypto/encrypted? (:llm.log/response raw)))
+      (is (crypto/encrypted? (:llm.log/tools raw)))
+      (is (crypto/encrypted? (:llm.log/error raw)))
+      (is (= "[{\"role\":\"user\",\"content\":\"secret\"}]" (:messages call)))
+      (is (= "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}" (:response call)))
+      (is (= "[{\"name\":\"browser-open\"}]" (:tools call)))
+      (is (= "provider error" (:error call))))))
+
+(deftest audit-event-payloads-are-encrypted-at-rest
+  (let [event-id (random-uuid)
+        sid (db/create-session! :http)]
+    (db/log-audit-event! {:id event-id
+                          :session-id sid
+                          :channel :http
+                          :actor :user
+                          :type :approval-decision
+                          :data {:approved true
+                                 :arguments {"secret" "value"}}})
+    (let [eid (ffirst (db/q '[:find ?e :in $ ?id :where [?e :audit.event/id ?id]] event-id))
+          raw (raw-entity eid)
+          event (first (db/session-audit-events sid))]
+      (is (crypto/encrypted? (:audit.event/data raw)))
+      (is (= {"approved" true
+              "arguments" {"secret" "value"}}
+             (:data event))))))
+
 (deftest transcripts-keep-structured-tool-payloads
   (let [sid        (db/create-session! :terminal)
         tool-calls [{"id"       "call_1"
@@ -111,7 +152,13 @@
                :artifacts nil
                :tool-calls nil
                :tool-result nil
-               :tool-id nil}
+               :tool-id nil
+               :tool-call-id nil
+               :tool-name nil
+               :llm-call-id nil
+               :provider-id nil
+               :model nil
+               :workload nil}
               {:role :assistant
                :id (:id (second messages))
                :content "checking service"
@@ -120,7 +167,13 @@
                :artifacts nil
                :tool-calls tool-calls
                :tool-result nil
-               :tool-id nil}
+               :tool-id nil
+               :tool-call-id nil
+               :tool-name nil
+               :llm-call-id nil
+               :provider-id nil
+               :model nil
+               :workload nil}
               {:role :tool
                :id (:id (nth messages 2))
                :content nil
@@ -129,7 +182,13 @@
                :artifacts nil
                :tool-calls nil
                :tool-result {"token" "top-secret"}
-               :tool-id "call_1"}]
+               :tool-id "call_1"
+               :tool-call-id nil
+               :tool-name nil
+               :llm-call-id nil
+               :provider-id nil
+               :model nil
+               :workload nil}]
              messages)))))
 
 (deftest schedule-run-payloads-are-encrypted-at-rest

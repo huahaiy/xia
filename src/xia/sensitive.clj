@@ -15,6 +15,11 @@
     :session/history-recap
     :session/tool-recap
     :message/content
+    :llm.log/messages
+    :llm.log/tools
+    :llm.log/response
+    :llm.log/error
+    :audit.event/data
     :schedule-run/result
     :schedule-run/error})
 

@@ -96,75 +96,128 @@
             </div>
           </section>
           <aside class="side-stack">
-            <section class="panel">
-              <div class="panel-header">
-                <h2 class="panel-title">Notes</h2>
-                <button type="button" class="secondary" id="new-scratch">New note</button>
-              </div>
-              <div class="scratch-workspace">
-                <div class="scratch-list" id="scratch-list">
-                  <div class="scratch-empty">Create a note to keep a persistent draft for this session.</div>
+            <details class="panel sidebar-accordion" id="notes-accordion" open>
+              <summary class="accordion-summary">
+                <div class="accordion-title-wrap">
+                  <div class="accordion-title-line">
+                    <span class="panel-title">Notes</span>
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="Session drafts and working notes."
+                          data-tooltip="Session drafts and working notes.">?</span>
+                  </div>
                 </div>
-                <div class="field">
-                  <label class="field-label" for="scratch-title">Title</label>
-                  <input type="text" id="scratch-title" class="text-input" placeholder="Untitled note" disabled>
+              </summary>
+              <div class="accordion-body">
+                <div class="accordion-toolbar">
+                  <button type="button" class="secondary" id="new-scratch">New note</button>
                 </div>
-                <div class="field">
-                  <label class="field-label" for="scratch-editor">Content</label>
-                  <textarea id="scratch-editor" class="scratch-editor" placeholder="Write or paste something..." disabled></textarea>
-                </div>
-                <div class="composer-foot">
-                  <div class="scratch-status" id="scratch-status">No note selected.</div>
-                  <div class="actions">
-                    <button type="button" class="secondary" id="delete-scratch" disabled>Delete</button>
-                    <button type="button" class="secondary" id="insert-scratch" disabled>Insert in Chat</button>
-                    <button type="button" class="primary" id="save-scratch" disabled>Save</button>
+                <div class="scratch-workspace">
+                  <div class="scratch-list" id="scratch-list">
+                    <div class="scratch-empty">No notes.</div>
+                  </div>
+                  <div class="detail-panel">
+                    <div class="detail-header">Note Details</div>
+                    <div class="field">
+                      <label class="field-label" for="scratch-title">Title</label>
+                      <input type="text" id="scratch-title" class="text-input" placeholder="Untitled note" disabled>
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="scratch-editor">Content</label>
+                      <textarea id="scratch-editor" class="scratch-editor" placeholder="Write or paste something..." disabled></textarea>
+                    </div>
+                    <div class="composer-foot">
+                      <div class="scratch-status" id="scratch-status">No note selected.</div>
+                      <div class="actions">
+                        <button type="button" class="secondary" id="delete-scratch" disabled>Delete</button>
+                        <button type="button" class="secondary" id="insert-scratch" disabled>Insert in Chat</button>
+                        <button type="button" class="primary" id="save-scratch" disabled>Save</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
-            </section>
-            <section class="panel">
-              <div class="panel-header">
-                <div>
-                  <h2 class="panel-title" title="Upload text, PDF, or Office files, keep them in this session, and insert them into chat or notes when needed.">Local Documents</h2>
+            </details>
+            <details class="panel sidebar-accordion" id="local-docs-accordion">
+              <summary class="accordion-summary">
+                <div class="accordion-title-wrap">
+                  <div class="accordion-title-line">
+                    <span class="panel-title" title="Upload text, PDF, or Office files, keep them in this session, and insert them into chat or notes when needed.">Local Documents</span>
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="Files available only in this chat session."
+                          data-tooltip="Files available only in this chat session.">?</span>
+                  </div>
                 </div>
-                <button type="button" class="secondary" id="local-upload-btn">Upload</button>
-              </div>
-              <div class="local-doc-list" id="local-doc-list">
-                <div class="scratch-empty">Choose a local file to make it available to Xia in this session.</div>
-              </div>
-              <div class="field">
-                <label class="field-label" for="local-doc-preview">Preview</label>
-                <textarea id="local-doc-preview" class="local-doc-preview" placeholder="Select a local document to preview it here." readonly></textarea>
-              </div>
-              <div class="local-doc-status" id="local-doc-status">No local document selected.</div>
-              <div class="actions">
-                <button type="button" class="secondary" id="local-doc-insert" disabled>Insert in Chat</button>
-                <button type="button" class="secondary" id="local-doc-scratch" disabled>Create Note</button>
-                <button type="button" class="secondary" id="local-doc-delete" disabled>Delete</button>
-              </div>
-            </section>
-            <section class="panel">
-              <div class="panel-header">
-                <div>
-                  <h2 class="panel-title" title="Generated outputs stay inside Xia until you inspect or download them yourself.">Artifacts</h2>
+              </summary>
+              <div class="accordion-body">
+                <div class="accordion-toolbar">
+                  <button type="button" class="secondary" id="local-upload-btn">Upload</button>
+                </div>
+                <div class="local-doc-list" id="local-doc-list">
+                  <div class="scratch-empty">No local documents.</div>
+                </div>
+                <div class="detail-panel">
+                  <div class="detail-header">Document Details</div>
+                  <div class="field">
+                    <label class="field-label" for="local-doc-preview">Preview</label>
+                    <textarea id="local-doc-preview" class="local-doc-preview" placeholder="Select a local document to preview it here." readonly></textarea>
+                  </div>
+                  <div class="local-doc-status" id="local-doc-status">No local document selected.</div>
+                  <div class="actions">
+                    <button type="button" class="secondary" id="local-doc-insert" disabled>Insert in Chat</button>
+                    <button type="button" class="secondary" id="local-doc-scratch" disabled>Create Note</button>
+                    <button type="button" class="secondary" id="local-doc-delete" disabled>Delete</button>
+                  </div>
                 </div>
               </div>
-              <div class="local-doc-list" id="artifact-list">
-                <div class="scratch-empty">Artifacts created by Xia will appear here for this session.</div>
+            </details>
+            <details class="panel sidebar-accordion" id="artifacts-accordion">
+              <summary class="accordion-summary">
+                <div class="accordion-title-wrap">
+                  <div class="accordion-title-line">
+                    <span class="panel-title" title="Generated outputs stay inside Xia until you inspect or download them yourself.">Artifacts</span>
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="Files created by Xia for this session."
+                          data-tooltip="Files created by Xia for this session.">?</span>
+                  </div>
+                </div>
+              </summary>
+              <div class="accordion-body">
+                <div class="local-doc-list" id="artifact-list">
+                  <div class="scratch-empty">No artifacts.</div>
+                </div>
+                <div class="detail-panel">
+                  <div class="detail-header">Artifact Details</div>
+                  <div class="field">
+                    <label class="field-label" for="artifact-preview">Preview</label>
+                    <textarea id="artifact-preview" class="local-doc-preview" placeholder="Select an artifact to preview it here." readonly></textarea>
+                  </div>
+                  <div class="local-doc-status" id="artifact-status">No artifact selected.</div>
+                  <div class="actions">
+                    <button type="button" class="secondary" id="artifact-insert" disabled>Insert in Chat</button>
+                    <button type="button" class="secondary" id="artifact-scratch" disabled>Create Note</button>
+                    <button type="button" class="secondary" id="artifact-download" disabled>Download</button>
+                    <button type="button" class="secondary" id="artifact-delete" disabled>Delete</button>
+                  </div>
+                </div>
               </div>
-              <div class="field">
-                <label class="field-label" for="artifact-preview">Preview</label>
-                <textarea id="artifact-preview" class="local-doc-preview" placeholder="Select an artifact to preview it here." readonly></textarea>
+            </details>
+            <details class="panel sidebar-accordion" id="shared-workspace-accordion">
+              <summary class="accordion-summary">
+                <div class="accordion-title-wrap">
+                  <div class="accordion-title-line">
+                    <span class="panel-title">Shared Workspace</span>
+                    <span class="info-hint" tabindex="0" role="img"
+                          aria-label="Shared files across local Xia instances."
+                          data-tooltip="Shared files across local Xia instances.">?</span>
+                  </div>
+                </div>
+              </summary>
+              <div class="accordion-body">
+                <div class="shared-workspace-list" id="shared-workspace-list">
+                  <div class="scratch-empty">Loading...</div>
+                </div>
               </div>
-              <div class="local-doc-status" id="artifact-status">No artifact selected.</div>
-              <div class="actions">
-                <button type="button" class="secondary" id="artifact-insert" disabled>Insert in Chat</button>
-                <button type="button" class="secondary" id="artifact-scratch" disabled>Create Note</button>
-                <button type="button" class="secondary" id="artifact-download" disabled>Download</button>
-                <button type="button" class="secondary" id="artifact-delete" disabled>Delete</button>
-              </div>
-            </section>
+            </details>
           </aside>
         </main>
       </div>

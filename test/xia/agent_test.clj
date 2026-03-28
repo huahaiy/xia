@@ -28,7 +28,7 @@
       (with-redefs [xia.tool/tool-definitions (constantly [])
                     xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
                                                                     :provider-id :default})
-                    xia.llm/chat-simple       (fn [_messages & _opts] "All set.")]
+                    xia.llm/chat-message      (fn [_messages & _opts] {"content" "All set."})]
         (is (= "All set."
                (agent/process-message session-id "hello" :channel :terminal))))
       (is (= [{:state :running
@@ -47,6 +47,35 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest process-message-persists-llm-provenance-and-audit-events
+  (let [session-id (db/create-session! :terminal)
+        call-id    (random-uuid)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :openrouter}
+                                                                  :provider-id :openrouter})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (with-meta {"content" "All set."}
+                                                         {:provider-id :openrouter
+                                                          :model "moonshotai/kimi-k2.5"
+                                                          :workload :assistant
+                                                          :llm-call-id call-id}))]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (let [messages (db/session-messages session-id)
+          assistant (last messages)
+          events (db/session-audit-events session-id)]
+      (is (= call-id (:llm-call-id assistant)))
+      (is (= :openrouter (:provider-id assistant)))
+      (is (= "moonshotai/kimi-k2.5" (:model assistant)))
+      (is (= :assistant (:workload assistant)))
+      (is (= [:user-message :llm-response]
+             (mapv :type events)))
+      (is (= call-id (:llm-call-id (last events)))))))
+
 (deftest process-message-reports-llm-partial-content
   (let [session-id (db/create-session! :terminal)
         statuses   (atom [])]
@@ -59,11 +88,11 @@
       (with-redefs [xia.tool/tool-definitions (constantly [])
                     xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
                                                                     :provider-id :default})
-                    xia.llm/chat-simple (fn [_messages & {:keys [on-delta]}]
-                                          (when on-delta
-                                            (on-delta {:delta "Hello"
-                                                       :content "Hello"}))
-                                          "Hello there.")]
+                    xia.llm/chat-message (fn [_messages & {:keys [on-delta]}]
+                                           (when on-delta
+                                             (on-delta {:delta "Hello"
+                                                        :content "Hello"}))
+                                           {"content" "Hello there."})]
         (is (= "Hello there."
                (agent/process-message session-id "hello" :channel :terminal))))
       (is (= {:state :running
@@ -90,10 +119,10 @@
                     xia.context/build-messages-data    (fn [_session-id _opts]
                                                          {:messages [{:role "system" :content "test"}]
                                                           :used-fact-eids []})
-                    xia.llm/chat-simple                (fn [_messages & _opts]
+                    xia.llm/chat-message               (fn [_messages & _opts]
                                                          (deliver started true)
                                                          (Thread/sleep 10000)
-                                                         "done")]
+                                                         {"content" "done"})]
         (let [result (future
                        (try
                          (agent/process-message session-id "cancel me" :channel :terminal)
@@ -137,7 +166,7 @@
                       xia.working-memory/update-wm!      (fn [& _] nil)
                       xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
                                                                       :provider-id :default})
-                      xia.llm/chat-simple                (fn [_messages & _opts] "All set.")
+                      xia.llm/chat-message               (fn [_messages & _opts] {"content" "All set."})
                       xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
                                                            (swap! checkpoints conj [schedule-id checkpoint]))]
           (is (= "All set."
@@ -171,9 +200,9 @@
                                                        (reset! build-messages-opts opts)
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.llm/chat-simple                (fn [_messages & opts]
+                  xia.llm/chat-message               (fn [_messages & opts]
                                                        (reset! llm-opts (apply hash-map opts))
-                                                       "All set.")]
+                                                       {"content" "All set."})]
       (is (= "All set."
              (agent/process-message session-id "hello" :channel :terminal))))
     (is (= 1 @selection-calls))
@@ -195,7 +224,7 @@
                   xia.context/build-messages-data    (fn [_session-id _opts]
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.llm/chat-simple                (fn [_messages & _opts] "All set.")]
+                  xia.llm/chat-message               (fn [_messages & _opts] {"content" "All set."})]
       (is (= "All set."
              (agent/process-message session-id
                                     "hello"
@@ -231,7 +260,7 @@
                                                        {:summary "Found the page."})
                   xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
                                                        (swap! checkpoints conj [schedule-id checkpoint]))
-                  xia.llm/chat-with-tools            (fn [_messages _tools & _opts]
+                  xia.llm/chat-message               (fn [_messages & _opts]
                                                        (if (= 1 (swap! llm-calls inc))
                                                          {"content" ""
                                                           "tool_calls" [{"id" "call-1"
@@ -264,7 +293,7 @@
                   xia.tool/parallel-safe?            (constantly false)
                   xia.tool/execute-tool              (fn [_tool-id _args _context]
                                                        {:summary "Found the page."})
-                  xia.llm/chat-with-tools            (fn [_messages _tools & _opts]
+                  xia.llm/chat-message               (fn [_messages & _opts]
                                                        (if (= 1 (swap! llm-calls inc))
                                                          {"content" ""
                                                           "tool_calls" [{"id" "call-1"
@@ -294,7 +323,7 @@
                   xia.tool/parallel-safe?            (constantly false)
                   xia.tool/execute-tool              (fn [_tool-id _args _context]
                                                        {:summary "Found the page."})
-                  xia.llm/chat-with-tools            (fn [_messages _tools & _opts]
+                  xia.llm/chat-message               (fn [_messages & _opts]
                                                        (swap! llm-calls inc)
                                                        {"content" ""
                                                         "tool_calls" [{"id" "call-1"
@@ -325,7 +354,7 @@
                   xia.context/build-messages-data       (fn [_session-id _opts]
                                                           {:messages [{:role "system" :content "test"}]
                                                            :used-fact-eids [11 22]})
-                  xia.llm/chat-simple                   (fn [_messages & _opts] "All set.")
+                  xia.llm/chat-message                  (fn [_messages & _opts] {"content" "All set."})
                   xia.agent/schedule-fact-utility-review!
                   (fn [fact-eids user-message assistant-response]
                     (reset! reviewed {:fact-eids fact-eids
@@ -349,7 +378,7 @@
                   xia.context/build-messages-data    (fn [_session-id _opts]
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.llm/chat-simple                (fn [_messages & _opts] "All set.")
+                  xia.llm/chat-message               (fn [_messages & _opts] {"content" "All set."})
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
       (is (= "All set."
              (agent/process-message session-id "hello" :channel :terminal))))
@@ -368,7 +397,7 @@
                   xia.context/build-messages-data    (fn [_session-id _opts]
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids [11]})
-                  xia.llm/chat-simple                (fn [_messages & _opts] "All set.")
+                  xia.llm/chat-message               (fn [_messages & _opts] {"content" "All set."})
                   xia.agent/schedule-fact-utility-review!
                   (fn [& _]
                     (throw (ex-info "fact review queue unavailable" {:type :fact-review-failure})))]
@@ -398,7 +427,7 @@
                                                        {:summary "Captured chart from the browser."
                                                         :detail "high"
                                                         :image_data_url "data:image/png;base64,AAAA"})
-                  xia.llm/chat-with-tools            (fn [messages _tools & _opts]
+                  xia.llm/chat-message               (fn [messages & _opts]
                                                        (swap! llm-calls conj messages)
                                                        (if (= 1 (count @llm-calls))
                                                          {"content" ""
@@ -462,7 +491,7 @@
                                                        {:summary "Captured chart from the browser."
                                                         :detail "high"
                                                         :image_data_url "data:image/png;base64,AAAA"})
-                  xia.llm/chat-with-tools            (fn [messages _tools & _opts]
+                  xia.llm/chat-message               (fn [messages & _opts]
                                                        (swap! llm-calls conj messages)
                                                        (if (= 1 (count @llm-calls))
                                                          {"content" ""
@@ -495,9 +524,9 @@
                                                        (swap! llm-calls inc)
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.llm/chat-simple                (fn [& _]
+                  xia.llm/chat-message               (fn [& _]
                                                        (swap! llm-calls inc)
-                                                       "unreachable")]
+                                                       {"content" "unreachable"})]
       (let [err (try
                   (agent/process-message session-id "123456" :channel :terminal)
                   (catch clojure.lang.ExceptionInfo e
@@ -534,9 +563,9 @@
                                                        (swap! llm-calls inc)
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.llm/chat-simple                (fn [& _]
+                  xia.llm/chat-message               (fn [& _]
                                                        (swap! llm-calls inc)
-                                                       "unreachable")]
+                                                       {"content" "unreachable"})]
         (let [err (try
                   (agent/process-message session-id text :channel :terminal)
                   (catch clojure.lang.ExceptionInfo e
@@ -567,10 +596,10 @@
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)
-                  xia.llm/chat-simple                (fn [_messages & _opts]
+                  xia.llm/chat-message               (fn [_messages & _opts]
                                                        (deliver first-llm-started true)
                                                        @release-first-llm
-                                                       "reply-1")]
+                                                       {"content" "reply-1"})]
       (let [first-turn  (future (agent/process-message session-id "first" :channel :http))
             _           (is (= true (deref first-llm-started 1000 ::timeout)))
             second-turn (future
@@ -719,11 +748,11 @@
                   xia.context/build-messages-data    (fn [_session-id _opts]
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.llm/chat-simple                (fn [_messages & _opts]
+                  xia.llm/chat-message               (fn [_messages & _opts]
                                                        (deliver started true)
                                                        (try
                                                          (Thread/sleep 10000)
-                                                         "done"
+                                                         {"content" "done"}
                                                          (finally
                                                            (deliver stopped true))))]
       (let [result (future

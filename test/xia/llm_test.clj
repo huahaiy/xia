@@ -432,6 +432,41 @@
       (finally
         (llm/reset-runtime!)))))
 
+(deftest chat-message-stamps-session-provenance-into-llm-log
+  (let [logged (atom nil)
+        session-id (random-uuid)]
+    (llm/reset-runtime!)
+    (try
+      (with-redefs [xia.db/get-default-provider
+                    (constantly {:llm.provider/id :default
+                                 :llm.provider/base-url "https://api.example.com/v1"
+                                 :llm.provider/api-key "sk-test"
+                                 :llm.provider/model "gpt-test"})
+                    xia.llm/provider-health
+                    (atom {})
+                    xia.llm/max-provider-retry-rounds
+                    (constantly 4)
+                    xia.llm/max-provider-retry-wait-ms
+                    (constantly 300000)
+                    xia.http-client/request
+                    (fn [_]
+                      {:status 200
+                       :body "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"})
+                    xia.db/log-llm-call!
+                    (fn [entry]
+                      (reset! logged entry))]
+        (let [message (llm/chat-message [{"role" "user" "content" "hello"}]
+                                        :session-id session-id)]
+          (llm/await-background-tasks!)
+          (is (= "ok" (get message "content")))
+          (is (= session-id (:session-id @logged)))
+          (is (= :default (:provider-id @logged)))
+          (is (= "gpt-test" (:model @logged)))
+          (is (uuid? (:id @logged)))
+          (is (= (:id @logged) (:llm-call-id (meta message))))))
+      (finally
+        (llm/reset-runtime!)))))
+
 (deftest chat-simple-rejects-malformed-provider-response
   (with-redefs [xia.db/get-default-provider
                 (constantly {:llm.provider/id :default

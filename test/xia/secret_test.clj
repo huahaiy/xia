@@ -16,6 +16,9 @@
     (is (secret/secret-attr? :oauth.account/client-secret))
     (is (secret/secret-attr? :message/content))
     (is (secret/secret-attr? :message/tool-result))
+    (is (secret/secret-attr? :llm.log/messages))
+    (is (secret/secret-attr? :llm.log/response))
+    (is (secret/secret-attr? :audit.event/data))
     (is (secret/secret-attr? :schedule-run/result))
     (is (secret/secret-attr? :schedule-run/actions)))
   (testing "secret namespace prefixes"

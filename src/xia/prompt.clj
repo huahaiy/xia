@@ -4,7 +4,8 @@
 
    Channels register prompt/approval handlers keyed by channel.
    Tool code calls (prompt! ...) or privileged tool execution calls
-   (approve! ...) which delegates to the current channel handler.")
+   (approve! ...) which delegates to the current channel handler."
+  (:require [xia.audit :as audit]))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt callback registry
@@ -54,7 +55,19 @@
     (when-not f
       (throw (ex-info "No interactive prompt available for current channel"
                       {:label label :channel (current-channel)})))
-    (f label :mask? mask?)))
+    (audit/log! *interaction-context*
+                {:actor :user
+                 :type  :input-request
+                 :data  {:label label
+                         :masked (boolean mask?)}})
+    (let [value (f label :mask? mask?)]
+      (audit/log! *interaction-context*
+                  {:actor :user
+                   :type  :input-response
+                   :data  {:label label
+                           :masked (boolean mask?)
+                           :provided (not (clojure.string/blank? value))}})
+      value)))
 
 (defn prompt-available?
   "True if a prompt handler is registered."
@@ -79,7 +92,24 @@
       (throw (ex-info "No approval handler available for current channel"
                       {:channel (current-channel)
                        :tool-id (:tool-id request)})))
-    (boolean (f req))))
+    (audit/log! *interaction-context*
+                {:actor :user
+                 :type  :approval-request
+                 :tool-id (some-> (:tool-id req) name)
+                 :data  {:tool-name   (:tool-name req)
+                         :description (:description req)
+                         :arguments   (:arguments req)
+                         :policy      (some-> (:policy req) name)
+                         :reason      (:reason req)}})
+    (let [approved? (boolean (f req))]
+      (audit/log! *interaction-context*
+                  {:actor :user
+                   :type  :approval-decision
+                   :tool-id (some-> (:tool-id req) name)
+                   :data  {:tool-name (:tool-name req)
+                           :approved approved?
+                           :policy   (some-> (:policy req) name)}})
+      approved?)))
 
 (defn approval-available?
   "True if an approval handler is registered."

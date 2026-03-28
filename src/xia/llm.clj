@@ -688,6 +688,34 @@
       (contains? message "content") (assoc "content" (or content ""))
       (nil? content) (assoc "content" ""))))
 
+(declare chat)
+
+(defn- response-metadata
+  [response request-info]
+  (merge request-info
+         (select-keys (meta response) [:provider-id :model :workload :llm-call-id])))
+
+(defn chat-message
+  "Send messages and return the normalized assistant message map.
+   Preserves provider/model/workload/call provenance in metadata."
+  [messages & {:keys [tools] :as opts}]
+  (let [resp         (apply chat messages (mapcat identity opts))
+        request-info (response-metadata resp (dissoc opts :on-delta))
+        message      (if (seq tools)
+                       (tool-message! resp request-info)
+                       (let [message (response-message! resp request-info)
+                             content (normalize-message-content (get message "content"))]
+                         (if (string? content)
+                           (cond-> message
+                             (contains? message "content")
+                             (assoc "content" content))
+                           (throw (malformed-response-ex
+                                    "LLM response missing text choices[0].message.content"
+                                    (assoc request-info :response resp))))))]
+    (if (instance? clojure.lang.IObj message)
+      (with-meta message (merge (meta message) request-info))
+      message)))
+
 (declare streaming-request?)
 
 (defn- provider-api-key
@@ -1453,7 +1481,11 @@
            :workload (:workload last-failure)})
         {:status :error
          :error (ex-info "No LLM provider available for request" {})})
-      (let [t0     (now-ms)
+      (let [provider-id (:provider-id attempt)
+            model       (or (:llm.provider/model (:provider attempt))
+                            (:model (:provider attempt)))
+            t0     (now-ms)
+            call-id (random-uuid)
             result (try
                      {:ok? true
                       :response (attempt-chat messages opts attempt)}
@@ -1462,12 +1494,11 @@
                         :error e}))
             dur-ms (- (now-ms) t0)]
         (try
-          (let [provider-id (:provider-id attempt)
-                model       (or (:llm.provider/model (:provider attempt))
-                                (:model (:provider attempt)))
-                usage       (when (:ok? result)
+          (let [usage       (when (:ok? result)
                               (get (:response result) "usage"))
-                log-entry   (cond-> {:provider-id provider-id
+                log-entry   (cond-> {:id          call-id
+                                     :session-id  (:session-id opts)
+                                     :provider-id provider-id
                                      :model       model
                                      :workload    (:workload attempt)
                                      :duration-ms dur-ms
@@ -1493,14 +1524,16 @@
                 response* (if (instance? clojure.lang.IObj response)
                             (with-meta response
                               (merge (meta response)
-                                     {:provider-id (:provider-id attempt)
-                                      :workload (:workload attempt)}))
+                                     {:provider-id provider-id
+                                      :model model
+                                      :workload (:workload attempt)
+                                      :llm-call-id call-id}))
                             response)]
-            (record-provider-success! (:provider-id attempt))
+            (record-provider-success! provider-id)
             {:status :ok
              :response response*})
           (let [e           (:error result)
-                attempt-id  (:provider-id attempt)
+                attempt-id  provider-id
                 error-text  (provider-error-message attempt-id e)
                 failure     (if (local-rate-limit-error? e)
                               {:error       e

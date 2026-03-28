@@ -305,8 +305,58 @@ h1 {
 }
 .side-stack {
   display: grid;
-  gap: 18px;
+  gap: 12px;
   min-height: 0;
+}
+.panel.sidebar-accordion {
+  padding: 0;
+  overflow: hidden;
+}
+.accordion-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  cursor: pointer;
+}
+.accordion-summary::-webkit-details-marker {
+  display: none;
+}
+.accordion-summary::after {
+  content: "▾";
+  color: var(--muted);
+  font-size: 0.92rem;
+  transition: transform 120ms ease, color 120ms ease;
+}
+.sidebar-accordion[open] .accordion-summary::after {
+  transform: rotate(180deg);
+  color: var(--accent-dark);
+}
+.accordion-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.accordion-title-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.accordion-body {
+  display: grid;
+  gap: 14px;
+  padding: 0 18px 18px;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
+.accordion-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding-top: 14px;
 }
 .panel {
   padding: 20px;
@@ -645,12 +695,28 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   line-height: 1.5;
   font-size: 0.9rem;
 }
-.local-doc-list {
+.local-doc-list,
+.shared-workspace-list {
   display: grid;
   gap: 8px;
   max-height: 220px;
   overflow: auto;
   padding-right: 4px;
+}
+.shared-workspace-link {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: #fff;
+  color: inherit;
+  text-decoration: none;
+}
+.shared-workspace-link:hover {
+  border-color: rgba(26, 158, 150, 0.28);
+  background: var(--accent-light);
+  text-decoration: none;
 }
 .scratch-item {
   width: 100%;

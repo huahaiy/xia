@@ -16,6 +16,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
+            [xia.workspace :as workspace]
             [xia.test-helpers :as th :refer [minimal-pdf-bytes with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream File]
            [java.net BindException]
@@ -132,6 +133,7 @@
     (is (re-find #"Copy transcript" (:body response)))
     (is (re-find #"Local Documents" (:body response)))
     (is (re-find #"Artifacts" (:body response)))
+    (is (re-find #"Shared Workspace" (:body response)))
     (is (re-find #"Notes" (:body response)))
     (is (re-find #"History" (:body response)))
     (is (re-find #"Scheduled Runs" (:body response)))
@@ -688,6 +690,7 @@
 
 (deftest session-messages-route-returns-transcript
   (let [sid (db/create-session! :http)
+        call-id (random-uuid)
         doc (local-doc/save-upload! {:session-id sid
                                      :name "notes.md"
                                      :media-type "text/markdown"
@@ -701,6 +704,13 @@
                      :local-doc-ids [(:id doc)]
                      :artifact-ids [(:id report)])
     (db/add-message! sid :assistant "hi there"
+                     :llm-call-id call-id
+                     :provider-id :openrouter
+                     :model "moonshotai/kimi-k2.5"
+                     :workload :assistant
+                     :tool-calls [{"id" "call_1"
+                                   "function" {"name" "browser-open"
+                                               "arguments" "{\"url\":\"https://example.com\"}"}}]
                      :local-doc-ids [(:id doc)]
                      :artifact-ids [(:id report)])
     (db/add-message! sid :tool "internal")
@@ -715,10 +725,65 @@
       (is (= "hello" (get (first messages) "content")))
       (is (= "notes.md" (get-in (first messages) ["local_docs" 0 "name"])))
       (is (= "Summary Report" (get-in (first messages) ["artifacts" 0 "title"])))
+      (is (string? (get (first messages) "id")))
       (is (= "assistant" (get (second messages) "role")))
       (is (= "hi there" (get (second messages) "content")))
+      (is (= (str call-id) (get (second messages) "llm_call_id")))
+      (is (= "openrouter" (get (second messages) "provider_id")))
+      (is (= "moonshotai/kimi-k2.5" (get (second messages) "model")))
+      (is (= "assistant" (get (second messages) "workload")))
+      (is (= "browser-open" (get-in (second messages) ["tool_calls" 0 "name"])))
       (is (= (str (:id doc)) (get-in (second messages) ["local_docs" 0 "id"])))
       (is (= (str (:id report)) (get-in (second messages) ["artifacts" 0 "id"]))))))
+
+(deftest session-audit-route-returns-events
+  (let [sid (db/create-session! :http)
+        call-id (random-uuid)]
+    (db/log-audit-event! {:session-id sid
+                          :channel :http
+                          :actor :assistant
+                          :type :llm-response
+                          :llm-call-id call-id
+                          :data {:provider-id "openrouter"
+                                 :model "moonshotai/kimi-k2.5"}})
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/audit")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body (response-json response)
+          events (get body "events")]
+      (is (= 200 (:status response)))
+      (is (= 1 (count events)))
+      (is (= "assistant" (get-in events [0 "actor"])))
+      (is (= "llm-response" (get-in events [0 "type"])))
+      (is (= (str call-id) (get-in events [0 "llm_call_id"])))
+      (is (= "openrouter" (get-in events [0 "data" "provider-id"])))
+      (is (= "moonshotai/kimi-k2.5" (get-in events [0 "data" "model"]))))))
+
+(deftest llm-call-detail-route-includes-related-transcript-messages
+  (let [sid (db/create-session! :http)
+        call-id (random-uuid)]
+    (db/log-llm-call! {:id call-id
+                       :session-id sid
+                       :provider-id :openrouter
+                       :model "moonshotai/kimi-k2.5"
+                       :messages "[]"
+                       :response "{\"choices\":[{\"message\":{\"content\":\"hi\"}}]}"
+                       :status :ok})
+    (db/add-message! sid :assistant "hi"
+                     :llm-call-id call-id
+                     :provider-id :openrouter
+                     :model "moonshotai/kimi-k2.5"
+                     :workload :assistant)
+    (let [response (#'http/router {:uri            (str "/llm-calls/" call-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body (response-json response)
+          related (get-in body ["call" "related_messages"])]
+      (is (= 200 (:status response)))
+      (is (= 1 (count related)))
+      (is (= "assistant" (get-in related [0 "role"])))
+      (is (= "openrouter" (get-in related [0 "provider_id"])))
+      (is (= "moonshotai/kimi-k2.5" (get-in related [0 "model"]))))))
 
 (deftest session-messages-route-blocks-non-local-origins
   (let [response (#'http/router {:uri            (str "/sessions/" (random-uuid) "/messages")
@@ -1151,6 +1216,26 @@
     (is (= 200 (:status delete-res)))
     (is (= "deleted" (get delete-body "status")))
     (is (= [] (get empty-body "artifacts")))))
+
+(deftest workspace-routes-list-and-download-files
+  (let [item         (workspace/write-note! "# Shared note")
+        list-res     (#'http/router {:uri "/workspace/items"
+                                     :request-method :get
+                                     :headers (ui-headers)})
+        list-body    (response-json list-res)
+        download-res (#'http/router {:uri (str "/workspace/items/" (:id item) "/download")
+                                     :request-method :get
+                                     :headers (ui-headers)})]
+    (is (= 200 (:status list-res)))
+    (is (= paths/default-workspace-id (get list-body "workspace_id")))
+    (is (= (str (:id item)) (get-in list-body ["items" 0 "id"])))
+    (is (= (:name item) (get-in list-body ["items" 0 "name"])))
+    (is (= (str "/workspace/items/" (:id item) "/download")
+           (get-in list-body ["items" 0 "download_url"])))
+    (is (= 200 (:status download-res)))
+    (is (= "text/markdown; charset=utf-8" (get-in download-res [:headers "Content-Type"])))
+    (is (re-find #"attachment; filename=\"note\.md\"" (get-in download-res [:headers "Content-Disposition"])))
+    (is (= "# Shared note" (String. ^bytes (:body download-res) StandardCharsets/UTF_8)))))
 
 (deftest knowledge-routes-search-list-and-forget-facts
   (let [alice-eid      (th/seed-node! "Alice Johnson" "person")

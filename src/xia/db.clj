@@ -1,7 +1,8 @@
 (ns xia.db
   "Datalevin database — the single source of truth for a xia instance.
    All state lives here: config, identity, memory, messages, skills, tools."
-  (:require [clojure.java.io :as io]
+  (:require [charred.api :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [datalevin.core :as d]
             [datalevin.embedding :as emb]
@@ -149,6 +150,12 @@
    :message/tool-calls {:db/valueType :db.type/idoc :db/domain "message-tool-calls"}
    :message/tool-result {:db/valueType :db.type/idoc :db/domain "message-tool-result"}
    :message/tool-id    {:db/valueType :db.type/string}  ; for tool-result messages
+   :message/tool-call-id {:db/valueType :db.type/string}
+   :message/tool-name   {:db/valueType :db.type/string}
+   :message/llm-call-id {:db/valueType :db.type/uuid}
+   :message/provider-id {:db/valueType :db.type/keyword}
+   :message/model       {:db/valueType :db.type/string}
+   :message/workload    {:db/valueType :db.type/keyword}
    :message.local-doc-ref/id      {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :message.local-doc-ref/message {:db/valueType :db.type/ref}
    :message.local-doc-ref/doc     {:db/valueType :db.type/ref}
@@ -413,6 +420,19 @@
    :llm.log/prompt-tokens   {:db/valueType :db.type/long}
    :llm.log/completion-tokens {:db/valueType :db.type/long}
    :llm.log/created-at  {:db/valueType :db.type/instant}
+
+   ;; --- Session Audit Event (interactive audit trail) ---
+   :audit.event/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :audit.event/session-id  {:db/valueType :db.type/uuid}
+   :audit.event/channel     {:db/valueType :db.type/keyword}
+   :audit.event/actor       {:db/valueType :db.type/keyword}
+   :audit.event/type        {:db/valueType :db.type/keyword}
+   :audit.event/message-id  {:db/valueType :db.type/uuid}
+   :audit.event/llm-call-id {:db/valueType :db.type/uuid}
+   :audit.event/tool-id     {:db/valueType :db.type/string}
+   :audit.event/tool-call-id {:db/valueType :db.type/string}
+   :audit.event/data        {:db/valueType :db.type/string}
+   :audit.event/created-at  {:db/valueType :db.type/instant}
 
    ;; --- Tool (executable code the LLM can call via function-calling) ---
    :tool/id            {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
@@ -1851,7 +1871,16 @@
     (= "" value)        nil
     :else               value))
 
-(declare empty->nil)
+(defn- json-doc
+  [value]
+  (json/write-json-str value))
+
+(defn- read-json-doc
+  [value]
+  (when (string? value)
+    (json/read-json value)))
+
+(declare empty->nil session-messages)
 
 (defn- normalize-message-local-doc-id
   [value]
@@ -1953,7 +1982,9 @@
        (max 1 (quot (count payload) 4)))))
 
 (defn add-message!
-  [session-id role content & {:keys [tool-calls tool-id tool-result local-doc-ids artifact-ids]}]
+  [session-id role content & {:keys [tool-calls tool-id tool-call-id tool-name tool-result
+                                     llm-call-id provider-id model workload
+                                     local-doc-ids artifact-ids]}]
   (let [session-eid    (session-eid session-id)
         message-id     (random-uuid)
         doc-ids        (valid-session-local-doc-ids session-id local-doc-ids)
@@ -1969,7 +2000,13 @@
                                                                    :tool-result tool-result})}
            tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
            (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
-           tool-id    (assoc :message/tool-id tool-id))]
+           tool-id    (assoc :message/tool-id tool-id)
+           tool-call-id (assoc :message/tool-call-id tool-call-id)
+           tool-name  (assoc :message/tool-name tool-name)
+           llm-call-id (assoc :message/llm-call-id llm-call-id)
+           provider-id (assoc :message/provider-id provider-id)
+           model      (assoc :message/model model)
+           workload   (assoc :message/workload workload))]
         (concat
           (map (fn [doc-id]
                  {:message.local-doc-ref/id      (random-uuid)
@@ -1980,7 +2017,8 @@
                  {:message.artifact-ref/id       (random-uuid)
                   :message.artifact-ref/message  [:message/id message-id]
                   :message.artifact-ref/artifact [:artifact/id artifact-id]})
-              artifact-ids*))))))
+              artifact-ids*))))
+    message-id))
 
 (defn- empty->nil [s] (when-not (= "" s) s))
 
@@ -2052,17 +2090,24 @@
             (into {}
                   (map (fn [[eid mid content role tool-calls tool-result tool-id]]
                          [eid
-                          (let [tool-result* (read-tool-result-doc tool-result)]
+                          (let [tool-result* (read-tool-result-doc tool-result)
+                                entity-map    (raw-entity eid)]
                             {:id          mid
                              :role        role
                              :content     (when-not (and (= role :tool) (some? tool-result*))
                                             (decrypt-secret-attr :message/content content))
-                             :created-at  (entity-created-at (raw-entity eid))
+                             :created-at  (entity-created-at entity-map)
                              :local-docs  (not-empty (message-local-docs eid))
                              :artifacts   (not-empty (message-artifacts eid))
                              :tool-calls  (read-tool-calls-doc tool-calls)
                              :tool-result tool-result*
-                             :tool-id     (empty->nil tool-id)})])
+                             :tool-id     (empty->nil tool-id)
+                             :tool-call-id (empty->nil (:message/tool-call-id entity-map))
+                             :tool-name   (empty->nil (:message/tool-name entity-map))
+                             :llm-call-id (:message/llm-call-id entity-map)
+                             :provider-id (:message/provider-id entity-map)
+                             :model       (empty->nil (:message/model entity-map))
+                             :workload    (:message/workload entity-map)})])
                        (q '[:find ?m ?mid ?content ?role ?tc ?tr ?tid
                             :in $ [?m ...]
                             :where
@@ -2076,6 +2121,16 @@
         (->> message-eids*
              (keep by-eid)
              vec)))))
+
+(defn latest-session-message
+  ([session-id]
+   (latest-session-message session-id nil))
+  ([session-id roles]
+   (let [roles* (some->> roles set)]
+     (->> (session-messages session-id)
+          (filter #(or (nil? roles*)
+                       (contains? roles* (:role %))))
+          last))))
 
 (defn session-messages
   "Get all messages for a session, ordered by creation time."
@@ -2578,18 +2633,48 @@
                      (when-let [v (:completion-tokens entry)] {:llm.log/completion-tokens v}))])
   (prune-llm-log!))
 
+(defn- llm-call-related-messages
+  [call-id]
+  (->> (q '[:find ?m ?mid ?role ?created-at
+            :in $ ?call-id
+            :where
+            [?m :message/llm-call-id ?call-id]
+            [?m :message/id ?mid]
+            [?m :message/role ?role]
+            [(get-else $ ?m :db/created-at 0) ?created-at]]
+          call-id)
+       (sort-by (juxt #(nth % 3) first))
+       (mapv (fn [[eid message-id role created-at]]
+               (let [entity-map (raw-entity eid)]
+                 {:id          message-id
+                  :role        role
+                  :provider-id (:message/provider-id entity-map)
+                  :model       (empty->nil (:message/model entity-map))
+                  :workload    (:message/workload entity-map)
+                  :created-at  (epoch-millis->date created-at)})))))
+
 (defn list-llm-calls
   "Return recent LLM call log entries, newest first. `limit` defaults to 50."
   ([] (list-llm-calls 50))
   ([limit]
-   (->> (q '[:find ?e ?t
-             :where
-             [?e :llm.log/id _]
-             [?e :llm.log/created-at ?t]])
+   (list-llm-calls limit nil))
+  ([limit session-id]
+   (->> (if session-id
+          (q '[:find ?e ?t
+               :in $ ?sid
+               :where
+               [?e :llm.log/id _]
+               [?e :llm.log/session-id ?sid]
+               [?e :llm.log/created-at ?t]]
+             session-id)
+          (q '[:find ?e ?t
+               :where
+               [?e :llm.log/id _]
+               [?e :llm.log/created-at ?t]]))
         (sort-by second #(compare %2 %1))
         (take limit)
         (mapv (fn [[eid _]]
-                (let [e (raw-entity eid)]
+                (let [e (decrypt-entity (raw-entity eid))]
                   {:id               (:llm.log/id e)
                    :session-id       (:llm.log/session-id e)
                    :provider-id      (:llm.log/provider-id e)
@@ -2606,7 +2691,7 @@
   "Return a single LLM call log entry with full messages/response."
   [call-id]
   (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))]
-    (let [e (raw-entity eid)]
+    (let [e (decrypt-entity (raw-entity eid))]
       {:id               (:llm.log/id e)
        :session-id       (:llm.log/session-id e)
        :provider-id      (:llm.log/provider-id e)
@@ -2620,4 +2705,45 @@
        :duration-ms      (:llm.log/duration-ms e)
        :prompt-tokens    (:llm.log/prompt-tokens e)
        :completion-tokens (:llm.log/completion-tokens e)
+       :related-messages (llm-call-related-messages call-id)
        :created-at       (:llm.log/created-at e)})))
+
+(defn log-audit-event!
+  [entry]
+  (transact! [(merge {:audit.event/id         (or (:id entry) (random-uuid))
+                      :audit.event/created-at (or (:created-at entry) (java.util.Date.))}
+                     (when-let [v (:session-id entry)]  {:audit.event/session-id v})
+                     (when-let [v (:channel entry)]     {:audit.event/channel v})
+                     (when-let [v (:actor entry)]       {:audit.event/actor v})
+                     (when-let [v (:type entry)]        {:audit.event/type v})
+                     (when-let [v (:message-id entry)]  {:audit.event/message-id v})
+                     (when-let [v (:llm-call-id entry)] {:audit.event/llm-call-id v})
+                     (when-let [v (:tool-id entry)]     {:audit.event/tool-id v})
+                     (when-let [v (:tool-call-id entry)] {:audit.event/tool-call-id v})
+                     (when-let [v (:data entry)]        {:audit.event/data (json-doc v)}))]))
+
+(defn session-audit-events
+  ([session-id]
+   (session-audit-events session-id 500))
+  ([session-id limit]
+   (->> (q '[:find ?e ?created-at
+             :in $ ?sid
+             :where
+             [?e :audit.event/session-id ?sid]
+             [?e :audit.event/created-at ?created-at]]
+           session-id)
+        (sort-by (juxt second first))
+        (take-last limit)
+        (mapv (fn [[eid _]]
+                (let [e (decrypt-entity (raw-entity eid))]
+                  {:id           (:audit.event/id e)
+                   :session-id   (:audit.event/session-id e)
+                   :channel      (:audit.event/channel e)
+                   :actor        (:audit.event/actor e)
+                   :type         (:audit.event/type e)
+                   :message-id   (:audit.event/message-id e)
+                   :llm-call-id  (:audit.event/llm-call-id e)
+                   :tool-id      (empty->nil (:audit.event/tool-id e))
+                   :tool-call-id (empty->nil (:audit.event/tool-call-id e))
+                   :data         (read-json-doc (:audit.event/data e))
+                   :created-at   (:audit.event/created-at e)}))))))

@@ -32,6 +32,7 @@
             [xia.setup :as setup]
             [xia.summarizer :as summarizer]
             [xia.skill.openclaw :as openclaw-skill]
+            [xia.workspace :as workspace]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
     [java.net BindException URI]
@@ -1105,6 +1106,59 @@
    :title  (:title artifact)
    :status (some-> (:status artifact) name)})
 
+(defn- workspace-item->body
+  [item]
+  (let [item-id (some-> (:id item) str)]
+    {:id           item-id
+     :workspace_id (:workspace-id item)
+     :name         (:name item)
+     :title        (:title item)
+     :source_type  (some-> (:source-type item) name)
+     :source_id    (:source-id item)
+     :media_type   (:media-type item)
+     :size_bytes   (:size-bytes item)
+     :created_at   (instant->str (:created-at item))
+     :download_url (when item-id
+                     (str "/workspace/items/" item-id "/download"))}))
+
+(defn- tool-call->body
+  [tool-call]
+  (cond-> {:id        (get tool-call "id")
+           :name      (or (get-in tool-call ["function" "name"])
+                          (get tool-call "name"))}
+    (or (get-in tool-call ["function" "arguments"])
+        (get tool-call "arguments"))
+    (assoc :arguments (or (get-in tool-call ["function" "arguments"])
+                          (get tool-call "arguments")))))
+
+(defn- session-message->body
+  [{:keys [id role content created-at local-docs artifacts tool-calls llm-call-id provider-id model workload]}]
+  (cond-> {:id         (some-> id str)
+           :role       (name role)
+           :content    content
+           :created_at (instant->str created-at)
+           :local_docs (into [] (map local-doc-ref->body) (or local-docs []))
+           :artifacts  (into [] (map artifact-ref->body) (or artifacts []))}
+    llm-call-id (assoc :llm_call_id (str llm-call-id))
+    provider-id (assoc :provider_id (name provider-id))
+    model (assoc :model model)
+    workload (assoc :workload (name workload))
+    (seq tool-calls) (assoc :tool_calls (mapv tool-call->body tool-calls))))
+
+(defn- audit-event->body
+  [event]
+  (cond-> {:id         (some-> (:id event) str)
+           :session_id (some-> (:session-id event) str)
+           :channel    (some-> (:channel event) name)
+           :actor      (some-> (:actor event) name)
+           :type       (some-> (:type event) name)
+           :created_at (instant->str (:created-at event))}
+    (:message-id event) (assoc :message_id (str (:message-id event)))
+    (:llm-call-id event) (assoc :llm_call_id (str (:llm-call-id event)))
+    (:tool-id event) (assoc :tool_id (:tool-id event))
+    (:tool-call-id event) (assoc :tool_call_id (:tool-call-id event))
+    (:data event) (assoc :data (:data event))))
+
 (defn- named-value->str
   [value]
   (cond
@@ -1772,10 +1826,12 @@
                                           message
                                           :channel channel
                                           :local-doc-ids local-doc-ids
-                                          :artifact-ids artifact-ids)]
+                                          :artifact-ids artifact-ids)
+          assistant-message (db/latest-session-message session-id #{:assistant})]
       (json-response 200 {:session_id (str session-id)
                           :role       "assistant"
-                          :content    response}))
+                          :content    response
+                          :message    (some-> assistant-message session-message->body)}))
     (finally
       (touch-rest-session! session-id))))
 
@@ -1904,14 +1960,7 @@
          (let [messages (->> (db/session-messages sid)
                              (into [] (comp
                                         (filter #(#{:user :assistant} (:role %)))
-                                        (map (fn [{:keys [role content created-at local-docs artifacts]}]
-                                               {:role       (name role)
-                                                :content    content
-                                                :created_at (instant->str created-at)
-                                                :local_docs (into [] (map local-doc-ref->body)
-                                                                  (or local-docs []))
-                                                :artifacts  (into [] (map artifact-ref->body)
-                                                                  (or artifacts []))}))))) ]
+                                        (map session-message->body))))]
            (touch-rest-session! session-id)
            (json-response 200 {:session_id session-id
                                :messages   messages}))))
@@ -1975,6 +2024,7 @@
 
 (defn- llm-call-summary->body [entry]
   (cond-> {:id          (str (:id entry))
+           :session_id  (some-> (:session-id entry) str)
            :provider_id (some-> (:provider-id entry) name)
            :model       (:model entry)
            :workload    (some-> (:workload entry) name)
@@ -1989,14 +2039,28 @@
   (cond-> (llm-call-summary->body entry)
     (:messages entry) (assoc :messages (:messages entry))
     (:tools entry)    (assoc :tools (:tools entry))
-    (:response entry) (assoc :response (:response entry))))
+    (:response entry) (assoc :response (:response entry))
+    (seq (:related-messages entry))
+    (assoc :related_messages
+           (mapv (fn [{:keys [id role provider-id model workload created-at]}]
+                   (cond-> {:id         (str id)
+                            :role       (name role)
+                            :created_at (instant->str created-at)}
+                     provider-id (assoc :provider_id (name provider-id))
+                     model (assoc :model model)
+                     workload (assoc :workload (name workload))))
+                 (:related-messages entry)))))
 
 (defn- handle-list-llm-calls [req]
   (let [params (parse-query-string (:query-string req))
-        limit  (or (some-> (get params "limit") parse-long) 50)]
-    (json-response 200
-                   {:calls (into [] (map llm-call-summary->body)
-                                 (db/list-llm-calls (min limit 200)))})))
+        limit  (or (some-> (get params "limit") parse-long) 50)
+        raw-session-id (get params "session_id")
+        session-id (some-> raw-session-id parse-session-id)]
+    (if (and raw-session-id (nil? session-id))
+      (json-response 400 {:error "invalid session id"})
+      (json-response 200
+                     {:calls (into [] (map llm-call-summary->body)
+                                   (db/list-llm-calls (min limit 200) session-id))}))))
 
 (defn- handle-get-llm-call [call-id]
   (try
@@ -2007,6 +2071,21 @@
         (json-response 404 {:error "call not found"})))
     (catch IllegalArgumentException _
       (json-response 400 {:error "invalid call id"}))))
+
+(defn- handle-session-audit
+  ([session-id]
+   (handle-session-audit session-id nil))
+  ([session-id expected-channel]
+   (try
+     (let [sid (java.util.UUID/fromString session-id)]
+       (if-not (session-accessible? sid expected-channel)
+         (json-response 404 {:error "session not found"})
+         (let [events (mapv audit-event->body (db/session-audit-events sid 1000))]
+           (touch-rest-session! session-id)
+           (json-response 200 {:session_id session-id
+                               :events     events}))))
+     (catch IllegalArgumentException _
+       (json-response 400 {:error "invalid session id"})))))
 
 (defn- handle-list-scratch-pads [session-id]
   (cond
@@ -2507,6 +2586,35 @@
       (json-response 200 {:status "deleted"
                           :session_id session-id
                           :artifact_id artifact-id}))))
+
+(defn- handle-list-workspace-items
+  [req]
+  (try
+    (let [params       (parse-query-string (:query-string req))
+          workspace-id (nonblank-str (get params "workspace_id"))
+          top          (parse-optional-positive-long (get params "top") "top")
+          items        (workspace/list-items :workspace-id workspace-id :top top)]
+      (json-response 200
+                     {:workspace_id (or workspace-id paths/default-workspace-id)
+                      :items        (into [] (map workspace-item->body) items)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-download-workspace-item
+  [item-id req]
+  (try
+    (let [params       (parse-query-string (:query-string req))
+          workspace-id (nonblank-str (get params "workspace_id"))]
+      (if-let [item (workspace/get-item item-id :workspace-id workspace-id)]
+        (let [payload-file (some-> (:payload-path item) io/file)
+              bytes        (when (and payload-file (.isFile payload-file))
+                             (Files/readAllBytes (.toPath payload-file)))]
+          (if bytes
+            (download-response (:name item) (:media-type item) bytes)
+            (json-response 404 {:error "shared workspace item not found"})))
+        (json-response 404 {:error "shared workspace item not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
 
 (defn- handle-search-knowledge-nodes [req]
   (let [params (parse-query-string (:query-string req))
@@ -3521,10 +3629,12 @@
           method (:request-method req)
           session-close-match (re-matches #"/sessions/([0-9a-fA-F-]+)" uri)
           session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
+          session-audit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/audit" uri)
           status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
           approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
           command-session-close-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)" uri)
           command-session-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/messages" uri)
+          command-session-audit-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/audit" uri)
           command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
           history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
@@ -3538,6 +3648,8 @@
           artifact-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)" uri)
           artifact-scratch-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/scratch-pads" uri)
           artifact-download-match (re-matches #"/sessions/([0-9a-fA-F-]+)/artifacts/([^/]+)/download" uri)
+          workspace-list-match (= uri "/workspace/items")
+          workspace-download-match (re-matches #"/workspace/items/([^/]+)/download" uri)
           knowledge-node-facts-match (re-matches #"/knowledge/nodes/([^/]+)/facts" uri)
           knowledge-fact-match (re-matches #"/knowledge/facts/([^/]+)" uri)
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
@@ -3595,6 +3707,9 @@
         (and (= method :get) command-session-match)
         (command-route-response req #(handle-session-messages (second command-session-match) :command))
 
+        (and (= method :get) command-session-audit-match)
+        (command-route-response req #(handle-session-audit (second command-session-audit-match) :command))
+
         (and (= method :delete) session-close-match)
         (protected-route-response req #(handle-close-session (second session-close-match) :http))
 
@@ -3609,6 +3724,9 @@
 
         (and (= method :get) session-match)
         (protected-route-response req #(handle-session-messages (second session-match) :http))
+
+        (and (= method :get) session-audit-match)
+        (protected-route-response req #(handle-session-audit (second session-audit-match) :http))
 
         (and (= method :get) (= uri "/history/sessions"))
         (protected-route-response req handle-history-sessions)
@@ -3688,6 +3806,14 @@
         (and (= method :delete) artifact-match)
         (protected-route-response req #(handle-delete-artifact (second artifact-match)
                                                                (nth artifact-match 2)))
+
+        (and (= method :get) workspace-list-match)
+        (protected-route-response req #(handle-list-workspace-items req))
+
+        (and (= method :get) workspace-download-match)
+        (protected-route-response req #(handle-download-workspace-item
+                                         (second workspace-download-match)
+                                         req))
 
         (and (= method :get) (= uri "/knowledge/nodes"))
         (protected-route-response req #(handle-search-knowledge-nodes req))

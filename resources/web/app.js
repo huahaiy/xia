@@ -11,6 +11,8 @@ const state = {
   activeLocalDocId: '',
   activeLocalDoc: null,
   localDocUploading: false,
+  sharedWorkspaceItems: [],
+  sharedWorkspaceStatus: 'Loading...',
   artifacts: [],
   activeArtifactId: '',
   activeArtifact: null,
@@ -348,6 +350,8 @@ const artifactInsertEl = document.getElementById('artifact-insert');
 const artifactScratchEl = document.getElementById('artifact-scratch');
 const artifactDownloadEl = document.getElementById('artifact-download');
 const artifactDeleteEl = document.getElementById('artifact-delete');
+const sharedWorkspaceListEl = document.getElementById('shared-workspace-list');
+const sidebarAccordionEls = Array.from(document.querySelectorAll('.sidebar-accordion'));
 const tabLinks = document.querySelectorAll('.tab-link');
 const tabPanels = document.querySelectorAll('.tab-panel');
 const advancedToggleEl = document.getElementById('advanced-toggle');
@@ -363,6 +367,15 @@ function switchTab(tabId) {
 
 tabLinks.forEach((link) => {
   link.addEventListener('click', () => switchTab(link.dataset.tab));
+});
+
+sidebarAccordionEls.forEach((accordion) => {
+  accordion.addEventListener('toggle', () => {
+    if (!accordion.open) return;
+    sidebarAccordionEls.forEach((other) => {
+      if (other !== accordion) other.open = false;
+    });
+  });
 });
 
 advancedToggleEl.addEventListener('change', () => {
@@ -4201,6 +4214,24 @@ function renderLlmCallDetail() {
     catch (_) { respPre.textContent = call.response; }
     llmCallDetailEl.appendChild(respPre);
   }
+  if (Array.isArray(call.related_messages) && call.related_messages.length) {
+    const relatedLabel = document.createElement('div');
+    relatedLabel.className = 'history-block-label';
+    relatedLabel.textContent = 'Related transcript messages';
+    llmCallDetailEl.appendChild(relatedLabel);
+    const relatedPre = document.createElement('pre');
+    relatedPre.textContent = call.related_messages
+      .map(function (message) {
+        const bits = [message.role];
+        if (message.provider_id) bits.push(message.provider_id);
+        if (message.model) bits.push(message.model);
+        if (message.workload) bits.push(message.workload);
+        if (message.created_at) bits.push(formatDateTime(message.created_at));
+        return bits.join(' · ') + ' · ' + (message.id || '');
+      })
+      .join('\n');
+    llmCallDetailEl.appendChild(relatedPre);
+  }
 }
 
 async function loadLlmCalls() {
@@ -5230,7 +5261,15 @@ function formatStamp(value) {
 function normalizeMessage(message) {
   if (!message) return null;
   return Object.assign({}, message, {
+    id: message.id || '',
     createdAt: message.createdAt || message.created_at || '',
+    llmCallId: message.llmCallId || message.llm_call_id || '',
+    providerId: message.providerId || message.provider_id || '',
+    model: message.model || '',
+    workload: message.workload || '',
+    toolCalls: Array.isArray(message.toolCalls)
+      ? message.toolCalls
+      : (Array.isArray(message.tool_calls) ? message.tool_calls : []),
     localDocs: Array.isArray(message.localDocs)
       ? message.localDocs
       : (Array.isArray(message.local_docs) ? message.local_docs : []),
@@ -5238,6 +5277,26 @@ function normalizeMessage(message) {
       ? message.artifacts
       : (Array.isArray(message.artifact_refs) ? message.artifact_refs : [])
   });
+}
+
+function messageProvenanceText(message) {
+  const bits = [];
+  if (message.createdAt) bits.push(formatStamp(message.createdAt));
+  if (message.role === 'assistant') {
+    if (message.providerId) bits.push(message.providerId);
+    if (message.model) bits.push(message.model);
+    if (message.workload) bits.push(message.workload);
+  }
+  return bits.join(' · ');
+}
+
+function messageToolPlanText(message) {
+  const toolCalls = Array.isArray(message.toolCalls) ? message.toolCalls : [];
+  if (!toolCalls.length) return '';
+  return 'Tool plan: ' + toolCalls
+    .map((toolCall) => toolCall && (toolCall.name || toolCall.id))
+    .filter(Boolean)
+    .join(', ');
 }
 
 function buildMessageEl(message) {
@@ -5251,7 +5310,7 @@ function buildMessageEl(message) {
   role.textContent = message.role === 'assistant' ? 'Xia' : message.role === 'user' ? 'You' : 'Status';
   const meta = document.createElement('div');
   meta.className = 'message-meta';
-  meta.textContent = formatStamp(message.createdAt);
+  meta.textContent = messageProvenanceText(message);
   roleWrap.appendChild(role);
   roleWrap.appendChild(meta);
   head.appendChild(roleWrap);
@@ -5273,6 +5332,13 @@ function buildMessageEl(message) {
   }
   card.appendChild(head);
   card.appendChild(body);
+  const toolPlan = messageToolPlanText(message);
+  if (toolPlan) {
+    const refs = document.createElement('div');
+    refs.className = 'message-meta';
+    refs.textContent = toolPlan;
+    card.appendChild(refs);
+  }
   if (Array.isArray(message.localDocs) && message.localDocs.length) {
     const refs = document.createElement('div');
     refs.className = 'message-meta';
@@ -5409,8 +5475,8 @@ function renderLocalDocList() {
     const empty = document.createElement('div');
     empty.className = 'scratch-empty';
     empty.textContent = state.localDocUploading
-      ? 'Uploading local documents...'
-      : 'Choose a local file to make it available to Xia in this session.';
+      ? 'Uploading...'
+      : 'No local documents.';
     localDocListEl.appendChild(empty);
     return;
   }
@@ -5505,7 +5571,7 @@ function renderArtifactList() {
   if (!state.artifacts.length) {
     const empty = document.createElement('div');
     empty.className = 'scratch-empty';
-    empty.textContent = 'Artifacts created by Xia will appear here for this session.';
+    empty.textContent = 'No artifacts.';
     artifactListEl.appendChild(empty);
     return;
   }
@@ -5548,6 +5614,55 @@ function resetArtifacts(statusText) {
   state.activeArtifactId = '';
   state.activeArtifact = null;
   syncArtifactPanel(statusText || 'No artifact selected.');
+}
+
+function sharedWorkspaceItemLabel(value) {
+  return firstNonEmpty(value, '').replace(/-/g, ' ');
+}
+
+function sharedWorkspaceItemTitle(item) {
+  return firstNonEmpty(item && item.name,
+    firstNonEmpty(item && item.title,
+      firstNonEmpty(item && item.id, 'Untitled file')));
+}
+
+function sharedWorkspaceItemMeta(item) {
+  const bits = [];
+  if (item && item.title && item.title !== item.name) bits.push(item.title);
+  if (item && item.source_type) bits.push(sharedWorkspaceItemLabel(item.source_type));
+  if (item && item.media_type) bits.push(item.media_type);
+  if (item && typeof item.size_bytes === 'number') bits.push(formatBytes(item.size_bytes));
+  if (item && item.created_at) bits.push('Added ' + formatDateTime(item.created_at));
+  return bits.join(' • ');
+}
+
+function renderSharedWorkspaceList() {
+  if (!sharedWorkspaceListEl) return;
+  sharedWorkspaceListEl.replaceChildren();
+  if (!state.sharedWorkspaceItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = firstNonEmpty(state.sharedWorkspaceStatus, 'No shared files.');
+    sharedWorkspaceListEl.appendChild(empty);
+    return;
+  }
+  state.sharedWorkspaceItems.forEach((item) => {
+    const link = document.createElement('a');
+    link.className = 'shared-workspace-link';
+    link.href = firstNonEmpty(item.download_url,
+      item && item.id ? ('/workspace/items/' + encodeURIComponent(item.id) + '/download') : '#');
+    link.textContent = '';
+    link.setAttribute('download', item && item.name ? item.name : '');
+    const title = document.createElement('div');
+    title.className = 'admin-item-title';
+    title.textContent = sharedWorkspaceItemTitle(item);
+    const meta = document.createElement('div');
+    meta.className = 'admin-item-meta';
+    meta.textContent = sharedWorkspaceItemMeta(item);
+    link.appendChild(title);
+    if (meta.textContent) link.appendChild(meta);
+    sharedWorkspaceListEl.appendChild(link);
+  });
 }
 
 function formatBytes(bytes) {
@@ -5599,7 +5714,7 @@ function renderScratchList() {
   if (!state.scratchPads.length) {
     const empty = document.createElement('div');
     empty.className = 'scratch-empty';
-    empty.textContent = 'Create a note for drafts or intermediate results.';
+    empty.textContent = 'No notes.';
     scratchListEl.appendChild(empty);
     return;
   }
@@ -5711,6 +5826,22 @@ async function loadArtifacts(options) {
   } catch (err) {
     syncArtifactPanel(err.message || 'Failed to load artifacts.');
   }
+}
+
+async function loadSharedWorkspaceItems() {
+  state.sharedWorkspaceStatus = 'Loading...';
+  renderSharedWorkspaceList();
+  try {
+    const data = await fetchJson('/workspace/items');
+    state.sharedWorkspaceItems = Array.isArray(data.items) ? data.items : [];
+    state.sharedWorkspaceStatus = state.sharedWorkspaceItems.length
+      ? ''
+      : 'No shared files.';
+  } catch (err) {
+    state.sharedWorkspaceItems = [];
+    state.sharedWorkspaceStatus = err.message || 'Failed to load shared workspace.';
+  }
+  renderSharedWorkspaceList();
 }
 
 async function loadArtifact(artifactId) {
@@ -6195,9 +6326,16 @@ async function sendMessage(text, options) {
       state.sessionId = data.session_id;
       persistSession();
     }
-    addMessage('assistant', data.content || '', { localDocs: localDocs, artifacts: artifacts });
+    const assistantMessage = normalizeMessage(data.message || {
+      role: 'assistant',
+      content: data.content || '',
+      local_docs: localDocs,
+      artifacts: artifacts
+    });
+    addMessage('assistant', assistantMessage.content || '', assistantMessage);
     await loadHistorySessions();
     await loadArtifacts();
+    await loadSharedWorkspaceItems();
     state.liveStatus = null;
     setStatus('Ready');
   } catch (err) {
@@ -6555,11 +6693,13 @@ resetSiteForm('Loading...');
 renderCapabilities();
 updateAdminButtons();
 updateComposerState();
+renderSharedWorkspaceList();
 bindStaticInfoHints();
 composerEl.focus();
 Promise.all([
   loadSessionMessages(),
   loadLocalDocs(),
+  loadSharedWorkspaceItems(),
   loadArtifacts(),
   loadScratchPads(),
   loadAdminConfig(),
