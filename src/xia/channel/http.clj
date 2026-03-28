@@ -1268,6 +1268,21 @@
         used-ids  (map :skill/id (db/list-skills))]
     (next-available-id base used-ids)))
 
+(defn- infer-schedule-id
+  [data]
+  (let [name-text (nonblank-str (get data "name"))
+        tool-id   (some-> (get data "tool_id") nonblank-str normalize-id-segment)
+        prompt    (some-> (get data "prompt")
+                          nonblank-str
+                          (subs 0 (min 48 (count (nonblank-str (get data "prompt")))))
+                          normalize-id-segment)
+        base      (or (normalize-id-segment name-text)
+                      tool-id
+                      prompt
+                      "schedule")
+        used-ids  (map :id (schedule/list-schedules))]
+    (next-available-id base used-ids)))
+
 (defn- parse-skill-tags
   [value]
   (let [parts (cond
@@ -1414,6 +1429,73 @@
         (catch Exception _
           (throw (ex-info (str field-name " must be valid JSON")
                           {:field field-name})))))))
+
+(defn- parse-json-object-value
+  [value field-name]
+  (cond
+    (nil? value)
+    nil
+
+    (map? value)
+    value
+
+    :else
+    (some-> (parse-json-object-string value field-name)
+            json/read-json)))
+
+(defn- parse-integer-list
+  [value field-name]
+  (cond
+    (nil? value)
+    nil
+
+    (not (sequential? value))
+    (throw (ex-info (str field-name " must be a list of integers")
+                    {:field field-name}))
+
+    :else
+    (mapv (fn [entry]
+            (try
+              (Integer/parseInt (str (or entry "")))
+              (catch Exception _
+                (throw (ex-info (str field-name " must contain only integers")
+                                {:field field-name
+                                 :value entry})))))
+          value)))
+
+(defn- parse-schedule-type
+  [value]
+  (let [schedule-type (some-> value nonblank-str keyword)]
+    (when-not (#{:tool :prompt} schedule-type)
+      (throw (ex-info "invalid schedule type"
+                      {:field "type"
+                       :value value})))
+    schedule-type))
+
+(defn- parse-schedule-spec
+  [data]
+  (let [interval-minutes (parse-optional-positive-long (get data "interval_minutes")
+                                                       "interval_minutes")
+        minute           (parse-integer-list (get data "minute") "minute")
+        hour             (parse-integer-list (get data "hour") "hour")
+        dom              (parse-integer-list (get data "dom") "dom")
+        month            (parse-integer-list (get data "month") "month")
+        dow              (parse-integer-list (get data "dow") "dow")]
+    (cond
+      interval-minutes
+      {:interval-minutes interval-minutes}
+
+      (some identity [minute hour dom month dow])
+      (cond-> {}
+        minute (assoc :minute minute)
+        hour   (assoc :hour hour)
+        dom    (assoc :dom dom)
+        month  (assoc :month month)
+        dow    (assoc :dow dow))
+
+      :else
+      (throw (ex-info "missing schedule timing fields"
+                      {:field "interval_minutes"})))))
 
 (defn- parse-auth-type
   [value]
@@ -1698,6 +1780,34 @@
    :autonomous_approved (boolean (autonomous/site-autonomous-approved? site))
    :username_configured (boolean (nonblank-str (:site-cred/username site)))
    :password_configured (boolean (nonblank-str (:site-cred/password site)))})
+
+(defn- schedule->admin-body
+  [sched]
+  (let [task-state (schedule/task-state (:id sched))
+        latest-run (first (schedule/schedule-history (:id sched) 1))]
+    {:id                  (some-> (:id sched) name)
+     :name                (:name sched)
+     :description         (:description sched)
+     :spec                (:spec sched)
+     :type                (some-> (:type sched) name)
+     :tool_id             (some-> (:tool-id sched) name)
+     :tool_args           (:tool-args sched)
+     :prompt              (:prompt sched)
+     :trusted             (boolean (:trusted? sched))
+     :enabled             (boolean (:enabled? sched))
+     :created_at          (instant->str (:created-at sched))
+     :last_run            (instant->str (:last-run sched))
+     :next_run            (instant->str (:next-run sched))
+     :latest_status       (some-> (:status latest-run) name)
+     :latest_error        (truncate-text (:error latest-run) 160)
+     :task_status         (some-> (:status task-state) name)
+     :task_phase          (some-> (:phase task-state) name)
+     :task_last_error     (:last-error task-state)
+     :task_backoff_until  (instant->str (:backoff-until task-state))
+     :task_checkpoint_at  (instant->str (:checkpoint-at task-state))
+     :task_last_success_at (instant->str (:last-success-at task-state))
+     :task_last_failure_at (instant->str (:last-failure-at task-state))
+     :task_consecutive_failures (or (:consecutive-failures task-state) 0)}))
 
 (defn- tool->admin-body
   [tool]
@@ -2782,6 +2892,9 @@
      :sites     (->> (db/list-site-creds)
                      (into [] (map site->admin-body))
                      sort-by-name)
+     :schedules (->> (schedule/list-schedules)
+                     (into [] (map schedule->admin-body))
+                     sort-by-name)
      :tools     (->> (db/list-tools)
                      (into [] (map tool->admin-body))
                      sort-by-name)
@@ -3647,6 +3760,99 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response e))))
 
+(defn- handle-save-schedule [req]
+  (try
+    (let [data          (or (read-body req) {})
+          schedule-id   (if-let [id-text (nonblank-str (get data "id"))]
+                          (parse-keyword-id id-text "id")
+                          (infer-schedule-id data))
+          existing      (schedule/get-schedule schedule-id)
+          schedule-type (parse-schedule-type (get data "type"))
+          name          (or (nonblank-str (get data "name"))
+                            (some-> existing :name)
+                            (name schedule-id))
+          description   (if (contains? data "description")
+                          (or (nonblank-str (get data "description")) "")
+                          (:description existing))
+          spec          (parse-schedule-spec data)
+          tool-id       (when (= schedule-type :tool)
+                          (parse-keyword-id (get data "tool_id") "tool_id"))
+          tool-args     (when (= schedule-type :tool)
+                          (parse-json-object-value (get data "tool_args") "tool_args"))
+          prompt        (when (= schedule-type :prompt)
+                          (nonblank-str (get data "prompt")))
+          trusted?      (if (contains? data "trusted")
+                          (true? (get data "trusted"))
+                          (if existing
+                            (boolean (:trusted? existing))
+                            true))
+          enabled?      (if (contains? data "enabled")
+                          (true? (get data "enabled"))
+                          (if existing
+                            (boolean (:enabled? existing))
+                            true))
+          saved         (if existing
+                          (schedule/update-schedule!
+                            schedule-id
+                            (cond-> {:name        name
+                                     :description description
+                                     :spec        spec
+                                     :type        schedule-type
+                                     :trusted?    trusted?
+                                     :enabled?    enabled?}
+                              (= schedule-type :tool)
+                              (assoc :tool-id tool-id
+                                     :tool-args tool-args)
+                              (= schedule-type :prompt)
+                              (assoc :prompt prompt)))
+                          (do
+                            (schedule/create-schedule!
+                              (cond-> {:id          schedule-id
+                                       :name        name
+                                       :description description
+                                       :spec        spec
+                                       :type        schedule-type
+                                       :trusted?    trusted?}
+                                (= schedule-type :tool)
+                                (assoc :tool-id tool-id
+                                       :tool-args tool-args)
+                                (= schedule-type :prompt)
+                                (assoc :prompt prompt)))
+                            (if enabled?
+                              (schedule/get-schedule schedule-id)
+                              (schedule/pause-schedule! schedule-id))))]
+      (json-response 200 {:schedule (schedule->admin-body saved)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-delete-schedule [schedule-id]
+  (try
+    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")]
+      (if (schedule/get-schedule schedule-key)
+        (do
+          (schedule/remove-schedule! schedule-key)
+          (json-response 200 {:status "deleted"
+                              :schedule_id (name schedule-key)}))
+        (json-response 404 {:error "schedule not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-pause-schedule [schedule-id]
+  (try
+    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")
+          saved        (schedule/pause-schedule! schedule-key)]
+      (json-response 200 {:schedule (schedule->admin-body saved)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
+(defn- handle-resume-schedule [schedule-id]
+  (try
+    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")
+          saved        (schedule/resume-schedule! schedule-key)]
+      (json-response 200 {:schedule (schedule->admin-body saved)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response e))))
+
 (defn- handle-save-skill [req]
   (try
     (let [data        (or (read-body req) {})
@@ -3796,6 +4002,9 @@
           admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-managed-instance-stop-match (re-matches #"/admin/managed-instances/([^/]+)/stop" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
+          admin-schedule-match (re-matches #"/admin/schedules/([^/]+)" uri)
+          admin-schedule-pause-match (re-matches #"/admin/schedules/([^/]+)/pause" uri)
+          admin-schedule-resume-match (re-matches #"/admin/schedules/([^/]+)/resume" uri)
           admin-skill-match  (re-matches #"/admin/skills/([^/]+)" uri)
           llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
@@ -4044,6 +4253,15 @@
         (and (= method :post) (= uri "/admin/sites"))
         (protected-route-response req #(handle-save-site req))
 
+        (and (= method :post) (= uri "/admin/schedules"))
+        (protected-route-response req #(handle-save-schedule req))
+
+        (and (= method :post) admin-schedule-pause-match)
+        (protected-route-response req #(handle-pause-schedule (second admin-schedule-pause-match)))
+
+        (and (= method :post) admin-schedule-resume-match)
+        (protected-route-response req #(handle-resume-schedule (second admin-schedule-resume-match)))
+
         (and (= method :post) (= uri "/admin/skills"))
         (protected-route-response req #(handle-save-skill req))
 
@@ -4052,6 +4270,9 @@
 
 	        (and (= method :delete) admin-site-match)
 	        (protected-route-response req #(handle-delete-site (second admin-site-match)))
+
+        (and (= method :delete) admin-schedule-match)
+        (protected-route-response req #(handle-delete-schedule (second admin-schedule-match)))
 
         (and (= method :get) admin-skill-match)
         (protected-route-response req #(handle-get-skill (second admin-skill-match)))

@@ -2845,6 +2845,69 @@
     (is (= "hyang" (:site-cred/username site)))
     (is (= "pw-secret" (:site-cred/password site)))))
 
+(deftest admin-schedule-routes-save-pause-resume-and-delete
+  (db/install-tool! {:id          :demo-tool
+                     :name        "Demo Tool"
+                     :description "demo"
+                     :parameters  {}
+                     :handler     "(fn [_] {:ok true})"
+                     :approval    :session})
+  (let [save-response (#'http/router {:uri            "/admin/schedules"
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"name" "Morning Review"
+                                                                     "type" "prompt"
+                                                                     "interval_minutes" 60
+                                                                     "prompt" "Summarize new work."
+                                                                     "trusted" true
+                                                                     "enabled" true})})
+        save-body     (response-json save-response)
+        schedule-id   (get-in save-body ["schedule" "id"])]
+    (is (= 200 (:status save-response)))
+    (is (= "Morning Review" (get-in save-body ["schedule" "name"])))
+    (is (= "prompt" (get-in save-body ["schedule" "type"])))
+    (is (= 60 (get-in save-body ["schedule" "spec" "interval-minutes"])))
+    (is (= "Summarize new work." (get-in save-body ["schedule" "prompt"])))
+    (is (= true (get-in save-body ["schedule" "enabled"])))
+    (is (some? (schedule/get-schedule (keyword schedule-id))))
+    (let [update-response (#'http/router {:uri            "/admin/schedules"
+                                          :request-method :post
+                                          :headers        (ui-headers)
+                                          :body           (request-body {"id" schedule-id
+                                                                         "name" "Morning Review"
+                                                                         "type" "tool"
+                                                                         "minute" [0]
+                                                                         "hour" [9]
+                                                                         "tool_id" "demo-tool"
+                                                                         "tool_args" {"mode" "brief"}
+                                                                         "trusted" false
+                                                                         "enabled" true})})
+          update-body     (response-json update-response)]
+      (is (= 200 (:status update-response)))
+      (is (= "tool" (get-in update-body ["schedule" "type"])))
+      (is (= "demo-tool" (get-in update-body ["schedule" "tool_id"])))
+      (is (= {"mode" "brief"} (get-in update-body ["schedule" "tool_args"])))
+      (is (= false (get-in update-body ["schedule" "trusted"]))))
+    (let [pause-response (#'http/router {:uri            (str "/admin/schedules/" schedule-id "/pause")
+                                         :request-method :post
+                                         :headers        (ui-headers)})
+          pause-body     (response-json pause-response)]
+      (is (= 200 (:status pause-response)))
+      (is (= false (get-in pause-body ["schedule" "enabled"]))))
+    (let [resume-response (#'http/router {:uri            (str "/admin/schedules/" schedule-id "/resume")
+                                          :request-method :post
+                                          :headers        (ui-headers)})
+          resume-body     (response-json resume-response)]
+      (is (= 200 (:status resume-response)))
+      (is (= true (get-in resume-body ["schedule" "enabled"]))))
+    (let [delete-response (#'http/router {:uri            (str "/admin/schedules/" schedule-id)
+                                          :request-method :delete
+                                          :headers        (ui-headers)})
+          delete-body     (response-json delete-response)]
+      (is (= 200 (:status delete-response)))
+      (is (= "deleted" (get delete-body "status")))
+      (is (nil? (schedule/get-schedule (keyword schedule-id)))))))
+
 (deftest start-binds-to-loopback-by-default
   (let [captured (atom nil)]
     (with-redefs [org.httpkit.server/run-server

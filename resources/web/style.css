@@ -859,6 +859,9 @@ textarea:focus {
   font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
   font-size: 0.88rem;
 }
+.form-textarea {
+  min-height: 120px;
+}
 #site-extra-fields {
   min-height: 150px;
   border-radius: var(--radius-sm);

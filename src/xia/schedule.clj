@@ -450,26 +450,100 @@
          vec)))
 
 (defn update-schedule!
-  "Update a schedule. Supported keys: :name :description :spec :enabled? :trusted? :tool-args :prompt"
+  "Update a schedule. Supported keys: :name :description :spec :type :tool-id
+   :tool-args :prompt :enabled? :trusted?."
   [schedule-id updates]
-  (when-not (get-schedule schedule-id)
-    (throw (ex-info "Schedule not found" {:id schedule-id})))
-  (let [tx (cond-> {:schedule/id schedule-id}
-             (:name updates)        (assoc :schedule/name (:name updates))
-             (:description updates) (assoc :schedule/description (:description updates))
-             (contains? updates :enabled?) (assoc :schedule/enabled? (:enabled? updates))
-             (contains? updates :trusted?) (assoc :schedule/trusted? (boolean (:trusted? updates)))
-             (:tool-args updates)   (assoc :schedule/tool-args (:tool-args updates))
-             (:prompt updates)      (assoc :schedule/prompt (:prompt updates)))]
-    ;; If spec changed, re-validate and update next-run
-    (if-let [new-spec (:spec updates)]
-      (let [spec     (coerce-spec new-spec)
-            _        (validate-spec! spec)
-            next-run (cron/next-run spec (java.util.Date.))]
-        (db/transact! [(assoc tx
-                              :schedule/spec (pr-str spec)
-                              :schedule/next-run next-run)]))
-      (db/transact! [tx]))
+  (let [current (or (get-schedule schedule-id)
+                    (throw (ex-info "Schedule not found" {:id schedule-id})))
+        spec-updated? (contains? updates :spec)
+        enabled-updated? (contains? updates :enabled?)
+        type         (or (:type updates) (:type current))
+        spec         (if spec-updated?
+                       (coerce-spec (:spec updates))
+                       (:spec current))
+        name         (if (contains? updates :name)
+                       (:name updates)
+                       (:name current))
+        description  (if (contains? updates :description)
+                       (:description updates)
+                       (:description current))
+        trusted?     (if (contains? updates :trusted?)
+                       (boolean (:trusted? updates))
+                       (boolean (:trusted? current)))
+        enabled?     (if enabled-updated?
+                       (boolean (:enabled? updates))
+                       (boolean (:enabled? current)))
+        tool-id      (if (contains? updates :tool-id)
+                       (:tool-id updates)
+                       (:tool-id current))
+        tool-args    (if (contains? updates :tool-args)
+                       (:tool-args updates)
+                       (:tool-args current))
+        prompt       (if (contains? updates :prompt)
+                       (:prompt updates)
+                       (:prompt current))
+        _            (when-not (#{:tool :prompt} type)
+                       (throw (ex-info "Schedule type must be :tool or :prompt"
+                                       {:id schedule-id :type type})))
+        _            (validate-spec! spec)
+        _            (when (and (= type :tool) (not tool-id))
+                       (throw (ex-info "Tool schedule must specify :tool-id"
+                                       {:id schedule-id})))
+        _            (when (and (= type :prompt) (not (some-> prompt str str/trim seq)))
+                       (throw (ex-info "Prompt schedule must specify :prompt"
+                                       {:id schedule-id})))
+        now          (java.util.Date.)
+        next-run     (cond
+                       spec-updated?
+                       (cron/next-run spec now :last-run (:last-run current))
+
+                       (and enabled-updated? enabled? (not (:enabled? current)))
+                       (cron/next-run spec now :last-run (:last-run current))
+
+                       :else
+                       (:next-run current))
+        tx           (cond-> [{:schedule/id       schedule-id
+                               :schedule/type     type
+                               :schedule/enabled? enabled?
+                               :schedule/trusted? trusted?
+                               :schedule/spec     (pr-str spec)}
+                              (when (contains? updates :name)
+                                {:schedule/id   schedule-id
+                                 :schedule/name (or name (clojure.core/name schedule-id))})
+                              (when (contains? updates :description)
+                                {:schedule/id            schedule-id
+                                 :schedule/description (or description "")})
+                              (when next-run
+                                {:schedule/id schedule-id
+                                 :schedule/next-run next-run})]
+                       (= type :tool)
+                       (conj (cond-> {:schedule/id      schedule-id
+                                      :schedule/tool-id tool-id}
+                               (contains? updates :tool-args)
+                               (assoc :schedule/tool-args tool-args)))
+
+                       (= type :prompt)
+                       (conj {:schedule/id schedule-id
+                              :schedule/prompt (or prompt "")})
+
+                       (and (= type :tool)
+                            (:prompt current))
+                       (conj [:db/retract [:schedule/id schedule-id] :schedule/prompt (:prompt current)])
+
+                       (and (= type :prompt)
+                            (:tool-id current))
+                       (conj [:db/retract [:schedule/id schedule-id] :schedule/tool-id (:tool-id current)])
+
+                       (and (= type :prompt)
+                            (some? (:tool-args current)))
+                       (conj [:db/retract [:schedule/id schedule-id] :schedule/tool-args (:tool-args current)])
+
+                       (and (= type :tool)
+                            (contains? updates :tool-args)
+                            (nil? tool-args)
+                            (some? (:tool-args current)))
+                       (conj [:db/retract [:schedule/id schedule-id] :schedule/tool-args (:tool-args current)]))]
+    (db/transact! (->> tx (remove nil?) vec))
     (log/info "Updated schedule:" (clojure.core/name schedule-id))
     (get-schedule schedule-id)))
 

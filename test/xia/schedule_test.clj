@@ -169,6 +169,25 @@
     (is (some? after))
     (is (not= before after))))
 
+(deftest update-schedule-can-switch-between-prompt-and-tool
+  (schedule/create-schedule!
+    {:id :upd-kind :spec {:interval-minutes 30} :type :prompt :prompt "write a summary"})
+  (let [tool-version (schedule/update-schedule! :upd-kind
+                                                {:type :tool
+                                                 :tool-id :email-list
+                                                 :tool-args {:max_results 3}})
+        prompt-version (schedule/update-schedule! :upd-kind
+                                                  {:type :prompt
+                                                   :prompt "write a new summary"})]
+    (is (= :tool (:type tool-version)))
+    (is (= :email-list (:tool-id tool-version)))
+    (is (= {:max_results 3} (:tool-args tool-version)))
+    (is (nil? (:prompt tool-version)))
+    (is (= :prompt (:type prompt-version)))
+    (is (= "write a new summary" (:prompt prompt-version)))
+    (is (nil? (:tool-id prompt-version)))
+    (is (nil? (:tool-args prompt-version)))))
+
 (deftest update-nonexistent-throws
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo #"not found"

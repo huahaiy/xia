@@ -41,6 +41,7 @@ const state = {
     oauthAccounts: [],
     services: [],
     sites: [],
+    schedules: [],
     tools: [],
     skills: [],
     managedInstances: [],
@@ -84,6 +85,7 @@ const state = {
   activeOauthAccountId: '',
   activeServiceId: '',
   activeSiteId: '',
+  activeAdminScheduleId: '',
   activeSkillId: '',
   providerSaving: false,
   workloadRoutingSaving: false,
@@ -101,6 +103,7 @@ const state = {
   oauthSaving: false,
   serviceSaving: false,
   siteSaving: false,
+  scheduleSaving: false,
   skillSaving: false,
   managedInstanceStoppingId: '',
   remoteBridgeSaving: false,
@@ -321,6 +324,39 @@ const siteAutonomousApprovedEl = document.getElementById('site-autonomous-approv
 const siteStatusEl = document.getElementById('site-status');
 const saveSiteEl = document.getElementById('save-site');
 const deleteSiteEl = document.getElementById('delete-site');
+const scheduleListEl = document.getElementById('schedule-list');
+const scheduleDetailHeaderEl = document.getElementById('schedule-detail-header');
+const scheduleIdEl = document.getElementById('schedule-id');
+const scheduleNameEl = document.getElementById('schedule-name');
+const scheduleTypeEl = document.getElementById('schedule-type');
+const scheduleModeEl = document.getElementById('schedule-mode');
+const scheduleIntervalFieldEl = document.getElementById('schedule-interval-field');
+const scheduleIntervalMinutesEl = document.getElementById('schedule-interval-minutes');
+const scheduleMinuteFieldEl = document.getElementById('schedule-minute-field');
+const scheduleMinuteEl = document.getElementById('schedule-minute');
+const scheduleHourFieldEl = document.getElementById('schedule-hour-field');
+const scheduleHourEl = document.getElementById('schedule-hour');
+const scheduleDomFieldEl = document.getElementById('schedule-dom-field');
+const scheduleDomEl = document.getElementById('schedule-dom');
+const scheduleMonthFieldEl = document.getElementById('schedule-month-field');
+const scheduleMonthEl = document.getElementById('schedule-month');
+const scheduleDowFieldEl = document.getElementById('schedule-dow-field');
+const scheduleDowEl = document.getElementById('schedule-dow');
+const scheduleCalendarNoteFieldEl = document.getElementById('schedule-calendar-note-field');
+const scheduleDescriptionEl = document.getElementById('schedule-description');
+const scheduleToolFieldEl = document.getElementById('schedule-tool-field');
+const scheduleToolIdEl = document.getElementById('schedule-tool-id');
+const scheduleToolArgsFieldEl = document.getElementById('schedule-tool-args-field');
+const scheduleToolArgsEl = document.getElementById('schedule-tool-args');
+const schedulePromptFieldEl = document.getElementById('schedule-prompt-field');
+const schedulePromptEl = document.getElementById('schedule-prompt');
+const scheduleTrustedEl = document.getElementById('schedule-trusted');
+const scheduleEnabledEl = document.getElementById('schedule-enabled');
+const scheduleStatusEl = document.getElementById('schedule-status');
+const saveScheduleEl = document.getElementById('save-schedule');
+const deleteScheduleEl = document.getElementById('delete-schedule');
+const scheduleToggleEl = document.getElementById('schedule-toggle');
+const scheduleViewRunsEl = document.getElementById('schedule-view-runs');
 const remoteBridgeEnabledEl = document.getElementById('remote-bridge-enabled');
 const remoteBridgeInstanceLabelEl = document.getElementById('remote-bridge-instance-label');
 const remoteBridgeRelayUrlEl = document.getElementById('remote-bridge-relay-url');
@@ -2829,6 +2865,44 @@ function inferredSiteIdBase() {
   }
 }
 
+function inferredScheduleIdBase() {
+  return normalizeIdSegment(scheduleNameEl.value)
+    || normalizeIdSegment(scheduleToolIdEl.value)
+    || normalizeIdSegment(schedulePromptEl.value.slice(0, 48))
+    || 'schedule';
+}
+
+function ensureScheduleId() {
+  const current = scheduleIdEl.value.trim();
+  const isEditing = !!state.activeAdminScheduleId;
+  if (isEditing && current) return current;
+  const base = inferredScheduleIdBase();
+  const usedIds = new Set((state.admin.schedules || []).map((schedule) => schedule.id).filter(Boolean));
+  let candidate = base;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = base + '-' + suffix;
+    suffix += 1;
+  }
+  scheduleIdEl.value = candidate;
+  return candidate;
+}
+
+function parseIntegerCsv(value, label) {
+  const text = (value || '').trim();
+  if (!text) return [];
+  return text.split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const parsed = Number(entry);
+      if (!Number.isInteger(parsed)) {
+        throw new Error(label + ' must be comma-separated integers.');
+      }
+      return parsed;
+    });
+}
+
 function ensureSiteId() {
   const current = siteIdEl.value.trim();
   const isEditing = !!state.activeSiteId;
@@ -3152,6 +3226,41 @@ function siteMeta(site) {
   return bits.join(' • ');
 }
 
+function scheduleSpecArray(spec, key) {
+  if (!spec || typeof spec !== 'object') return [];
+  const value = spec[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function formatScheduleSpec(spec) {
+  if (!spec || typeof spec !== 'object') return 'No schedule';
+  const intervalMinutes = Number(spec['interval-minutes']);
+  if (Number.isFinite(intervalMinutes) && intervalMinutes > 0) {
+    return 'Every ' + intervalMinutes + ' ' + pluralize(intervalMinutes, 'minute');
+  }
+  const bits = [];
+  if (scheduleSpecArray(spec, 'minute').length) bits.push('min ' + scheduleSpecArray(spec, 'minute').join(','));
+  if (scheduleSpecArray(spec, 'hour').length) bits.push('hour ' + scheduleSpecArray(spec, 'hour').join(','));
+  if (scheduleSpecArray(spec, 'dom').length) bits.push('dom ' + scheduleSpecArray(spec, 'dom').join(','));
+  if (scheduleSpecArray(spec, 'month').length) bits.push('month ' + scheduleSpecArray(spec, 'month').join(','));
+  if (scheduleSpecArray(spec, 'dow').length) bits.push('dow ' + scheduleSpecArray(spec, 'dow').join(','));
+  return bits.join(' • ') || 'Calendar schedule';
+}
+
+function scheduleMeta(schedule) {
+  const bits = [];
+  if (schedule.type) bits.push(schedule.type);
+  bits.push(formatScheduleSpec(schedule.spec));
+  bits.push(schedule.enabled ? 'Enabled' : 'Paused');
+  if (schedule.task_status && schedule.task_status !== 'success') bits.push('State ' + schedule.task_status);
+  if (schedule.latest_status) bits.push('Last run ' + schedule.latest_status);
+  if (schedule.next_run) bits.push('Next ' + formatDateTime(schedule.next_run));
+  else if (schedule.last_run) bits.push('Ran ' + formatDateTime(schedule.last_run));
+  if (schedule.latest_error) bits.push(schedule.latest_error);
+  else if (schedule.task_last_error) bits.push(schedule.task_last_error);
+  return bits.join(' • ');
+}
+
 function historySessionMeta(session) {
   const bits = [];
   if (session.channel) bits.push(session.channel);
@@ -3452,6 +3561,26 @@ function updateAdminButtons() {
   siteIdEl.disabled = state.siteSaving || !!state.activeSiteId;
   saveSiteEl.disabled = state.siteSaving;
   deleteSiteEl.disabled = state.siteSaving || !state.activeSiteId;
+  scheduleIdEl.disabled = state.scheduleSaving || !!state.activeAdminScheduleId;
+  scheduleNameEl.disabled = state.scheduleSaving;
+  scheduleTypeEl.disabled = state.scheduleSaving;
+  scheduleModeEl.disabled = state.scheduleSaving;
+  scheduleIntervalMinutesEl.disabled = state.scheduleSaving;
+  scheduleMinuteEl.disabled = state.scheduleSaving;
+  scheduleHourEl.disabled = state.scheduleSaving;
+  scheduleDomEl.disabled = state.scheduleSaving;
+  scheduleMonthEl.disabled = state.scheduleSaving;
+  scheduleDowEl.disabled = state.scheduleSaving;
+  scheduleDescriptionEl.disabled = state.scheduleSaving;
+  scheduleToolIdEl.disabled = state.scheduleSaving;
+  scheduleToolArgsEl.disabled = state.scheduleSaving;
+  schedulePromptEl.disabled = state.scheduleSaving;
+  scheduleTrustedEl.disabled = state.scheduleSaving;
+  scheduleEnabledEl.disabled = state.scheduleSaving;
+  saveScheduleEl.disabled = state.scheduleSaving;
+  deleteScheduleEl.disabled = state.scheduleSaving || !state.activeAdminScheduleId;
+  scheduleToggleEl.disabled = state.scheduleSaving || !state.activeAdminScheduleId;
+  scheduleViewRunsEl.disabled = !state.activeAdminScheduleId;
   skillIdEl.disabled = state.skillSaving || !!state.activeSkillId;
   skillNameEl.disabled = state.skillSaving;
   skillDescriptionEl.disabled = state.skillSaving;
@@ -3603,6 +3732,56 @@ function renderSiteList() {
       return selectSite(site);
     }
   );
+}
+
+function renderScheduleToolOptions() {
+  const selected = scheduleToolIdEl.value;
+  scheduleToolIdEl.replaceChildren();
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = 'Select a tool';
+  scheduleToolIdEl.appendChild(blank);
+  (state.admin.tools || []).forEach((tool) => {
+    const option = document.createElement('option');
+    option.value = tool.id || '';
+    option.textContent = firstNonEmpty(tool.name, tool.id);
+    scheduleToolIdEl.appendChild(option);
+  });
+  scheduleToolIdEl.value = selected || '';
+}
+
+function renderScheduleList() {
+  renderSelectableList(
+    scheduleListEl,
+    state.admin.schedules,
+    state.activeAdminScheduleId,
+    'No scheduled work yet.',
+    (schedule) => firstNonEmpty(schedule.name, schedule.id),
+    scheduleMeta,
+    (schedule) => {
+      if ((schedule && schedule.id || '') === state.activeAdminScheduleId) {
+        resetScheduleForm('Create a schedule or select an existing one.');
+        return;
+      }
+      return selectSchedule(schedule);
+    }
+  );
+}
+
+function syncScheduleInputs() {
+  const isTool = scheduleTypeEl.value === 'tool';
+  const isInterval = scheduleModeEl.value === 'interval';
+  scheduleToolFieldEl.hidden = !isTool;
+  scheduleToolArgsFieldEl.hidden = !isTool;
+  schedulePromptFieldEl.hidden = isTool;
+  scheduleIntervalFieldEl.hidden = !isInterval;
+  scheduleMinuteFieldEl.hidden = isInterval;
+  scheduleHourFieldEl.hidden = isInterval;
+  scheduleDomFieldEl.hidden = isInterval;
+  scheduleMonthFieldEl.hidden = isInterval;
+  scheduleDowFieldEl.hidden = isInterval;
+  scheduleCalendarNoteFieldEl.hidden = isInterval;
+  renderScheduleToolOptions();
 }
 
 function renderToolList() {
@@ -3965,6 +4144,32 @@ function resetSiteForm(statusText) {
   updateAdminButtons();
 }
 
+function resetScheduleForm(statusText) {
+  state.activeAdminScheduleId = '';
+  scheduleDetailHeaderEl.textContent = 'New schedule';
+  scheduleIdEl.value = '';
+  scheduleNameEl.value = '';
+  scheduleTypeEl.value = 'prompt';
+  scheduleModeEl.value = 'interval';
+  scheduleIntervalMinutesEl.value = '60';
+  scheduleMinuteEl.value = '';
+  scheduleHourEl.value = '';
+  scheduleDomEl.value = '';
+  scheduleMonthEl.value = '';
+  scheduleDowEl.value = '';
+  scheduleDescriptionEl.value = '';
+  scheduleToolIdEl.value = '';
+  scheduleToolArgsEl.value = '';
+  schedulePromptEl.value = '';
+  scheduleTrustedEl.checked = true;
+  scheduleEnabledEl.checked = true;
+  scheduleToggleEl.textContent = 'Pause';
+  syncScheduleInputs();
+  scheduleStatusEl.textContent = statusText || 'Create a schedule or select an existing one.';
+  renderScheduleList();
+  updateAdminButtons();
+}
+
 function selectProvider(provider) {
   state.activeProviderId = provider.id || '';
   state.providerDraft = null;
@@ -4093,6 +4298,42 @@ function selectSite(site) {
   siteAutonomousApprovedEl.checked = !!site.autonomous_approved;
   siteStatusEl.textContent = site.username_configured ? 'Credentials stored.' : 'No credentials stored.';
   renderSiteList();
+  updateAdminButtons();
+}
+
+function selectSchedule(schedule) {
+  state.activeAdminScheduleId = schedule.id || '';
+  scheduleDetailHeaderEl.textContent = firstNonEmpty(schedule.name, schedule.id, 'Schedule');
+  scheduleIdEl.value = schedule.id || '';
+  scheduleNameEl.value = schedule.name || '';
+  scheduleTypeEl.value = schedule.type || 'prompt';
+  const spec = schedule.spec || {};
+  const intervalMinutes = Number(spec['interval-minutes']);
+  const isInterval = Number.isFinite(intervalMinutes) && intervalMinutes > 0;
+  scheduleModeEl.value = isInterval ? 'interval' : 'calendar';
+  scheduleIntervalMinutesEl.value = isInterval ? String(intervalMinutes) : '';
+  scheduleMinuteEl.value = scheduleSpecArray(spec, 'minute').join(',');
+  scheduleHourEl.value = scheduleSpecArray(spec, 'hour').join(',');
+  scheduleDomEl.value = scheduleSpecArray(spec, 'dom').join(',');
+  scheduleMonthEl.value = scheduleSpecArray(spec, 'month').join(',');
+  scheduleDowEl.value = scheduleSpecArray(spec, 'dow').join(',');
+  scheduleDescriptionEl.value = schedule.description || '';
+  scheduleToolIdEl.value = schedule.tool_id || '';
+  scheduleToolArgsEl.value = schedule.tool_args ? prettyJson(schedule.tool_args) : '';
+  schedulePromptEl.value = schedule.prompt || '';
+  scheduleTrustedEl.checked = !!schedule.trusted;
+  scheduleEnabledEl.checked = !!schedule.enabled;
+  scheduleToggleEl.textContent = schedule.enabled ? 'Pause' : 'Resume';
+  syncScheduleInputs();
+  const bits = [
+    schedule.enabled ? 'Enabled.' : 'Paused.',
+    schedule.next_run ? ('Next run ' + formatDateTime(schedule.next_run) + '.') : '',
+    schedule.latest_status ? ('Latest run ' + schedule.latest_status + '.') : '',
+    schedule.task_status ? ('Task state ' + schedule.task_status + '.') : '',
+    schedule.task_last_error || ''
+  ].filter(Boolean);
+  scheduleStatusEl.textContent = bits.join(' ');
+  renderScheduleList();
   updateAdminButtons();
 }
 
@@ -4622,6 +4863,7 @@ async function loadAdminConfigImpl() {
     state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];
     state.admin.services = Array.isArray(data.services) ? data.services : [];
     state.admin.sites = Array.isArray(data.sites) ? data.sites : [];
+    state.admin.schedules = Array.isArray(data.schedules) ? data.schedules : [];
     state.admin.tools = Array.isArray(data.tools) ? data.tools : [];
     state.admin.skills = Array.isArray(data.skills) ? data.skills : [];
     state.admin.managedInstances = Array.isArray(data.managed_instances) ? data.managed_instances : [];
@@ -4648,9 +4890,11 @@ async function loadAdminConfigImpl() {
     const oauthAccount = state.admin.oauthAccounts.find((entry) => entry.id === state.activeOauthAccountId);
     const service = state.admin.services.find((entry) => entry.id === state.activeServiceId);
     const site = state.admin.sites.find((entry) => entry.id === state.activeSiteId);
+    const schedule = state.admin.schedules.find((entry) => entry.id === state.activeAdminScheduleId);
     const skill = state.admin.skills.find((entry) => entry.id === state.activeSkillId);
     renderOauthTemplateOptions();
     renderOauthAccountOptions();
+    renderScheduleToolOptions();
     renderIdentitySettings();
     renderLittleXiaList();
     renderProviderTemplateOptions();
@@ -4686,6 +4930,14 @@ async function loadAdminConfigImpl() {
       selectSite(site);
     } else if (!state.activeSiteId) {
       resetSiteForm('Create a site login or select an existing one.');
+    }
+    if (!schedule && state.activeAdminScheduleId) {
+      state.activeAdminScheduleId = '';
+    }
+    if (schedule) {
+      selectSchedule(schedule);
+    } else if (!state.activeAdminScheduleId) {
+      resetScheduleForm('Create a schedule or select an existing one.');
     }
     if (skill) {
       await loadSkill(skill.id);
@@ -5386,6 +5638,148 @@ async function deleteSite() {
     state.siteSaving = false;
     updateAdminButtons();
   }
+}
+
+function buildSchedulePayload() {
+  const payload = {
+    id: ensureScheduleId(),
+    name: scheduleNameEl.value.trim(),
+    description: scheduleDescriptionEl.value,
+    type: scheduleTypeEl.value || 'prompt',
+    trusted: scheduleTrustedEl.checked,
+    enabled: scheduleEnabledEl.checked
+  };
+  if (scheduleModeEl.value === 'interval') {
+    const intervalText = scheduleIntervalMinutesEl.value.trim();
+    if (!intervalText) {
+      throw new Error('Interval Minutes is required.');
+    }
+    const intervalMinutes = Number(intervalText);
+    if (!Number.isInteger(intervalMinutes) || intervalMinutes <= 0) {
+      throw new Error('Interval Minutes must be a positive integer.');
+    }
+    payload.interval_minutes = intervalMinutes;
+  } else {
+    const minute = parseIntegerCsv(scheduleMinuteEl.value, 'Minute');
+    const hour = parseIntegerCsv(scheduleHourEl.value, 'Hour');
+    const dom = parseIntegerCsv(scheduleDomEl.value, 'Day of Month');
+    const month = parseIntegerCsv(scheduleMonthEl.value, 'Month');
+    const dow = parseIntegerCsv(scheduleDowEl.value, 'Day of Week');
+    if (!minute.length && !hour.length && !dom.length && !month.length && !dow.length) {
+      throw new Error('Add at least one calendar field, or switch to interval mode.');
+    }
+    if (minute.length) payload.minute = minute;
+    if (hour.length) payload.hour = hour;
+    if (dom.length) payload.dom = dom;
+    if (month.length) payload.month = month;
+    if (dow.length) payload.dow = dow;
+  }
+  if (payload.type === 'tool') {
+    if (!scheduleToolIdEl.value) {
+      throw new Error('Choose a tool.');
+    }
+    payload.tool_id = scheduleToolIdEl.value;
+    const toolArgsText = scheduleToolArgsEl.value.trim();
+    if (toolArgsText) {
+      let parsed;
+      try {
+        parsed = JSON.parse(toolArgsText);
+      } catch (_) {
+        throw new Error('Tool Args must be valid JSON.');
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Tool Args must be a JSON object.');
+      }
+      payload.tool_args = parsed;
+    }
+  } else {
+    const prompt = schedulePromptEl.value.trim();
+    if (!prompt) {
+      throw new Error('Prompt is required.');
+    }
+    payload.prompt = prompt;
+  }
+  return payload;
+}
+
+async function saveSchedule() {
+  if (state.scheduleSaving) return;
+  state.scheduleSaving = true;
+  scheduleStatusEl.textContent = 'Saving...';
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildSchedulePayload())
+    });
+    const schedule = data.schedule || null;
+    state.activeAdminScheduleId = schedule && schedule.id ? schedule.id : state.activeAdminScheduleId;
+    await loadAdminConfig();
+    scheduleStatusEl.textContent = 'Schedule saved.';
+    setStatus('Scheduled work saved');
+  } catch (err) {
+    scheduleStatusEl.textContent = err.message || 'Failed to save schedule.';
+  } finally {
+    state.scheduleSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function toggleSchedule() {
+  if (!state.activeAdminScheduleId || state.scheduleSaving) return;
+  const schedule = (state.admin.schedules || []).find((entry) => entry.id === state.activeAdminScheduleId);
+  if (!schedule) return;
+  state.scheduleSaving = true;
+  scheduleStatusEl.textContent = schedule.enabled ? 'Pausing...' : 'Resuming...';
+  updateAdminButtons();
+  try {
+    await fetchJson('/admin/schedules/' + encodeURIComponent(schedule.id) + '/' + (schedule.enabled ? 'pause' : 'resume'), {
+      method: 'POST'
+    });
+    await loadAdminConfig();
+    scheduleStatusEl.textContent = schedule.enabled ? 'Schedule paused.' : 'Schedule resumed.';
+    setStatus(schedule.enabled ? 'Scheduled work paused' : 'Scheduled work resumed');
+  } catch (err) {
+    scheduleStatusEl.textContent = err.message || 'Failed to update schedule.';
+  } finally {
+    state.scheduleSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function deleteSchedule() {
+  if (!state.activeAdminScheduleId || state.scheduleSaving) return;
+  if (!window.confirm('Delete this scheduled work?')) return;
+  state.scheduleSaving = true;
+  scheduleStatusEl.textContent = 'Deleting...';
+  updateAdminButtons();
+  try {
+    await fetchJson('/admin/schedules/' + encodeURIComponent(state.activeAdminScheduleId), {
+      method: 'DELETE'
+    });
+    state.activeAdminScheduleId = '';
+    resetScheduleForm('Deleted.');
+    await loadAdminConfig();
+    setStatus('Scheduled work deleted');
+  } catch (err) {
+    scheduleStatusEl.textContent = err.message || 'Failed to delete schedule.';
+  } finally {
+    state.scheduleSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function viewScheduleRuns() {
+  if (!state.activeAdminScheduleId) return;
+  switchTab('history-tab');
+  switchHistorySection('scheduled-runs');
+  if (!state.history.schedules.length) {
+    await loadHistorySchedules();
+  }
+  const schedule = state.history.schedules.find((entry) => entry.id === state.activeAdminScheduleId)
+    || { id: state.activeAdminScheduleId };
+  await selectHistorySchedule(schedule);
 }
 
 async function saveSkill() {
@@ -6956,6 +7350,23 @@ saveServiceEl.addEventListener('click', () => saveService());
 
 saveSiteEl.addEventListener('click', () => saveSite());
 deleteSiteEl.addEventListener('click', () => deleteSite());
+scheduleTypeEl.addEventListener('change', () => {
+  syncScheduleInputs();
+  updateAdminButtons();
+});
+scheduleModeEl.addEventListener('change', () => {
+  syncScheduleInputs();
+  updateAdminButtons();
+});
+saveScheduleEl.addEventListener('click', () => saveSchedule());
+deleteScheduleEl.addEventListener('click', () => deleteSchedule());
+scheduleToggleEl.addEventListener('click', () => toggleSchedule());
+scheduleViewRunsEl.addEventListener('click', () => {
+  const result = viewScheduleRuns();
+  if (result && typeof result.catch === 'function') {
+    result.catch((err) => console.error('Failed to open schedule runs:', err));
+  }
+});
 saveSkillEl.addEventListener('click', () => saveSkill());
 deleteSkillEl.addEventListener('click', () => deleteSkill());
 saveRemoteBridgeEl.addEventListener('click', () => saveRemoteBridge());
@@ -7032,6 +7443,7 @@ renderDatabaseBackupSettings();
 resetOauthAccountForm('Loading...');
 resetServiceForm('Loading...');
 resetSiteForm('Loading...');
+resetScheduleForm('Loading...');
 resetSkillForm('Loading...');
 renderCapabilities();
 updateAdminButtons();
