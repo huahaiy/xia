@@ -189,6 +189,26 @@
             {:item "Draft replies" :status :in-progress}]
            (get-in updated [:stack 0 :agenda])))))
 
+(deftest apply-control-preserves-existing-progress-status-when-parser-derived-it
+  (let [initial {:goal "Handle billing emails"
+                 :stack [{:title "Handle billing emails"
+                          :summary "Checked inbox"
+                          :next-step "Draft replies"
+                          :reason "Unread messages remain"
+                          :progress-status :in-progress
+                          :agenda [{:item "Check inbox" :status :completed}
+                                   {:item "Draft replies" :status :in-progress}]}]}
+        control (:control
+                 (autonomous/parse-controller-response
+                  (str "Worked the plan.\n\n"
+                       "AUTONOMOUS_STATUS_JSON:"
+                       "{\"status\":\"continue\",\"summary\":\"Worked the plan\",\"next_step\":\"Send replies\",\"reason\":\"One step remains\",\"current_focus\":\"Handle billing emails\",\"stack_action\":\"stay\"}")))
+        updated (autonomous/apply-control initial control)]
+    (is (= :in-progress
+           (get-in updated [:stack 0 :progress-status])))
+    (is (= "Send replies"
+           (get-in updated [:stack 0 :next-step])))))
+
 (deftest apply-control-clear-resets-or-empties-the-stack
   (let [initial {:goal "Handle billing emails"
                  :stack [{:title "Handle billing emails"

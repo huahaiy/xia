@@ -16,6 +16,32 @@
   (db/delete-config! :agent/max-tool-rounds)
   (is (= 100 (#'xia.agent/configured-max-tool-rounds))))
 
+(deftest worker-run-cleanup-is-worker-scoped
+  (let [session-id (db/create-session! :terminal)
+        token-a    (Object.)
+        token-b    (Object.)
+        worker-a   (future :worker-a)
+        worker-b   (future :worker-b)]
+    (#'xia.agent/with-session-run
+     session-id
+     (fn []
+       (#'xia.agent/begin-worker-run! session-id token-a)
+       (#'xia.agent/register-worker-future! session-id token-a worker-a)
+       (#'xia.agent/register-worker-thread! session-id token-a)
+       (#'xia.agent/begin-worker-run! session-id token-b)
+       (#'xia.agent/register-worker-future! session-id token-b worker-b)
+       (#'xia.agent/register-worker-thread! session-id token-b)
+       (#'xia.agent/clear-worker-run! session-id token-a)
+       (let [entry (#'xia.agent/session-run-entry session-id)]
+         (is (= token-b (:worker-token entry)))
+         (is (= worker-b (:worker-future entry)))
+         (is (= (Thread/currentThread) (:worker-thread entry))))
+       (#'xia.agent/clear-worker-run! session-id token-b)
+       (let [entry (#'xia.agent/session-run-entry session-id)]
+         (is (nil? (:worker-token entry)))
+         (is (nil? (:worker-future entry)))
+         (is (nil? (:worker-thread entry))))))))
+
 (deftest process-message-reports-progress
   (let [session-id (db/create-session! :terminal)
         statuses   (atom [])]
@@ -818,6 +844,41 @@
            (->> (db/session-messages session-id)
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
+
+(deftest process-message-does-not-treat-changing-summaries-as-identical-iterations
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 3)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Step one finished.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Step one finished\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}
+                                                         2 {"content" (str "Step two finished.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Step two finished\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}
+                                                         {"content" (str "Step three finished.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"continue\",\"summary\":\"Step three finished\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "keep going" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Autonomous loop exceeded iteration limit of 3"
+                     (.getMessage ^Exception err)))
+        (is (not= :autonomous-loop-stalled
+                  (:type (ex-data err)))))
+      (is (= 3 @llm-calls)))))
 
 (deftest process-message-allows-final-llm-call-after-last-tool-round
   (let [session-id (db/create-session! :terminal)

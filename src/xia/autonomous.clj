@@ -334,6 +334,17 @@
   (or (truncate-agenda-item goal)
       "Current task"))
 
+(def ^:private missing-field ::missing-field)
+
+(defn- first-present
+  [m ks]
+  (reduce (fn [acc k]
+            (if (and (map? m) (contains? m k))
+              (reduced (get m k))
+              acc))
+          missing-field
+          ks))
+
 (defn- normalize-frame
   [frame default-title]
   (let [agenda           (normalize-agenda (or (:agenda frame)
@@ -363,6 +374,19 @@
                                           (get frame "reason")))
      :progress-status status
      :agenda          agenda}))
+
+(defn- progress-status-present?
+  [frame]
+  (if (and (map? frame) (contains? frame :progress-status-explicit?))
+    (true? (:progress-status-explicit? frame))
+    (not= missing-field
+          (first-present frame
+                         [:progress-status
+                          :progress_status
+                          :status
+                          "progress_status"
+                          "progress-status"
+                          "status"]))))
 
 (defn- normalize-stack
   [goal stack]
@@ -442,9 +466,10 @@
 
 (defn- merge-frame
   [existing control default-title]
-  (let [existing*   (when (map? existing)
-                      (normalize-frame existing default-title))
-        control*    (normalize-frame control default-title)
+  (let [existing*    (when (map? existing)
+                       (normalize-frame existing default-title))
+        control*     (normalize-frame control default-title)
+        progress?    (progress-status-present? control)
         merged-title (or (:title control*)
                          (:title existing*)
                          default-title)]
@@ -455,9 +480,13 @@
                           (:next-step existing*))
      :reason          (or (:reason control*)
                           (:reason existing*))
-     :progress-status (or (:progress-status control*)
-                          (:progress-status existing*)
-                          :pending)
+     :progress-status (if progress?
+                        (or (:progress-status control*)
+                            (:progress-status existing*)
+                            :pending)
+                        (or (:progress-status existing*)
+                            (:progress-status control*)
+                            :pending))
      :agenda          (or (:agenda control*)
                           (:agenda existing*))}))
 
@@ -797,6 +826,11 @@
                             (:current_focus parsed)
                             (get parsed "current-focus")
                             (:current-focus parsed)))
+        raw-progress-status (first-present parsed
+                                          ["progress_status"
+                                           :progress_status
+                                           "progress-status"
+                                           :progress-status])
         stack-action   (normalize-stack-action
                          (or (get parsed "stack_action")
                              (:stack_action parsed)
@@ -805,10 +839,7 @@
         agenda     (normalize-agenda (or (get parsed "agenda")
                                          (:agenda parsed)))
         progress-status (or (normalize-progress-status
-                              (or (get parsed "progress_status")
-                                  (:progress_status parsed)
-                                  (get parsed "progress-status")
-                                  (:progress-status parsed)))
+                              raw-progress-status)
                             (derive-progress-status status
                                                     goal-complete?
                                                     agenda))]
@@ -824,5 +855,6 @@
                        :goal-complete? goal-complete?
                        :current-focus  current-focus
                        :stack-action   stack-action
+                       :progress-status-explicit? (not= missing-field raw-progress-status)
                        :progress-status progress-status
                        :agenda         agenda})}))

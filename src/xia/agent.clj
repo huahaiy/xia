@@ -347,6 +347,7 @@
       (swap! active-session-runs assoc session-id
              {:run-id run-id
               :supervisor-thread (Thread/currentThread)
+              :worker-token nil
               :worker-thread nil
               :worker-future nil
               :cancelled? false
@@ -375,26 +376,47 @@
                (assoc runs session-id (f entry))
                runs)))))
 
-(defn- register-worker-thread!
-  [session-id]
+(defn- begin-worker-run!
+  [session-id worker-token]
   (update-session-run-entry! session-id
-                             #(assoc % :worker-thread (Thread/currentThread))))
+                             #(assoc % :worker-token worker-token
+                                       :worker-thread nil
+                                       :worker-future nil)))
+
+(defn- register-worker-thread!
+  [session-id worker-token]
+  (update-session-run-entry! session-id
+                             (fn [entry]
+                               (if (= worker-token (:worker-token entry))
+                                 (assoc entry :worker-thread (Thread/currentThread))
+                                 entry))))
 
 (defn- clear-worker-thread!
-  [session-id]
+  [session-id worker-token]
   (update-session-run-entry! session-id
-                             #(assoc % :worker-thread nil)))
+                             (fn [entry]
+                               (if (= worker-token (:worker-token entry))
+                                 (assoc entry :worker-thread nil)
+                                 entry))))
 
 (defn- register-worker-future!
-  [session-id worker]
+  [session-id worker-token worker]
   (update-session-run-entry! session-id
-                             #(assoc % :worker-future worker)))
+                             (fn [entry]
+                               (if (= worker-token (:worker-token entry))
+                                 (assoc entry :worker-future worker)
+                                 entry))))
 
 (defn- clear-worker-run!
-  [session-id]
+  [session-id worker-token]
   (update-session-run-entry! session-id
-                             #(assoc % :worker-thread nil
-                                       :worker-future nil)))
+                             (fn [entry]
+                               (if (= worker-token (:worker-token entry))
+                                 (assoc entry
+                                        :worker-token nil
+                                        :worker-thread nil
+                                        :worker-future nil)
+                                 entry))))
 
 (defn- interrupt-worker-thread!
   [session-id]
@@ -1329,12 +1351,14 @@
    execution-context assistant-provider assistant-provider-id transient-messages
    working-memory-message update-working-memory? max-tool-rounds autonomy-state max-iterations]
   (loop [attempt 0]
-    (let [worker-state (atom {:phase nil
+    (let [worker-token (Object.)
+          worker-state (atom {:phase nil
                               :seq 0
                               :last-event-ms (current-time-ms)
                               :events []})
+          _ (begin-worker-run! session-id worker-token)
           worker (future
-                   (register-worker-thread! session-id)
+                   (register-worker-thread! session-id worker-token)
                    (try
                      (run-agent-iteration session-id
                                           channel
@@ -1350,8 +1374,8 @@
                                           max-tool-rounds
                                           worker-state)
                      (finally
-                       (clear-worker-run! session-id))))]
-      (register-worker-future! session-id worker)
+                       (clear-worker-run! session-id worker-token))))]
+      (register-worker-future! session-id worker-token worker)
       (let [result (try
                      {:ok (wait-for-worker! execution-context
                                             session-id
@@ -1400,6 +1424,8 @@
   (let [tip (autonomous/current-frame autonomy-state)]
     {:title (:title tip)
      :progress-status (:progress-status tip)
+     :summary (:summary control)
+     :reason (:reason control)
      :next-step (:next-step control)
      :stack-action (:stack-action control)
      :agenda (:agenda tip)
