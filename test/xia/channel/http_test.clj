@@ -1570,7 +1570,7 @@
           provider (first (filter #(= "openai" (get % "id")) (get body "providers")))
           openai-template (first (filter #(= "openai" (get % "id")) (get body "llm_provider_templates")))
           qwen-template (first (filter #(= "qwen" (get % "id")) (get body "llm_provider_templates")))
-          glm-template (first (filter #(= "glm" (get % "id")) (get body "llm_provider_templates")))
+          fireworks-template (first (filter #(= "fireworks" (get % "id")) (get body "llm_provider_templates")))
           custom-template (first (filter #(= "custom" (get % "id")) (get body "llm_provider_templates")))
           conversation-context (get body "conversation_context")
           memory-retention (get body "memory_retention")
@@ -1653,7 +1653,7 @@
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
     (is (every? (set (map #(get % "id") (get body "llm_provider_templates")))
-                ["claude" "custom" "deepseek" "gemini" "glm"
+                ["claude" "custom" "deepseek" "fireworks" "gemini"
                  "minimax" "ollama" "openai" "openrouter" "qwen"]))
     (is (= #{"api-key"} (set (get openai-template "auth_types"))))
     (is (= "api" (get-in openai-template ["access_modes" 0 "id"])))
@@ -1661,8 +1661,8 @@
     (is (= "api-key" (get-in openai-template ["access_modes" 0 "credential_sources" 0])))
     (is (= #{"api-key"} (set (get qwen-template "auth_types"))))
     (is (= ["api-key"] (get-in qwen-template ["access_modes" 0 "credential_sources"])))
-    (is (= #{"api-key"} (set (get glm-template "auth_types"))))
-    (is (= ["api-key"] (get-in glm-template ["access_modes" 0 "credential_sources"])))
+    (is (= #{"api-key"} (set (get fireworks-template "auth_types"))))
+    (is (= ["api-key"] (get-in fireworks-template ["access_modes" 0 "credential_sources"])))
     (is (= #{"api-key" "none"} (set (get custom-template "auth_types"))))
     (is (= ["api-key"] (get-in custom-template ["access_modes" 0 "credential_sources"])))
     (is (nil? (get openai-template "account_connector")))

@@ -37,6 +37,14 @@
 (def ^:private session-turn-lock-count 256)
 (def ^:private default-llm-status-preview-chars 160)
 (def ^:private default-llm-status-update-interval-ms 500)
+(def ^:private default-supervisor-tick-ms 250)
+(def ^:private default-supervisor-phase-timeout-ms 30000)
+(def ^:private default-supervisor-llm-timeout-ms 120000)
+(def ^:private default-supervisor-tool-timeout-ms 120000)
+(def ^:private default-supervisor-max-identical-iterations 3)
+(def ^:private default-supervisor-max-restarts 1)
+(def ^:private default-supervisor-restart-backoff-ms 100)
+(def ^:private default-supervisor-restart-grace-ms 1000)
 (defonce ^:private session-turn-locks
   (vec (repeatedly session-turn-lock-count #(ReentrantLock.))))
 (defonce ^:private active-session-runs (atom {}))
@@ -51,7 +59,7 @@
    :schedule-id
    :channel])
 
-(declare truncate-summary)
+(declare truncate-summary status-agenda status-stack run-agent-iteration)
 
 ;; build-messages is now in xia.context
 
@@ -99,7 +107,7 @@
 
 (defn- validate-tool-round-call-count!
   [tool-calls]
-  (let [tool-count               (count tool-calls)
+  (let [tool-count (count tool-calls)
         max-tool-calls-per-round (configured-max-tool-calls-per-round)]
     (when (> (long tool-count) (long max-tool-calls-per-round))
       (throw (ex-info (str "Too many tool calls in one round: "
@@ -107,7 +115,8 @@
                            " (max "
                            max-tool-calls-per-round
                            ")")
-                      {:tool-count               tool-count
+                      {:type :tool-call-limit-exceeded
+                       :tool-count tool-count
                        :max-tool-calls-per-round max-tool-calls-per-round})))
     tool-count))
 
@@ -151,6 +160,46 @@
   (cfg/positive-long :agent/llm-status-update-interval-ms
                      default-llm-status-update-interval-ms))
 
+(defn- supervisor-tick-ms
+  []
+  (cfg/positive-long :agent/supervisor-tick-ms
+                     default-supervisor-tick-ms))
+
+(defn- supervisor-phase-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-phase-timeout-ms
+                     default-supervisor-phase-timeout-ms))
+
+(defn- supervisor-llm-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-llm-timeout-ms
+                     default-supervisor-llm-timeout-ms))
+
+(defn- supervisor-tool-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-tool-timeout-ms
+                     default-supervisor-tool-timeout-ms))
+
+(defn- supervisor-max-identical-iterations
+  []
+  (cfg/positive-long :agent/supervisor-max-identical-iterations
+                     default-supervisor-max-identical-iterations))
+
+(defn- supervisor-max-restarts
+  []
+  (cfg/positive-long :agent/supervisor-max-restarts
+                     default-supervisor-max-restarts))
+
+(defn- supervisor-restart-backoff-ms
+  []
+  (cfg/positive-long :agent/supervisor-restart-backoff-ms
+                     default-supervisor-restart-backoff-ms))
+
+(defn- supervisor-restart-grace-ms
+  []
+  (cfg/positive-long :agent/supervisor-restart-grace-ms
+                     default-supervisor-restart-grace-ms))
+
 (defn- new-request-id
   []
   (str (random-uuid)))
@@ -161,13 +210,13 @@
 
 (defn- derive-request-context
   [session-id channel tool-context]
-  (let [parent-context    prompt/*interaction-context*
-        request-id        (or (:request-id tool-context)
-                              (new-request-id))
-        correlation-id    (or (:correlation-id tool-context)
-                              (:correlation-id parent-context)
-                              (:request-id parent-context)
-                              request-id)
+  (let [parent-context prompt/*interaction-context*
+        request-id (or (:request-id tool-context)
+                       (new-request-id))
+        correlation-id (or (:correlation-id tool-context)
+                           (:correlation-id parent-context)
+                           (:request-id parent-context)
+                           request-id)
         parent-request-id (or (:parent-request-id tool-context)
                               (:request-id parent-context))]
     (cond-> (merge (trace-context parent-context)
@@ -200,18 +249,18 @@
 (defn- throwable-detail
   [^Throwable t]
   (let [{:keys [cause via]} (Throwable->map t)
-        causes            (into []
-                                (map (fn [{:keys [type message data]}]
-                                       (cond-> {:class (str type)
-                                                :message message}
-                                         (seq data)
-                                         (assoc :data (summarize-error-data data)))))
-                                via)
-        root-cause        (last causes)]
-    {:message     (or (.getMessage t) cause (str t))
-     :class       (.getName (class t))
-     :causes      causes
-     :root-cause  root-cause
+        causes (into []
+                     (map (fn [{:keys [type message data]}]
+                            (cond-> {:class (str type)
+                                     :message message}
+                              (seq data)
+                              (assoc :data (summarize-error-data data)))))
+                     via)
+        root-cause (last causes)]
+    {:message (or (.getMessage t) cause (str t))
+     :class (.getName (class t))
+     :causes causes
+     :root-cause root-cause
      :stack-trace (into []
                         (map str)
                         (take (branch-error-stack-frames) (.getStackTrace t)))}))
@@ -223,9 +272,9 @@
    (request-cancelled-ex session-id reason nil))
   ([session-id reason cause]
    (ex-info "Request cancelled"
-            (cond-> {:type       :request-cancelled
-                     :status     499
-                     :error      "request cancelled"
+            (cond-> {:type :request-cancelled
+                     :status 499
+                     :error "request cancelled"
                      :session-id session-id}
               reason
               (assoc :reason reason))
@@ -240,17 +289,20 @@
    (let [entry* (atom nil)]
      (when session-id
        (swap! active-session-runs
-              (fn [runs]
-                (if-let [entry (get runs session-id)]
-                  (let [updated (assoc entry
-                                       :cancelled? true
-                                       :cancel-reason reason)]
-                    (reset! entry* updated)
-                    (assoc runs session-id updated))
-                  runs)))
+               (fn [runs]
+                 (if-let [entry (get runs session-id)]
+                   (let [updated (assoc entry
+                                        :cancelled? true
+                                       :cancel-reason (or (:cancel-reason entry)
+                                                          reason))]
+                     (reset! entry* updated)
+                     (assoc runs session-id updated))
+                   runs)))
        (when-let [entry @entry*]
-         (when-let [^Thread worker (:thread entry)]
-           (.interrupt worker))
+         (when-let [^Thread supervisor-thread (:supervisor-thread entry)]
+           (.interrupt supervisor-thread))
+         (when-let [^Thread worker-thread (:worker-thread entry)]
+           (.interrupt worker-thread))
          true)))))
 
 (defn cancel-all-sessions!
@@ -266,8 +318,8 @@
 (defn session-cancelled?
   [session-id]
   (boolean
-    (or (.isInterrupted (Thread/currentThread))
-        (some-> (get @active-session-runs session-id) :cancelled?))))
+   (or (.isInterrupted (Thread/currentThread))
+       (some-> (get @active-session-runs session-id) :cancelled?))))
 
 (defn- cancellation-reason
   [session-id]
@@ -291,9 +343,11 @@
   (if session-id
     (let [run-id (Object.)]
       (swap! active-session-runs assoc session-id
-             {:run-id      run-id
-              :thread      (Thread/currentThread)
-              :cancelled?  false
+             {:run-id run-id
+              :supervisor-thread (Thread/currentThread)
+              :worker-thread nil
+              :worker-future nil
+              :cancelled? false
               :cancel-reason nil})
       (try
         (f)
@@ -304,6 +358,72 @@
                      (dissoc runs session-id)
                      runs))))))
     (f)))
+
+(defn- session-run-entry
+  [session-id]
+  (when session-id
+    (get @active-session-runs session-id)))
+
+(defn- update-session-run-entry!
+  [session-id f]
+  (when session-id
+    (swap! active-session-runs
+           (fn [runs]
+             (if-let [entry (get runs session-id)]
+               (assoc runs session-id (f entry))
+               runs)))))
+
+(defn- register-worker-thread!
+  [session-id]
+  (update-session-run-entry! session-id
+                             #(assoc % :worker-thread (Thread/currentThread))))
+
+(defn- clear-worker-thread!
+  [session-id]
+  (update-session-run-entry! session-id
+                             #(assoc % :worker-thread nil)))
+
+(defn- register-worker-future!
+  [session-id worker]
+  (update-session-run-entry! session-id
+                             #(assoc % :worker-future worker)))
+
+(defn- clear-worker-run!
+  [session-id]
+  (update-session-run-entry! session-id
+                             #(assoc % :worker-thread nil
+                                       :worker-future nil)))
+
+(defn- interrupt-worker-thread!
+  [session-id]
+  (when-let [^Thread worker-thread (:worker-thread (session-run-entry session-id))]
+    (when (not= (Thread/currentThread) worker-thread)
+      (.interrupt worker-thread))
+    true))
+
+(defn- request-session-cancel!
+  [session-id reason & {:keys [interrupt-supervisor?]
+                        :or {interrupt-supervisor? false}}]
+  (let [entry* (atom nil)]
+    (when session-id
+      (swap! active-session-runs
+             (fn [runs]
+               (if-let [entry (get runs session-id)]
+                 (let [updated (assoc entry
+                                      :cancelled? true
+                                      :cancel-reason (or (:cancel-reason entry)
+                                                         reason))]
+                   (reset! entry* updated)
+                   (assoc runs session-id updated))
+                 runs)))
+      (when-let [entry @entry*]
+        (when (and interrupt-supervisor?
+                   (not= (Thread/currentThread) ^Thread (:supervisor-thread entry)))
+          (.interrupt ^Thread (:supervisor-thread entry)))
+        (when (and (:worker-thread entry)
+                   (not= (Thread/currentThread) ^Thread (:worker-thread entry)))
+          (.interrupt ^Thread (:worker-thread entry)))
+        true))))
 
 (defn- cancel-futures!
   [futures]
@@ -326,12 +446,12 @@
           results
           (let [remaining-ms (- deadline-ms (long (System/currentTimeMillis)))
                 ^Future future (nth futures idx)
-                result       (if (pos? remaining-ms)
-                               (try
-                                 (await-future-result future remaining-ms)
-                                 (catch TimeoutException _
-                                   future-timeout-sentinel))
-                               future-timeout-sentinel)]
+                result (if (pos? remaining-ms)
+                         (try
+                           (await-future-result future remaining-ms)
+                           (catch TimeoutException _
+                             future-timeout-sentinel))
+                         future-timeout-sentinel)]
             (if (= future-timeout-sentinel result)
               (do
                 (cancel-futures! futures)
@@ -344,11 +464,11 @@
 
 (defn- validate-user-message!
   [user-message]
-  (let [message        (or user-message "")
-        char-count     (long (count message))
+  (let [message (or user-message "")
+        char-count (long (count message))
         token-estimate (long (context/estimate-tokens message))
-        max-chars      (long (max-user-message-chars))
-        max-tokens     (long (max-user-message-tokens))]
+        max-chars (long (max-user-message-chars))
+        max-tokens (long (max-user-message-tokens))]
     (cond
       (> char-count max-chars)
       (throw (ex-info (str "User message too large: "
@@ -356,11 +476,11 @@
                            " chars (max "
                            max-chars
                            ")")
-                      {:type        :user-message-too-large
-                       :status      413
-                       :error       "user message too large"
-                       :char-count  char-count
-                       :max-chars   max-chars}))
+                      {:type :user-message-too-large
+                       :status 413
+                       :error "user message too large"
+                       :char-count char-count
+                       :max-chars max-chars}))
 
       (> token-estimate max-tokens)
       (throw (ex-info (str "User message too large: ~"
@@ -368,11 +488,11 @@
                            " tokens (max "
                            max-tokens
                            ")")
-                      {:type           :user-message-too-large
-                       :status         413
-                       :error          "user message too large"
+                      {:type :user-message-too-large
+                       :status 413
+                       :error "user message too large"
                        :token-estimate token-estimate
-                       :max-tokens     max-tokens})))))
+                       :max-tokens max-tokens})))))
 
 (defn- call-model
   [messages tools provider-id & {:keys [on-delta session-id]}]
@@ -389,11 +509,31 @@
     :else
     (llm/chat-message messages :session-id session-id :on-delta on-delta)))
 
-(defn- report-status!
+(defn- current-time-ms
+  []
+  (long (System/currentTimeMillis)))
+
+(defn- autonomy-status-fields
+  [autonomy-state iteration max-iterations]
+  (let [tip (autonomous/current-frame autonomy-state)
+        stack (:stack autonomy-state)]
+    {:iteration iteration
+     :max-iterations max-iterations
+     :current-focus (:title tip)
+     :progress-status (some-> tip :progress-status name)
+     :stack-depth (count stack)
+     :agenda (status-agenda (:agenda tip))
+     :stack (status-stack stack)}))
+
+(defn- emit-status!
   [message & {:as extra}]
   (prompt/status! (merge {:state :running
                           :message message}
                          extra)))
+
+(defn- report-status!
+  [message & {:as extra}]
+  (apply emit-status! message (mapcat identity extra)))
 
 (defn- llm-preview-text
   [content]
@@ -403,21 +543,21 @@
           (truncate-summary (llm-status-preview-chars))))
 
 (defn- make-llm-progress-reporter
-  [round]
+  [round emit-event!]
   (let [last-report-ms (volatile! 0)]
     (fn [{:keys [content]}]
       (when-let [preview (llm-preview-text content)]
-        (let [now-ms        (long (System/currentTimeMillis))
-              last-ms       (long @last-report-ms)
-              interval-ms   (long (llm-status-update-interval-ms))
+        (let [now-ms (long (System/currentTimeMillis))
+              last-ms (long @last-report-ms)
+              interval-ms (long (llm-status-update-interval-ms))
               should-report (or (zero? last-ms)
                                 (>= (- now-ms last-ms) interval-ms))]
           (when should-report
             (vreset! last-report-ms now-ms)
-            (report-status! "Calling model"
-                            :phase :llm
-                            :round round
-                            :partial-content preview)))))))
+            (emit-event! {:phase :llm
+                          :message "Calling model"
+                          :round round
+                          :partial-content preview})))))))
 
 (defn schedule-fact-utility-review!
   [fact-eids user-message assistant-response]
@@ -456,21 +596,21 @@
      :prompt task}
 
     (map? task)
-    (let [label  (or (:task task)
-                     (:title task)
-                     (get task "task")
-                     (get task "title")
-                     (get task "label"))
+    (let [label (or (:task task)
+                    (:title task)
+                    (get task "task")
+                    (get task "title")
+                    (get task "label"))
           prompt (or (:prompt task)
                      (:message task)
                      (get task "prompt")
                      (get task "message")
                      label)]
-      {:task   (str (or label prompt "branch task"))
+      {:task (str (or label prompt "branch task"))
        :prompt (str (or prompt label ""))})
 
     :else
-    {:task   (str task)
+    {:task (str task)
      :prompt (str task)}))
 
 (defn- branch-task-prompt
@@ -495,7 +635,7 @@
 (defn- branch-result-summary
   [results]
   (let [completed (count (filter #(= "completed" (:status %)) results))
-        failed    (count (filter #(= "failed" (:status %)) results))]
+        failed (count (filter #(= "failed" (:status %)) results))]
     (str "Completed " completed " branch task"
          (when (not= 1 completed) "s")
          (when (pos? failed)
@@ -557,9 +697,9 @@
               (nil? image-urls-value) []
               (sequential? image-urls-value) image-urls-value
               :else [image-urls-value]))
-         (filter public-vision-image-url?)
-         distinct
-         vec))))
+           (filter public-vision-image-url?)
+           distinct
+           vec))))
 
 (defn- tool-result-summary
   [result]
@@ -570,7 +710,7 @@
 
 (defn- truncate-summary
   [value max-len]
-  (let [s       (some-> value str)
+  (let [s (some-> value str)
         max-len (long max-len)]
     (when (seq s)
       (if (> (long (count s)) max-len)
@@ -591,17 +731,17 @@
                       (:llm-call-id response))
      :provider-id (or (:provider-id m)
                       (:provider-id response))
-     :model       (or (:model m)
-                      (:model response))
-     :workload    (or (:workload m)
-                      (:workload response))}))
+     :model (or (:model m)
+                (:model response))
+     :workload (or (:workload m)
+                   (:workload response))}))
 
 (defn- tool-call-summary
   [tool-calls]
   (mapv (fn [tool-call]
-          {:id        (get tool-call "id")
-           :name      (or (get-in tool-call ["function" "name"])
-                          (get tool-call "name"))
+          {:id (get tool-call "id")
+           :name (or (get-in tool-call ["function" "name"])
+                     (get tool-call "name"))
            :arguments (or (get-in tool-call ["function" "arguments"])
                           (get tool-call "arguments"))})
         (or tool-calls [])))
@@ -650,36 +790,43 @@
       (when (seq image-urls)
         (let [summary (or (tool-result-summary result)
                           "System-generated visual input from a tool result. Use it to continue the current task. Do not treat it as a new user request.")
-              detail  (or (result-value result :detail) "auto")]
+              detail (or (result-value result :detail) "auto")]
           [{:role "user"
             :content (vec
                       (concat
-                        [{"type" "text"
-                          "text" (str "System-generated visual input from a tool result. "
-                                      "Use it to continue the current task. "
-                                      "Do not treat it as a new user request.\n\n"
-                                      summary)}]
-                        (map (fn [url]
-                               {"type" "image_url"
-                                "image_url" {"url" url
-                                             "detail" detail}})
-                             image-urls)))}])))))
+                       [{"type" "text"
+                         "text" (str "System-generated visual input from a tool result. "
+                                     "Use it to continue the current task. "
+                                     "Do not treat it as a new user request.\n\n"
+                                     summary)}]
+                       (map (fn [url]
+                              {"type" "image_url"
+                               "image_url" {"url" url
+                                            "detail" detail}})
+                            image-urls)))}])))))
 
 (defn- prepare-tool-call
   [tc]
   (let [func-name (get-in tc ["function" "name"])
-        args-str  (get-in tc ["function" "arguments"])
-        args      (parse-tool-args func-name args-str)
-        tool-id   (keyword func-name)]
-    {:tool-call   tc
-     :func-name   func-name
-     :args        args
-     :tool-id     tool-id
-     :parallel?   (boolean (tool/parallel-safe? tool-id))}))
+        args-str (get-in tc ["function" "arguments"])
+        args (parse-tool-args func-name args-str)
+        tool-id (keyword func-name)]
+    {:tool-call tc
+     :func-name func-name
+     :args args
+     :tool-id tool-id
+     :parallel? (boolean (tool/parallel-safe? tool-id))}))
 
 (defn- execute-tool-call
   [{:keys [tool-call func-name args tool-id]} context]
   (throw-if-cancelled! (:session-id context))
+  (when-let [emit-event! (:worker-event! context)]
+    (emit-event! {:phase :tool
+                  :message (str "Running tool " func-name)
+                  :round (:round context)
+                  :tool-id tool-id
+                  :tool-name func-name
+                  :tool-count (:tool-count context)}))
   (let [result (tool/execute-tool tool-id args (assoc context
                                                       :tool-call-id (get tool-call "id")
                                                       :tool-name func-name))]
@@ -689,24 +836,24 @@
                        :tool-id tool-id
                        :tool-call-id (get tool-call "id")}
                       (trace-context context)))
-    {:role         "tool"
+    {:role "tool"
      :tool_call_id (get tool-call "id")
-     :tool_name    func-name
-     :result       (sanitized-tool-result result)
-     :content      (tool-result-content result)
+     :tool_name func-name
+     :result (sanitized-tool-result result)
+     :content (tool-result-content result)
      :follow-up-messages (multimodal-follow-up-messages result context)}))
 
 (defn- bind-original-tool-call-ids
   [prepared-calls tool-results]
   (let [prepared-count (count prepared-calls)
-        result-count   (count tool-results)]
+        result-count (count tool-results)]
     (when (not= prepared-count result-count)
       (throw (ex-info "Tool execution result count mismatch"
                       {:prepared-count prepared-count
-                       :result-count   result-count})))
+                       :result-count result-count})))
     (mapv (fn [{:keys [tool-call func-name tool-id]} result]
-            (let [original-id  (get tool-call "id")
-                  result-id    (:tool_call_id result)
+            (let [original-id (get tool-call "id")
+                  result-id (:tool_call_id result)
                   effective-id (or original-id result-id)]
               (when (and (some? original-id)
                          (some? result-id)
@@ -729,16 +876,18 @@
        (partition-by :parallel?)
        (mapv (fn [calls]
                {:parallel? (:parallel? (first calls))
-                :calls     (vec calls)}))))
+                :calls (vec calls)}))))
 
 (defn- execute-tool-batch
   [{:keys [parallel? calls]} context]
   (if (and parallel? (> (count calls) 1))
     (do
-      (report-status! (str "Running " (count calls) " independent tools in parallel")
-                      :phase :tool
+      (when-let [emit-event! (:worker-event! context)]
+        (emit-event! {:phase :tool
+                      :message (str "Running " (count calls) " independent tools in parallel")
+                      :round (:round context)
                       :parallel true
-                      :tool-count (count calls))
+                      :tool-count (count calls)}))
       (log/debug "Executing tool batch in parallel"
                  (merge {:tool-count (count calls)
                          :tool-names (mapv :func-name calls)}
@@ -746,10 +895,10 @@
       (let [futures (mapv (fn [call]
                             (future
                               (try
-                                {:call   call
+                                {:call call
                                  :result (execute-tool-call call context)}
                                 (catch Throwable t
-                                  {:call      call
+                                  {:call call
                                    :exception t}))))
                           calls)
             results (await-futures! futures
@@ -758,10 +907,10 @@
                                       (let [call (nth calls idx)]
                                         (ex-info (str "Parallel tool execution timed out: " (:func-name call))
                                                  (merge (trace-context context)
-                                                        {:type       :parallel-tool-timeout
+                                                        {:type :parallel-tool-timeout
                                                          :timeout-ms timeout-ms
-                                                         :tool-id    (:tool-id call)
-                                                         :func-name  (:func-name call)})))))
+                                                         :tool-id (:tool-id call)
+                                                         :func-name (:func-name call)})))))
             failures (keep #(when-let [t (:exception %)]
                               (assoc % :throwable t))
                            results)]
@@ -770,14 +919,14 @@
             (.addSuppressed ^Throwable throwable ^Throwable suppressed))
           (throw (ex-info (str "Parallel tool execution failed: " (:func-name call))
                           (merge (trace-context context)
-                                 {:tool-id   (:tool-id call)
+                                 {:tool-id (:tool-id call)
                                   :func-name (:func-name call)
-                                  :failures  (mapv (fn [{:keys [call throwable]}]
-                                                     (merge (trace-context context)
-                                                            {:tool-id   (:tool-id call)
-                                                             :func-name (:func-name call)
-                                                             :message   (.getMessage ^Throwable throwable)}))
-                                                   failures)})
+                                  :failures (mapv (fn [{:keys [call throwable]}]
+                                                    (merge (trace-context context)
+                                                           {:tool-id (:tool-id call)
+                                                            :func-name (:func-name call)
+                                                            :message (.getMessage ^Throwable throwable)}))
+                                                  failures)})
                           throwable)))
         (mapv :result results)))
     (mapv #(execute-tool-call % context) calls)))
@@ -787,10 +936,10 @@
   [tool-calls context]
   (validate-tool-round-call-count! tool-calls)
   (let [prepared-calls (mapv prepare-tool-call tool-calls)
-        tool-results   (->> prepared-calls
-                            tool-call-batches
-                            (mapcat #(execute-tool-batch % context))
-                            vec)]
+        tool-results (->> prepared-calls
+                          tool-call-batches
+                          (mapcat #(execute-tool-batch % context))
+                          vec)]
     (bind-original-tool-call-ids prepared-calls tool-results)))
 
 (defn- response-content
@@ -802,13 +951,14 @@
     :else (str response)))
 
 (defn- autonomous-iteration-messages
-  [autonomy-state iteration max-iterations]
+  [autonomy-state iteration max-iterations & {:keys [incoming-message]}]
   [(autonomous/controller-system-message)
    (autonomous/controller-state-message
     {:goal (:goal autonomy-state)
      :iteration iteration
      :max-iterations max-iterations
-     :stack (:stack autonomy-state)})])
+     :stack (:stack autonomy-state)
+     :incoming-message incoming-message})])
 
 (defn- autonomous-iteration-input
   [autonomy-state iteration max-iterations]
@@ -843,22 +993,327 @@
 
 (defn- report-autonomy-status!
   [phase autonomy-state iteration max-iterations & {:keys [stack-action]}]
-  (let [tip   (autonomous/current-frame autonomy-state)
-        stack (:stack autonomy-state)]
-    (prompt/status! {:state :running
-                     :phase phase
-                     :message (autonomous/status-line phase
-                                                     autonomy-state
-                                                     iteration
-                                                     max-iterations
-                                                     :stack-action stack-action)
-                     :iteration iteration
-                     :max-iterations max-iterations
-                     :current-focus (:title tip)
-                     :progress-status (some-> tip :progress-status name)
-                     :stack-depth (count stack)
-                     :agenda (status-agenda (:agenda tip))
-                     :stack (status-stack stack)})))
+  (apply emit-status!
+         (autonomous/status-line phase
+                                 autonomy-state
+                                 iteration
+                                 max-iterations
+                                 :stack-action stack-action)
+         (mapcat identity
+                 (merge {:phase phase}
+                        (autonomy-status-fields autonomy-state
+                                                iteration
+                                                max-iterations)))))
+
+(defn- report-supervisor-status!
+  [phase message autonomy-state iteration max-iterations & {:as extra}]
+  (apply emit-status!
+         message
+         (mapcat identity
+                 (merge {:phase phase}
+                        (autonomy-status-fields autonomy-state
+                                                iteration
+                                                max-iterations)
+                        extra))))
+
+(defn- emit-worker-event!
+  [worker-state event]
+  (let [now-ms (current-time-ms)]
+    (swap! worker-state
+           (fn [state]
+             (let [phase (:phase event)
+                   previous-phase (:phase state)
+                   phase-start-ms (if (= phase previous-phase)
+                                    (:phase-start-ms state now-ms)
+                                    now-ms)
+                   seq-no (inc (long (:seq state 0)))
+                   event* (merge {:message nil
+                                  :partial-content nil
+                                  :round nil
+                                  :tool-count nil
+                                  :tool-id nil
+                                  :tool-name nil
+                                  :parallel nil
+                                  :checkpoint nil}
+                                 event
+                                 {:seq seq-no
+                                  :phase phase
+                                  :phase-start-ms phase-start-ms
+                                  :last-event-ms now-ms
+                                  :updated-at-ms now-ms})]
+               (-> state
+                   (merge (dissoc event* :events))
+                   (assoc :phase phase
+                          :phase-start-ms phase-start-ms
+                          :last-event-ms now-ms
+                          :updated-at-ms now-ms
+                          :seq seq-no)
+                   (update :events (fnil conj []) event*)))))))
+
+(defn- worker-timeout-ms
+  [phase]
+  (case phase
+    :llm (supervisor-llm-timeout-ms)
+    :tool (supervisor-tool-timeout-ms)
+    (supervisor-phase-timeout-ms)))
+
+(defn- worker-stalled?
+  [{:keys [phase last-event-ms]}]
+  (when (and phase last-event-ms)
+    (> (- (current-time-ms) (long last-event-ms))
+       (long (worker-timeout-ms phase)))))
+
+(defn- worker-stall-ex
+  [session-id channel iteration max-iterations autonomy-state worker-state]
+  (let [tip (autonomous/current-frame autonomy-state)]
+    (ex-info (str "Agent supervisor stopped a stalled worker during "
+                  (some-> (:phase worker-state) name)
+                  " phase")
+             {:type :agent-stalled
+              :session-id session-id
+              :channel channel
+              :phase (:phase worker-state)
+              :iteration iteration
+              :max-iterations max-iterations
+              :current-focus (:title tip)
+              :progress-status (:progress-status tip)
+              :timeout-ms (worker-timeout-ms (:phase worker-state))
+              :last-event-ms (:last-event-ms worker-state)
+              :tool-id (:tool-id worker-state)
+              :tool-name (:tool-name worker-state)
+              :round (:round worker-state)})))
+
+(defn- worker-stop-timeout-ex
+  [session-id channel iteration max-iterations autonomy-state worker-state]
+  (let [tip (autonomous/current-frame autonomy-state)]
+    (ex-info (str "Agent supervisor could not stop a stalled worker during "
+                  (some-> (:phase worker-state) name)
+                  " phase")
+             {:type :agent-stop-timeout
+              :session-id session-id
+              :channel channel
+              :phase (:phase worker-state)
+              :iteration iteration
+              :max-iterations max-iterations
+              :current-focus (:title tip)
+              :progress-status (:progress-status tip)
+              :grace-ms (supervisor-restart-grace-ms)
+              :tool-id (:tool-id worker-state)
+              :tool-name (:tool-name worker-state)
+              :round (:round worker-state)})))
+
+(defn- stop-worker!
+  [session-id worker]
+  (interrupt-worker-thread! session-id)
+  (future-cancel worker)
+  (let [deadline-ms (+ (current-time-ms)
+                       (long (supervisor-restart-grace-ms)))]
+    (loop []
+      (cond
+        (future-done? worker)
+        true
+
+        (>= (current-time-ms) deadline-ms)
+        false
+
+        :else
+        (do
+          (Thread/sleep 10)
+          (recur))))))
+
+(def ^:private non-restartable-worker-error-types
+  #{:request-cancelled
+    :autonomous-loop-stalled
+    :agent-stop-timeout
+    :tool-round-limit-exceeded
+    :tool-call-limit-exceeded
+    :user-message-too-large
+    :session-busy})
+
+(defn- restartable-worker-error?
+  [t]
+  (let [type (some-> t ex-data :type)]
+    (cond
+      (instance? InterruptedException t)
+      false
+
+      (contains? non-restartable-worker-error-types type)
+      false
+
+      (contains? #{:agent-stalled :parallel-tool-timeout} type)
+      true
+
+      :else
+      true)))
+
+(defn- worker-failure-summary
+  [t]
+  (let [type (some-> t ex-data :type)
+        message (or (.getMessage ^Throwable t)
+                    (some-> type name)
+                    "worker failure")]
+    (truncate-summary message 240)))
+
+(defn- wait-for-worker!
+  [execution-context session-id channel iteration max-iterations autonomy-state worker-state worker]
+  (let [handled-seq (volatile! 0)
+        handle-events! (fn [snapshot]
+                         (doseq [event (filter #(> (long (:seq % 0))
+                                                   (long @handled-seq))
+                                               (:events snapshot))]
+                           (vreset! handled-seq (long (:seq event 0)))
+                           (report-supervisor-status! (:phase event)
+                                                      (:message event)
+                                                      autonomy-state
+                                                      iteration
+                                                      max-iterations
+                                                      :round (:round event)
+                                                      :partial-content (:partial-content event)
+                                                      :tool-count (:tool-count event)
+                                                      :tool-id (:tool-id event)
+                                                      :tool-name (:tool-name event)
+                                                      :parallel (:parallel event))
+                           (when-let [checkpoint (:checkpoint event)]
+                             (save-schedule-checkpoint! execution-context checkpoint))))]
+    (loop []
+      (throw-if-cancelled! session-id)
+      (let [snapshot @worker-state]
+        (handle-events! snapshot)
+        (cond
+          (future-done? worker)
+          (do
+            (handle-events! @worker-state)
+            (try
+              @worker
+              (catch java.util.concurrent.ExecutionException e
+                (throw (or (.getCause e) e)))))
+
+          (worker-stalled? snapshot)
+          (do
+            (throw (if (stop-worker! session-id worker)
+                     (worker-stall-ex session-id
+                                      channel
+                                      iteration
+                                      max-iterations
+                                      autonomy-state
+                                      snapshot)
+                     (worker-stop-timeout-ex session-id
+                                             channel
+                                             iteration
+                                             max-iterations
+                                             autonomy-state
+                                             snapshot))))
+
+          :else
+          (do
+            (Thread/sleep (long (supervisor-tick-ms)))
+            (recur)))))))
+
+(defn- run-supervised-agent-iteration
+  [session-id channel resource-session-id local-doc-ids artifact-ids
+   execution-context assistant-provider assistant-provider-id transient-messages
+   working-memory-message max-tool-rounds autonomy-state max-iterations]
+  (loop [attempt 0]
+    (let [worker-state (atom {:phase nil
+                              :seq 0
+                              :last-event-ms (current-time-ms)
+                              :events []})
+          worker (future
+                   (register-worker-thread! session-id)
+                   (try
+                     (run-agent-iteration session-id
+                                          channel
+                                          resource-session-id
+                                          local-doc-ids
+                                          artifact-ids
+                                          execution-context
+                                          assistant-provider
+                                          assistant-provider-id
+                                          transient-messages
+                                          working-memory-message
+                                          max-tool-rounds
+                                          worker-state)
+                     (finally
+                       (clear-worker-thread! session-id))))
+          result (try
+                   {:ok (wait-for-worker! execution-context
+                                          session-id
+                                          channel
+                                          (:iteration execution-context)
+                                          max-iterations
+                                          autonomy-state
+                                          worker-state
+                                          worker)}
+                   (catch Throwable t
+                     {:error t}))]
+      (if-let [t (:error result)]
+        (let [max-restarts (long (supervisor-max-restarts))
+              attempt* (inc attempt)]
+          (if (and (< attempt max-restarts)
+                   (restartable-worker-error? t)
+                   (not (session-cancelled? session-id)))
+            (do
+              (report-supervisor-status! :restarting
+                                         (str "Restarting iteration after "
+                                              (worker-failure-summary t)
+                                              " (attempt "
+                                              attempt*
+                                              "/"
+                                              max-restarts
+                                              ")")
+                                         autonomy-state
+                                         (:iteration execution-context)
+                                         max-iterations
+                                         :attempt attempt*)
+              (save-schedule-checkpoint! execution-context
+                                         {:phase :restarting
+                                          :iteration (:iteration execution-context)
+                                          :summary (worker-failure-summary t)
+                                          :attempt attempt*
+                                          :session-id session-id
+                                          :failure-phase (some-> t ex-data :phase)})
+              (Thread/sleep (long (supervisor-restart-backoff-ms)))
+              (recur attempt*))
+            (throw t)))
+        (:ok result)))))
+
+(defn- iteration-signature
+  [autonomy-state control]
+  (let [tip (autonomous/current-frame autonomy-state)]
+    {:title (:title tip)
+     :progress-status (:progress-status tip)
+     :next-step (:next-step control)
+     :stack-action (:stack-action control)
+     :agenda (:agenda tip)
+     :stack (status-stack (:stack autonomy-state))}))
+
+(defn- update-iteration-loop-state
+  [{:keys [signature count]} next-signature]
+  (if (= signature next-signature)
+    {:signature next-signature
+     :count (inc (long (or count 0)))}
+    {:signature next-signature
+     :count 1}))
+
+(defn- throw-if-identical-iteration-loop!
+  [session-id channel iteration max-iterations loop-state autonomy-state control]
+  (let [count* (long (or (:count loop-state) 0))
+        limit (long (supervisor-max-identical-iterations))]
+    (when (>= count* limit)
+      (let [tip (autonomous/current-frame autonomy-state)]
+        (throw (ex-info (str "Autonomous loop made no progress after "
+                             limit
+                             " identical iterations")
+                        {:type :autonomous-loop-stalled
+                         :session-id session-id
+                         :channel channel
+                         :iteration iteration
+                         :max-iterations max-iterations
+                         :current-focus (:title tip)
+                         :progress-status (:progress-status tip)
+                         :next-step (:next-step control)
+                         :agenda (:agenda tip)
+                         :stack (:stack autonomy-state)}))))))
 
 (defn- merge-fact-eids
   [left right]
@@ -885,53 +1340,57 @@
                          :local-doc-ids local-doc-ids
                          :artifact-ids artifact-ids)]
     (audit/log! execution-context
-                {:actor       :assistant
-                 :type        :llm-response
-                 :message-id  assistant-message-id
+                {:actor :assistant
+                 :type :llm-response
+                 :message-id assistant-message-id
                  :llm-call-id llm-call-id
-                 :data        {:provider-id (some-> provider-id name)
-                               :model model
-                               :workload (some-> workload name)
-                               :tool-calls []}})))
+                 :data {:provider-id (some-> provider-id name)
+                        :model model
+                        :workload (some-> workload name)
+                        :tool-calls []}})))
 
 (defn- run-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
-   working-memory-message max-tool-rounds]
-  (report-status! "Updating working memory"
-                  :phase :working-memory
-                  :iteration (:iteration execution-context))
-  (best-effort-update-working-memory! session-id
-                                     working-memory-message
-                                     channel
-                                     {:resource-session-id resource-session-id})
-  (throw-if-cancelled! session-id)
-  (let [tools (tool/tool-definitions execution-context)
-        {:keys [messages used-fact-eids]}
-        (context/build-messages-data session-id
-                                     {:provider            assistant-provider
-                                      :provider-id         assistant-provider-id
-                                      :compaction-workload :history-compaction})
-        messages (inject-transient-messages messages transient-messages)]
-    (save-schedule-checkpoint!
-     execution-context
-     {:phase :planning
-      :iteration (:iteration execution-context)
-      :round 0
-      :summary "Working memory updated and context prepared."
-      :message-count (count messages)
-      :session-id session-id})
-    (loop [messages messages
-           round    0]
-      (throw-if-cancelled! session-id)
-      (report-status! (if (zero? round)
-                        "Calling model"
-                        "Calling model with tool results")
-                      :phase :llm
+   working-memory-message max-tool-rounds worker-state]
+  (let [emit-event! #(emit-worker-event! worker-state %)]
+    (emit-event! {:phase :working-memory
+                  :message "Updating working memory"
+                  :iteration (:iteration execution-context)})
+    (best-effort-update-working-memory! session-id
+                                        working-memory-message
+                                        channel
+                                        {:resource-session-id resource-session-id})
+    (throw-if-cancelled! session-id)
+    (let [tools (tool/tool-definitions execution-context)
+          {:keys [messages used-fact-eids]}
+          (context/build-messages-data session-id
+                                       {:provider assistant-provider
+                                        :provider-id assistant-provider-id
+                                        :compaction-workload :history-compaction})
+          messages (inject-transient-messages messages transient-messages)]
+      (emit-event! {:phase :planning
+                    :message "Planning next step"
+                    :iteration (:iteration execution-context)
+                    :round 0
+                    :message-count (count messages)
+                    :checkpoint {:phase :planning
+                                 :iteration (:iteration execution-context)
+                                 :round 0
+                                 :summary "Working memory updated and context prepared."
+                                 :message-count (count messages)
+                                 :session-id session-id}})
+      (loop [messages messages
+             round 0]
+        (throw-if-cancelled! session-id)
+        (emit-event! {:phase :llm
+                      :message (if (zero? round)
+                                 "Calling model"
+                                 "Calling model with tool results")
                       :iteration (:iteration execution-context)
-                      :round round)
-      (let [progress-reporter (make-llm-progress-reporter round)
-            response   (call-model messages
+                      :round round})
+        (let [progress-reporter (make-llm-progress-reporter round emit-event!)
+              response (call-model messages
                                    tools
                                    assistant-provider-id
                                    :session-id session-id
@@ -939,113 +1398,126 @@
                                                (throw-if-cancelled! session-id)
                                                (progress-reporter delta)
                                                (throw-if-cancelled! session-id)))
-            _          (throw-if-cancelled! session-id)
-            has-tools? (and (map? response) (seq (get response "tool_calls")))]
-        (if has-tools?
-          (do
-            (when (>= (long round) (long max-tool-rounds))
-              (throw (ex-info "Too many tool-calling rounds"
-                              {:rounds          round
-                               :max-tool-rounds max-tool-rounds})))
-            (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
-                  tool-calls    (get response "tool_calls")
-                  assistant-msg {:role       "assistant"
-                                 :content    (response-content response)
-                                 :tool_calls tool-calls}
-                  tool-count    (count tool-calls)
-                  tool-results  (do
-                                  (report-status! (str "Model requested "
-                                                       tool-count
-                                                       " tool"
-                                                       (when (not= 1 tool-count) "s"))
-                                                  :phase :tool-plan
-                                                  :iteration (:iteration execution-context)
-                                                  :round round
-                                                  :tool-count tool-count)
-                                  (throw-if-cancelled! session-id)
-                                  (execute-tool-calls tool-calls
-                                                      (assoc execution-context
-                                                             :llm-call-id llm-call-id
-                                                             :provider-id provider-id
-                                                             :model model
-                                                             :workload workload)))
-                  _             (throw-if-cancelled! session-id)
-                  tool-history  (mapv #(select-keys % [:role :tool_call_id :content])
-                                      tool-results)
-                  follow-up-messages (->> tool-results
-                                          (mapcat :follow-up-messages)
-                                          vec)]
-              (let [assistant-message-id
-                    (db/add-message! session-id :assistant
-                                     (response-content response)
-                                     :tool-calls tool-calls
-                                     :llm-call-id llm-call-id
-                                     :provider-id provider-id
-                                     :model model
-                                     :workload workload
-                                     :local-doc-ids local-doc-ids
-                                     :artifact-ids artifact-ids)]
-                (audit/log! execution-context
-                            {:actor       :assistant
-                             :type        :llm-response
-                             :message-id  assistant-message-id
-                             :llm-call-id llm-call-id
-                             :data        {:provider-id (some-> provider-id name)
-                                           :model model
-                                           :workload (some-> workload name)
-                                           :tool-calls (tool-call-summary tool-calls)}}))
-              (doseq [tr tool-results]
-                (db/add-message! session-id :tool
-                                 nil
-                                 :tool-result (:result tr)
-                                 :tool-id (:tool_call_id tr)
-                                 :tool-call-id (:tool_call_id tr)
-                                 :tool-name (:tool_name tr)
-                                 :llm-call-id llm-call-id
-                                 :provider-id provider-id
-                                 :model model
-                                 :workload workload))
-              (save-schedule-checkpoint!
-               execution-context
-               {:phase :tool
-                :iteration (:iteration execution-context)
-                :round round
-                :tool-count tool-count
-                :tool-ids (tool-call-names tool-calls)
-                :summary (or (truncate-summary (response-content response) 240)
-                             (str "Completed tool round with "
-                                  tool-count
-                                  " tool call"
-                                  (when (not= 1 tool-count) "s")
-                                  "."))})
-              (recur (-> messages
-                         (conj assistant-msg)
-                         (into tool-history)
-                         (into follow-up-messages))
-                     (inc round))))
-          (do
-            (throw-if-cancelled! session-id)
-            (report-status! "Preparing response"
-                            :phase :finalizing
-                            :iteration (:iteration execution-context))
-            {:response response
-             :used-fact-eids used-fact-eids}))))))
+              _ (throw-if-cancelled! session-id)
+              has-tools? (and (map? response) (seq (get response "tool_calls")))]
+          (if has-tools?
+            (do
+              (when (>= (long round) (long max-tool-rounds))
+                (throw (ex-info "Too many tool-calling rounds"
+                                {:type :tool-round-limit-exceeded
+                                 :rounds round
+                                 :max-tool-rounds max-tool-rounds})))
+              (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
+                    tool-calls (get response "tool_calls")
+                    assistant-msg {:role "assistant"
+                                   :content (response-content response)
+                                   :tool_calls tool-calls}
+                    tool-count (count tool-calls)
+                    _ (emit-event! {:phase :tool-plan
+                                    :message (str "Model requested "
+                                                  tool-count
+                                                  " tool"
+                                                  (when (not= 1 tool-count) "s"))
+                                    :iteration (:iteration execution-context)
+                                    :round round
+                                    :tool-count tool-count})
+                    tool-results (do
+                                   (throw-if-cancelled! session-id)
+                                   (execute-tool-calls tool-calls
+                                                       (assoc execution-context
+                                                              :llm-call-id llm-call-id
+                                                              :provider-id provider-id
+                                                              :model model
+                                                              :workload workload
+                                                              :round round
+                                                              :tool-count tool-count
+                                                              :worker-event! emit-event!)))
+                    _ (throw-if-cancelled! session-id)
+                    tool-history (mapv #(select-keys % [:role :tool_call_id :content])
+                                       tool-results)
+                    follow-up-messages (->> tool-results
+                                            (mapcat :follow-up-messages)
+                                            vec)]
+                (let [assistant-message-id
+                      (db/add-message! session-id :assistant
+                                       (response-content response)
+                                       :tool-calls tool-calls
+                                       :llm-call-id llm-call-id
+                                       :provider-id provider-id
+                                       :model model
+                                       :workload workload
+                                       :local-doc-ids local-doc-ids
+                                       :artifact-ids artifact-ids)]
+                  (audit/log! execution-context
+                              {:actor :assistant
+                               :type :llm-response
+                               :message-id assistant-message-id
+                               :llm-call-id llm-call-id
+                               :data {:provider-id (some-> provider-id name)
+                                      :model model
+                                      :workload (some-> workload name)
+                                      :tool-calls (tool-call-summary tool-calls)}}))
+                (doseq [tr tool-results]
+                  (db/add-message! session-id :tool
+                                   nil
+                                   :tool-result (:result tr)
+                                   :tool-id (:tool_call_id tr)
+                                   :tool-call-id (:tool_call_id tr)
+                                   :tool-name (:tool_name tr)
+                                   :llm-call-id llm-call-id
+                                   :provider-id provider-id
+                                   :model model
+                                   :workload workload))
+                (emit-event! {:phase :tool
+                              :message (or (truncate-summary (response-content response) 240)
+                                           (str "Completed tool round with "
+                                                tool-count
+                                                " tool call"
+                                                (when (not= 1 tool-count) "s")
+                                                "."))
+                              :iteration (:iteration execution-context)
+                              :round round
+                              :tool-count tool-count
+                              :tool-ids (tool-call-names tool-calls)
+                              :checkpoint {:phase :tool
+                                           :iteration (:iteration execution-context)
+                                           :round round
+                                           :tool-count tool-count
+                                           :tool-ids (tool-call-names tool-calls)
+                                           :summary (or (truncate-summary (response-content response) 240)
+                                                        (str "Completed tool round with "
+                                                             tool-count
+                                                             " tool call"
+                                                             (when (not= 1 tool-count) "s")
+                                                             "."))}})
+                (recur (-> messages
+                           (conj assistant-msg)
+                           (into tool-history)
+                           (into follow-up-messages))
+                       (inc round))))
+            (do
+              (throw-if-cancelled! session-id)
+              (emit-event! {:phase :finalizing
+                            :message "Preparing response"
+                            :iteration (:iteration execution-context)})
+              {:response response
+               :used-fact-eids used-fact-eids})))))))
 
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.
 
    1. Updates working memory (retrieval pipeline)
    2. Builds context: system prompt (identity + WM context + skills) + history
-  3. Calls the LLM with available tools (function-calling)
-  4. If the LLM wants to use tools, executes them and loops
-  5. Returns the final text response"
+   3. Calls the LLM with available tools (function-calling)
+   4. If the LLM wants to use tools, executes them and loops
+   5. Returns the final text response"
   [session-id user-message & {:keys [channel tool-context provider-id local-doc-ids artifact-ids
                                      max-tool-rounds resource-session-id
                                      persist-message? transient-messages
                                      working-memory-message]
-                              :or   {channel :terminal
-                                     tool-context {}
-                                     persist-message? true}}]
+                              :or {channel :terminal
+                                   tool-context {}
+                                   persist-message? true}}]
   (with-session-turn-lock
     session-id
     (fn []
@@ -1064,21 +1536,21 @@
                                                          :local-doc-ids local-doc-ids
                                                          :artifact-ids artifact-ids)]
                     (audit/log! request-context
-                                {:actor      :user
-                                 :type       :user-message
+                                {:actor :user
+                                 :type :user-message
                                  :message-id user-message-id
-                                 :data       {:local-doc-ids (vec (or local-doc-ids []))
-                                              :artifact-ids  (vec (or artifact-ids []))}})))
-                (let [{assistant-provider    :provider
+                                 :data {:local-doc-ids (vec (or local-doc-ids []))
+                                        :artifact-ids (vec (or artifact-ids []))}})))
+                (let [{assistant-provider :provider
                        assistant-provider-id :provider-id}
                       (llm/resolve-provider-selection
-                        (cond-> {:workload :assistant}
-                          provider-id
-                          (assoc :provider-id provider-id)))
+                       (cond-> {:workload :assistant}
+                         provider-id
+                         (assoc :provider-id provider-id)))
                       base-execution-context (merge tool-context
                                                     request-context
                                                     {:session-id session-id
-                                                     :channel    channel
+                                                     :channel channel
                                                      :user-message user-message
                                                      :resource-session-id resource-session-id
                                                      :assistant-provider assistant-provider
@@ -1087,19 +1559,26 @@
                                                  (configured-max-tool-rounds)))
                       max-iterations* (long (autonomous/max-iterations))
                       transient-messages* (vec (filter map? transient-messages))
-                      initial-autonomy-state (autonomous/initial-state user-message)]
+                      initial-autonomy-state (autonomous/prepare-turn-state
+                                              (wm/autonomy-state session-id)
+                                              user-message)]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
+                  (wm/snapshot! session-id)
                   (loop [iteration 1
-                         fact-eids []]
+                         fact-eids []
+                         loop-state nil]
                     (throw-if-cancelled! session-id)
                     (let [autonomy-state (or (wm/autonomy-state session-id)
                                              initial-autonomy-state)
                           iteration-context (assoc base-execution-context
                                                    :iteration iteration
                                                    :max-iterations max-iterations*)
-                          controller-messages (autonomous-iteration-messages autonomy-state
-                                                                            iteration
-                                                                            max-iterations*)
+                          controller-messages (autonomous-iteration-messages
+                                               autonomy-state
+                                               iteration
+                                               max-iterations*
+                                               :incoming-message (when (= iteration 1)
+                                                                   user-message))
                           transient-messages** (into transient-messages*
                                                      controller-messages)
                           _ (report-autonomy-status! :understanding
@@ -1120,17 +1599,19 @@
                                    "Resuming the autonomous loop with the updated plan.")
                         :session-id session-id})
                       (let [{:keys [response used-fact-eids]}
-                            (run-agent-iteration session-id
-                                                 channel
-                                                 resource-session-id
-                                                 local-doc-ids
-                                                 artifact-ids
-                                                 iteration-context
-                                                 assistant-provider
-                                                 assistant-provider-id
-                                                 transient-messages**
-                                                 wm-message
-                                                 max-tool-rounds*)
+                            (run-supervised-agent-iteration session-id
+                                                            channel
+                                                            resource-session-id
+                                                            local-doc-ids
+                                                            artifact-ids
+                                                            iteration-context
+                                                            assistant-provider
+                                                            assistant-provider-id
+                                                            transient-messages**
+                                                            wm-message
+                                                            max-tool-rounds*
+                                                            autonomy-state
+                                                            max-iterations*)
                             parsed (autonomous/parse-controller-response
                                     (response-content response))
                             control (:control parsed)
@@ -1144,6 +1625,7 @@
                                                            next-state))
                                                      autonomy-state)
                             updated-tip (autonomous/current-frame updated-autonomy-state)
+                            _ (wm/snapshot! session-id)
                             text (final-assistant-text parsed response)]
                         (report-autonomy-status! :observing
                                                  updated-autonomy-state
@@ -1191,7 +1673,17 @@
                                            :last-stack (some-> updated-autonomy-state :stack)}))
 
                           :else
-                          (do
+                          (let [next-loop-state (update-iteration-loop-state
+                                                 loop-state
+                                                 (iteration-signature updated-autonomy-state
+                                                                      control))]
+                            (throw-if-identical-iteration-loop! session-id
+                                                                channel
+                                                                iteration
+                                                                max-iterations*
+                                                                next-loop-state
+                                                                updated-autonomy-state
+                                                                control)
                             (report-autonomy-status! :updating
                                                      updated-autonomy-state
                                                      iteration
@@ -1209,38 +1701,78 @@
                               :agenda (some-> updated-tip :agenda)
                               :stack (some-> updated-autonomy-state :stack)})
                             (recur (inc iteration)
-                                   fact-eids*)))))))
+                                   fact-eids*
+                                   next-loop-state)))))))
                 (catch InterruptedException e
                   (.interrupt (Thread/currentThread))
+                  (request-session-cancel! session-id "request interrupted")
                   (let [cancel-ex (request-cancelled-ex session-id
                                                         (cancellation-reason session-id)
                                                         e)]
+                    (save-schedule-checkpoint! request-context
+                                               {:phase :cancelled
+                                                :summary "Request cancelled"
+                                                :session-id session-id})
                     (prompt/status! {:state :cancelled
                                      :phase :cancelled
                                      :message "Request cancelled"})
                     (throw cancel-ex)))
                 (catch clojure.lang.ExceptionInfo e
-                  (if (= :request-cancelled (:type (ex-data e)))
-                    (do
-                      (prompt/status! {:state :cancelled
-                                       :phase :cancelled
-                                       :message "Request cancelled"})
-                      (throw e))
-                    (do
-                      (prompt/status! {:state :error
-                                       :phase :error
-                                       :message (str "Request failed: " (.getMessage e))})
-                      (throw e))))
+                  (let [data (ex-data e)]
+                    (cond
+                      (= :request-cancelled (:type data))
+                      (do
+                        (save-schedule-checkpoint! request-context
+                                                   {:phase :cancelled
+                                                    :summary "Request cancelled"
+                                                    :session-id session-id})
+                        (prompt/status! {:state :cancelled
+                                         :phase :cancelled
+                                         :message "Request cancelled"})
+                        (throw e))
+
+                      (contains? #{:agent-stalled :autonomous-loop-stalled} (:type data))
+                      (do
+                        (save-schedule-checkpoint! request-context
+                                                   {:phase :stalled
+                                                    :summary (.getMessage e)
+                                                    :session-id session-id
+                                                    :iteration (:iteration data)
+                                                    :current-focus (:current-focus data)
+                                                    :progress-status (:progress-status data)})
+                        (prompt/status! {:state :error
+                                         :phase :stalled
+                                         :message (str "Supervisor stopped the run: " (.getMessage e))})
+                        (throw e))
+
+                      :else
+                      (do
+                        (save-schedule-checkpoint! request-context
+                                                   {:phase :error
+                                                    :summary (.getMessage e)
+                                                    :session-id session-id})
+                        (prompt/status! {:state :error
+                                         :phase :error
+                                         :message (str "Request failed: " (.getMessage e))})
+                        (throw e)))))
                 (catch Exception e
                   (if (session-cancelled? session-id)
                     (let [cancel-ex (request-cancelled-ex session-id
                                                           (cancellation-reason session-id)
                                                           e)]
+                      (save-schedule-checkpoint! request-context
+                                                 {:phase :cancelled
+                                                  :summary "Request cancelled"
+                                                  :session-id session-id})
                       (prompt/status! {:state :cancelled
                                        :phase :cancelled
                                        :message "Request cancelled"})
                       (throw cancel-ex))
                     (do
+                      (save-schedule-checkpoint! request-context
+                                                 {:phase :error
+                                                  :summary (.getMessage e)
+                                                  :session-id session-id})
                       (prompt/status! {:state :error
                                        :phase :error
                                        :message (str "Request failed: " (.getMessage e))})
@@ -1250,23 +1782,23 @@
   [parent-session-id {:keys [task prompt] :as branch-task}
    {:keys [channel provider-id resource-session-id objective
            max-tool-rounds tool-context]
-    :or   {channel :terminal}}]
+    :or {channel :terminal}}]
   (throw-if-runtime-stopping! parent-session-id)
   (throw-if-cancelled! parent-session-id)
-  (let [parent-trace      (trace-context prompt/*interaction-context*)
+  (let [parent-trace (trace-context prompt/*interaction-context*)
         branch-request-id (new-request-id)
-        branch-trace      (cond-> (merge parent-trace
-                                         {:channel :branch
-                                          :request-id branch-request-id
-                                          :correlation-id (or (:correlation-id parent-trace)
-                                                              (:request-id parent-trace)
-                                                              branch-request-id)})
-                            (:request-id parent-trace)
-                            (assoc :parent-request-id (:request-id parent-trace)))
-        child-session-id  (db/create-session! :branch
-                                              {:parent-session-id parent-session-id
-                                               :worker? true
-                                               :label task})]
+        branch-trace (cond-> (merge parent-trace
+                                    {:channel :branch
+                                     :request-id branch-request-id
+                                     :correlation-id (or (:correlation-id parent-trace)
+                                                         (:request-id parent-trace)
+                                                         branch-request-id)})
+                       (:request-id parent-trace)
+                       (assoc :parent-request-id (:request-id parent-trace)))
+        child-session-id (db/create-session! :branch
+                                             {:parent-session-id parent-session-id
+                                              :worker? true
+                                              :label task})]
     (try
       (throw-if-runtime-stopping! child-session-id)
       (throw-if-cancelled! child-session-id)
@@ -1286,11 +1818,11 @@
                                                          tool-context))
             wm-context (wm/wm->context child-session-id)]
         (merge branch-trace
-               {:task       task
-                :status     "completed"
+               {:task task
+                :status "completed"
                 :session-id child-session-id
-                :topics     (:topics wm-context)
-                :result     result}))
+                :topics (:topics wm-context)
+                :result result}))
       (catch Throwable t
         (log/error t "Branch task failed"
                    (merge {:task task
@@ -1298,10 +1830,10 @@
                            :parent-session-id parent-session-id}
                           branch-trace))
         (merge branch-trace
-               {:task         task
-                :status       "failed"
-                :session-id   child-session-id
-                :error        (.getMessage t)
+               {:task task
+                :status "failed"
+                :session-id child-session-id
+                :error (.getMessage t)
                 :error-detail (throwable-detail t)}))
       (finally
         (db/set-session-active! child-session-id false)
@@ -1313,66 +1845,66 @@
    branch results for the parent agent."
   [tasks & {:keys [session-id channel provider-id resource-session-id objective
                    max-parallel max-tool-rounds tool-context]
-            :or   {channel :terminal
-                   tool-context {}}}]
-  (let [parent-context      prompt/*interaction-context*
-        parent-session-id   (or session-id (:session-id parent-context))
-        channel*            (or channel (:channel parent-context) :terminal)
-        provider-id*        (or provider-id
-                                (:assistant-provider-id parent-context))
+            :or {channel :terminal
+                 tool-context {}}}]
+  (let [parent-context prompt/*interaction-context*
+        parent-session-id (or session-id (:session-id parent-context))
+        channel* (or channel (:channel parent-context) :terminal)
+        provider-id* (or provider-id
+                         (:assistant-provider-id parent-context))
         resource-session-id* (or resource-session-id parent-session-id)
-        branch-tasks        (->> tasks (map normalize-branch-task) (remove #(str/blank? (:prompt %))) vec)
-        task-count          (count branch-tasks)
-        _                   (throw-if-runtime-stopping! parent-session-id)
-        _                   (throw-if-cancelled! parent-session-id)
-        max-tasks           (max-branch-tasks)
-        max-parallel*       (clojure.core/min (clojure.core/max 1 (long (or max-parallel (max-parallel-branches))))
-                                              (clojure.core/max 1 (long max-tasks)))]
+        branch-tasks (->> tasks (map normalize-branch-task) (remove #(str/blank? (:prompt %))) vec)
+        task-count (count branch-tasks)
+        _ (throw-if-runtime-stopping! parent-session-id)
+        _ (throw-if-cancelled! parent-session-id)
+        max-tasks (max-branch-tasks)
+        max-parallel* (clojure.core/min (clojure.core/max 1 (long (or max-parallel (max-parallel-branches))))
+                                        (clojure.core/max 1 (long max-tasks)))]
     (when (zero? task-count)
       (throw (ex-info "Branch tasks require at least one task" {})))
     (when (> (long task-count) (long max-tasks))
       (throw (ex-info (str "Too many branch tasks: " task-count " (max " max-tasks ")")
                       {:task-count task-count
-                       :max-tasks  max-tasks})))
+                       :max-tasks max-tasks})))
     (report-status! (str "Running " task-count " branch task"
                          (when (not= 1 task-count) "s"))
                     :phase :branch
                     :branch-count task-count
                     :parallel true)
     (let [results (vec
-                    (mapcat (fn [batch]
-                              (let [futures (mapv (fn [branch-task]
-                                                    (future
-                                                      (run-branch-task* parent-session-id
-                                                                        branch-task
-                                                                        {:channel channel*
-                                                                         :provider-id provider-id*
-                                                                         :resource-session-id resource-session-id*
-                                                                         :objective objective
-                                                                         :max-tool-rounds (or max-tool-rounds
-                                                                                              (max-branch-tool-rounds))
-                                                                         :tool-context tool-context})))
-                                                  batch)]
-                                (await-futures! futures
-                                                (branch-task-timeout-ms)
-                                                (fn [idx timeout-ms]
-                                                  (let [branch-task (nth batch idx)]
-                                                    (ex-info (str "Branch task timed out: "
-                                                                  (or (:task branch-task)
-                                                                      (:prompt branch-task)
-                                                                      "unnamed"))
-                                                             (merge (trace-context parent-context)
-                                                                    {:type       :branch-task-timeout
-                                                                     :timeout-ms timeout-ms
-                                                                     :task       (:task branch-task)
-                                                                     :prompt     (:prompt branch-task)})))))))
-                            (partition-all max-parallel* branch-tasks)))]
-      {:summary            (branch-result-summary results)
-       :parent_session_id  parent-session-id
-       :request_id         (:request-id parent-context)
-       :correlation_id     (or (:correlation-id parent-context)
-                               (:request-id parent-context))
-       :branch_count       task-count
-       :completed_count    (count (filter #(= "completed" (:status %)) results))
-       :failed_count       (count (filter #(= "failed" (:status %)) results))
-       :results            results})))
+                   (mapcat (fn [batch]
+                             (let [futures (mapv (fn [branch-task]
+                                                   (future
+                                                     (run-branch-task* parent-session-id
+                                                                       branch-task
+                                                                       {:channel channel*
+                                                                        :provider-id provider-id*
+                                                                        :resource-session-id resource-session-id*
+                                                                        :objective objective
+                                                                        :max-tool-rounds (or max-tool-rounds
+                                                                                             (max-branch-tool-rounds))
+                                                                        :tool-context tool-context})))
+                                                 batch)]
+                               (await-futures! futures
+                                               (branch-task-timeout-ms)
+                                               (fn [idx timeout-ms]
+                                                 (let [branch-task (nth batch idx)]
+                                                   (ex-info (str "Branch task timed out: "
+                                                                 (or (:task branch-task)
+                                                                     (:prompt branch-task)
+                                                                     "unnamed"))
+                                                            (merge (trace-context parent-context)
+                                                                   {:type :branch-task-timeout
+                                                                    :timeout-ms timeout-ms
+                                                                    :task (:task branch-task)
+                                                                    :prompt (:prompt branch-task)})))))))
+                           (partition-all max-parallel* branch-tasks)))]
+      {:summary (branch-result-summary results)
+       :parent_session_id parent-session-id
+       :request_id (:request-id parent-context)
+       :correlation_id (or (:correlation-id parent-context)
+                           (:request-id parent-context))
+       :branch_count task-count
+       :completed_count (count (filter #(= "completed" (:status %)) results))
+       :failed_count (count (filter #(= "failed" (:status %)) results))
+       :results results})))

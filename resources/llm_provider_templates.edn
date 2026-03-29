@@ -76,21 +76,22 @@
   :docs-url "https://api-docs.deepseek.com/"
   :sign-in-options []
   :notes "Uses DeepSeek API key authentication via bearer token."}
- {:id :glm
-  :name "Z.ai / GLM"
-  :description "Connect Xia to GLM-hosted models through Zhipu's compatible endpoint."
+ {:id :fireworks
+  :name "Fireworks AI"
+  :description "Connect Xia to Fireworks-hosted serverless models."
   :category :cloud
-  :base-url "https://open.bigmodel.cn/api/paas/v4"
-  :model-suggestion "glm-4.5"
+  :base-url "https://api.fireworks.ai/inference/v1"
+  :model-suggestion "accounts/fireworks/models/deepseek-v3p1"
   :access-modes [{:id :api
                   :label "API credential"
-                  :description "Use a GLM API key."
+                  :description "Use a Fireworks API key."
                   :credential-sources [:api-key]
                   :default? true}]
-  :account-url "https://open.bigmodel.cn/"
-  :docs-url "https://docs.bigmodel.cn/cn/api/introduction"
+  :account-url "https://app.fireworks.ai/"
+  :api-key-url "https://app.fireworks.ai/"
+  :docs-url "https://docs.fireworks.ai/getting-started/quickstart"
   :sign-in-options []
-  :notes "Zhipu's standard endpoint supports bearer API keys. Coding-plan users may need the alternate compatible base URL https://open.bigmodel.cn/api/coding/paas/v4."}
+  :notes "Uses Fireworks' OpenAI-compatible endpoint with bearer API keys. Fireworks model ids are fully qualified, for example accounts/fireworks/models/deepseek-v3p1."}
  {:id :minimax
   :name "MiniMax"
   :description "Connect Xia to MiniMax-hosted models."

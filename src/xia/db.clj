@@ -300,6 +300,7 @@
    :wm/id               {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :wm/session           {:db/valueType :db.type/ref}     ; → session
    :wm/topics            {:db/valueType :db.type/string}
+   :wm/autonomy-state    {:db/valueType :db.type/string}
    :wm/updated-at        {:db/valueType :db.type/instant}
 
    :wm.slot/id           {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
@@ -1731,7 +1732,7 @@
 
 (defn save-wm-snapshot!
   "Persist working memory state to DB for crash recovery."
-  [{:keys [session-id topics slots episode-refs local-doc-refs]}]
+  [{:keys [session-id topics slots episode-refs local-doc-refs autonomy-state]}]
   (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
                                   :where [?e :session/id ?sid]]
                                 session-id))]
@@ -1739,49 +1740,51 @@
       (throw (ex-info "Cannot save WM snapshot: session not found"
                       {:session-id session-id})))
     (let [wm-id       (random-uuid)
-        wm-tx       {:wm/id         wm-id
-                      :wm/session    session-eid
-                      :wm/topics     (or topics "")
-                      :wm/updated-at (java.util.Date.)}
-        ;; Delete old snapshot for this session
-        old-wm-eids (mapv first (q '[:find ?e :in $ ?s
-                                      :where [?e :wm/session ?s]]
-                                    session-eid))
-        retracts    (mapv (fn [eid] [:db/retractEntity eid]) old-wm-eids)]
-    (transact! (into retracts [wm-tx]))
-    ;; Now add slots and episode-refs pointing to the new WM entity
-    (let [wm-eid (ffirst (q '[:find ?e :in $ ?id :where [?e :wm/id ?id]] wm-id))]
-      (when (seq slots)
-        (transact!
-          (mapv (fn [[_node-eid slot]]
-                  {:wm.slot/id        (random-uuid)
-                   :wm.slot/wm        wm-eid
-                   :wm.slot/node      (:node-eid slot)
-                   :wm.slot/relevance (float (:relevance slot))
-                   :wm.slot/pinned?   (boolean (:pinned? slot))
-                   :wm.slot/added-at  (java.util.Date.)})
-                slots)))
-      (when (seq episode-refs)
-        (transact!
-          (mapv (fn [eref]
-                  {:wm.episode-ref/id        (random-uuid)
-                   :wm.episode-ref/wm        wm-eid
-                   :wm.episode-ref/episode   (:episode-eid eref)
-                   :wm.episode-ref/relevance (float (:relevance eref))})
-                episode-refs)))
-      (when (seq local-doc-refs)
-        (transact!
-          (keep (fn [dref]
-                  (when-let [doc-eid (ffirst
-                                       (q '[:find ?e :in $ ?id
-                                            :where [?e :local.doc/id ?id]]
-                                          (:doc-id dref)))]
-                    {:wm.local-doc-ref/id        (random-uuid)
-                     :wm.local-doc-ref/wm        wm-eid
-                     :wm.local-doc-ref/doc       doc-eid
-                     :wm.local-doc-ref/relevance (float (:relevance dref))}))
-                local-doc-refs))))
-    wm-id)))
+          wm-tx       (cond-> {:wm/id         wm-id
+                               :wm/session    session-eid
+                               :wm/topics     (or topics "")
+                               :wm/updated-at (java.util.Date.)}
+                        (some? autonomy-state)
+                        (assoc :wm/autonomy-state (json/write-json-str autonomy-state)))
+          ;; Delete old snapshot for this session
+          old-wm-eids (mapv first (q '[:find ?e :in $ ?s
+                                       :where [?e :wm/session ?s]]
+                                     session-eid))
+          retracts    (mapv (fn [eid] [:db/retractEntity eid]) old-wm-eids)]
+      (transact! (into retracts [wm-tx]))
+      ;; Now add slots and episode-refs pointing to the new WM entity
+      (let [wm-eid (ffirst (q '[:find ?e :in $ ?id :where [?e :wm/id ?id]] wm-id))]
+        (when (seq slots)
+          (transact!
+            (mapv (fn [[_node-eid slot]]
+                    {:wm.slot/id        (random-uuid)
+                     :wm.slot/wm        wm-eid
+                     :wm.slot/node      (:node-eid slot)
+                     :wm.slot/relevance (float (:relevance slot))
+                     :wm.slot/pinned?   (boolean (:pinned? slot))
+                     :wm.slot/added-at  (java.util.Date.)})
+                  slots)))
+        (when (seq episode-refs)
+          (transact!
+            (mapv (fn [eref]
+                    {:wm.episode-ref/id        (random-uuid)
+                     :wm.episode-ref/wm        wm-eid
+                     :wm.episode-ref/episode   (:episode-eid eref)
+                     :wm.episode-ref/relevance (float (:relevance eref))})
+                  episode-refs)))
+        (when (seq local-doc-refs)
+          (transact!
+            (keep (fn [dref]
+                    (when-let [doc-eid (ffirst
+                                         (q '[:find ?e :in $ ?id
+                                              :where [?e :local.doc/id ?id]]
+                                            (:doc-id dref)))]
+                      {:wm.local-doc-ref/id        (random-uuid)
+                       :wm.local-doc-ref/wm        wm-eid
+                       :wm.local-doc-ref/doc       doc-eid
+                       :wm.local-doc-ref/relevance (float (:relevance dref))}))
+                  local-doc-refs))))
+      wm-id)))
 
 (defn load-wm-snapshot
   "Load the most recent WM snapshot for a session."
@@ -1795,6 +1798,11 @@
                                     session-eid))]
         (let [wm-entity (into {} (d/entity (d/db (conn)) wm-eid))]
           {:topics (:wm/topics wm-entity)
+           :autonomy-state (when-let [text (:wm/autonomy-state wm-entity)]
+                             (try
+                               (json/read-json text)
+                               (catch Exception _
+                                 nil)))
            :updated-at (entity-updated-at wm-entity)})))))
 
 (defn latest-session-episode

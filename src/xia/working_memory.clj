@@ -14,6 +14,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.memory :as memory]))
@@ -674,6 +675,22 @@ Rules:
         (swap! wm-atom assoc sid wm)
         wm))))
 
+(defn- restore-snapshot!
+  [session-id]
+  (run-session-op! session-id
+    (fn [sid]
+      (when-let [snapshot (db/load-wm-snapshot sid)]
+        (update-session-wm! sid
+          (fn [wm]
+            (cond-> wm
+              (contains? snapshot :topics)
+              (assoc :topics (:topics snapshot))
+
+              (contains? snapshot :autonomy-state)
+              (assoc :autonomy-state (some-> (:autonomy-state snapshot)
+                                             autonomous/normalize-state)))))
+        (get-wm sid)))))
+
 (defn ensure-wm!
   "Return working memory for the session, creating and warm-starting it if needed."
   [session-id]
@@ -682,7 +699,8 @@ Rules:
       (or (get-wm sid)
           (do
             (create-wm! sid)
-            (warm-start! sid)
+            (when-not (restore-snapshot! sid)
+              (warm-start! sid))
             (get-wm sid))))))
 
 (defn warm-start!
@@ -726,7 +744,8 @@ Rules:
   (run-session-op! session-id
     (fn [sid]
       (update-session-wm! sid
-        #(assoc % :autonomy-state autonomy-state)))))
+        #(assoc % :autonomy-state (some-> autonomy-state
+                                          autonomous/normalize-state))))))
 
 (defn clear-autonomy-state!
   [session-id]

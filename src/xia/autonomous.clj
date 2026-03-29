@@ -17,7 +17,7 @@
   []
   prompt/*interaction-context*)
 
-(declare controller-state-message)
+(declare controller-state-message current-frame)
 
 (defn autonomous-run?
   ([] (autonomous-run? (context)))
@@ -282,18 +282,31 @@
 
 (defn- normalize-frame
   [frame default-title]
-  (let [agenda           (normalize-agenda (:agenda frame))
-        status           (or (normalize-progress-status (:progress-status frame))
-                             (normalize-progress-status (:status frame))
+  (let [agenda           (normalize-agenda (or (:agenda frame)
+                                               (get frame "agenda")))
+        status           (or (normalize-progress-status (or (:progress-status frame)
+                                                            (get frame "progress_status")
+                                                            (get frame "progress-status")))
+                             (normalize-progress-status (or (:status frame)
+                                                            (get frame "status")))
                              (derive-progress-status :continue false agenda)
                              :pending)
-        title            (or (truncate-agenda-item (:title frame))
-                             (truncate-agenda-item (:current-focus frame))
+        title            (or (truncate-agenda-item (or (:title frame)
+                                                       (get frame "title")))
+                             (truncate-agenda-item (or (:current-focus frame)
+                                                       (:current_focus frame)
+                                                       (get frame "current_focus")
+                                                       (get frame "current-focus")))
                              default-title)]
     {:title           title
-     :summary         (truncate-field (:summary frame))
-     :next-step       (truncate-field (:next-step frame))
-     :reason          (truncate-field (:reason frame))
+     :summary         (truncate-field (or (:summary frame)
+                                          (get frame "summary")))
+     :next-step       (truncate-field (or (:next-step frame)
+                                          (:next_step frame)
+                                          (get frame "next_step")
+                                          (get frame "next-step")))
+     :reason          (truncate-field (or (:reason frame)
+                                          (get frame "reason")))
      :progress-status status
      :agenda          agenda}))
 
@@ -317,10 +330,38 @@
     {:goal  goal*
      :stack (normalize-stack goal* nil)}))
 
+(defn normalize-state
+  [state]
+  (let [raw-stack (or (:stack state)
+                      (get state "stack"))
+        goal*     (truncate-field (or (:goal state)
+                                      (get state "goal")
+                                      (some-> raw-stack peek :title)
+                                      (some-> raw-stack peek (get "title"))))
+        stack*    (normalize-stack goal* raw-stack)]
+    {:goal  goal*
+     :stack stack*}))
+
+(defn prepare-turn-state
+  [state user-message]
+  (let [state*           (when (map? state)
+                           (normalize-state state))
+        current-status   (some-> state* current-frame :progress-status)
+        resumable-state? (contains? #{:pending
+                                      :in-progress
+                                      :paused
+                                      :resumable
+                                      :diverged
+                                      :blocked}
+                                    current-status)]
+    (if resumable-state?
+      state*
+      (initial-state user-message))))
+
 (defn current-frame
   [state]
   (peek (:stack (if (map? state)
-                  (update state :stack #(normalize-stack (:goal state) %))
+                  (normalize-state state)
                   (initial-state nil)))))
 
 (defn apply-control
@@ -435,6 +476,9 @@
           "- Do not ask the user questions in this execution context.\n")
         "- If progress now depends on missing approval, missing credentials, or waiting for later external change, describe the blocker and mark the run complete.\n"
         "- Prefer bounded progress in each iteration over aimless repetition.\n"
+        "- Always work on the current stack tip. Do not choose among stack frames.\n"
+        "- Treat new user input, tool results, and observations as inputs about the current tip. If they imply subordinate work, interruption, return-to-parent, replacement, or discard, report that with stack_action at the end of the iteration.\n"
+        "- Use stay when continuing the current tip. Use push to suspend the current tip and enter a child task. Use pop when the current child is done and control should return to its parent. Use replace when the current tip should be superseded. Use clear only when prior stack state should be discarded.\n"
         "- Reuse observations already present in the session instead of repeating the same tool calls.\n\n"
         "At the very end of every response, append the literal marker "
         control-marker
@@ -455,7 +499,7 @@
 
 (defn controller-state-message
   [{:keys [goal iteration max-iterations stack previous-summary previous-next-step
-           previous-reason previous-progress-status previous-agenda]}]
+           previous-reason previous-progress-status previous-agenda incoming-message]}]
   (let [stack* (when (seq stack)
                  (normalize-stack goal stack))
         tip    (peek stack*)]
@@ -467,6 +511,11 @@
           "\n\n"
           "Current iteration: " iteration " of " max-iterations ".\n"
           "Observe the current session history and tool results before deciding the next step.\n"
+          (when-let [input (truncate-field incoming-message)]
+            (str "\nNew input for this turn:\n"
+                 input
+                 "\n"
+                 "Interpret this input relative to the current stack tip. Work on that tip in this iteration. If the input means the tip should be suspended, returned from, replaced, or discarded, report that with stack_action at the end of the iteration.\n"))
           (if (seq stack*)
             (str "\nCurrent execution stack (bottom -> top):\n"
                  (str/join "\n" (stack-lines stack*))

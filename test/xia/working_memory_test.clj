@@ -1,5 +1,6 @@
 (ns xia.working-memory-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [xia.autonomous :as autonomous]
             [xia.test-helpers :as th]
             [xia.db :as db]
             [xia.local-doc :as local-doc]
@@ -38,13 +39,20 @@
     (is (nil? (wm/get-wm)))))
 
 (deftest test-autonomy-state-round-trips-through-working-memory
-  (let [sid   (random-uuid)
-        state {:goal "Handle billing emails"
-               :stack [{:title "Handle billing emails"
-                        :progress-status :in-progress
-                        :agenda [{:item "Check inbox" :status :completed}]}]}]
-    (wm/create-wm! sid)
+  (let [sid   (db/create-session! :terminal)
+        state (autonomous/normalize-state
+               {:goal "Handle billing emails"
+                :stack [{:title "Handle billing emails"
+                         :progress-status :in-progress
+                         :agenda [{:item "Check inbox" :status :completed}]}]})]
+    (wm/ensure-wm! sid)
     (wm/set-autonomy-state! sid state)
+    (is (= state (wm/autonomy-state sid)))
+    (is (= state (:autonomy (wm/wm->context sid))))
+    (wm/snapshot! sid)
+    (wm/clear-wm! sid)
+    (is (nil? (wm/get-wm sid)))
+    (wm/ensure-wm! sid)
     (is (= state (wm/autonomy-state sid)))
     (is (= state (:autonomy (wm/wm->context sid))))
     (wm/clear-autonomy-state! sid)
