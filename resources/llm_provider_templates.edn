@@ -31,10 +31,10 @@
   :notes "Uses OpenAI API keys against the official API endpoint. ChatGPT subscription sign-in is not used in Xia."}
  {:id :qwen
   :name "Qwen"
-  :description "Connect through Alibaba Cloud's Qwen-compatible endpoint."
+  :description "Connect Xia to Alibaba Cloud Model Studio's Qwen-compatible endpoint."
   :category :cloud
   :base-url "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  :model-suggestion "qwen-max"
+  :model-suggestion "qwen3.5-plus"
   :access-modes [{:id :api
                   :label "API credential"
                   :description "Use a Qwen API key."
@@ -42,9 +42,39 @@
                   :default? true}]
   :account-url "https://bailian.console.aliyun.com/"
   :api-key-url "https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key"
-  :docs-url "https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api"
+  :docs-url "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope"
   :sign-in-options []
-  :notes "Use an API key. Beijing uses the default base URL; Singapore uses https://dashscope-intl.aliyuncs.com/compatible-mode/v1."}
+  :notes "Uses Alibaba Cloud Model Studio's OpenAI-compatible endpoint with bearer API keys. Beijing uses the default base URL; Singapore uses https://dashscope-intl.aliyuncs.com/compatible-mode/v1 and Virginia uses https://dashscope-us.aliyuncs.com/compatible-mode/v1."}
+ {:id :deepseek
+  :name "DeepSeek"
+  :description "Connect Xia to DeepSeek-hosted models."
+  :category :cloud
+  :base-url "https://api.deepseek.com/v1"
+  :model-suggestion "deepseek-chat"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a DeepSeek API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://platform.deepseek.com/"
+  :docs-url "https://api-docs.deepseek.com/"
+  :sign-in-options []
+  :notes "Uses DeepSeek API key authentication via bearer token."}
+ {:id :kimi
+  :name "Moonshot Kimi"
+  :description "Connect Xia to Moonshot AI's Kimi API."
+  :category :cloud
+  :base-url "https://api.moonshot.ai/v1"
+  :model-suggestion "kimi-k2.5"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a Moonshot API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://platform.moonshot.ai/"
+  :docs-url "https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model.en-US"
+  :sign-in-options []
+  :notes "Uses Moonshot AI's OpenAI-compatible endpoint with bearer API keys. Moonshot documents kimi-k2.5 and kimi-k2-thinking as current Kimi API models, with kimi-k2.5 recommended for general agentic and coding work."}
  {:id :claude
   :name "Claude"
   :description "Connect Xia to Anthropic-hosted Claude models."
@@ -61,21 +91,53 @@
   :docs-url "https://docs.anthropic.com/en/api/getting-started"
   :sign-in-options []
   :notes "Uses Anthropic's native Messages API with x-api-key authentication."}
- {:id :deepseek
-  :name "DeepSeek"
-  :description "Connect Xia to DeepSeek-hosted models."
+ {:id :novita
+  :name "Novita"
+  :description "Connect Xia to Novita's OpenAI-compatible inference API."
   :category :cloud
-  :base-url "https://api.deepseek.com/v1"
-  :model-suggestion "deepseek-chat"
+  :base-url "https://api.novita.ai/openai/v1"
+  :model-suggestion "openai/gpt-oss-20b"
   :access-modes [{:id :api
                   :label "API credential"
-                  :description "Use a DeepSeek API key."
+                  :description "Use a Novita API key."
                   :credential-sources [:api-key]
                   :default? true}]
-  :account-url "https://platform.deepseek.com/"
-  :docs-url "https://api-docs.deepseek.com/"
+  :account-url "https://novita.ai/"
+  :api-key-url "https://novita.ai/settings/key-management"
+  :docs-url "https://novita.ai/docs/guides/llm-api"
+  :sign-in-options [:google :github]
+  :notes "Uses Novita's OpenAI-compatible endpoint with bearer API keys. Novita supports chat completions, streaming, tool use, model listing, and a broad hosted model catalog behind one endpoint."}
+ {:id :deepinfra
+  :name "DeepInfra"
+  :description "Connect Xia to DeepInfra's OpenAI-compatible inference API."
+  :category :cloud
+  :base-url "https://api.deepinfra.com/v1/openai"
+  :model-suggestion "deepseek-ai/DeepSeek-V3.2"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a DeepInfra API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://deepinfra.com/"
+  :docs-url "https://deepinfra.com/docs/openai_api"
   :sign-in-options []
-  :notes "Uses DeepSeek API key authentication via bearer token."}
+  :notes "Uses DeepInfra's OpenAI-compatible endpoint with bearer API keys. DeepInfra supports chat completions, streaming, tools, and many hosted open-source models behind one endpoint."}
+ {:id :siliconflow
+  :name "SiliconFlow"
+  :description "Connect Xia to SiliconFlow's OpenAI-compatible inference API."
+  :category :cloud
+  :base-url "https://api.siliconflow.com/v1"
+  :model-suggestion "openai/gpt-oss-20b"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a SiliconFlow API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://cloud.siliconflow.com/"
+  :api-key-url "https://cloud.siliconflow.com/account/ak"
+  :docs-url "https://docs.siliconflow.com/en/userguide/quickstart"
+  :sign-in-options []
+  :notes "Uses SiliconFlow's OpenAI-compatible endpoint with bearer API keys. SiliconFlow supports chat completions, streaming, function calling, and a broad hosted model catalog behind one endpoint."}
  {:id :fireworks
   :name "Fireworks AI"
   :description "Connect Xia to Fireworks-hosted serverless models."
@@ -92,21 +154,6 @@
   :docs-url "https://docs.fireworks.ai/getting-started/quickstart"
   :sign-in-options []
   :notes "Uses Fireworks' OpenAI-compatible endpoint with bearer API keys. Fireworks model ids are fully qualified, for example accounts/fireworks/models/deepseek-v3p1."}
- {:id :minimax
-  :name "MiniMax"
-  :description "Connect Xia to MiniMax-hosted models."
-  :category :cloud
-  :base-url "https://api.minimax.io/v1"
-  :model-suggestion "MiniMax-M2.5"
-  :access-modes [{:id :api
-                  :label "API credential"
-                  :description "Use a MiniMax API key."
-                  :credential-sources [:api-key]
-                  :default? true}]
-  :account-url "https://platform.minimax.io/"
-  :docs-url "https://platform.minimax.io/docs/guides/quickstart-preparation"
-  :sign-in-options []
-  :notes "Uses MiniMax API key authentication via bearer token. Global endpoint is https://api.minimax.io/v1. China deployments may use https://api.minimaxi.com/v1 instead."}
  {:id :gemini
   :name "Google Gemini"
   :description "Connect Xia to Gemini models via Google AI Studio."
@@ -123,6 +170,37 @@
   :docs-url "https://ai.google.dev/gemini-api/docs"
   :sign-in-options []
   :notes "Google AI Studio provides free-tier access to Gemini models. The OpenAI-compatible endpoint is used here."}
+ {:id :minimax
+  :name "MiniMax"
+  :description "Connect Xia to MiniMax-hosted models via the compatible OpenAI API."
+  :category :cloud
+  :base-url "https://api.minimax.io/v1"
+  :model-suggestion "MiniMax-M2.5"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a MiniMax API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://platform.minimax.io/"
+  :docs-url "https://platform.minimax.io/docs/api-reference/text-openai-api"
+  :sign-in-options []
+  :notes "Uses MiniMax's OpenAI-compatible endpoint with bearer API keys. MiniMax currently documents MiniMax-M2.5, MiniMax-M2.5-highspeed, MiniMax-M2.1, MiniMax-M2.1-highspeed, and MiniMax-M2 as supported OpenAI-compatible text models."}
+ {:id :groq
+  :name "Groq"
+  :description "Connect Xia to Groq's low-latency OpenAI-compatible API."
+  :category :cloud
+  :base-url "https://api.groq.com/openai/v1"
+  :model-suggestion "llama-3.3-70b-versatile"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a Groq API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://console.groq.com/"
+  :api-key-url "https://console.groq.com/keys"
+  :docs-url "https://console.groq.com/docs/api-reference"
+  :sign-in-options []
+  :notes "Uses Groq's OpenAI-compatible endpoint with bearer API keys. Groq is especially strong when you want very low latency for chat or tool use."}
  {:id :openrouter
   :name "OpenRouter"
   :description "Access hundreds of models through a single API key."
@@ -139,6 +217,22 @@
   :docs-url "https://openrouter.ai/docs"
   :sign-in-options [:google]
   :notes "One API key, many models. Create separate entries for different models (e.g. a cheap model for history compaction, a stronger one for assistant)."}
+ {:id :together
+  :name "Together AI"
+  :description "Connect Xia to Together's OpenAI-compatible inference API."
+  :category :cloud
+  :base-url "https://api.together.xyz/v1"
+  :model-suggestion "openai/gpt-oss-20b"
+  :access-modes [{:id :api
+                  :label "API credential"
+                  :description "Use a Together API key."
+                  :credential-sources [:api-key]
+                  :default? true}]
+  :account-url "https://api.together.xyz/"
+  :api-key-url "https://api.together.xyz/settings/api-keys"
+  :docs-url "https://docs.together.ai/docs/openai-api-compatibility"
+  :sign-in-options []
+  :notes "Uses Together's OpenAI-compatible endpoint with bearer API keys. Good default picks include openai/gpt-oss-20b and current Together-hosted open-source instruct models."}
  {:id :custom
   :name "Custom OpenAI-Compatible API"
   :description "Use any OpenAI-compatible endpoint, gateway, or proxy."
