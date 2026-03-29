@@ -585,13 +585,14 @@
 
 (defn- best-effort-update-working-memory!
   [session-id user-message channel opts]
-  (try
-    (wm/update-wm! user-message session-id channel opts)
-    (catch Exception e
-      (log/warn e "Working memory update failed; continuing without refreshed WM"
-                {:session-id session-id
-                 :channel channel})
-      nil)))
+  (when-let [message (some-> user-message str str/trim not-empty)]
+    (try
+      (wm/update-wm! message session-id channel opts)
+      (catch Exception e
+        (log/warn e "Working memory update failed; continuing without refreshed WM"
+                  {:session-id session-id
+                   :channel channel})
+        nil))))
 
 (defn- launch-fact-utility-review!
   [fact-eids user-message assistant-response]
@@ -840,7 +841,15 @@
                   :round (:round context)
                   :tool-id tool-id
                   :tool-name func-name
-                  :tool-count (:tool-count context)}))
+                  :tool-count (:tool-count context)
+                  :checkpoint {:phase :tool
+                               :iteration (:iteration context)
+                               :round (:round context)
+                               :tool-id tool-id
+                               :tool-name func-name
+                               :tool-count (:tool-count context)
+                               :summary (str "Running tool " func-name)
+                               :session-id (:session-id context)}}))
   (let [result (tool/execute-tool tool-id args (assoc context
                                                       :tool-call-id (get tool-call "id")
                                                       :tool-name func-name))]
@@ -974,10 +983,6 @@
      :stack (:stack autonomy-state)
      :incoming-message incoming-message})])
 
-(defn- autonomous-iteration-input
-  [autonomy-state iteration max-iterations]
-  (autonomous/working-memory-message autonomy-state iteration max-iterations))
-
 (defn- autonomous-iteration-summary
   [{:keys [assistant-text control]}]
   (or (:summary control)
@@ -1083,7 +1088,9 @@
                           :phase-start-ms phase-start-ms
                           :last-event-ms now-ms
                           :updated-at-ms now-ms
-                          :seq seq-no)
+                          :seq seq-no
+                          :tool-risk? (or (:tool-risk? state)
+                                          (= phase :tool)))
                    (update :events (fnil conj []) event*)))))))
 
 (defn- worker-timeout-ms
@@ -1202,9 +1209,12 @@
     :session-busy})
 
 (defn- restartable-worker-error?
-  [t]
+  [t worker-state]
   (let [type (some-> t ex-data :type)]
     (cond
+      (:tool-risk? worker-state)
+      false
+
       (instance? InterruptedException t)
       false
 
@@ -1317,7 +1327,7 @@
 (defn- run-supervised-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
-   working-memory-message max-tool-rounds autonomy-state max-iterations]
+   working-memory-message update-working-memory? max-tool-rounds autonomy-state max-iterations]
   (loop [attempt 0]
     (let [worker-state (atom {:phase nil
                               :seq 0
@@ -1336,6 +1346,7 @@
                                           assistant-provider-id
                                           transient-messages
                                           working-memory-message
+                                          update-working-memory?
                                           max-tool-rounds
                                           worker-state)
                      (finally
@@ -1353,10 +1364,11 @@
                      (catch Throwable t
                        {:error t}))]
         (if-let [t (:error result)]
-          (let [max-restarts (long (supervisor-max-restarts))
+          (let [worker-snapshot @worker-state
+                max-restarts (long (supervisor-max-restarts))
                 attempt* (inc attempt)]
             (if (and (< attempt max-restarts)
-                     (restartable-worker-error? t)
+                     (restartable-worker-error? t worker-snapshot)
                      (not (session-cancelled? session-id)))
               (do
                 (report-supervisor-status! :restarting
@@ -1434,6 +1446,13 @@
       (some-> response response-content str not-empty)
       ""))
 
+(defn- clear-autonomy-state-on-completion?
+  [control]
+  (boolean
+   (or (= :clear (:stack-action control))
+       (:goal-complete? control)
+       (= :complete (:progress-status control)))))
+
 (defn- persist-final-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]
   (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
@@ -1458,15 +1477,16 @@
 (defn- run-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
-   working-memory-message max-tool-rounds worker-state]
+   working-memory-message update-working-memory? max-tool-rounds worker-state]
   (let [emit-event! #(emit-worker-event! worker-state %)]
-    (emit-event! {:phase :working-memory
-                  :message "Updating working memory"
-                  :iteration (:iteration execution-context)})
-    (best-effort-update-working-memory! session-id
-                                        working-memory-message
-                                        channel
-                                        {:resource-session-id resource-session-id})
+    (when update-working-memory?
+      (emit-event! {:phase :working-memory
+                    :message "Updating working memory"
+                    :iteration (:iteration execution-context)})
+      (best-effort-update-working-memory! session-id
+                                          working-memory-message
+                                          channel
+                                          {:resource-session-id resource-session-id}))
     (throw-if-cancelled! session-id)
     (let [tools (tool/tool-definitions execution-context)
           {:keys [messages used-fact-eids]}
@@ -1699,11 +1719,9 @@
                                                      autonomy-state
                                                      iteration
                                                      max-iterations*)
-                          wm-message (if (= iteration 1)
-                                       (or working-memory-message user-message)
-                                       (autonomous-iteration-input autonomy-state
-                                                                   iteration
-                                                                   max-iterations*))]
+                          update-working-memory? (= iteration 1)
+                          wm-message (when update-working-memory?
+                                       (or working-memory-message user-message))]
                       (save-schedule-checkpoint!
                        iteration-context
                        {:phase :understanding
@@ -1723,6 +1741,7 @@
                                                             assistant-provider-id
                                                             transient-messages**
                                                             wm-message
+                                                            update-working-memory?
                                                             max-tool-rounds*
                                                             autonomy-state
                                                             max-iterations*)
@@ -1767,6 +1786,9 @@
                                                               response
                                                               local-doc-ids
                                                               artifact-ids)
+                            (when (clear-autonomy-state-on-completion? control)
+                              (wm/clear-autonomy-state! session-id)
+                              (wm/snapshot! session-id))
                             (launch-fact-utility-review! fact-eids* user-message text)
                             (prompt/status! {:state :done
                                              :phase :complete

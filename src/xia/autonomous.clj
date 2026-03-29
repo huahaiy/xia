@@ -366,17 +366,24 @@
 
 (defn- normalize-stack
   [goal stack]
-  (let [default-title (default-frame-title goal)
-        stack*        (->> (or stack [])
-                           (keep #(when (map? %)
-                                    (normalize-frame % default-title)))
-                           (take-last max-stack-depth)
-                           vec)]
-    (if (seq stack*)
-      stack*
-      [(normalize-frame {:title default-title
-                         :progress-status :pending}
-                        default-title)])))
+  (cond
+    (and (some? stack)
+         (sequential? stack)
+         (empty? stack))
+    []
+
+    :else
+    (let [default-title (default-frame-title goal)
+          stack*        (->> (or stack [])
+                             (keep #(when (map? %)
+                                      (normalize-frame % default-title)))
+                             (take-last max-stack-depth)
+                             vec)]
+      (if (seq stack*)
+        stack*
+        [(normalize-frame {:title default-title
+                           :progress-status :pending}
+                          default-title)]))))
 
 (defn initial-state
   [goal]
@@ -418,6 +425,42 @@
                   (normalize-state state)
                   (initial-state nil)))))
 
+(defn- suspend-progress-status
+  [status]
+  (case status
+    :paused :paused
+    :resumable :resumable
+    :diverged :diverged
+    :blocked :blocked
+    :complete :complete
+    :resumable))
+
+(defn- suspend-frame
+  [frame]
+  (when (map? frame)
+    (assoc frame :progress-status (suspend-progress-status (:progress-status frame)))))
+
+(defn- merge-frame
+  [existing control default-title]
+  (let [existing*   (when (map? existing)
+                      (normalize-frame existing default-title))
+        control*    (normalize-frame control default-title)
+        merged-title (or (:title control*)
+                         (:title existing*)
+                         default-title)]
+    {:title           merged-title
+     :summary         (or (:summary control*)
+                          (:summary existing*))
+     :next-step       (or (:next-step control*)
+                          (:next-step existing*))
+     :reason          (or (:reason control*)
+                          (:reason existing*))
+     :progress-status (or (:progress-status control*)
+                          (:progress-status existing*)
+                          :pending)
+     :agenda          (or (:agenda control*)
+                          (:agenda existing*))}))
+
 (defn apply-control
   [state control]
   (let [goal          (truncate-field (or (:goal state)
@@ -431,11 +474,17 @@
                           (default-frame-title goal))
         next-tip      (normalize-frame (assoc control :title tip-title)
                                        tip-title)
+        merged-tip    (merge-frame current-tip
+                                   (assoc control :title tip-title)
+                                   tip-title)
         replace-top   (fn [frames frame]
-                        (conj (vec (butlast frames)) frame))
+                        (if (seq frames)
+                          (conj (vec (butlast frames)) frame)
+                          [frame]))
         next-stack    (case action
                         :push
-                        (->> (conj stack next-tip)
+                        (->> (conj (replace-top stack (suspend-frame current-tip))
+                                   next-tip)
                              (take-last max-stack-depth)
                              vec)
 
@@ -446,20 +495,22 @@
                                 parent-title (or (truncate-agenda-item (:current-focus control))
                                                  (:title parent-tip)
                                                  (default-frame-title goal))
-                                parent-frame (normalize-frame (assoc control :title parent-title)
-                                                              parent-title)]
+                                parent-frame (merge-frame parent-tip
+                                                          (assoc control :title parent-title)
+                                                          parent-title)]
                             (replace-top parent-stack parent-frame))
-                          [(normalize-frame (assoc control :title tip-title)
-                                            tip-title)])
+                          [merged-tip])
 
                         :replace
                         (replace-top stack next-tip)
 
                         :clear
-                        []
+                        (if (= :continue (:status control))
+                          [next-tip]
+                          [])
 
                         :stay
-                        (replace-top stack next-tip))]
+                        (replace-top stack merged-tip))]
     {:goal  goal
      :stack next-stack}))
 
@@ -544,7 +595,7 @@
         "- Prefer bounded progress in each iteration over aimless repetition.\n"
         "- Always work on the current stack tip. Do not choose among stack frames.\n"
         "- Treat new user input, tool results, and observations as inputs about the current tip. If they imply subordinate work, interruption, return-to-parent, replacement, or discard, report that with stack_action at the end of the iteration.\n"
-        "- Use stay when continuing the current tip. Use push to suspend the current tip and enter a child task. Use pop when the current child is done and control should return to its parent. Use replace when the current tip should be superseded. Use clear only when prior stack state should be discarded.\n"
+        "- Use stay when continuing the current tip. Use push to suspend the current tip and enter a child task. Use pop when the current child is done and control should return to its parent. Use replace when the current tip should be superseded. Use clear only when prior stack state should be discarded and the stack should be reset.\n"
         "- Reuse observations already present in the session instead of repeating the same tool calls.\n\n"
         "At the start of the first assistant response in every iteration, before any explanation or tool call, prepend the literal marker "
         intent-marker
@@ -566,7 +617,7 @@
         "- reason: why you are continuing or completing.\n"
         "- goal_complete: true only when the current goal is fully satisfied.\n"
         "- current_focus: title of the current stack tip after this iteration.\n"
-        "- stack_action: stay to keep working the current frame, push to enter a subroutine, pop to return to the parent frame, replace to switch the current frame, clear to empty the stack.\n"
+        "- stack_action: stay to keep working the current frame, push to enter a subroutine, pop to return to the parent frame, replace to switch the current frame, clear to discard prior stack state and reset from the current focus.\n"
         "- progress_status: overall status of the current stack tip.\n"
         "- agenda: ordered short checklist for the current stack tip only, not the full stack.\n"
         "- Use paused when work should stop for now. Use resumable when it is paused but has a clear restart path. Use diverged when the work has meaningfully branched away from the original plan.\n"

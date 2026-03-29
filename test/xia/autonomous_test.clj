@@ -134,6 +134,8 @@
                             {:item "Draft billing reply" :status :in-progress}]})]
     (is (= ["Handle billing emails" "Find invoice ids"]
            (mapv :title (:stack pushed))))
+    (is (= :resumable
+           (get-in pushed [:stack 0 :progress-status])))
     (is (= "Find invoice ids"
            (:title (autonomous/current-frame pushed))))
     (is (= ["Handle billing emails"]
@@ -143,6 +145,63 @@
     (is (= [{:item "Check inbox" :status :completed}
             {:item "Draft billing reply" :status :in-progress}]
            (get-in popped [:stack 0 :agenda])))))
+
+(deftest apply-control-stay-preserves-existing-frame-fields
+  (let [initial {:goal "Handle billing emails"
+                 :stack [{:title "Handle billing emails"
+                          :summary "Checked inbox"
+                          :next-step "Draft replies"
+                          :reason "Unread messages remain"
+                          :progress-status :in-progress
+                          :agenda [{:item "Check inbox" :status :completed}
+                                   {:item "Draft replies" :status :in-progress}]}]}
+        updated (autonomous/apply-control
+                 initial
+                 {:status :continue
+                  :summary nil
+                  :next-step "Send replies"
+                  :reason nil
+                  :current-focus "Handle billing emails"
+                  :stack-action :stay
+                  :progress-status :in-progress})]
+    (is (= "Checked inbox"
+           (get-in updated [:stack 0 :summary])))
+    (is (= "Unread messages remain"
+           (get-in updated [:stack 0 :reason])))
+    (is (= "Send replies"
+           (get-in updated [:stack 0 :next-step])))
+    (is (= [{:item "Check inbox" :status :completed}
+            {:item "Draft replies" :status :in-progress}]
+           (get-in updated [:stack 0 :agenda])))))
+
+(deftest apply-control-clear-resets-or-empties-the-stack
+  (let [initial {:goal "Handle billing emails"
+                 :stack [{:title "Handle billing emails"
+                          :progress-status :in-progress}
+                         {:title "Find invoice ids"
+                          :progress-status :in-progress}]}
+        reset-state (autonomous/apply-control
+                     initial
+                     {:status :continue
+                      :summary "Switch to a fresh task"
+                      :next-step "Handle the refund request"
+                      :reason "Discard the prior stack"
+                      :current-focus "Handle refund request"
+                      :stack-action :clear
+                      :progress-status :pending})
+        cleared-state (autonomous/apply-control
+                       initial
+                       {:status :complete
+                        :summary "Done"
+                        :next-step ""
+                        :reason "The prior stack is no longer needed"
+                        :current-focus "Handle refund request"
+                        :stack-action :clear
+                        :progress-status :complete})]
+    (is (= ["Handle refund request"]
+           (mapv :title (:stack reset-state))))
+    (is (= []
+           (:stack cleared-state)))))
 
 (deftest normalize-state-handles-string-keyed-snapshots
   (let [state (autonomous/normalize-state

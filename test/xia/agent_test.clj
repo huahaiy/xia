@@ -339,8 +339,10 @@
     (is (= :understanding (get-in @checkpoints [0 1 :phase])))
     (is (= :planning (get-in @checkpoints [1 1 :phase])))
     (is (= :tool (get-in @checkpoints [2 1 :phase])))
-    (is (= ["web-search"] (get-in @checkpoints [2 1 :tool-ids])))
-    (is (= :observing (get-in @checkpoints [3 1 :phase])))))
+    (is (= "web-search" (get-in @checkpoints [2 1 :tool-name])))
+    (is (= :tool (get-in @checkpoints [3 1 :phase])))
+    (is (= ["web-search"] (get-in @checkpoints [3 1 :tool-ids])))
+    (is (= :observing (get-in @checkpoints [4 1 :phase])))))
 
 (deftest process-message-repeats-autonomous-loop-until-controller-completes
   (let [session-id        (db/create-session! :terminal)
@@ -393,6 +395,56 @@
             :user-message "reply to the billing emails"
             :assistant-response "Sent the replies."}
            @reviewed))))
+
+(deftest process-message-updates-working-memory-only-once-per-top-level-turn
+  (let [session-id (db/create-session! :terminal)
+        wm-inputs  (atom [])
+        llm-calls  (atom 0)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [message _session-id _channel _opts]
+                                                       (swap! wm-inputs conj message))
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Checked inbox.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Checked inbox\",\"next_step\":\"Draft replies\",\"reason\":\"Unread messages remain\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" (str "Sent the replies.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"completed\"}]}")} ))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent the replies."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (= ["reply to the billing emails"] @wm-inputs))))
+
+(deftest process-message-clears-autonomy-state-after-completed-goal
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "Sent the replies.\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:"
+                                                                       "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"stack_action\":\"stay\",\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Send replies\",\"status\":\"completed\"}]}")})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent the replies."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (nil? (wm/autonomy-state session-id)))
+    (wm/clear-wm! session-id)
+    (wm/ensure-wm! session-id)
+    (is (nil? (wm/autonomy-state session-id)))))
 
 (deftest process-message-restores-resumable-stack-across-top-level-turns
   (let [session-id   (db/create-session! :terminal)
@@ -578,6 +630,51 @@
                   (filter #(contains? #{:user :assistant} (:role %)))
                   (mapv (fn [{:keys [role content]}]
                           [role content])))))
+      (finally
+        (prompt/register-status! :terminal nil)))))
+
+(deftest process-message-does-not-restart-after-tool-execution-begins
+  (let [session-id (db/create-session! :terminal)
+        statuses   (atom [])
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-restarts 1)
+    (db/set-config! :agent/supervisor-restart-backoff-ms 1)
+    (prompt/register-status! :terminal
+                             (fn [status]
+                               (swap! statuses conj (select-keys status
+                                                                 [:state :phase :message]))))
+    (try
+      (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                     :function {:name "web-search"
+                                                                                :parameters {}}}])
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.tool/parallel-safe?            (constantly false)
+                    xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                         {:summary "Found the page."})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         (case (swap! llm-calls inc)
+                                                           1 {"content" ""
+                                                              "tool_calls" [{"id" "call-1"
+                                                                             "function" {"name" "web-search"
+                                                                                         "arguments" "{}"}}]}
+                                                           2 (throw (RuntimeException. "crashed after tool"))
+                                                           {"content" "unexpected restart"}))
+                    xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+        (let [err (try
+                    (agent/process-message session-id
+                                           "research this"
+                                           :channel :terminal)
+                    (catch Exception e
+                      e))]
+          (is (instance? RuntimeException err))
+          (is (= "crashed after tool" (.getMessage ^RuntimeException err)))))
+      (is (= 2 @llm-calls))
+      (is (not-any? #(= :restarting (:phase %)) @statuses))
       (finally
         (prompt/register-status! :terminal nil)))))
 
