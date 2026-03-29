@@ -100,6 +100,63 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest process-message-surfaces-action-intent-before-tools
+  (let [session-id (db/create-session! :terminal)
+        statuses   (atom [])
+        llm-calls  (atom 0)]
+    (prompt/register-status! :terminal
+                             (fn [status]
+                               (swap! statuses conj (select-keys status
+                                                                 [:state :phase :message
+                                                                  :intent-focus :intent-agenda-item
+                                                                  :intent-plan-step :intent-why
+                                                                  :intent-tool-name
+                                                                  :intent-tool-args-summary]))))
+    (try
+      (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                     :function {:name "web-search"
+                                                                                :parameters {}}}])
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.tool/parallel-safe?            (constantly false)
+                    xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                         {:summary "Found the message."})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         (if (= 1 (swap! llm-calls inc))
+                                                           {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Handle billing emails\",\"agenda_item\":\"Check inbox\",\"plan_step\":\"Search unread billing email\",\"why\":\"Need the latest unread items\",\"tool\":\"web-search\",\"tool_args_summary\":\"label:billing unread\"}\n\n"
+                                                                           "Searching now.")
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{}"}}]}
+                                                           {"content" (str "Sent the reply.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"complete\",\"summary\":\"Sent the reply\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"current_focus\":\"Handle billing emails\",\"stack_action\":\"stay\",\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Send reply\",\"status\":\"completed\"}]}")}))
+                    xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+        (is (= "Sent the reply."
+               (agent/process-message session-id "reply to the billing emails" :channel :terminal))))
+      (is (some #(= {:state :running
+                     :phase :intent
+                     :message "Intent: Search unread billing email via web-search (label:billing unread)"
+                     :intent-focus "Handle billing emails"
+                     :intent-agenda-item "Check inbox"
+                     :intent-plan-step "Search unread billing email"
+                     :intent-why "Need the latest unread items"
+                     :intent-tool-name "web-search"
+                     :intent-tool-args-summary "label:billing unread"}
+                    %)
+                @statuses))
+      (is (= "Searching now."
+             (:content (first (filter #(and (= :assistant (:role %))
+                                            (seq (:tool-calls %)))
+                                      (db/session-messages session-id))))))
+      (finally
+        (prompt/register-status! :terminal nil)))))
+
 (deftest process-message-can-be-cancelled
   (let [session-id (db/create-session! :terminal)
         started    (promise)

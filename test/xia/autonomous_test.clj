@@ -5,9 +5,11 @@
             [xia.prompt :as prompt]))
 
 (deftest parse-controller-response-normalizes-progress-and-agenda
-  (let [{:keys [assistant-text control]}
+  (let [{:keys [assistant-text intent control]}
         (autonomous/parse-controller-response
-          (str "Worked the plan.\n\n"
+          (str "ACTION_INTENT_JSON:"
+               "{\"focus\":\"Reply to billing emails\",\"agenda_item\":\"Send reply\",\"plan_step\":\"Draft the reply\",\"why\":\"The inbox review is already done\",\"tool\":\"gmail-search\",\"tool_args_summary\":\"label:billing unread\"}\n\n"
+               "Worked the plan.\n\n"
                "AUTONOMOUS_STATUS_JSON:"
                "{\"status\":\"continue\",\"summary\":\"Worked the plan\",\"next_step\":\"Send the reply\",\"reason\":\"One step remains\",\"goal_complete\":false,"
                "\"current_focus\":\"Reply to billing emails\","
@@ -16,6 +18,13 @@
                "\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"done\"},"
                "{\"item\":\"Send reply\",\"status\":\"pending\"}]}"))]
     (is (= "Worked the plan." assistant-text))
+    (is (= {:focus "Reply to billing emails"
+            :agenda-item "Send reply"
+            :plan-step "Draft the reply"
+            :why "The inbox review is already done"
+            :tool-name "gmail-search"
+            :tool-args-summary "label:billing unread"}
+           intent))
     (is (= :continue (:status control)))
     (is (= "Reply to billing emails" (:current-focus control)))
     (is (= :stay (:stack-action control)))
@@ -83,7 +92,22 @@
       (is (str/includes? content
                          "Always work on the current stack tip. Do not choose among stack frames."))
       (is (str/includes? content
-                         "Use stay when continuing the current tip")))))
+                         "Use stay when continuing the current tip"))
+      (is (str/includes? content
+                         "ACTION_INTENT_JSON:"))
+      (is (str/includes? content
+                         "At the start of the first assistant response in every iteration")))))
+
+(deftest controller-state-message-requires-intent-before-work
+  (let [content (:content (autonomous/controller-state-message
+                           {:goal "Handle billing emails"
+                            :iteration 1
+                            :max-iterations 6
+                            :stack [{:title "Handle billing emails"
+                                     :progress-status :in-progress
+                                     :agenda [{:item "Draft reply" :status :in-progress}]}]}))]
+    (is (str/includes? content
+                       "Start the first assistant response in this iteration with ACTION_INTENT_JSON"))))
 
 (deftest apply-control-pushes-and-pops-stack-frames
   (let [initial (autonomous/initial-state "Handle billing emails")

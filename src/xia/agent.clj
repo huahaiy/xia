@@ -529,6 +529,15 @@
      :agenda (status-agenda (:agenda tip))
      :stack (status-stack stack)}))
 
+(defn- intent-status-fields
+  [intent]
+  {:intent-focus (some-> intent :focus)
+   :intent-agenda-item (some-> intent :agenda-item)
+   :intent-plan-step (some-> intent :plan-step)
+   :intent-why (some-> intent :why)
+   :intent-tool-name (some-> intent :tool-name)
+   :intent-tool-args-summary (some-> intent :tool-args-summary)})
+
 (defn- emit-status!
   [message & {:as extra}]
   (prompt/status! (merge {:state :running
@@ -541,10 +550,11 @@
 
 (defn- llm-preview-text
   [content]
-  (some-> content
-          str
-          str/trim
-          (truncate-summary (llm-status-preview-chars))))
+  (let [text (some-> content str str/trim)]
+    (when (and (seq text)
+               (not (str/includes? text (autonomous/intent-marker-text)))
+               (not (str/includes? text (autonomous/control-marker-text))))
+      (truncate-summary text (llm-status-preview-chars)))))
 
 (defn- make-llm-progress-reporter
   [round emit-event!]
@@ -1020,6 +1030,28 @@
                                                 max-iterations)
                         extra))))
 
+(defn- emit-intent-event!
+  [emit-event! execution-context parsed-response]
+  (when-let [intent (:intent parsed-response)]
+    (emit-event! (merge {:phase :intent
+                         :message (autonomous/intent-status-line intent)
+                         :iteration (:iteration execution-context)
+                         :round 0
+                         :checkpoint {:phase :intent
+                                      :iteration (:iteration execution-context)
+                                      :summary (or (:plan-step intent)
+                                                   (:agenda-item intent)
+                                                   (:focus intent)
+                                                   "Prepared the next action.")
+                                      :session-id (:session-id execution-context)
+                                      :intent-focus (:focus intent)
+                                      :intent-agenda-item (:agenda-item intent)
+                                      :intent-plan-step (:plan-step intent)
+                                      :intent-why (:why intent)
+                                      :intent-tool-name (:tool-name intent)
+                                      :intent-tool-args-summary (:tool-args-summary intent)}}
+                        (intent-status-fields intent)))))
+
 (defn- emit-worker-event!
   [worker-state event]
   (let [now-ms (current-time-ms)]
@@ -1211,7 +1243,13 @@
                                                       :tool-count (:tool-count event)
                                                       :tool-id (:tool-id event)
                                                       :tool-name (:tool-name event)
-                                                      :parallel (:parallel event))
+                                                      :parallel (:parallel event)
+                                                      :intent-focus (:intent-focus event)
+                                                      :intent-agenda-item (:intent-agenda-item event)
+                                                      :intent-plan-step (:intent-plan-step event)
+                                                      :intent-why (:intent-why event)
+                                                      :intent-tool-name (:intent-tool-name event)
+                                                      :intent-tool-args-summary (:intent-tool-args-summary event))
                            (when-let [checkpoint (:checkpoint event)]
                              (save-schedule-checkpoint! execution-context checkpoint))))
         cancel-run! (fn [snapshot]
@@ -1467,6 +1505,14 @@
                                                (progress-reporter delta)
                                                (throw-if-cancelled! session-id)))
               _ (throw-if-cancelled! session-id)
+              parsed-response (autonomous/parse-controller-response
+                               (response-content response))
+              assistant-content (or (:assistant-text parsed-response)
+                                    (response-content response))
+              _ (when (zero? round)
+                  (emit-intent-event! emit-event!
+                                      execution-context
+                                      parsed-response))
               has-tools? (and (map? response) (seq (get response "tool_calls")))]
           (if has-tools?
             (do
@@ -1478,7 +1524,7 @@
               (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
                     tool-calls (get response "tool_calls")
                     assistant-msg {:role "assistant"
-                                   :content (response-content response)
+                                   :content assistant-content
                                    :tool_calls tool-calls}
                     tool-count (count tool-calls)
                     _ (emit-event! {:phase :tool-plan
@@ -1508,7 +1554,7 @@
                                             vec)]
                 (let [assistant-message-id
                       (db/add-message! session-id :assistant
-                                       (response-content response)
+                                       assistant-content
                                        :tool-calls tool-calls
                                        :llm-call-id llm-call-id
                                        :provider-id provider-id
@@ -1537,7 +1583,7 @@
                                    :model model
                                    :workload workload))
                 (emit-event! {:phase :tool
-                              :message (or (truncate-summary (response-content response) 240)
+                              :message (or (truncate-summary assistant-content 240)
                                            (str "Completed tool round with "
                                                 tool-count
                                                 " tool call"
@@ -1552,7 +1598,7 @@
                                            :round round
                                            :tool-count tool-count
                                            :tool-ids (tool-call-names tool-calls)
-                                           :summary (or (truncate-summary (response-content response) 240)
+                                           :summary (or (truncate-summary assistant-content 240)
                                                         (str "Completed tool round with "
                                                              tool-count
                                                              " tool call"
@@ -1566,8 +1612,8 @@
             (do
               (throw-if-cancelled! session-id)
               (emit-event! {:phase :finalizing
-                            :message "Preparing response"
-                            :iteration (:iteration execution-context)})
+                           :message "Preparing response"
+                           :iteration (:iteration execution-context)})
               {:response response
                :used-fact-eids used-fact-eids})))))))
 

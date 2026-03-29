@@ -11,6 +11,7 @@
 (def ^:private max-agenda-items 8)
 (def ^:private max-agenda-item-chars 160)
 (def ^:private max-stack-depth 8)
+(def ^:private intent-marker "ACTION_INTENT_JSON:")
 (def ^:private control-marker "AUTONOMOUS_STATUS_JSON:")
 
 (defn context
@@ -94,6 +95,10 @@
   []
   control-marker)
 
+(defn intent-marker-text
+  []
+  intent-marker)
+
 (defn- truncate-field
   [value]
   (let [text (some-> value str str/trim)
@@ -111,6 +116,10 @@
       (if (> (long (count text)) limit)
         (str (subs text 0 (max 1 (dec limit))) "…")
         text))))
+
+(defn- truncate-tool-name
+  [value]
+  (some-> value truncate-agenda-item))
 
 (def ^:private progress-status-aliases
   {"not_started" :not-started
@@ -231,6 +240,51 @@
 (defn- progress-status-label
   [status]
   (some-> status name (str/replace "-" "_")))
+
+(defn- normalize-intent
+  [intent]
+  (when (map? intent)
+    (let [focus            (truncate-agenda-item (or (get intent "focus")
+                                                     (:focus intent)
+                                                     (get intent "current_focus")
+                                                     (:current_focus intent)
+                                                     (get intent "current-focus")
+                                                     (:current-focus intent)))
+          agenda-item      (truncate-agenda-item (or (get intent "agenda_item")
+                                                     (:agenda_item intent)
+                                                     (get intent "agenda-item")
+                                                     (:agenda-item intent)
+                                                     (get intent "item")
+                                                     (:item intent)))
+          plan-step        (truncate-field (or (get intent "plan_step")
+                                               (:plan_step intent)
+                                               (get intent "plan-step")
+                                               (:plan-step intent)
+                                               (get intent "step")
+                                               (:step intent)))
+          why              (truncate-field (or (get intent "why")
+                                               (:why intent)
+                                               (get intent "reason")
+                                               (:reason intent)))
+          tool-name        (truncate-tool-name (or (get intent "tool")
+                                                   (:tool intent)
+                                                   (get intent "tool_name")
+                                                   (:tool_name intent)
+                                                   (get intent "tool-name")
+                                                   (:tool-name intent)))
+          tool-args-summary (truncate-field (or (get intent "tool_args_summary")
+                                                (:tool_args_summary intent)
+                                                (get intent "tool-args-summary")
+                                                (:tool-args-summary intent)
+                                                (get intent "arguments")
+                                                (:arguments intent)))]
+      (when (or focus agenda-item plan-step why tool-name tool-args-summary)
+        {:focus focus
+         :agenda-item agenda-item
+         :plan-step plan-step
+         :why why
+         :tool-name tool-name
+         :tool-args-summary tool-args-summary}))))
 
 (defn- agenda-lines
   [agenda]
@@ -454,6 +508,18 @@
          (when (and (= phase :updating) next-step)
            (str " -> " next-step)))))
 
+(defn intent-status-line
+  [{:keys [focus agenda-item plan-step tool-name tool-args-summary]}]
+  (str "Intent: "
+       (or plan-step
+           agenda-item
+           focus
+           "Proceed with the current tip")
+       (when tool-name
+         (str " via " tool-name))
+       (when tool-args-summary
+         (str " (" tool-args-summary ")"))))
+
 (defn controller-system-message
   []
   (let [ctx            (context)
@@ -480,6 +546,17 @@
         "- Treat new user input, tool results, and observations as inputs about the current tip. If they imply subordinate work, interruption, return-to-parent, replacement, or discard, report that with stack_action at the end of the iteration.\n"
         "- Use stay when continuing the current tip. Use push to suspend the current tip and enter a child task. Use pop when the current child is done and control should return to its parent. Use replace when the current tip should be superseded. Use clear only when prior stack state should be discarded.\n"
         "- Reuse observations already present in the session instead of repeating the same tool calls.\n\n"
+        "At the start of the first assistant response in every iteration, before any explanation or tool call, prepend the literal marker "
+        intent-marker
+        " followed by one valid JSON object with this exact shape:\n"
+        "{\"focus\":\"...\",\"agenda_item\":\"...\",\"plan_step\":\"...\",\"why\":\"...\",\"tool\":\"optional-tool-name\",\"tool_args_summary\":\"optional short arguments summary\"}\n"
+        "- focus: the current stack tip you are acting on right now.\n"
+        "- agenda_item: the agenda item for this step when there is one.\n"
+        "- plan_step: the concrete next action you are about to take in this iteration.\n"
+        "- why: why this action helps the current tip.\n"
+        "- tool: the tool you expect to call next, or empty when none.\n"
+        "- tool_args_summary: short human-readable summary of the expected tool arguments.\n"
+        "- Emit this intent object even when you will immediately call tools.\n\n"
         "At the very end of every response, append the literal marker "
         control-marker
         " followed by one valid JSON object with this exact shape:\n"
@@ -511,6 +588,9 @@
           "\n\n"
           "Current iteration: " iteration " of " max-iterations ".\n"
           "Observe the current session history and tool results before deciding the next step.\n"
+          "Start the first assistant response in this iteration with "
+          intent-marker
+          "{...} before any explanation or tool call.\n"
           (when-let [input (truncate-field incoming-message)]
             (str "\nNew input for this turn:\n"
                  input
@@ -548,26 +628,83 @@
                           "\n")))))
           "\nMake real progress now. Use stack_action=push when entering a subroutine and stack_action=pop when returning to a parent frame.")}))
 
-(defn- parse-control-json
-  [tail]
-  (let [trimmed (some-> tail str str/trim)]
+(defn- extract-json-object
+  [text]
+  (let [trimmed (some-> text str str/triml)]
     (when (seq trimmed)
-      (let [json-text (if-let [[_ body] (re-matches #"(?s)```(?:json)?\s*(\{.*\})\s*```" trimmed)]
-                        body
-                        trimmed)]
-        (json/read-json json-text)))))
+      (let [[body fenced?]
+            (if-let [[_ inner] (re-matches #"(?s)\A```(?:json)?\s*(.*)\z" trimmed)]
+              [inner true]
+              [trimmed false])]
+        (when (and (seq body) (= \{ (.charAt ^String body 0)))
+          (loop [idx 0
+                 depth 0
+                 in-string? false
+                 escape? false]
+            (when (< idx (count body))
+              (let [ch (.charAt ^String body idx)]
+                (cond
+                  in-string?
+                  (cond
+                    escape?
+                    (recur (inc idx) depth true false)
+
+                    (= ch \\)
+                    (recur (inc idx) depth true true)
+
+                    (= ch \")
+                    (recur (inc idx) depth false false)
+
+                    :else
+                    (recur (inc idx) depth true false))
+
+                  (= ch \")
+                  (recur (inc idx) depth true false)
+
+                  (= ch \{)
+                  (recur (inc idx) (inc depth) false false)
+
+                  (= ch \})
+                  (let [depth* (dec depth)]
+                    (if (zero? depth*)
+                      (let [json-text (subs body 0 (inc idx))
+                            rest      (subs body (inc idx))
+                            rest*     (if fenced?
+                                        (str/replace-first rest #"^\s*```" "")
+                                        rest)]
+                        {:json-text json-text
+                         :rest rest*})
+                      (recur (inc idx) depth* false false)))
+
+                  :else
+                  (recur (inc idx) depth false false))))))))))
+
+(defn- parse-json-after-marker
+  [text marker]
+  (when-let [idx (str/index-of (or text "") marker)]
+    (let [before (subs text 0 idx)
+          after  (subs text (+ idx (count marker)))]
+      (when-let [{:keys [json-text rest]} (extract-json-object after)]
+        (try
+          {:before before
+           :after rest
+           :parsed (json/read-json json-text)}
+          (catch Exception _
+            nil))))))
 
 (defn parse-controller-response
   [response]
-  (let [text  (or response "")
-        idx   (str/index-of text control-marker)
-        body  (when idx (subs text (+ idx (count control-marker))))
-        head  (some-> (if idx (subs text 0 idx) text) str/trim)
-        parsed (when body
-                 (try
-                   (parse-control-json body)
-                   (catch Exception _
-                     nil)))
+  (let [text            (or response "")
+        parsed-intent   (parse-json-after-marker text intent-marker)
+        text-without-intent (str (or (:before parsed-intent) text)
+                                 (or (:after parsed-intent) ""))
+        parsed-control  (parse-json-after-marker text-without-intent control-marker)
+        head            (some-> (if parsed-control
+                                  (str (:before parsed-control)
+                                       (:after parsed-control))
+                                  text-without-intent)
+                                str/trim)
+        parsed          (:parsed parsed-control)
         status-raw (some-> (or (get parsed "status")
                                (:status parsed))
                            str
@@ -608,6 +745,7 @@
                                                     goal-complete?
                                                     agenda))]
     {:assistant-text head
+     :intent        (some-> parsed-intent :parsed normalize-intent)
      :control       (when parsed
                       {:status         status
                        :summary        summary
