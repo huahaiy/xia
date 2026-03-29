@@ -876,6 +876,7 @@
           (is (= "base" (:template_instance started)))
           (is (= 4115 (:port started)))
           (is (= "running" (:state started)))
+          (is (= true (:attached started)))
           (is (= [{:instance_id "ops-child"
                    :service_id "xia-managed-instance-ops-child"
                    :service_name "Managed Xia ops-child"
@@ -884,6 +885,7 @@
                    :pid 4242
                    :state "running"
                    :alive true
+                   :attached true
                    :template_instance "base"
                    :log_path (str (paths/default-instance-root "ops-child") "/xia.log")
                    :started_at (:started_at started)
@@ -892,7 +894,9 @@
                  (:instances listed)))
           (is (= "ops-child" (:instance_id status)))
           (is (= "running" (:state status)))
+          (is (= true (:attached status)))
           (is (= "exited" (:state stopped)))
+          (is (= true (:attached stopped)))
           (is (= 0 (:exit_code stopped)))))
       (finally
         (instance-supervisor/shutdown!)

@@ -304,7 +304,13 @@
     {:phase :tool
      :round 1
      :summary "Opened the dashboard and attempted the primary action."
-     :tool-ids ["browser-open" "browser-click"]})
+     :tool-ids ["browser-open" "browser-click"]
+     :progress-status :resumable
+     :stack [{:title "Check the dashboard" :progress-status :in-progress}
+             {:title "Resume alternate path" :progress-status :resumable}]
+     :agenda [{:item "Open dashboard" :status :completed}
+              {:item "Resume alternate path" :status :resumable}
+              {:item "Investigate new branch" :status :diverged}]})
   (let [state (schedule/record-task-failure! :recoverable "No element matches selector #submit")
         prompt (schedule/augment-prompt-with-recovery-context :recoverable "Check the dashboard")]
     (is (= :backoff (:status state)))
@@ -313,7 +319,11 @@
     (is (= "No element matches selector #submit" (:last-error state)))
     (is (re-find #"Recovery context from previous scheduled attempts" prompt))
     (is (re-find #"browser-query-elements" prompt))
-    (is (re-find #"Opened the dashboard and attempted the primary action" prompt))))
+    (is (re-find #"Opened the dashboard and attempted the primary action" prompt))
+    (is (re-find #"Last progress status: resumable" prompt))
+    (is (re-find #"Last execution stack: \[in-progress\] Check the dashboard > \[resumable\] Resume alternate path" prompt))
+    (is (re-find #"\[resumable\] Resume alternate path" prompt))
+    (is (re-find #"\[diverged\] Investigate new branch" prompt))))
 
 (deftest repeated-identical-failures-pause-schedule
   (db/set-config! :schedule/pause-after-repeated-failures 2)

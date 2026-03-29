@@ -661,15 +661,16 @@ Rules:
   [session-id]
   (run-session-op! session-id
     (fn [sid]
-      (let [wm {:session-id   sid
-                :topics       nil
-                :prev-topics  nil
-               :turn-count   0
-               :topic-turn   0
-               :slots        {}
-               :episode-refs []
-               :local-doc-refs []
-               :config       default-config}]
+      (let [wm {:session-id      sid
+                :topics          nil
+                :prev-topics     nil
+                :autonomy-state  nil
+                :turn-count      0
+                :topic-turn      0
+                :slots           {}
+                :episode-refs    []
+                :local-doc-refs  []
+                :config          default-config}]
         (swap! wm-atom assoc sid wm)
         wm))))
 
@@ -714,6 +715,26 @@ Rules:
   ([session-id]
    (session-wm session-id)))
 
+(defn autonomy-state
+  ([]
+   (autonomy-state nil))
+  ([session-id]
+   (get-in (session-wm session-id) [:autonomy-state])))
+
+(defn set-autonomy-state!
+  [session-id autonomy-state]
+  (run-session-op! session-id
+    (fn [sid]
+      (update-session-wm! sid
+        #(assoc % :autonomy-state autonomy-state)))))
+
+(defn clear-autonomy-state!
+  [session-id]
+  (run-session-op! session-id
+    (fn [sid]
+      (update-session-wm! sid
+        #(assoc % :autonomy-state nil)))))
+
 (defn clear-wm!
   "Clear working memory (on session end)."
   ([]
@@ -757,6 +778,7 @@ Rules:
   ([session-id]
    (when-let [wm (session-wm session-id)]
     {:topics       (:topics wm)
+     :autonomy     (:autonomy-state wm)
      :entities     (into []
                          (map (fn [{:keys [name type facts edges properties relevance pinned?]}]
                                 {:name       name

@@ -37,6 +37,20 @@
     (wm/clear-wm!)
     (is (nil? (wm/get-wm)))))
 
+(deftest test-autonomy-state-round-trips-through-working-memory
+  (let [sid   (random-uuid)
+        state {:goal "Handle billing emails"
+               :stack [{:title "Handle billing emails"
+                        :progress-status :in-progress
+                        :agenda [{:item "Check inbox" :status :completed}]}]}]
+    (wm/create-wm! sid)
+    (wm/set-autonomy-state! sid state)
+    (is (= state (wm/autonomy-state sid)))
+    (is (= state (:autonomy (wm/wm->context sid))))
+    (wm/clear-autonomy-state! sid)
+    (is (nil? (wm/autonomy-state sid)))
+    (wm/clear-wm! sid)))
+
 ;; ---------------------------------------------------------------------------
 ;; Keyword extraction
 ;; ---------------------------------------------------------------------------

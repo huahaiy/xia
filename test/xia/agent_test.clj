@@ -31,19 +31,16 @@
                     xia.llm/chat-message      (fn [_messages & _opts] {"content" "All set."})]
         (is (= "All set."
                (agent/process-message session-id "hello" :channel :terminal))))
-      (is (= [{:state :running
-               :phase :working-memory
-               :message "Updating working memory"}
-              {:state :running
-               :phase :llm
-               :message "Calling model"}
-              {:state :running
-               :phase :finalizing
-               :message "Preparing response"}
-              {:state :done
-               :phase :complete
-               :message "Ready"}]
-             @statuses))
+      (is (= [:understanding :working-memory :llm :finalizing :observing :complete]
+             (mapv :phase @statuses)))
+      (is (str/includes? (:message (first @statuses))
+                         "Iteration 1/6: Understanding hello"))
+      (is (str/includes? (:message (nth @statuses 4))
+                         "Iteration 1/6: Observed hello"))
+      (is (= {:state :done
+              :phase :complete
+              :message "Ready"}
+             (last @statuses)))
       (finally
         (prompt/register-status! :terminal nil)))))
 
@@ -274,9 +271,102 @@
                                     :channel :scheduler
                                     :tool-context {:schedule-id :nightly-review}))))
     (is (= :nightly-review (ffirst @checkpoints)))
-    (is (= :planning (get-in @checkpoints [0 1 :phase])))
-    (is (= :tool (get-in @checkpoints [1 1 :phase])))
-    (is (= ["web-search"] (get-in @checkpoints [1 1 :tool-ids])))))
+    (is (= :understanding (get-in @checkpoints [0 1 :phase])))
+    (is (= :planning (get-in @checkpoints [1 1 :phase])))
+    (is (= :tool (get-in @checkpoints [2 1 :phase])))
+    (is (= ["web-search"] (get-in @checkpoints [2 1 :tool-ids])))
+    (is (= :observing (get-in @checkpoints [3 1 :phase])))))
+
+(deftest process-message-repeats-autonomous-loop-until-controller-completes
+  (let [session-id        (db/create-session! :terminal)
+        llm-messages      (atom [])
+        build-calls       (atom 0)
+        selection-calls   (atom 0)
+        reviewed          (atom nil)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (fn [_]
+                                                       (swap! selection-calls inc)
+                                                       {:provider {:llm.provider/id :default}
+                                                        :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids [(swap! build-calls inc)]})
+                  xia.llm/chat-message               (fn [messages & _opts]
+                                                       (swap! llm-messages conj messages)
+                                                       (case (count @llm-messages)
+                                                         1 {"content" (str "Checked inbox.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Checked inbox\",\"next_step\":\"Draft replies\",\"reason\":\"Unread messages remain\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"in_progress\"},{\"item\":\"Send replies\",\"status\":\"pending\"}]}")}
+                                                         {"content" (str "Sent the replies.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"completed\"},{\"item\":\"Send replies\",\"status\":\"completed\"}]}")} ))
+                  xia.agent/schedule-fact-utility-review!
+                  (fn [fact-eids user-message assistant-response]
+                    (reset! reviewed {:fact-eids fact-eids
+                                      :user-message user-message
+                                      :assistant-response assistant-response}))]
+      (is (= "Sent the replies."
+             (agent/process-message session-id "reply to the billing emails" :channel :terminal))))
+    (is (= 1 @selection-calls))
+    (is (= 2 (count @llm-messages)))
+    (is (str/includes? (get-in @llm-messages [0 2 :content])
+                       "Current iteration: 1 of 6."))
+    (is (str/includes? (get-in @llm-messages [1 2 :content])
+                       "Current iteration: 2 of 6."))
+    (is (str/includes? (get-in @llm-messages [1 2 :content])
+                       "Tip summary: Checked inbox"))
+    (is (str/includes? (get-in @llm-messages [1 2 :content])
+                       "[in_progress] Draft replies"))
+    (is (= [[:user "reply to the billing emails"]
+            [:assistant "Sent the replies."]]
+           (->> (db/session-messages session-id)
+                (filter #(contains? #{:user :assistant} (:role %)))
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))
+    (is (= {:fact-eids [1 2]
+            :user-message "reply to the billing emails"
+            :assistant-response "Sent the replies."}
+           @reviewed))))
+
+(deftest process-message-fails-when-autonomous-loop-hits-iteration-cap
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 2)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (swap! llm-calls inc)
+                                                       {"content" (str "Still working.\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:"
+                                                                       "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "keep going" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Autonomous loop exceeded iteration limit of 2"
+                     (.getMessage ^Exception err)))
+        (is (= {:session-id session-id
+                :channel :terminal
+                :iteration 2
+                :max-iterations 2
+                :last-progress-status :blocked
+                :last-agenda [{:item "Retry task" :status :blocked}]}
+               (select-keys (ex-data err)
+                            [:session-id :channel :iteration :max-iterations
+                             :last-progress-status :last-agenda])))))
+    (is (= 2 @llm-calls))
+    (is (= [[:user "keep going"]]
+           (->> (db/session-messages session-id)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
 
 (deftest process-message-allows-final-llm-call-after-last-tool-round
   (let [session-id (db/create-session! :terminal)

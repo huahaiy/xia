@@ -9,6 +9,7 @@
   (:require [taoensso.timbre :as log]
             [charred.api :as json]
             [clojure.string :as str]
+            [xia.autonomous :as autonomous]
             [xia.audit :as audit]
             [xia.config :as cfg]
             [xia.context :as context]
@@ -792,6 +793,244 @@
                             vec)]
     (bind-original-tool-call-ids prepared-calls tool-results)))
 
+(defn- response-content
+  [response]
+  (cond
+    (string? response) response
+    (map? response) (or (get response "content") "")
+    (nil? response) ""
+    :else (str response)))
+
+(defn- autonomous-iteration-messages
+  [autonomy-state iteration max-iterations]
+  [(autonomous/controller-system-message)
+   (autonomous/controller-state-message
+    {:goal (:goal autonomy-state)
+     :iteration iteration
+     :max-iterations max-iterations
+     :stack (:stack autonomy-state)})])
+
+(defn- autonomous-iteration-input
+  [autonomy-state iteration max-iterations]
+  (autonomous/working-memory-message autonomy-state iteration max-iterations))
+
+(defn- autonomous-iteration-summary
+  [{:keys [assistant-text control]}]
+  (or (:summary control)
+      (some-> assistant-text str not-empty)
+      "Completed an autonomous iteration."))
+
+(defn- status-agenda
+  [agenda]
+  (->> agenda
+       (keep (fn [{:keys [item status]}]
+               (when item
+                 {:item item
+                  :status (some-> status name)})))
+       vec
+       not-empty))
+
+(defn- status-stack
+  [stack]
+  (->> stack
+       (keep (fn [{:keys [title progress-status next-step]}]
+               (when title
+                 {:title title
+                  :progress_status (some-> progress-status name)
+                  :next_step next-step})))
+       vec
+       not-empty))
+
+(defn- report-autonomy-status!
+  [phase autonomy-state iteration max-iterations & {:keys [stack-action]}]
+  (let [tip   (autonomous/current-frame autonomy-state)
+        stack (:stack autonomy-state)]
+    (prompt/status! {:state :running
+                     :phase phase
+                     :message (autonomous/status-line phase
+                                                     autonomy-state
+                                                     iteration
+                                                     max-iterations
+                                                     :stack-action stack-action)
+                     :iteration iteration
+                     :max-iterations max-iterations
+                     :current-focus (:title tip)
+                     :progress-status (some-> tip :progress-status name)
+                     :stack-depth (count stack)
+                     :agenda (status-agenda (:agenda tip))
+                     :stack (status-stack stack)})))
+
+(defn- merge-fact-eids
+  [left right]
+  (->> (concat (or left []) (or right []))
+       distinct
+       vec))
+
+(defn- final-assistant-text
+  [parsed response]
+  (or (some-> (:assistant-text parsed) str not-empty)
+      (some-> parsed :control :summary str not-empty)
+      (some-> response response-content str not-empty)
+      ""))
+
+(defn- persist-final-assistant-message!
+  [session-id text execution-context response local-doc-ids artifact-ids]
+  (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
+        assistant-message-id
+        (db/add-message! session-id :assistant text
+                         :llm-call-id llm-call-id
+                         :provider-id provider-id
+                         :model model
+                         :workload workload
+                         :local-doc-ids local-doc-ids
+                         :artifact-ids artifact-ids)]
+    (audit/log! execution-context
+                {:actor       :assistant
+                 :type        :llm-response
+                 :message-id  assistant-message-id
+                 :llm-call-id llm-call-id
+                 :data        {:provider-id (some-> provider-id name)
+                               :model model
+                               :workload (some-> workload name)
+                               :tool-calls []}})))
+
+(defn- run-agent-iteration
+  [session-id channel resource-session-id local-doc-ids artifact-ids
+   execution-context assistant-provider assistant-provider-id transient-messages
+   working-memory-message max-tool-rounds]
+  (report-status! "Updating working memory"
+                  :phase :working-memory
+                  :iteration (:iteration execution-context))
+  (best-effort-update-working-memory! session-id
+                                     working-memory-message
+                                     channel
+                                     {:resource-session-id resource-session-id})
+  (throw-if-cancelled! session-id)
+  (let [tools (tool/tool-definitions execution-context)
+        {:keys [messages used-fact-eids]}
+        (context/build-messages-data session-id
+                                     {:provider            assistant-provider
+                                      :provider-id         assistant-provider-id
+                                      :compaction-workload :history-compaction})
+        messages (inject-transient-messages messages transient-messages)]
+    (save-schedule-checkpoint!
+     execution-context
+     {:phase :planning
+      :iteration (:iteration execution-context)
+      :round 0
+      :summary "Working memory updated and context prepared."
+      :message-count (count messages)
+      :session-id session-id})
+    (loop [messages messages
+           round    0]
+      (throw-if-cancelled! session-id)
+      (report-status! (if (zero? round)
+                        "Calling model"
+                        "Calling model with tool results")
+                      :phase :llm
+                      :iteration (:iteration execution-context)
+                      :round round)
+      (let [progress-reporter (make-llm-progress-reporter round)
+            response   (call-model messages
+                                   tools
+                                   assistant-provider-id
+                                   :session-id session-id
+                                   :on-delta (fn [delta]
+                                               (throw-if-cancelled! session-id)
+                                               (progress-reporter delta)
+                                               (throw-if-cancelled! session-id)))
+            _          (throw-if-cancelled! session-id)
+            has-tools? (and (map? response) (seq (get response "tool_calls")))]
+        (if has-tools?
+          (do
+            (when (>= (long round) (long max-tool-rounds))
+              (throw (ex-info "Too many tool-calling rounds"
+                              {:rounds          round
+                               :max-tool-rounds max-tool-rounds})))
+            (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
+                  tool-calls    (get response "tool_calls")
+                  assistant-msg {:role       "assistant"
+                                 :content    (response-content response)
+                                 :tool_calls tool-calls}
+                  tool-count    (count tool-calls)
+                  tool-results  (do
+                                  (report-status! (str "Model requested "
+                                                       tool-count
+                                                       " tool"
+                                                       (when (not= 1 tool-count) "s"))
+                                                  :phase :tool-plan
+                                                  :iteration (:iteration execution-context)
+                                                  :round round
+                                                  :tool-count tool-count)
+                                  (throw-if-cancelled! session-id)
+                                  (execute-tool-calls tool-calls
+                                                      (assoc execution-context
+                                                             :llm-call-id llm-call-id
+                                                             :provider-id provider-id
+                                                             :model model
+                                                             :workload workload)))
+                  _             (throw-if-cancelled! session-id)
+                  tool-history  (mapv #(select-keys % [:role :tool_call_id :content])
+                                      tool-results)
+                  follow-up-messages (->> tool-results
+                                          (mapcat :follow-up-messages)
+                                          vec)]
+              (let [assistant-message-id
+                    (db/add-message! session-id :assistant
+                                     (response-content response)
+                                     :tool-calls tool-calls
+                                     :llm-call-id llm-call-id
+                                     :provider-id provider-id
+                                     :model model
+                                     :workload workload
+                                     :local-doc-ids local-doc-ids
+                                     :artifact-ids artifact-ids)]
+                (audit/log! execution-context
+                            {:actor       :assistant
+                             :type        :llm-response
+                             :message-id  assistant-message-id
+                             :llm-call-id llm-call-id
+                             :data        {:provider-id (some-> provider-id name)
+                                           :model model
+                                           :workload (some-> workload name)
+                                           :tool-calls (tool-call-summary tool-calls)}}))
+              (doseq [tr tool-results]
+                (db/add-message! session-id :tool
+                                 nil
+                                 :tool-result (:result tr)
+                                 :tool-id (:tool_call_id tr)
+                                 :tool-call-id (:tool_call_id tr)
+                                 :tool-name (:tool_name tr)
+                                 :llm-call-id llm-call-id
+                                 :provider-id provider-id
+                                 :model model
+                                 :workload workload))
+              (save-schedule-checkpoint!
+               execution-context
+               {:phase :tool
+                :iteration (:iteration execution-context)
+                :round round
+                :tool-count tool-count
+                :tool-ids (tool-call-names tool-calls)
+                :summary (or (truncate-summary (response-content response) 240)
+                             (str "Completed tool round with "
+                                  tool-count
+                                  " tool call"
+                                  (when (not= 1 tool-count) "s")
+                                  "."))})
+              (recur (-> messages
+                         (conj assistant-msg)
+                         (into tool-history)
+                         (into follow-up-messages))
+                     (inc round))))
+          (do
+            (throw-if-cancelled! session-id)
+            (report-status! "Preparing response"
+                            :phase :finalizing
+                            :iteration (:iteration execution-context))
+            {:response response
+             :used-fact-eids used-fact-eids}))))))
+
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.
 
@@ -819,6 +1058,7 @@
                 (throw-if-cancelled! session-id)
                 (validate-user-message! user-message)
                 (throw-if-cancelled! session-id)
+                (wm/ensure-wm! session-id)
                 (when persist-message?
                   (let [user-message-id (db/add-message! session-id :user user-message
                                                          :local-doc-ids local-doc-ids
@@ -829,170 +1069,147 @@
                                  :message-id user-message-id
                                  :data       {:local-doc-ids (vec (or local-doc-ids []))
                                               :artifact-ids  (vec (or artifact-ids []))}})))
-                (report-status! "Updating working memory"
-                                :phase :working-memory)
-                (let [wm-message (or working-memory-message user-message)]
-                  (best-effort-update-working-memory! session-id
-                                                     wm-message
-                                                     channel
-                                                     {:resource-session-id resource-session-id}))
-                (throw-if-cancelled! session-id)
                 (let [{assistant-provider    :provider
                        assistant-provider-id :provider-id}
                       (llm/resolve-provider-selection
                         (cond-> {:workload :assistant}
                           provider-id
                           (assoc :provider-id provider-id)))
-                      execution-context (merge tool-context
-                                               request-context
-                                               {:session-id session-id
-                                                :channel    channel
-                                                :user-message user-message
-                                                :resource-session-id resource-session-id
-                                                :assistant-provider assistant-provider
-                                                :assistant-provider-id assistant-provider-id})
-                      tools (tool/tool-definitions execution-context)
-                      {:keys [messages used-fact-eids]}
-                      (context/build-messages-data session-id
-                                                   {:provider            assistant-provider
-                                                    :provider-id         assistant-provider-id
-                                                    :compaction-workload :history-compaction})
-                      messages (inject-transient-messages messages transient-messages)]
-                  (save-schedule-checkpoint!
-                    execution-context
-                    {:phase :planning
-                     :round 0
-                     :summary "Working memory updated and context prepared."
-                     :message-count (count messages)
-                     :session-id session-id})
-                  (let [max-tool-rounds* (long (or max-tool-rounds
-                                                   (configured-max-tool-rounds)))]
-                    (loop [messages messages
-                           round    0]
-                      (throw-if-cancelled! session-id)
-                      (report-status! (if (zero? round)
-                                        "Calling model"
-                                        "Calling model with tool results")
-                                      :phase :llm
-                                      :round round)
-                      (let [progress-reporter (make-llm-progress-reporter round)
-                            response   (call-model messages
-                                                   tools
-                                                   assistant-provider-id
-                                                   :session-id session-id
-                                                   :on-delta (fn [delta]
-                                                               (throw-if-cancelled! session-id)
-                                                               (progress-reporter delta)
-                                                               (throw-if-cancelled! session-id)))
-                            _          (throw-if-cancelled! session-id)
-                            has-tools? (and (map? response) (seq (get response "tool_calls")))]
-                        (if has-tools?
+                      base-execution-context (merge tool-context
+                                                    request-context
+                                                    {:session-id session-id
+                                                     :channel    channel
+                                                     :user-message user-message
+                                                     :resource-session-id resource-session-id
+                                                     :assistant-provider assistant-provider
+                                                     :assistant-provider-id assistant-provider-id})
+                      max-tool-rounds* (long (or max-tool-rounds
+                                                 (configured-max-tool-rounds)))
+                      max-iterations* (long (autonomous/max-iterations))
+                      transient-messages* (vec (filter map? transient-messages))
+                      initial-autonomy-state (autonomous/initial-state user-message)]
+                  (wm/set-autonomy-state! session-id initial-autonomy-state)
+                  (loop [iteration 1
+                         fact-eids []]
+                    (throw-if-cancelled! session-id)
+                    (let [autonomy-state (or (wm/autonomy-state session-id)
+                                             initial-autonomy-state)
+                          iteration-context (assoc base-execution-context
+                                                   :iteration iteration
+                                                   :max-iterations max-iterations*)
+                          controller-messages (autonomous-iteration-messages autonomy-state
+                                                                            iteration
+                                                                            max-iterations*)
+                          transient-messages** (into transient-messages*
+                                                     controller-messages)
+                          _ (report-autonomy-status! :understanding
+                                                     autonomy-state
+                                                     iteration
+                                                     max-iterations*)
+                          wm-message (if (= iteration 1)
+                                       (or working-memory-message user-message)
+                                       (autonomous-iteration-input autonomy-state
+                                                                   iteration
+                                                                   max-iterations*))]
+                      (save-schedule-checkpoint!
+                       iteration-context
+                       {:phase :understanding
+                        :iteration iteration
+                        :summary (if (= iteration 1)
+                                   "Understanding the goal and preparing the first plan."
+                                   "Resuming the autonomous loop with the updated plan.")
+                        :session-id session-id})
+                      (let [{:keys [response used-fact-eids]}
+                            (run-agent-iteration session-id
+                                                 channel
+                                                 resource-session-id
+                                                 local-doc-ids
+                                                 artifact-ids
+                                                 iteration-context
+                                                 assistant-provider
+                                                 assistant-provider-id
+                                                 transient-messages**
+                                                 wm-message
+                                                 max-tool-rounds*)
+                            parsed (autonomous/parse-controller-response
+                                    (response-content response))
+                            control (:control parsed)
+                            summary (autonomous-iteration-summary parsed)
+                            fact-eids* (merge-fact-eids fact-eids used-fact-eids)
+                            updated-autonomy-state (if control
+                                                     (let [next-state (autonomous/apply-control autonomy-state
+                                                                                                control)]
+                                                       (wm/set-autonomy-state! session-id next-state)
+                                                       (or (wm/autonomy-state session-id)
+                                                           next-state))
+                                                     autonomy-state)
+                            updated-tip (autonomous/current-frame updated-autonomy-state)
+                            text (final-assistant-text parsed response)]
+                        (report-autonomy-status! :observing
+                                                 updated-autonomy-state
+                                                 iteration
+                                                 max-iterations*
+                                                 :stack-action (some-> control :stack-action))
+                        (save-schedule-checkpoint!
+                         iteration-context
+                         {:phase :observing
+                          :iteration iteration
+                          :summary summary
+                          :session-id session-id
+                          :status (some-> control :status)
+                          :next-step (some-> control :next-step)
+                          :progress-status (some-> updated-tip :progress-status)
+                          :agenda (some-> updated-tip :agenda)
+                          :stack (some-> updated-autonomy-state :stack)})
+                        (cond
+                          (or (nil? control)
+                              (= :complete (:status control)))
                           (do
-                            (when (>= (long round) max-tool-rounds*)
-                                              (throw (ex-info "Too many tool-calling rounds"
-                                                              {:rounds         round
-                                                               :max-tool-rounds max-tool-rounds*})))
-                            (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
-                                  tool-calls    (get response "tool_calls")
-                                  assistant-msg {:role       "assistant"
-                                                 :content    (get response "content" "")
-                                                 :tool_calls tool-calls}
-                                  tool-count    (count tool-calls)
-                                  tool-results  (do
-                                                  (report-status! (str "Model requested "
-                                                                       tool-count
-                                                                       " tool"
-                                                                       (when (not= 1 tool-count) "s"))
-                                                                  :phase :tool-plan
-                                                                  :round round
-                                                                  :tool-count tool-count)
-                                                  (throw-if-cancelled! session-id)
-                                                  (execute-tool-calls tool-calls
-                                                                      (assoc execution-context
-                                                                             :llm-call-id llm-call-id
-                                                                             :provider-id provider-id
-                                                                             :model model
-                                                                             :workload workload)))
-                                  _             (throw-if-cancelled! session-id)
-                                  tool-history  (mapv #(select-keys % [:role :tool_call_id :content])
-                                                      tool-results)
-                                  follow-up-messages (->> tool-results
-                                                          (mapcat :follow-up-messages)
-                                                          vec)]
-                              (let [assistant-message-id
-                                    (db/add-message! session-id :assistant
-                                                     (get response "content" "")
-                                                     :tool-calls tool-calls
-                                                     :llm-call-id llm-call-id
-                                                     :provider-id provider-id
-                                                     :model model
-                                                     :workload workload
-                                                     :local-doc-ids local-doc-ids
-                                                     :artifact-ids artifact-ids)]
-                                (audit/log! execution-context
-                                            {:actor       :assistant
-                                             :type        :llm-response
-                                             :message-id  assistant-message-id
-                                             :llm-call-id llm-call-id
-                                             :data        {:provider-id (some-> provider-id name)
-                                                           :model model
-                                                           :workload (some-> workload name)
-                                                           :tool-calls (tool-call-summary tool-calls)}}))
-                              (doseq [tr tool-results]
-                                (db/add-message! session-id :tool
-                                                 nil
-                                                 :tool-result (:result tr)
-                                                 :tool-id (:tool_call_id tr)
-                                                 :tool-call-id (:tool_call_id tr)
-                                                 :tool-name (:tool_name tr)
-                                                 :llm-call-id llm-call-id
-                                                 :provider-id provider-id
-                                                 :model model
-                                                 :workload workload))
-                              (save-schedule-checkpoint!
-                                execution-context
-                                {:phase :tool
-                                 :round round
-                                 :tool-count tool-count
-                                 :tool-ids (tool-call-names tool-calls)
-                                 :summary (or (truncate-summary (get response "content" "") 240)
-                                              (str "Completed tool round with "
-                                                   tool-count
-                                                   " tool call"
-                                                   (when (not= 1 tool-count) "s")
-                                                   "."))})
-                              (recur (-> messages
-                                         (conj assistant-msg)
-                                         (into tool-history)
-                                         (into follow-up-messages))
-                                     (inc round))))
-                          (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
-                                text (get response "content" "")]
-                            (throw-if-cancelled! session-id)
-                            (report-status! "Preparing response"
-                                            :phase :finalizing)
-                            (let [assistant-message-id
-                                  (db/add-message! session-id :assistant text
-                                                   :llm-call-id llm-call-id
-                                                   :provider-id provider-id
-                                                   :model model
-                                                   :workload workload
-                                                   :local-doc-ids local-doc-ids
-                                                   :artifact-ids artifact-ids)]
-                              (audit/log! execution-context
-                                          {:actor       :assistant
-                                           :type        :llm-response
-                                           :message-id  assistant-message-id
-                                           :llm-call-id llm-call-id
-                                           :data        {:provider-id (some-> provider-id name)
-                                                         :model model
-                                                         :workload (some-> workload name)
-                                                         :tool-calls []}}))
-                            (launch-fact-utility-review! used-fact-eids user-message text)
+                            (persist-final-assistant-message! session-id
+                                                              text
+                                                              iteration-context
+                                                              response
+                                                              local-doc-ids
+                                                              artifact-ids)
+                            (launch-fact-utility-review! fact-eids* user-message text)
                             (prompt/status! {:state :done
                                              :phase :complete
                                              :message "Ready"})
-                            text))))))
+                            text)
+
+                          (>= iteration max-iterations*)
+                          (throw (ex-info (str "Autonomous loop exceeded iteration limit of "
+                                               max-iterations*)
+                                          {:session-id session-id
+                                           :channel channel
+                                           :iteration iteration
+                                           :max-iterations max-iterations*
+                                           :last-summary summary
+                                           :last-next-step (:next-step control)
+                                           :last-progress-status (some-> updated-tip :progress-status)
+                                           :last-agenda (some-> updated-tip :agenda)
+                                           :last-stack (some-> updated-autonomy-state :stack)}))
+
+                          :else
+                          (do
+                            (report-autonomy-status! :updating
+                                                     updated-autonomy-state
+                                                     iteration
+                                                     max-iterations*
+                                                     :stack-action (:stack-action control))
+                            (save-schedule-checkpoint!
+                             iteration-context
+                             {:phase :updating
+                              :iteration iteration
+                              :summary (or (:next-step control)
+                                           "Updating the autonomous plan for the next iteration.")
+                              :session-id session-id
+                              :status :continue
+                              :progress-status (some-> updated-tip :progress-status)
+                              :agenda (some-> updated-tip :agenda)
+                              :stack (some-> updated-autonomy-state :stack)})
+                            (recur (inc iteration)
+                                   fact-eids*)))))))
                 (catch InterruptedException e
                   (.interrupt (Thread/currentThread))
                   (let [cancel-ex (request-cancelled-ex session-id

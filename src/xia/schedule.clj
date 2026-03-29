@@ -93,6 +93,54 @@
   (when (map? value)
     value))
 
+(defn- checkpoint-progress-status-line
+  [checkpoint]
+  (when-let [status (:progress-status checkpoint)]
+    (str "- Last progress status: "
+         (if (keyword? status) (name status) (str status)))))
+
+(defn- checkpoint-agenda-line
+  [checkpoint]
+  (when-let [agenda (seq (:agenda checkpoint))]
+    (let [items (->> agenda
+                     (keep (fn [entry]
+                             (when (map? entry)
+                               (let [item   (some-> (or (:item entry)
+                                                        (get entry "item"))
+                                                    str
+                                                    str/trim
+                                                    not-empty)
+                                     status (or (:status entry)
+                                                (get entry "status"))]
+                                 (when item
+                                   (str "[" (if (keyword? status) (name status) (str status))
+                                        "] "
+                                        item))))))
+                     (take 5)
+                     vec)]
+      (when (seq items)
+        (str "- Last agenda: " (str/join " | " items))))))
+
+(defn- checkpoint-stack-line
+  [checkpoint]
+  (when-let [stack (seq (:stack checkpoint))]
+    (let [items (->> stack
+                     (keep (fn [entry]
+                             (when (map? entry)
+                               (let [title  (some-> (:title entry)
+                                                    str
+                                                    str/trim
+                                                    not-empty)
+                                     status (:progress-status entry)]
+                                 (when title
+                                   (str "[" (if (keyword? status) (name status) (str status))
+                                        "] "
+                                        title))))))
+                     (take 6)
+                     vec)]
+      (when (seq items)
+        (str "- Last execution stack: " (str/join " > " items))))))
+
 (defn- normalize-failure-signature
   [error]
   (some-> error
@@ -299,6 +347,15 @@
                             ")"))
                      ": "
                      (:summary checkpoint)))
+
+          (checkpoint-progress-status-line checkpoint)
+          (conj (checkpoint-progress-status-line checkpoint))
+
+          (checkpoint-agenda-line checkpoint)
+          (conj (checkpoint-agenda-line checkpoint))
+
+          (checkpoint-stack-line checkpoint)
+          (conj (checkpoint-stack-line checkpoint))
 
           (normalize-session-id (:session-id checkpoint))
           (conj "- Resume the existing scheduled session instead of starting over from the beginning."))))))

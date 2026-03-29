@@ -157,6 +157,14 @@
                   (if wm-ctx
                     (do (when (:topics wm-ctx)
                           (println (str "  Topic: " (:topics wm-ctx))))
+                      (when-let [autonomy (:autonomy wm-ctx)]
+                        (when-let [stack (seq (:stack autonomy))]
+                          (println "  Execution stack:")
+                          (doseq [{:keys [title progress-status next-step]} stack]
+                            (println (str "    [" (some-> progress-status name) "] " title
+                                          (when next-step
+                                            (str " -> " next-step)))))
+                          (println)))
                       (println)
                       (if (seq (:entities wm-ctx))
                         (do (println "  Active entities:")
