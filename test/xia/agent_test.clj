@@ -103,6 +103,7 @@
 (deftest process-message-can-be-cancelled
   (let [session-id (db/create-session! :terminal)
         started    (promise)
+        stopped    (promise)
         statuses   (atom [])]
     (prompt/register-status! :terminal
                              (fn [status]
@@ -117,9 +118,15 @@
                                                          {:messages [{:role "system" :content "test"}]
                                                           :used-fact-eids []})
                     xia.llm/chat-message               (fn [_messages & _opts]
-                                                         (deliver started true)
-                                                         (Thread/sleep 10000)
-                                                         {"content" "done"})]
+                                                         (try
+                                                           (deliver started true)
+                                                           (Thread/sleep 10000)
+                                                           {"content" "done"}
+                                                           (catch InterruptedException e
+                                                             (.interrupt (Thread/currentThread))
+                                                             (throw e))
+                                                           (finally
+                                                             (deliver stopped true))))]
         (let [result (future
                        (try
                          (agent/process-message session-id "cancel me" :channel :terminal)
@@ -135,7 +142,8 @@
                     :session-id session-id
                     :reason "user requested cancel"}
                    (select-keys (ex-data err)
-                                [:type :status :error :session-id :reason]))))))
+                                [:type :status :error :session-id :reason]))))
+          (is (= true (deref stopped 1000 ::timeout)))))
       (is (= {:state :cancelled
               :phase :cancelled
               :message "Request cancelled"}

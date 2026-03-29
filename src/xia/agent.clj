@@ -303,6 +303,8 @@
            (.interrupt supervisor-thread))
          (when-let [^Thread worker-thread (:worker-thread entry)]
            (.interrupt worker-thread))
+         (when-let [^Future worker-future (:worker-future entry)]
+           (future-cancel worker-future))
          true)))))
 
 (defn cancel-all-sessions!
@@ -423,6 +425,8 @@
         (when (and (:worker-thread entry)
                    (not= (Thread/currentThread) ^Thread (:worker-thread entry)))
           (.interrupt ^Thread (:worker-thread entry)))
+        (when-let [^Future worker-future (:worker-future entry)]
+          (future-cancel worker-future))
         true))))
 
 (defn- cancel-futures!
@@ -1103,23 +1107,58 @@
               :round (:round worker-state)})))
 
 (defn- stop-worker!
-  [session-id worker]
-  (interrupt-worker-thread! session-id)
-  (future-cancel worker)
-  (let [deadline-ms (+ (current-time-ms)
-                       (long (supervisor-restart-grace-ms)))]
-    (loop []
-      (cond
-        (future-done? worker)
-        true
+  ([session-id]
+   (stop-worker! session-id nil))
+  ([session-id worker]
+   (let [worker* (or worker
+                     (:worker-future (session-run-entry session-id)))
+         interrupted? (volatile! (Thread/interrupted))]
+     (try
+       (interrupt-worker-thread! session-id)
+       (when worker*
+         (future-cancel worker*))
+       (if (nil? worker*)
+         true
+         (let [deadline-ms (+ (current-time-ms)
+                              (long (supervisor-restart-grace-ms)))]
+           (loop []
+             (cond
+               (future-done? worker*)
+               true
 
-        (>= (current-time-ms) deadline-ms)
-        false
+               (>= (current-time-ms) deadline-ms)
+               false
 
-        :else
-        (do
-          (Thread/sleep 10)
-          (recur))))))
+               :else
+               (do
+                 (try
+                   (Thread/sleep 10)
+                   (catch InterruptedException _
+                     (vreset! interrupted? true)))
+                 (recur))))))
+       (finally
+         (when @interrupted?
+           (.interrupt (Thread/currentThread))))))))
+
+(defn- worker-cancel-stop-timeout-ex
+  [session-id channel iteration max-iterations autonomy-state worker-state]
+  (let [tip (autonomous/current-frame autonomy-state)]
+    (ex-info (str "Agent supervisor could not stop the worker after request cancellation during "
+                  (some-> (:phase worker-state) name)
+                  " phase")
+             {:type :agent-stop-timeout
+              :session-id session-id
+              :channel channel
+              :phase (:phase worker-state)
+              :iteration iteration
+              :max-iterations max-iterations
+              :current-focus (:title tip)
+              :progress-status (:progress-status tip)
+              :grace-ms (supervisor-restart-grace-ms)
+              :cancel-reason (cancellation-reason session-id)
+              :tool-id (:tool-id worker-state)
+              :tool-name (:tool-name worker-state)
+              :round (:round worker-state)})))
 
 (def ^:private non-restartable-worker-error-types
   #{:request-cancelled
@@ -1174,12 +1213,34 @@
                                                       :tool-name (:tool-name event)
                                                       :parallel (:parallel event))
                            (when-let [checkpoint (:checkpoint event)]
-                             (save-schedule-checkpoint! execution-context checkpoint))))]
+                             (save-schedule-checkpoint! execution-context checkpoint))))
+        cancel-run! (fn [snapshot]
+                      (report-supervisor-status! :cancelling
+                                                 "Stopping current work"
+                                                 autonomy-state
+                                                 iteration
+                                                 max-iterations
+                                                 :round (:round snapshot)
+                                                 :tool-count (:tool-count snapshot)
+                                                 :tool-id (:tool-id snapshot)
+                                                 :tool-name (:tool-name snapshot)
+                                                 :parallel (:parallel snapshot))
+                      (throw (if (stop-worker! session-id worker)
+                               (request-cancelled-ex session-id
+                                                     (cancellation-reason session-id))
+                               (worker-cancel-stop-timeout-ex session-id
+                                                              channel
+                                                              iteration
+                                                              max-iterations
+                                                              autonomy-state
+                                                              snapshot))))]
     (loop []
-      (throw-if-cancelled! session-id)
       (let [snapshot @worker-state]
         (handle-events! snapshot)
         (cond
+          (session-cancelled? session-id)
+          (cancel-run! snapshot)
+
           (future-done? worker)
           (do
             (handle-events! @worker-state)
@@ -1206,7 +1267,13 @@
 
           :else
           (do
-            (Thread/sleep (long (supervisor-tick-ms)))
+            (try
+              (Thread/sleep (long (supervisor-tick-ms)))
+              (catch InterruptedException _
+                (request-session-cancel! session-id
+                                         (or (cancellation-reason session-id)
+                                             "request interrupted"))
+                (cancel-run! snapshot)))
             (recur)))))))
 
 (defn- run-supervised-agent-iteration
@@ -1234,48 +1301,49 @@
                                           max-tool-rounds
                                           worker-state)
                      (finally
-                       (clear-worker-thread! session-id))))
-          result (try
-                   {:ok (wait-for-worker! execution-context
-                                          session-id
-                                          channel
-                                          (:iteration execution-context)
-                                          max-iterations
-                                          autonomy-state
-                                          worker-state
-                                          worker)}
-                   (catch Throwable t
-                     {:error t}))]
-      (if-let [t (:error result)]
-        (let [max-restarts (long (supervisor-max-restarts))
-              attempt* (inc attempt)]
-          (if (and (< attempt max-restarts)
-                   (restartable-worker-error? t)
-                   (not (session-cancelled? session-id)))
-            (do
-              (report-supervisor-status! :restarting
-                                         (str "Restarting iteration after "
-                                              (worker-failure-summary t)
-                                              " (attempt "
-                                              attempt*
-                                              "/"
-                                              max-restarts
-                                              ")")
-                                         autonomy-state
-                                         (:iteration execution-context)
-                                         max-iterations
-                                         :attempt attempt*)
-              (save-schedule-checkpoint! execution-context
-                                         {:phase :restarting
-                                          :iteration (:iteration execution-context)
-                                          :summary (worker-failure-summary t)
-                                          :attempt attempt*
-                                          :session-id session-id
-                                          :failure-phase (some-> t ex-data :phase)})
-              (Thread/sleep (long (supervisor-restart-backoff-ms)))
-              (recur attempt*))
-            (throw t)))
-        (:ok result)))))
+                       (clear-worker-run! session-id))))]
+      (register-worker-future! session-id worker)
+      (let [result (try
+                     {:ok (wait-for-worker! execution-context
+                                            session-id
+                                            channel
+                                            (:iteration execution-context)
+                                            max-iterations
+                                            autonomy-state
+                                            worker-state
+                                            worker)}
+                     (catch Throwable t
+                       {:error t}))]
+        (if-let [t (:error result)]
+          (let [max-restarts (long (supervisor-max-restarts))
+                attempt* (inc attempt)]
+            (if (and (< attempt max-restarts)
+                     (restartable-worker-error? t)
+                     (not (session-cancelled? session-id)))
+              (do
+                (report-supervisor-status! :restarting
+                                           (str "Restarting iteration after "
+                                                (worker-failure-summary t)
+                                                " (attempt "
+                                                attempt*
+                                                "/"
+                                                max-restarts
+                                                ")")
+                                           autonomy-state
+                                           (:iteration execution-context)
+                                           max-iterations
+                                           :attempt attempt*)
+                (save-schedule-checkpoint! execution-context
+                                           {:phase :restarting
+                                            :iteration (:iteration execution-context)
+                                            :summary (worker-failure-summary t)
+                                            :attempt attempt*
+                                            :session-id session-id
+                                            :failure-phase (some-> t ex-data :phase)})
+                (Thread/sleep (long (supervisor-restart-backoff-ms)))
+                (recur attempt*))
+              (throw t)))
+          (:ok result))))))
 
 (defn- iteration-signature
   [autonomy-state control]
@@ -1704,19 +1772,25 @@
                                    fact-eids*
                                    next-loop-state)))))))
                 (catch InterruptedException e
-                  (.interrupt (Thread/currentThread))
                   (request-session-cancel! session-id "request interrupted")
-                  (let [cancel-ex (request-cancelled-ex session-id
-                                                        (cancellation-reason session-id)
-                                                        e)]
-                    (save-schedule-checkpoint! request-context
-                                               {:phase :cancelled
-                                                :summary "Request cancelled"
-                                                :session-id session-id})
-                    (prompt/status! {:state :cancelled
-                                     :phase :cancelled
-                                     :message "Request cancelled"})
-                    (throw cancel-ex)))
+                  (if (stop-worker! session-id)
+                    (let [cancel-ex (request-cancelled-ex session-id
+                                                          (cancellation-reason session-id)
+                                                          e)]
+                      (save-schedule-checkpoint! request-context
+                                                 {:phase :cancelled
+                                                  :summary "Request cancelled"
+                                                  :session-id session-id})
+                      (prompt/status! {:state :cancelled
+                                       :phase :cancelled
+                                       :message "Request cancelled"})
+                      (throw cancel-ex))
+                    (throw (ex-info "Agent supervisor could not stop the worker after request cancellation"
+                                    {:type :agent-stop-timeout
+                                     :session-id session-id
+                                     :channel channel
+                                     :grace-ms (supervisor-restart-grace-ms)}
+                                    e))))
                 (catch clojure.lang.ExceptionInfo e
                   (let [data (ex-data e)]
                     (cond
@@ -1731,7 +1805,7 @@
                                          :message "Request cancelled"})
                         (throw e))
 
-                      (contains? #{:agent-stalled :autonomous-loop-stalled} (:type data))
+                      (contains? #{:agent-stalled :autonomous-loop-stalled :agent-stop-timeout} (:type data))
                       (do
                         (save-schedule-checkpoint! request-context
                                                    {:phase :stalled
