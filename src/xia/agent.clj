@@ -617,6 +617,16 @@
                   (merge {:schedule-id schedule-id}
                          (trace-context execution-context)))))))
 
+(defn- inject-transient-messages
+  [messages transient-messages]
+  (let [transient* (->> transient-messages
+                        (filter map?)
+                        vec)]
+    (if (seq transient*)
+      (into [(first messages)]
+            (concat transient* (rest messages)))
+      messages)))
+
 (defn- sanitized-tool-result
   [result]
   (if (map? result)
@@ -791,9 +801,12 @@
   4. If the LLM wants to use tools, executes them and loops
   5. Returns the final text response"
   [session-id user-message & {:keys [channel tool-context provider-id local-doc-ids artifact-ids
-                                     max-tool-rounds resource-session-id]
+                                     max-tool-rounds resource-session-id
+                                     persist-message? transient-messages
+                                     working-memory-message]
                               :or   {channel :terminal
-                                     tool-context {}}}]
+                                     tool-context {}
+                                     persist-message? true}}]
   (with-session-turn-lock
     session-id
     (fn []
@@ -806,21 +819,23 @@
                 (throw-if-cancelled! session-id)
                 (validate-user-message! user-message)
                 (throw-if-cancelled! session-id)
-                (let [user-message-id (db/add-message! session-id :user user-message
-                                                       :local-doc-ids local-doc-ids
-                                                       :artifact-ids artifact-ids)]
-                  (audit/log! request-context
-                              {:actor      :user
-                               :type       :user-message
-                               :message-id user-message-id
-                               :data       {:local-doc-ids (vec (or local-doc-ids []))
-                                            :artifact-ids  (vec (or artifact-ids []))}}))
+                (when persist-message?
+                  (let [user-message-id (db/add-message! session-id :user user-message
+                                                         :local-doc-ids local-doc-ids
+                                                         :artifact-ids artifact-ids)]
+                    (audit/log! request-context
+                                {:actor      :user
+                                 :type       :user-message
+                                 :message-id user-message-id
+                                 :data       {:local-doc-ids (vec (or local-doc-ids []))
+                                              :artifact-ids  (vec (or artifact-ids []))}})))
                 (report-status! "Updating working memory"
                                 :phase :working-memory)
-                (best-effort-update-working-memory! session-id
-                                                   user-message
-                                                   channel
-                                                   {:resource-session-id resource-session-id})
+                (let [wm-message (or working-memory-message user-message)]
+                  (best-effort-update-working-memory! session-id
+                                                     wm-message
+                                                     channel
+                                                     {:resource-session-id resource-session-id}))
                 (throw-if-cancelled! session-id)
                 (let [{assistant-provider    :provider
                        assistant-provider-id :provider-id}
@@ -841,7 +856,8 @@
                       (context/build-messages-data session-id
                                                    {:provider            assistant-provider
                                                     :provider-id         assistant-provider-id
-                                                    :compaction-workload :history-compaction})]
+                                                    :compaction-workload :history-compaction})
+                      messages (inject-transient-messages messages transient-messages)]
                   (save-schedule-checkpoint!
                     execution-context
                     {:phase :planning

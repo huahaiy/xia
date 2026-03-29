@@ -239,5 +239,20 @@
     "name": "com.microsoft.playwright.Page$ScreenshotOptions",
     "allDeclaredConstructors": true,
     "allDeclaredFields": true
+  },
+  {
+    "name": "org.jsoup.Jsoup"
+  },
+  {
+    "name": "org.jsoup.nodes.Document"
+  },
+  {
+    "name": "org.jsoup.nodes.Element"
+  },
+  {
+    "name": "org.jsoup.nodes.TextNode"
+  },
+  {
+    "name": "org.jsoup.select.Elements"
   }
 ]

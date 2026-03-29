@@ -1,11 +1,11 @@
 (ns xia.dev-repl-test
   (:require [clojure.test :refer :all]
-            [user :as user]
+            [xia.dev-repl :as dev-repl]
             [xia.core :as core]))
 
 (defn- reset-user-options!
   []
-  (reset! (var-get #'user/runtime-options*)
+  (reset! (var-get #'dev-repl/runtime-options*)
           (merge core/default-run-options
                  {:mode "server"
                   :web-dev true
@@ -27,8 +27,8 @@
         stopped    (atom nil)
         configured (atom nil)
         started    (atom nil)]
-    (user/set-options! {:port 3011
-                        :db "/tmp/xia-dev-user"})
+    (dev-repl/set-options! {:port 3011
+                            :db "/tmp/xia-dev-user"})
     (with-redefs [xia.dev-nrepl/start! (fn [opts]
                                          (reset! nrepl opts)
                                          {:bind "127.0.0.1"
@@ -42,7 +42,7 @@
                   xia.core/start-server-runtime! (fn [options]
                                                    (reset! started options)
                                                    options)]
-      (let [result (user/go)]
+      (let [result (dev-repl/go)]
         (is (= "server" (:mode result)))
         (is (= true (:web-dev result)))
         (is (= 3011 (:port result)))
@@ -65,9 +65,9 @@
                   clojure.tools.namespace.repl/refresh (fn [& args]
                                                          (reset! refreshed args)
                                                          :refreshed)]
-    (is (= :refreshed (user/reset))))
-  (is (= (user/options) @stopped))
-  (is (= '(:after user/go) @refreshed))))
+      (is (= :refreshed (dev-repl/reset))))
+  (is (= (dev-repl/options) @stopped))
+  (is (= '(:after xia.dev-repl/go) @refreshed))))
 
 (deftest repl-stop-does-not-stop-dev-nrepl
   (let [stopped (atom nil)
@@ -78,6 +78,6 @@
                   xia.dev-nrepl/stop! (fn []
                                         (swap! nrepl-stop-calls inc)
                                         nil)]
-      (is (= :stopped (user/stop))))
-    (is (= (user/options) @stopped))
+      (is (= :stopped (dev-repl/stop))))
+    (is (= (dev-repl/options) @stopped))
     (is (zero? @nrepl-stop-calls))))

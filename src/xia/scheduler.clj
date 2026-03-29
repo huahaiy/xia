@@ -9,8 +9,9 @@
    - :prompt — creates a session and runs through the full agent loop
                (LLM decides what tools to use)
 
-   Lifecycle: start! → (tick every 60s) → stop!"
+  Lifecycle: start! → (tick every 60s) → stop!"
   (:require [taoensso.timbre :as log]
+            [xia.autonomous :as autonomous]
             [xia.backup :as backup]
             [xia.db :as db]
             [xia.agent :as agent]
@@ -82,32 +83,32 @@
 
 (defn- schedule-tool-context
   [schedule-id trusted? audit-log]
-  {:channel          :scheduler
-   :schedule-id      schedule-id
-   :autonomous-run?  true
+  {:channel :scheduler
+   :schedule-id schedule-id
+   :autonomous-run? true
    :approval-bypass? trusted?
-   :audit-log        audit-log})
+   :audit-log audit-log})
 
 (defn- execute-tool-schedule
   "Execute a :tool type schedule."
   [{:keys [id tool-id tool-args trusted?]}]
-  (let [started   (java.util.Date.)
+  (let [started (java.util.Date.)
         audit-log (atom [])
-        context   (schedule-tool-context id trusted? audit-log)]
+        context (schedule-tool-context id trusted? audit-log)]
     (schedule/save-task-checkpoint!
-      id
-      {:phase :tool
-       :summary (str "Running scheduled tool " (name tool-id) ".")
-       :tool-id tool-id})
+     id
+     {:phase :tool
+      :summary (str "Running scheduled tool " (name tool-id) ".")
+      :tool-id tool-id})
     (try
       (let [result (tool/execute-tool tool-id (or tool-args {}) context)]
         (schedule/record-run! id
-          {:started-at  started
-           :finished-at (java.util.Date.)
-           :status      (if (:error result) :error :success)
-           :result      (str result)
-           :actions     @audit-log
-           :error       (:error result)})
+                              {:started-at started
+                               :finished-at (java.util.Date.)
+                               :status (if (:error result) :error :success)
+                               :result (str result)
+                               :actions @audit-log
+                               :error (:error result)})
         (if-let [error-message (:error result)]
           (schedule/record-task-failure! id error-message)
           (schedule/record-task-success! id
@@ -115,11 +116,11 @@
                                              (str result)))))
       (catch Exception e
         (schedule/record-run! id
-          {:started-at  started
-           :finished-at (java.util.Date.)
-           :status      :error
-           :actions     @audit-log
-           :error       (.getMessage e)})
+                              {:started-at started
+                               :finished-at (java.util.Date.)
+                               :status :error
+                               :actions @audit-log
+                               :error (.getMessage e)})
         (schedule/record-task-failure! id (.getMessage e))))))
 
 (defn- finalize-prompt-schedule-session!
@@ -136,46 +137,139 @@
         (catch Exception e
           (log/error e "Failed to clear scheduler working memory" session-id))))))
 
+(defn- autonomous-iteration-messages
+  [goal iteration max-iterations previous-control]
+  [(autonomous/controller-system-message)
+   (autonomous/controller-state-message
+    {:goal goal
+     :iteration iteration
+     :max-iterations max-iterations
+     :previous-summary (:summary previous-control)
+     :previous-next-step (:next-step previous-control)
+     :previous-reason (:reason previous-control)})])
+
+(defn- autonomous-iteration-input
+  [goal iteration max-iterations previous-control]
+  (:content (second (autonomous-iteration-messages goal
+                                                   iteration
+                                                   max-iterations
+                                                   previous-control))))
+
+(defn- autonomous-iteration-summary
+  [{:keys [assistant-text control]}]
+  (or (:summary control)
+      (some-> assistant-text str not-empty)
+      "Completed an autonomous iteration."))
+
+(defn- run-autonomous-prompt-loop
+  [session-id prompt execution-context]
+  (let [max-iterations (long (autonomous/max-iterations))]
+    (loop [iteration 1
+           previous-control nil]
+      (schedule/save-task-checkpoint!
+       (:schedule-id execution-context)
+       {:phase :understanding
+        :iteration iteration
+        :summary (if (= iteration 1)
+                   "Understanding the scheduled goal and preparing the first plan."
+                   "Resuming the autonomous loop with the updated plan.")
+        :session-id session-id})
+      (let [transient-messages (autonomous-iteration-messages prompt
+                                                              iteration
+                                                              max-iterations
+                                                              previous-control)
+            wm-message (autonomous-iteration-input prompt
+                                                   iteration
+                                                   max-iterations
+                                                   previous-control)
+            response (agent/process-message session-id
+                                            (if (= iteration 1) prompt "")
+                                            :channel :scheduler
+                                            :tool-context execution-context
+                                            :persist-message? (= iteration 1)
+                                            :transient-messages transient-messages
+                                            :working-memory-message wm-message)
+            parsed (autonomous/parse-controller-response response)
+            control (:control parsed)
+            assistant-text (or (:assistant-text parsed) response)
+            summary (autonomous-iteration-summary parsed)]
+        (schedule/save-task-checkpoint!
+         (:schedule-id execution-context)
+         {:phase :observing
+          :iteration iteration
+          :summary summary
+          :session-id session-id
+          :status (some-> control :status)
+          :next-step (some-> control :next-step)})
+        (cond
+          (not control)
+          assistant-text
+
+          (= :complete (:status control))
+          (or (some-> assistant-text str not-empty)
+              (:summary control)
+              "")
+
+          (>= iteration max-iterations)
+          (throw (ex-info (str "Autonomous schedule exceeded iteration limit of "
+                               max-iterations)
+                          {:schedule-id (:schedule-id execution-context)
+                           :session-id session-id
+                           :max-iterations max-iterations
+                           :last-summary summary
+                           :last-next-step (:next-step control)}))
+
+          :else
+          (do
+            (schedule/save-task-checkpoint!
+             (:schedule-id execution-context)
+             {:phase :updating
+              :iteration iteration
+              :summary (or (:next-step control)
+                           "Updating the autonomous plan for the next iteration.")
+              :session-id session-id
+              :status :continue})
+            (recur (inc iteration) control)))))))
+
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
   [{:keys [id prompt trusted?]}]
-  (let [started            (java.util.Date.)
+  (let [started (java.util.Date.)
         resumed-session-id (schedule/resumable-session-id id)
-        session-id         (or resumed-session-id
-                               (db/create-session! :scheduler))
-        audit-log  (atom [])
-        prompt*    (schedule/augment-prompt-with-recovery-context id prompt)]
+        session-id (or resumed-session-id
+                       (db/create-session! :scheduler))
+        audit-log (atom [])
+        prompt* (schedule/augment-prompt-with-recovery-context id prompt)
+        execution-context (schedule-tool-context id trusted? audit-log)]
     (try
       (when resumed-session-id
         (db/set-session-active! session-id true))
       (wm/ensure-wm! session-id)
       (schedule/save-task-checkpoint!
-        id
-        {:phase :planning
-         :summary (if resumed-session-id
-                    "Resumed a scheduled prompt run from the last checkpoint."
-                    "Started a scheduled prompt run.")
-         :resumed? (boolean resumed-session-id)
-         :session-id session-id})
-      (let [result (agent/process-message session-id prompt*
-                                          :channel :scheduler
-                                          :tool-context (schedule-tool-context id
-                                                                              trusted?
-                                                                              audit-log))]
+       id
+       {:phase :planning
+        :summary (if resumed-session-id
+                   "Resumed a scheduled prompt run from the last checkpoint."
+                   "Started a scheduled prompt run.")
+        :resumed? (boolean resumed-session-id)
+        :session-id session-id})
+      (let [result (run-autonomous-prompt-loop session-id
+                                               prompt*
+                                               execution-context)]
         (schedule/record-run! id
-          {:started-at  started
-           :finished-at (java.util.Date.)
-           :status      :success
-           :actions     @audit-log
-           :result      (str result)})
+                              {:started-at started
+                               :finished-at (java.util.Date.)
+                               :status :success
+                               :actions @audit-log
+                               :result (str result)})
         (schedule/record-task-success! id result))
       (catch Exception e
         (schedule/record-run! id
-          {:started-at  started
-           :finished-at (java.util.Date.)
-           :status      :error
-           :actions     @audit-log
-           :error       (.getMessage e)})
+                              {:started-at started
+                               :finished-at (java.util.Date.)
+                               :status :error
+                               :actions @audit-log
+                               :error (.getMessage e)})
         (schedule/record-task-failure! id (.getMessage e)))
       (finally
         (finalize-prompt-schedule-session! session-id)))))
@@ -203,7 +297,7 @@
             (log/warn e "Proactive OAuth refresh failed before schedule" (name id))))
         (log/info "Executing schedule:" (name id) "type:" (:type sched))
         (case (:type sched)
-          :tool   (execute-tool-schedule sched)
+          :tool (execute-tool-schedule sched)
           :prompt (execute-prompt-schedule sched))
         ;; Trim old history (keep 50 most recent per schedule)
         (schedule/trim-history! id 50)
@@ -220,8 +314,8 @@
   "Find and execute all due schedules."
   []
   (try
-    (let [now  (java.util.Date.)
-          due  (schedule/due-schedules now)]
+    (let [now (java.util.Date.)
+          due (schedule/due-schedules now)]
       (when (seq due)
         (log/info "Scheduler tick:" (count due) "schedule(s) due")
         (doseq [sched due]

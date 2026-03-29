@@ -151,28 +151,30 @@
       (assoc item :text truncated)
       truncated)))
 
+(deftype TestEmbeddingProvider []
+  emb/IEmbeddingProvider
+  (embedding [_ items _opts]
+    (mapv (comp embed-text provider-text) items))
+  (embedding-metadata [_]
+    test-embedding-metadata)
+  (embedding-dimensions [_]
+    test-embedding-dimensions)
+  (close-provider [_]
+    nil)
+
+  emb/ITokenCounter
+  (token-count* [_ item _opts]
+    (count (tokenize (provider-text item))))
+  (truncate-item* [_ item max-tokens _opts]
+    (truncate-provider-item item max-tokens))
+
+  java.lang.AutoCloseable
+  (close [_]
+    nil))
+
 (defn test-embedding-provider
   []
-  (reify
-    emb/IEmbeddingProvider
-    (embedding [_ items _opts]
-      (mapv (comp embed-text provider-text) items))
-    (embedding-metadata [_]
-      test-embedding-metadata)
-    (embedding-dimensions [_]
-      test-embedding-dimensions)
-    (close-provider [_]
-      nil)
-
-    emb/ITokenCounter
-    (token-count* [_ item _opts]
-      (count (tokenize (provider-text item))))
-    (truncate-item* [_ item max-tokens _opts]
-      (truncate-provider-item item max-tokens))
-
-    java.lang.AutoCloseable
-    (close [_]
-      nil)))
+  (TestEmbeddingProvider.))
 
 (def ^:private test-llm-metadata
   {:llm/provider {:kind :test
@@ -191,24 +193,26 @@
       (str "model-summary: " summary)
       "model-summary: empty")))
 
+(deftype TestLlmProvider []
+  llm/ILLMProvider
+  (generate-text* [_ prompt _max-tokens _opts]
+    (summarize-provider-text prompt))
+  (summarize-text* [_ text _max-tokens _opts]
+    (summarize-provider-text text))
+  (llm-metadata [_]
+    test-llm-metadata)
+  (llm-context-size [_]
+    4096)
+  (close-llm-provider [_]
+    nil)
+
+  java.lang.AutoCloseable
+  (close [_]
+    nil))
+
 (defn test-llm-provider
   []
-  (reify
-    llm/ILLMProvider
-    (generate-text* [_ prompt _max-tokens _opts]
-      (summarize-provider-text prompt))
-    (summarize-text* [_ text _max-tokens _opts]
-      (summarize-provider-text text))
-    (llm-metadata [_]
-      test-llm-metadata)
-    (llm-context-size [_]
-      4096)
-    (close-llm-provider [_]
-      nil)
-
-    java.lang.AutoCloseable
-    (close [_]
-      nil)))
+  (TestLlmProvider.))
 
 (defn test-connect-options
   ([]
