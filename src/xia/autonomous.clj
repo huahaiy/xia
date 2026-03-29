@@ -732,27 +732,44 @@
 
 (defn- parse-json-after-marker
   [text marker]
-  (when-let [idx (str/index-of (or text "") marker)]
-    (let [before (subs text 0 idx)
-          after  (subs text (+ idx (count marker)))]
-      (when-let [{:keys [json-text rest]} (extract-json-object after)]
-        (try
-          {:before before
-           :after rest
-           :parsed (json/read-json json-text)}
-          (catch Exception _
-            nil))))))
+  (let [text* (or text "")]
+    (if-let [idx (str/index-of text* marker)]
+      (let [before (subs text* 0 idx)
+            after  (subs text* (+ idx (count marker)))]
+        (if-let [{:keys [json-text rest]} (extract-json-object after)]
+          (try
+            {:status :parsed
+             :before before
+             :after rest
+             :parsed (json/read-json json-text)}
+            (catch Exception _
+              {:status :malformed
+               :before before
+               :after after}))
+          {:status :malformed
+           :before before
+           :after after}))
+      {:status :missing
+       :before text*
+       :after ""})))
 
 (defn parse-controller-response
   [response]
   (let [text            (or response "")
         parsed-intent   (parse-json-after-marker text intent-marker)
-        text-without-intent (str (or (:before parsed-intent) text)
-                                 (or (:after parsed-intent) ""))
+        text-without-intent (if (= :parsed (:status parsed-intent))
+                              (str (:before parsed-intent)
+                                   (:after parsed-intent))
+                              text)
         parsed-control  (parse-json-after-marker text-without-intent control-marker)
-        head            (some-> (if parsed-control
+        head            (some-> (case (:status parsed-control)
+                                  :parsed
                                   (str (:before parsed-control)
                                        (:after parsed-control))
+
+                                  :malformed
+                                  (:before parsed-control)
+
                                   text-without-intent)
                                 str/trim)
         parsed          (:parsed parsed-control)
@@ -796,7 +813,9 @@
                                                     goal-complete?
                                                     agenda))]
     {:assistant-text head
+     :intent-status (:status parsed-intent)
      :intent        (some-> parsed-intent :parsed normalize-intent)
+     :control-status (:status parsed-control)
      :control       (when parsed
                       {:status         status
                        :summary        summary

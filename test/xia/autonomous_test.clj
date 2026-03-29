@@ -48,6 +48,21 @@
             {:item "Follow new branch" :status :diverged}]
            (:agenda control)))))
 
+(deftest parse-controller-response-distinguishes-missing-and-malformed-control
+  (let [missing   (autonomous/parse-controller-response
+                    "Plain reply without a control envelope.")
+        malformed (autonomous/parse-controller-response
+                    (str "Worked the plan.\n\n"
+                         "AUTONOMOUS_STATUS_JSON:{\"status\":\"continue\""))]
+    (is (= :missing (:control-status missing)))
+    (is (nil? (:control missing)))
+    (is (= "Plain reply without a control envelope."
+           (:assistant-text missing)))
+    (is (= :malformed (:control-status malformed)))
+    (is (nil? (:control malformed)))
+    (is (= "Worked the plan."
+           (:assistant-text malformed)))))
+
 (deftest controller-state-message-renders-progress-and-agenda
   (let [message (autonomous/controller-state-message
                   {:goal "Handle billing emails"

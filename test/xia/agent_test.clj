@@ -446,6 +446,68 @@
     (wm/ensure-wm! session-id)
     (is (nil? (wm/autonomy-state session-id)))))
 
+(deftest process-message-clears-autonomy-state-when-control-envelope-is-missing
+  (let [session-id (db/create-session! :terminal)]
+    (wm/ensure-wm! session-id)
+    (wm/set-autonomy-state! session-id
+                            {:goal "Reply to the billing emails"
+                             :stack [{:title "Reply to the billing emails"
+                                      :summary "Need invoice ids from the user"
+                                      :next-step "Wait for invoice ids"
+                                      :reason "Blocked on user input"
+                                      :progress-status :resumable
+                                      :agenda [{:item "Wait for invoice ids"
+                                                :status :resumable}]}]})
+    (wm/snapshot! session-id)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" "Plain reply without a control envelope."})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Plain reply without a control envelope."
+             (agent/process-message session-id
+                                    "thanks"
+                                    :channel :terminal))))
+    (is (nil? (wm/autonomy-state session-id)))
+    (wm/clear-wm! session-id)
+    (wm/ensure-wm! session-id)
+    (is (nil? (wm/autonomy-state session-id)))))
+
+(deftest process-message-clears-autonomy-state-and-strips-malformed-control-envelope
+  (let [session-id (db/create-session! :terminal)]
+    (wm/ensure-wm! session-id)
+    (wm/set-autonomy-state! session-id
+                            {:goal "Reply to the billing emails"
+                             :stack [{:title "Reply to the billing emails"
+                                      :summary "Drafted the reply"
+                                      :next-step "Send it"
+                                      :reason "One step remains"
+                                      :progress-status :in-progress
+                                      :agenda [{:item "Send it"
+                                                :status :in-progress}]}]})
+    (wm/snapshot! session-id)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "Worked the plan.\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:{\"status\":\"continue\"")})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Worked the plan."
+             (agent/process-message session-id
+                                    "continue"
+                                    :channel :terminal))))
+    (is (nil? (wm/autonomy-state session-id)))))
+
 (deftest process-message-restores-resumable-stack-across-top-level-turns
   (let [session-id   (db/create-session! :terminal)
         llm-messages (atom [])

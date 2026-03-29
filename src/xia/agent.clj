@@ -1446,12 +1446,14 @@
       (some-> response response-content str not-empty)
       ""))
 
-(defn- clear-autonomy-state-on-completion?
-  [control]
+(defn- clear-autonomy-state-on-terminal?
+  [parsed]
+  (let [control (:control parsed)]
   (boolean
-   (or (= :clear (:stack-action control))
+   (or (not= :parsed (:control-status parsed))
+       (= :clear (:stack-action control))
        (:goal-complete? control)
-       (= :complete (:progress-status control)))))
+       (= :complete (:progress-status control))))))
 
 (defn- persist-final-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]
@@ -1771,6 +1773,7 @@
                           :iteration iteration
                           :summary summary
                           :session-id session-id
+                          :control-status (:control-status parsed)
                           :status (some-> control :status)
                           :next-step (some-> control :next-step)
                           :progress-status (some-> updated-tip :progress-status)
@@ -1786,7 +1789,7 @@
                                                               response
                                                               local-doc-ids
                                                               artifact-ids)
-                            (when (clear-autonomy-state-on-completion? control)
+                            (when (clear-autonomy-state-on-terminal? parsed)
                               (wm/clear-autonomy-state! session-id)
                               (wm/snapshot! session-id))
                             (launch-fact-utility-review! fact-eids* user-message text)
