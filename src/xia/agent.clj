@@ -638,16 +638,25 @@
 
 (declare run-fact-utility-review-worker!)
 
+(defn- fact-utility-review-retry-backoff!
+  [attempt]
+  (let [attempt* (long (max 1 (long attempt)))]
+    (if (<= attempt* 3)
+      (Thread/yield)
+      (Thread/sleep (long (min 5 (bit-shift-left 1 (min 2 (- attempt* 4)))))))))
+
 (defn- update-fact-utility-review-state!
   ([f]
    (update-fact-utility-review-state! fact-utility-review-state compare-and-set! f))
   ([state-atom cas-fn f]
-   (loop []
+   (loop [attempt 1]
      (let [before @state-atom
            [after result] (f before)]
        (if (cas-fn state-atom before after)
          result
-         (recur))))))
+         (do
+           (fact-utility-review-retry-backoff! attempt)
+           (recur (inc attempt))))))))
 
 (defn- enqueue-fact-utility-review-state
   [state session-id observations]
@@ -1025,11 +1034,45 @@
   [messages transient-messages]
   (let [transient* (->> transient-messages
                         (filter map?)
-                        vec)]
-    (if (seq transient*)
+                        vec)
+        system-transient (->> transient*
+                              (filter #(= "system" (:role %)))
+                              vec)
+        other-transient  (->> transient*
+                              (remove #(= "system" (:role %)))
+                              vec)
+        join-content     (fn [parts]
+                           (->> parts
+                                (keep :content)
+                                (map str)
+                                (map str/trim)
+                                (remove str/blank?)
+                                (str/join "\n\n")))]
+    (cond
+      (empty? transient*)
+      messages
+
+      (and (seq system-transient)
+           (seq messages)
+           (= "system" (:role (first messages))))
+      (let [merged-system (assoc (first messages)
+                                 :content
+                                 (join-content (into [(first messages)]
+                                                     system-transient)))]
+        (into [merged-system]
+              (concat other-transient (rest messages))))
+
+      (seq system-transient)
+      (into [{:role "system"
+              :content (join-content system-transient)}]
+            (concat other-transient messages))
+
+      (empty? messages)
+      other-transient
+
+      :else
       (into [(first messages)]
-            (concat transient* (rest messages)))
-      messages)))
+            (concat other-transient (rest messages))))))
 
 (defn- sanitized-tool-result
   [result]

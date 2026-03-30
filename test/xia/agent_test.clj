@@ -19,6 +19,33 @@
   (db/delete-config! :agent/max-tool-rounds)
   (is (= 100 (#'xia.agent/configured-max-tool-rounds))))
 
+(deftest inject-transient-messages-merges-system-content-into-primary-system-prompt
+  (let [messages [{:role "system" :content "Base system prompt"}
+                  {:role "user" :content "hello"}]
+        transient [{:role "system" :content "Controller rules"}
+                   {:role "system" :content "Controller state"}]
+        injected (#'xia.agent/inject-transient-messages messages transient)]
+    (is (= 2 (count injected)))
+    (is (= "system" (:role (first injected))))
+    (is (= "Base system prompt\n\nController rules\n\nController state"
+           (:content (first injected))))
+    (is (= {:role "user" :content "hello"}
+           (second injected)))))
+
+(deftest inject-transient-messages-keeps-non-system-transients-after-merged-system-prompt
+  (let [messages [{:role "system" :content "Base system prompt"}
+                  {:role "user" :content "hello"}]
+        transient [{:role "system" :content "Controller rules"}
+                   {:role "assistant" :content "Visible transient"}]
+        injected (#'xia.agent/inject-transient-messages messages transient)]
+    (is (= 3 (count injected)))
+    (is (= "Base system prompt\n\nController rules"
+           (:content (first injected))))
+    (is (= {:role "assistant" :content "Visible transient"}
+           (second injected)))
+    (is (= {:role "user" :content "hello"}
+           (nth injected 2)))))
+
 (deftest worker-run-cleanup-is-worker-scoped
   (let [session-id (db/create-session! :terminal)
         token-a    (Object.)
@@ -507,13 +534,13 @@
              (agent/process-message session-id "reply to the billing emails" :channel :terminal))))
     (is (= 1 @selection-calls))
     (is (= 2 (count @llm-messages)))
-    (is (str/includes? (get-in @llm-messages [0 2 :content])
+    (is (str/includes? (get-in @llm-messages [0 0 :content])
                        "Current iteration: 1 of 6."))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "Current iteration: 2 of 6."))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "Tip summary: Checked inbox"))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "[in_progress] Draft replies"))
     (is (= [[:user "reply to the billing emails"]
             [:assistant "Checked inbox."]
@@ -918,18 +945,18 @@
                                     "reply to the billing emails"
                                     :channel :terminal)))
       (wm/clear-wm! session-id)
-      (is (= "Resumed with invoice ids."
+    (is (= "Resumed with invoice ids."
              (agent/process-message session-id
                                     "Here are the invoice ids: 12 and 13"
                                     :channel :terminal))))
     (is (= 2 (count @llm-messages)))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "Current execution stack"))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "[resumable] Find invoice ids"))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "New input for this turn:"))
-    (is (str/includes? (get-in @llm-messages [1 2 :content])
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "Here are the invoice ids: 12 and 13"))))
 
 (deftest process-message-returns-final-message-when-autonomous-loop-hits-iteration-cap
@@ -1494,6 +1521,24 @@
                  cas-fn
                  #(#'xia.agent/finish-fact-utility-review-worker-state % session-id :worker-a))))
       (is (= {} @state-atom)))))
+
+(deftest fact-utility-review-state-update-backs-off-between-cas-retries
+  (let [state-atom (atom {})
+        cas-calls  (atom 0)
+        backoffs   (atom [])
+        cas-fn     (fn [_atm _old _new]
+                     (let [n (swap! cas-calls inc)]
+                       (>= n 4)))]
+    (with-redefs [xia.agent/fact-utility-review-retry-backoff!
+                  (fn [attempt]
+                    (swap! backoffs conj attempt))]
+      (is (= :ok
+             (#'xia.agent/update-fact-utility-review-state!
+              state-atom
+              cas-fn
+              (fn [_]
+                [{} :ok]))))
+      (is (= [1 2 3] @backoffs)))))
 
 (deftest process-message-continues-when-working-memory-update-fails
   (let [session-id (db/create-session! :terminal)]
