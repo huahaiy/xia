@@ -166,6 +166,12 @@
                             (Long/valueOf estimate))
                       estimate)))))))))))
 
+(defn- section-budget-tokens
+  ^long [text]
+  ;; Section renderers only need a cheap local estimate for incremental budget
+  ;; tracking; they do not need provider-aware token counting per line/item.
+  (long (heuristic-estimate-tokens text)))
+
 ;; ============================================================================
 ;; Budget config
 ;; ============================================================================
@@ -685,7 +691,7 @@
                entity-used-fact-eids :used-fact-eids}
               (render-entity-data (first ents))
               line       content
-              line-tokens (long (estimate-tokens line))]
+              line-tokens (section-budget-tokens line)]
           (if (> (+ tokens line-tokens) budget*)
             {:content        (str/join "\n" lines)
              :tokens         tokens
@@ -722,7 +728,7 @@
           (let [{:keys [summary timestamp]} (first eps)
                 date-str (format-date timestamp)
                 line (str "- [" (or date-str "?") "] " summary)
-                line-tokens (long (estimate-tokens line))]
+                line-tokens (section-budget-tokens line)]
             (if (> (+ tokens line-tokens) budget*)
               {:content (str/join "\n" lines)
                :tokens  tokens}
@@ -774,7 +780,7 @@
           {:content (str/join "\n" lines)
            :tokens  tokens}
           (let [line (local-doc-line (first remaining))
-                line-tokens (long (estimate-tokens line))]
+                line-tokens (section-budget-tokens line)]
             (if (> (+ tokens line-tokens) budget*)
               {:content (str/join "\n" lines)
                :tokens  tokens}
@@ -799,7 +805,7 @@
            :tokens  tokens}
           (let [s (first sks)
                 section (str "### " (:skill/name s) "\n" (:skill/content s))
-                section-tokens (long (estimate-tokens section))]
+                section-tokens (section-budget-tokens section)]
             (if (> (+ tokens section-tokens) budget*)
               {:content (str/join "\n" parts)
                :tokens  tokens}

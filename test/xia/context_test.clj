@@ -238,11 +238,12 @@
 
   (testing "sorts entities by relevance before applying the budget"
     (let [render-entity #'xia.context/render-entity
+          section-budget-tokens #'xia.context/section-budget-tokens
           low    {:name "Low" :type :concept :relevance 0.1
                   :facts [] :edges {:outgoing [] :incoming []}}
           high   {:name "Top" :type :concept :relevance 0.9
                   :facts [] :edges {:outgoing [] :incoming []}}
-          budget (+ 8 (long (ctx/estimate-tokens (render-entity high))))
+          budget (+ 8 (long (section-budget-tokens (render-entity high))))
           result (ctx/render-entities [low high] budget)]
       (is (str/includes? result "- Top"))
       (is (not (str/includes? result "- Low")))))
@@ -305,6 +306,38 @@
 
     (testing "empty docs"
       (is (nil? (rd [] 500))))))
+
+(deftest test-section-renderers-use-heuristic-budget-estimates
+  (with-redefs [xia.context/estimate-tokens
+                (fn [_]
+                  (throw (ex-info "section renderers should not call estimate-tokens"
+                                  {})))]
+    (is (str/includes? (ctx/render-entities
+                        [{:name "Alice"
+                          :type :person
+                          :facts [{:content "likes Clojure" :confidence 1.0}]
+                          :edges {:outgoing [] :incoming []}}]
+                        500)
+                       "Alice"))
+    (is (str/includes? (#'xia.context/render-episodes
+                        [{:summary "Discussed Clojure"
+                          :timestamp (java.util.Date.)
+                          :relevance 0.8}]
+                        500)
+                       "Discussed Clojure"))
+    (is (str/includes? (#'xia.context/render-local-docs
+                        [{:name "notes.md"
+                          :media-type "text/markdown"
+                          :summary "Important notes"
+                          :matched-chunks [{:summary "Important chunk"}]
+                          :relevance 0.8}]
+                        500)
+                       "notes.md"))
+    (is (str/includes? (#'xia.context/render-skills
+                        [{:skill/name "email-drafting"
+                          :skill/content "Write emails professionally."}]
+                        500)
+                       "email-drafting"))))
 
 ;; ---------------------------------------------------------------------------
 ;; render-skills
