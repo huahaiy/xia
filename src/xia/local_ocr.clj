@@ -4,6 +4,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.async :as async]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -391,8 +392,12 @@
 
 (defn- process-result
   [^Process process timeout-ms]
-  (let [stdout* (future (read-stream! (.getInputStream process)))
-        stderr* (future (read-stream! (.getErrorStream process)))]
+  (let [stdout* (async/submit-parallel!
+                 "local-ocr-stdout"
+                 #(read-stream! (.getInputStream process)))
+        stderr* (async/submit-parallel!
+                 "local-ocr-stderr"
+                 #(read-stream! (.getErrorStream process)))]
     (if (.waitFor process (long timeout-ms) TimeUnit/MILLISECONDS)
       {:exit   (.exitValue process)
        :stdout @stdout*

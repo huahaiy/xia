@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -1387,9 +1388,14 @@
   (try
     (let [session-id       (random-uuid)
           reviewed         (promise)
+          submitted        (atom [])
           heuristic-calls  (atom [])
           review-call-count (atom 0)]
       (with-redefs [xia.agent/fact-utility-review-debounce-ms 25
+                    xia.async/submit-background!
+                    (fn [description f]
+                      (swap! submitted conj description)
+                      (future (f)))
                     xia.working-memory/apply-fact-utility-heuristic!
                     (fn [fact-eids assistant-response]
                       (swap! heuristic-calls conj {:fact-eids fact-eids
@@ -1412,6 +1418,7 @@
                  :user-message "follow up"
                  :assistant-response "second response"}]
                (deref reviewed 1000 ::timeout)))
+        (is (= ["fact-utility-review"] @submitted))
         (is (= 1 @review-call-count))))
     (finally
       (reset! @#'xia.agent/fact-utility-review-state {}))))

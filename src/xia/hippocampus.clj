@@ -12,6 +12,7 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [charred.api :as json]
+            [xia.async :as async]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -596,8 +597,9 @@ Rules:
   (locking background-consolidation-lock
     (when (:accepting? @background-consolidation-state)
       (let [self (promise)
-            task (future
-                   (let [me @self]
+            task (async/submit-background!
+                  "hippocampus-consolidation"
+                  #(let [me @self]
                      (try
                        (consolidate-pending!)
                        (catch Exception e
@@ -605,8 +607,9 @@ Rules:
                        (finally
                          (locking background-consolidation-lock
                            (swap! background-consolidation-state update :tasks disj me))))))]
-        (swap! background-consolidation-state update :tasks conj task)
-        (deliver self task)
+        (when task
+          (swap! background-consolidation-state update :tasks conj task)
+          (deliver self task))
         task))))
 
 (defn- referenced-local-doc-names

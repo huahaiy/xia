@@ -6,6 +6,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.async :as async]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http]
@@ -113,8 +114,9 @@
   (locking async-log-lock
     (when (:accepting? @async-log-state)
       (let [self (promise)
-            task (future
-                   (let [me @self]
+            task (async/submit-background!
+                  "llm-log-write"
+                  #(let [me @self]
                      (try
                        (db/log-llm-call! log-entry)
                        (catch Exception e
@@ -122,8 +124,9 @@
                        (finally
                          (locking async-log-lock
                            (swap! async-log-state update :tasks disj me))))))]
-        (swap! async-log-state update :tasks conj task)
-        (deliver self task)
+        (when task
+          (swap! async-log-state update :tasks conj task)
+          (deliver self task))
         task))))
 
 (defn- current-workload-id-set

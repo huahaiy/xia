@@ -9,6 +9,7 @@
   (:require [taoensso.timbre :as log]
             [charred.api :as json]
             [clojure.string :as str]
+            [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.audit :as audit]
             [xia.config :as cfg]
@@ -679,13 +680,24 @@
       :else
       [(dissoc state session-id) nil])))
 
+(defn- abandon-fact-utility-review-worker-state
+  [state session-id worker-token]
+  (let [{current-token :worker-token :as session-state} (get state session-id)]
+    (if (= worker-token current-token)
+      [(assoc state session-id (dissoc session-state :worker-token)) true]
+      [state false])))
+
 (defn- enqueue-fact-utility-review!
   [session-id fact-eids user-message assistant-response]
   (let [observations (fact-utility-observations fact-eids user-message assistant-response)]
     (when (seq observations)
       (when-let [token (update-fact-utility-review-state!
                         #(enqueue-fact-utility-review-state % session-id observations))]
-        (future (run-fact-utility-review-worker! session-id token))))
+        (when-not (async/submit-background!
+                   "fact-utility-review"
+                   #(run-fact-utility-review-worker! session-id token))
+          (update-fact-utility-review-state!
+           #(abandon-fact-utility-review-worker-state % session-id token)))))
     (count observations)))
 
 (defn- claim-fact-utility-review-batch!
@@ -698,7 +710,11 @@
   (when-let [token
              (update-fact-utility-review-state!
               #(finish-fact-utility-review-worker-state % session-id worker-token))]
-    (future (run-fact-utility-review-worker! session-id token))))
+    (when-not (async/submit-background!
+               "fact-utility-review"
+               #(run-fact-utility-review-worker! session-id token))
+      (update-fact-utility-review-state!
+       #(abandon-fact-utility-review-worker-state % session-id token)))))
 
 (defn- run-fact-utility-review-worker!
   [session-id worker-token]
@@ -1142,8 +1158,9 @@
                          :tool-names (mapv :func-name calls)}
                         (trace-context context)))
       (let [futures (mapv (fn [call]
-                            (future
-                              (try
+                            (async/submit-parallel!
+                             (str "parallel-tool:" (:func-name call))
+                             #(try
                                 {:call call
                                  :result (execute-tool-call call context)}
                                 (catch Throwable t
@@ -2383,8 +2400,11 @@
     (let [results (vec
                    (mapcat (fn [batch]
                              (let [futures (mapv (fn [branch-task]
-                                                   (future
-                                                     (run-branch-task* parent-session-id
+                                                   (async/submit-parallel!
+                                                    (str "branch-task:" (or (:task branch-task)
+                                                                            (:prompt branch-task)
+                                                                            "unnamed"))
+                                                    #(run-branch-task* parent-session-id
                                                                        branch-task
                                                                        {:channel channel*
                                                                         :provider-id provider-id*

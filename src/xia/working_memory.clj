@@ -14,6 +14,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -225,7 +226,9 @@ Rules:
      (when (or (not (str/blank? fts-query))
                (not (str/blank? semantic-query)))
        (let [search-futures (mapv (fn [[step f]]
-                                    [step (future (safe-search step f))])
+                                    [step (async/submit-parallel!
+                                           (str "wm-search:" (name step))
+                                           #(safe-search step f))])
                                   search-steps)]
          (into (array-map)
                (map (fn [[step result-future]]
@@ -591,8 +594,9 @@ Rules:
 (defn- schedule-topic-update!
   [session-id]
   (try
-    (future
-      (try
+    (async/submit-background!
+     "wm-topic-update"
+     #(try
         (update-topics! session-id)
         (catch Exception e
           (log/warn e "Background topic update failed" {:session-id session-id}))))
