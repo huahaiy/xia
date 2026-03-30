@@ -152,6 +152,37 @@
             {:item "Draft billing reply" :status :in-progress}]
            (get-in popped [:stack 0 :agenda])))))
 
+(deftest apply-control-pop-derives-parent-state-from-child-when-parent-update-is-omitted
+  (let [state {:stack [{:title "Handle billing emails"
+                        :summary "Need invoice ids before replying"
+                        :next-step "Find invoice ids"
+                        :reason "Blocked on invoice lookup"
+                        :progress-status :resumable
+                        :agenda [{:item "Find invoice ids" :status :resumable}
+                                 {:item "Draft billing reply" :status :pending}]}
+                       {:title "Find invoice ids"
+                        :summary "Searching invoices"
+                        :next-step "Return to the reply"
+                        :reason "This child subtask is almost done"
+                        :progress-status :in-progress
+                        :agenda [{:item "Look up invoice ids" :status :completed}]}]}
+        popped (autonomous/apply-control
+                state
+                {:status :continue
+                 :summary "Invoice ids found"
+                 :reason "Return to parent task"
+                 :current-focus "Handle billing emails"
+                 :stack-action :pop})]
+    (is (= ["Handle billing emails"]
+           (mapv :title (:stack popped))))
+    (is (= :in-progress
+           (get-in popped [:stack 0 :progress-status])))
+    (is (= "Draft billing reply"
+           (get-in popped [:stack 0 :next-step])))
+    (is (= [{:item "Find invoice ids" :status :completed}
+            {:item "Draft billing reply" :status :pending}]
+           (get-in popped [:stack 0 :agenda])))))
+
 (deftest apply-control-stay-preserves-existing-frame-fields
   (let [initial {:stack [{:title "Handle billing emails"
                           :summary "Checked inbox"
@@ -248,8 +279,7 @@
 
 (deftest normalize-state-handles-string-keyed-snapshots
   (let [state (autonomous/normalize-state
-               {"goal" "Handle billing emails"
-                "stack" [{"title" "Handle billing emails"
+               {"stack" [{"title" "Handle billing emails"
                           "progress_status" "resumable"
                           "agenda" [{"item" "Wait for invoice ids"
                                      "status" "resumable"}]}]})]

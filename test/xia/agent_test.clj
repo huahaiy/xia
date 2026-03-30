@@ -1189,7 +1189,7 @@
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
 
-(deftest process-message-does-not-treat-changing-summaries-as-identical-iterations
+(deftest process-message-treats-summary-rephrasing-alone-as-an-identical-loop
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom 0)]
     (db/set-config! :agent/supervisor-max-identical-iterations 2)
@@ -1200,7 +1200,7 @@
                   xia.context/build-messages-data    (fn [_session-id _opts]
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
-                  xia.autonomous/max-iterations      (constantly 3)
+                  xia.autonomous/max-iterations      (constantly 6)
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (case (swap! llm-calls inc)
                                                          1 {"content" (str "Step one finished.\n\n"
@@ -1213,10 +1213,20 @@
                                                                          "AUTONOMOUS_STATUS_JSON:"
                                                                          "{\"status\":\"continue\",\"summary\":\"Step three finished\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}))
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
-      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
-        (is (str/includes? result "Step three finished."))
-        (is (str/includes? result "Note: I stopped after reaching the autonomous iteration limit for this turn (3)."))))
-    (is (= 3 @llm-calls))))
+      (let [err (try
+                  (agent/process-message session-id "keep going" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-loop-stalled
+               (:type (ex-data err))))))
+    (is (= 2 @llm-calls))
+    (is (= [[:user "keep going"]
+            [:assistant "Step one finished."]
+            [:assistant "Step two finished."]]
+           (->> (db/session-messages session-id)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
 
 (deftest process-message-does-not-treat-different-tool-activity-as-identical-iterations
   (let [session-id (db/create-session! :terminal)

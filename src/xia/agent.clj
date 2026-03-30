@@ -1316,6 +1316,43 @@
        vec
        not-empty))
 
+(def ^:private loop-signature-stopwords
+  #{"a" "an" "and" "are" "for" "from" "into" "its" "more" "now" "of" "on" "or"
+    "remaining" "remains" "step" "steps" "still" "the" "to" "with" "work" "working"})
+
+(defn- loop-text-signature
+  [text]
+  (some->> text
+           str
+           str/lower-case
+           (re-seq #"[a-z0-9]+")
+           (remove #(or (< (count ^String %) 3)
+                        (contains? loop-signature-stopwords %)))
+           distinct
+           sort
+           vec
+           not-empty))
+
+(defn- loop-agenda-signature
+  [agenda]
+  (->> agenda
+       (keep (fn [{:keys [item status]}]
+               (when (or item status)
+                 {:item-terms (loop-text-signature item)
+                  :status status})))
+       vec
+       not-empty))
+
+(defn- loop-stack-signature
+  [stack]
+  (->> stack
+       (keep (fn [{:keys [title progress-status]}]
+               (when (or title progress-status)
+                 {:title-terms (loop-text-signature title)
+                  :progress-status progress-status})))
+       vec
+       not-empty))
+
 (defn- report-autonomy-status!
   [phase autonomy-state iteration max-iterations & {:keys [stack-action]}]
   (apply emit-status!
@@ -1715,15 +1752,12 @@
 (defn- iteration-signature
   [autonomy-state control tool-activity]
   (let [tip (autonomous/current-frame autonomy-state)]
-    {:title (:title tip)
+    {:title-terms (loop-text-signature (:title tip))
      :progress-status (:progress-status tip)
-     :summary (:summary control)
-     :reason (:reason control)
-     :next-step (:next-step control)
      :stack-action (:stack-action control)
      :tool-activity tool-activity
-     :agenda (:agenda tip)
-     :stack (status-stack (:stack autonomy-state))}))
+     :agenda (loop-agenda-signature (:agenda tip))
+     :stack (loop-stack-signature (:stack autonomy-state))}))
 
 (defn- update-iteration-loop-state
   [{:keys [signature count]} next-signature]

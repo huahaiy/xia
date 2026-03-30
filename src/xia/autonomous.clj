@@ -422,6 +422,90 @@
                           "progress-status"
                           "status"]))))
 
+(defn- agenda-present?
+  [frame]
+  (not= missing-field
+        (first-present frame
+                       [:agenda
+                        "agenda"])))
+
+(defn- next-step-present?
+  [frame]
+  (not= missing-field
+        (first-present frame
+                       [:next-step
+                        :next_step
+                        "next_step"
+                        "next-step"])))
+
+(defn- normalize-match-text
+  [value]
+  (some-> value
+          str
+          str/lower-case
+          (str/replace #"[^a-z0-9]+" " ")
+          str/trim
+          not-empty))
+
+(defn- matching-task?
+  [left right]
+  (let [left*  (normalize-match-text left)
+        right* (normalize-match-text right)]
+    (and left*
+         right*
+         (or (= left* right*)
+             (str/includes? left* right*)
+             (str/includes? right* left*)))))
+
+(def ^:private actionable-agenda-statuses
+  #{:pending :in-progress :paused :resumable :diverged :blocked})
+
+(defn- derive-parent-agenda-on-pop
+  [parent-tip child-tip]
+  (let [agenda      (:agenda parent-tip)
+        child-title (:title child-tip)
+        parent-next (:next-step parent-tip)]
+    (when (seq agenda)
+      (let [match? (fn [{:keys [item status]}]
+                     (and (contains? actionable-agenda-statuses status)
+                          (or (matching-task? item child-title)
+                              (matching-task? item parent-next))))
+            idx    (first (keep-indexed (fn [i entry]
+                                          (when (match? entry)
+                                            i))
+                                        agenda))]
+        (when (some? idx)
+          (assoc-in (vec agenda) [idx :status] :completed))))))
+
+(defn- first-actionable-agenda-item
+  [agenda]
+  (some (fn [{:keys [item status]}]
+          (when (and item
+                     (contains? actionable-agenda-statuses status))
+            item))
+        agenda))
+
+(defn- derive-parent-control-on-pop
+  [parent-tip child-tip control parent-title]
+  (let [derived-agenda     (when-not (agenda-present? control)
+                             (derive-parent-agenda-on-pop parent-tip child-tip))
+        effective-agenda   (or derived-agenda
+                               (:agenda control)
+                               (:agenda parent-tip))
+        derived-next-step  (when-not (next-step-present? control)
+                             (let [parent-next (:next-step parent-tip)]
+                               (when (or (str/blank? parent-next)
+                                         (matching-task? parent-next (:title child-tip)))
+                                 (first-actionable-agenda-item effective-agenda))))
+        derived-progress   (when-not (progress-status-present? control)
+                             (derive-progress-status (:status control)
+                                                     (:goal-complete? control)
+                                                     effective-agenda))]
+    (cond-> (assoc control :title parent-title)
+      derived-agenda (assoc :agenda derived-agenda)
+      derived-next-step (assoc :next-step derived-next-step)
+      derived-progress (assoc :progress-status derived-progress))))
+
 (defn- normalize-stack
   [goal stack]
   (cond
@@ -465,14 +549,11 @@
     state
     (let [raw-stack (or (:stack state)
                         (get state "stack"))
-          legacy-goal (truncate-goal (or (:goal state)
-                                         (get state "goal")))
-          seed-title   (truncate-goal (or legacy-goal
-                                          (some-> raw-stack first :title)
-                                          (some-> raw-stack first (get "title"))
-                                          (some-> raw-stack peek :title)
-                                          (some-> raw-stack peek (get "title"))))
-          stack*      (normalize-stack seed-title raw-stack)]
+          seed-title (truncate-goal (or (some-> raw-stack first :title)
+                                        (some-> raw-stack first (get "title"))
+                                        (some-> raw-stack peek :title)
+                                        (some-> raw-stack peek (get "title"))))
+          stack*     (normalize-stack seed-title raw-stack)]
       (mark-normalized-state
        {:stack stack*}))))
 
@@ -574,7 +655,6 @@
 (defn apply-control
   [state control]
   (let [seed-title    (or (root-goal state)
-                          (truncate-goal (:goal state))
                           (truncate-goal (:current-focus control))
                           (truncate-goal (:summary control)))
         stack         (normalize-stack seed-title (:stack state))
@@ -606,8 +686,12 @@
                                 parent-title (or (truncate-agenda-item (:current-focus control))
                                                  (:title parent-tip)
                                                  (default-frame-title seed-title))
+                                parent-control (derive-parent-control-on-pop parent-tip
+                                                                             current-tip
+                                                                             control
+                                                                             parent-title)
                                 parent-frame (merge-frame parent-tip
-                                                          (assoc control :title parent-title)
+                                                          parent-control
                                                           parent-title)]
                             (replace-top parent-stack parent-frame))
                           [merged-tip])
