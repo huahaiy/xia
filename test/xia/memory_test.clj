@@ -339,6 +339,24 @@
       (is (= "likes Python" (:content (first facts))))
       (is (= 0.5 (:utility (first facts)))))))
 
+(deftest test-node-data-by-eids
+  (let [alice (th/seed-node! "Alice" "person")
+        acme  (th/seed-node! "Acme" "thing")]
+    (memory/set-node-property! alice [:location] "Seattle")
+    (memory/add-fact! {:node-eid alice :content "likes Clojure"})
+    (memory/add-edge! {:from-eid alice
+                       :to-eid acme
+                       :type :works-at
+                       :label "employed at Acme"})
+    (let [node-data (memory/node-data-by-eids [alice acme])]
+      (is (= "Alice" (get-in node-data [alice :name])))
+      (is (= :person (get-in node-data [alice :type])))
+      (is (= "Seattle" (get-in node-data [alice :properties :location])))
+      (is (= "likes Clojure" (get-in node-data [alice :facts 0 :content])))
+      (is (= "Acme" (get-in node-data [alice :edges :outgoing 0 :target])))
+      (is (= "Acme" (get-in node-data [acme :name])))
+      (is (= "Alice" (get-in node-data [acme :edges :incoming 0 :source]))))))
+
 (deftest test-forget-fact
   (let [node-eid     (th/seed-node! "Carol" "person")
         forgotten-eid (th/seed-fact! node-eid "prefers tea")

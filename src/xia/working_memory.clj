@@ -350,12 +350,6 @@ Rules:
            vec))
     []))
 
-(defn- hydrate-slot-node-data
-  [node-eid]
-  {:facts      (memory/node-facts node-eid)
-   :edges      (memory/node-edges node-eid)
-   :properties (memory/node-properties node-eid)})
-
 (defn- preload-merge-node-data
   [current-slots search-results expanded-nodes & {:keys [refresh-existing?]
                                                   :or {refresh-existing? false}}]
@@ -377,9 +371,7 @@ Rules:
                                             (contains? direct-nodes %))))
         fact-nodes        (into {}
                                 (map (fn [node-eid]
-                                       (let [node (memory/get-node node-eid)]
-                                         [node-eid {:name (:kg.node/name node)
-                                                    :type (:kg.node/type node)}])))
+                                       [node-eid {}]))
                                 fact-node-eids)
         expanded-node-map (into {}
                                 (keep (fn [[eid {:keys [name type]}]]
@@ -389,13 +381,22 @@ Rules:
                                                       (contains? fact-nodes eid))
                                           [eid {:name name
                                                 :type type}])))
-                                expanded-nodes)]
+                                expanded-nodes)
+        node-metadata     (merge direct-nodes fact-nodes expanded-node-map)
+        hydrated-by-eid   (memory/node-data-by-eids (keys node-metadata))]
     (into {}
           (map (fn [[node-eid {:keys [name type]}]]
-                 [node-eid {:name name
-                            :type type
-                            :slot-data (hydrate-slot-node-data node-eid)}]))
-          (merge direct-nodes fact-nodes expanded-node-map))))
+                 (let [{hydrated-name :name
+                        hydrated-type :type
+                        facts :facts
+                        edges :edges
+                        properties :properties} (get hydrated-by-eid node-eid)]
+                   [node-eid {:name (or name hydrated-name)
+                              :type (or type hydrated-type)
+                              :slot-data {:facts facts
+                                          :edges edges
+                                          :properties properties}}])))
+          node-metadata)))
 
 (defn- merge-results!
   "Merge search + expansion results into working memory."

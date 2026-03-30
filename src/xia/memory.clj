@@ -385,12 +385,41 @@
 (defn get-node [node-eid]
   (into {} (db/entity node-eid)))
 
+(defn- node-basics-by-eids
+  [node-eids]
+  (if-not (seq node-eids)
+    {}
+    (->> (db/q '[:find ?node ?name ?type
+                 :in $ [?node ...]
+                 :where
+                 [?node :kg.node/name ?name]
+                 [?node :kg.node/type ?type]]
+               (vec (distinct node-eids)))
+         (reduce (fn [acc [node-eid name type]]
+                   (assoc acc node-eid
+                          {:name name
+                           :type type}))
+                 {}))))
+
 ;; --- Node properties (idoc) ---
 
 (defn node-properties
   "Get a node's properties map (idoc). Returns nil if no properties set."
   [node-eid]
   (:kg.node/properties (db/entity node-eid)))
+
+(defn- node-properties-by-eids
+  [node-eids]
+  (if-not (seq node-eids)
+    {}
+    (->> (db/q '[:find ?node ?props
+                 :in $ [?node ...]
+                 :where
+                 [?node :kg.node/properties ?props]]
+               (vec (distinct node-eids)))
+         (reduce (fn [acc [node-eid props]]
+                   (assoc acc node-eid props))
+                 {}))))
 
 (defn set-node-property!
   "Set a property on a node. `path` is a vector of keys, `value` is the new value.
@@ -485,6 +514,55 @@
                        {:source name :type type :label (empty->nil label)})
                      incoming)}))
 
+(defn- node-edges-by-eids
+  [node-eids]
+  (if-not (seq node-eids)
+    {}
+    (let [node-eids* (vec (distinct node-eids))
+          outgoing   (db/q '[:find ?from ?to-name ?type ?label
+                             :in $ [?from ...]
+                             :where
+                             [?edge :kg.edge/from ?from]
+                             [?edge :kg.edge/to ?to]
+                             [?to :kg.node/name ?to-name]
+                             [?edge :kg.edge/type ?type]
+                             [(get-else $ ?edge :kg.edge/label "") ?label]]
+                           node-eids*)
+          incoming   (db/q '[:find ?to ?from-name ?type ?label
+                             :in $ [?to ...]
+                             :where
+                             [?edge :kg.edge/to ?to]
+                             [?edge :kg.edge/from ?from]
+                             [?from :kg.node/name ?from-name]
+                             [?edge :kg.edge/type ?type]
+                             [(get-else $ ?edge :kg.edge/label "") ?label]]
+                           node-eids*)]
+      (let [initial (zipmap node-eids*
+                            (repeat {:outgoing []
+                                     :incoming []}))
+            with-outgoing
+            (reduce (fn [acc [node-eid name type label]]
+                      (update-in acc [node-eid :outgoing]
+                                 conj
+                                 {:target name
+                                  :type type
+                                  :label (empty->nil label)}))
+                    initial
+                    outgoing)
+            with-incoming
+            (reduce (fn [acc [node-eid name type label]]
+                      (update-in acc [node-eid :incoming]
+                                 conj
+                                 {:source name
+                                  :type type
+                                  :label (empty->nil label)}))
+                    with-outgoing
+                    incoming)]
+        (update-vals with-incoming
+                     (fn [{:keys [outgoing incoming]}]
+                       {:outgoing (vec outgoing)
+                        :incoming (vec incoming)}))))))
+
 (defn connected-node-summaries
   "Return one-hop neighboring nodes for the given seed node eids.
    Uses bulk queries so graph expansion does not issue per-node edge lookups
@@ -556,6 +634,53 @@
                 :content    content
                 :confidence confidence
                 :utility    (double utility)}))))
+
+(defn- node-facts-by-node-eids
+  [node-eids]
+  (if-not (seq node-eids)
+    {}
+    (let [rows (db/q '[:find ?node ?fact ?content ?confidence ?utility ?updated
+                       :in $ [?node ...]
+                       :where
+                       [?fact :kg.fact/node ?node]
+                       [?fact :kg.fact/content ?content]
+                       [?fact :kg.fact/confidence ?confidence]
+                       [(get-else $ ?fact :kg.fact/utility 0.5) ?utility]
+                       [?fact :kg.fact/updated-at ?updated]]
+                     (vec (distinct node-eids)))]
+      (reduce-kv
+       (fn [acc node-eid node-rows]
+         (assoc acc node-eid
+                (->> node-rows
+                     (sort-by #(nth % 5) #(compare %2 %1))
+                     (mapv (fn [[_ fact-eid content confidence utility _]]
+                             {:eid        fact-eid
+                              :content    content
+                              :confidence confidence
+                              :utility    (double utility)})))))
+       {}
+       (group-by first rows)))))
+
+(defn node-data-by-eids
+  "Bulk-load node basics, facts, edges, and properties for the given node eids."
+  [node-eids]
+  (let [node-eids*    (vec (distinct node-eids))
+        basics-by-eid (node-basics-by-eids node-eids*)
+        facts-by-eid  (node-facts-by-node-eids node-eids*)
+        edges-by-eid  (node-edges-by-eids node-eids*)
+        props-by-eid  (node-properties-by-eids node-eids*)]
+    (into {}
+          (map (fn [node-eid]
+                 (let [{:keys [name type]} (get basics-by-eid node-eid)
+                       edges (get edges-by-eid node-eid)]
+                   [node-eid {:name       name
+                              :type       type
+                              :facts      (or (get facts-by-eid node-eid) [])
+                              :edges      (or edges
+                                              {:outgoing []
+                                               :incoming []})
+                              :properties (get props-by-eid node-eid)}])))
+          node-eids*)))
 
 ;; ============================================================================
 ;; Hybrid Search (FTS + Embedding via Datalevin)

@@ -247,26 +247,19 @@
 (deftest merge-results-prefetches-node-data-outside-update-retries
   (let [sid             (random-uuid)
         node-eid        (th/seed-node! "RetryNode" "concept")
-        get-node-calls  (atom 0)
-        facts-calls     (atom 0)
-        edges-calls     (atom 0)
-        props-calls     (atom 0)]
+        node-data-calls (atom 0)]
     (wm/create-wm! sid)
     (swap! @#'xia.working-memory/wm-atom assoc-in [sid :turn-count] 1)
     (try
-      (with-redefs [xia.memory/get-node        (fn [_]
-                                                 (swap! get-node-calls inc)
-                                                 {:kg.node/name "RetryNode"
-                                                  :kg.node/type :concept})
-                    xia.memory/node-facts      (fn [_]
-                                                 (swap! facts-calls inc)
-                                                 [])
-                    xia.memory/node-edges      (fn [_]
-                                                 (swap! edges-calls inc)
-                                                 {})
-                    xia.memory/node-properties (fn [_]
-                                                 (swap! props-calls inc)
-                                                 {})]
+      (with-redefs [xia.memory/node-data-by-eids
+                    (fn [node-eids]
+                      (swap! node-data-calls inc)
+                      (is (= [node-eid] (vec node-eids)))
+                      {node-eid {:name "RetryNode"
+                                 :type :concept
+                                 :facts []
+                                 :edges {}
+                                 :properties {}}})]
         (with-redefs-fn {#'xia.working-memory/update-session-wm!
                          (fn [session-id f]
                            (let [wm      (wm/get-wm session-id)
@@ -281,10 +274,7 @@
                                                   :episodes []
                                                   :local-docs []}
                                                  nil))))
-      (is (= 1 @get-node-calls))
-      (is (= 1 @facts-calls))
-      (is (= 1 @edges-calls))
-      (is (= 1 @props-calls))
+      (is (= 1 @node-data-calls))
       (is (= "RetryNode"
              (get-in (wm/get-wm sid) [:slots node-eid :name])))
       (finally
