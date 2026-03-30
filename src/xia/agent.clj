@@ -61,6 +61,7 @@
    :channel])
 
 (declare truncate-summary status-agenda status-stack run-agent-iteration
+         sanitized-tool-result
          cancel-futures!
          request-session-cancel!)
 
@@ -878,6 +879,36 @@
                (not (str/blank? summary)))
       summary)))
 
+(defn- tool-result-error
+  [result]
+  (let [error (result-value result :error)]
+    (when (and (string? error)
+               (not (str/blank? error)))
+      error)))
+
+(defn- tool-result-status
+  [tool-result]
+  (if (tool-result-error (:result tool-result))
+    :error
+    :success))
+
+(defn- tool-result-audit-data
+  [tool-result]
+  (let [result  (:result tool-result)
+        error   (tool-result-error result)
+        summary (or (tool-result-summary result)
+                    (when (string? (:content tool-result))
+                      (let [content (str/trim (:content tool-result))]
+                        (when (seq content)
+                          content)))
+                    (when (some? result)
+                      (json/write-json-str (sanitized-tool-result result))))
+        status  (tool-result-status tool-result)]
+    (cond-> {:tool-name (:tool_name tool-result)
+             :status    (name status)}
+      summary (assoc :summary (truncate-summary summary 240))
+      error (assoc :error (truncate-summary error 500)))))
+
 (defn- truncate-summary
   [value max-len]
   (let [s (some-> value str)
@@ -1676,6 +1707,30 @@
                         :workload (some-> workload name)
                         :tool-calls []}})))
 
+(defn- persist-tool-result-message!
+  [session-id execution-context llm-call-id provider-id model workload tool-result]
+  (let [tool-name        (:tool_name tool-result)
+        tool-call-id     (:tool_call_id tool-result)
+        tool-message-id  (db/add-message! session-id :tool
+                                          nil
+                                          :tool-result (:result tool-result)
+                                          :tool-id tool-name
+                                          :tool-call-id tool-call-id
+                                          :tool-name tool-name
+                                          :llm-call-id llm-call-id
+                                          :provider-id provider-id
+                                          :model model
+                                          :workload workload)]
+    (audit/log! execution-context
+                {:actor        :assistant
+                 :type         :tool-result
+                 :message-id   tool-message-id
+                 :llm-call-id  llm-call-id
+                 :tool-id      tool-name
+                 :tool-call-id tool-call-id
+                 :data         (tool-result-audit-data tool-result)})
+    tool-message-id))
+
 (defn- run-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
@@ -1805,16 +1860,13 @@
                                       :workload (some-> workload name)
                                       :tool-calls (tool-call-summary tool-calls)}}))
                 (doseq [tr tool-results]
-                  (db/add-message! session-id :tool
-                                   nil
-                                   :tool-result (:result tr)
-                                   :tool-id (:tool_call_id tr)
-                                   :tool-call-id (:tool_call_id tr)
-                                   :tool-name (:tool_name tr)
-                                   :llm-call-id llm-call-id
-                                   :provider-id provider-id
-                                   :model model
-                                   :workload workload))
+                  (persist-tool-result-message! session-id
+                                                execution-context
+                                                llm-call-id
+                                                provider-id
+                                                model
+                                                workload
+                                                tr))
                 (emit-event! {:phase :tool
                               :message (or (truncate-summary assistant-content 240)
                                            (str "Completed tool round with "

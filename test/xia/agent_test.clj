@@ -123,6 +123,73 @@
              (mapv :type events)))
       (is (= call-id (:llm-call-id (last events)))))))
 
+(deftest process-message-audits-tool-result-completions
+  (let [session-id     (db/create-session! :terminal)
+        tool-call-id   (random-uuid)
+        final-call-id  (random-uuid)
+        llm-calls      (atom 0)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}
+                                                                  {:type "function"
+                                                                   :function {:name "email-send"
+                                                                              :parameters {}}}])
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [tool-id _args _context]
+                                                       (case tool-id
+                                                         :web-search {:summary "Found the billing thread."}
+                                                         :email-send {:error "SMTP rejected the recipient"}
+                                                         {:summary "ok"}))
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :openrouter}
+                                                                  :provider-id :openrouter})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (if (= 1 (swap! llm-calls inc))
+                                                         (with-meta
+                                                           {"content" "Checking tools."
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{}"}}
+                                                                          {"id" "call-2"
+                                                                           "function" {"name" "email-send"
+                                                                                       "arguments" "{}"}}]}
+                                                           {:provider-id :openrouter
+                                                            :model "moonshotai/kimi-k2.5"
+                                                            :workload :assistant
+                                                            :llm-call-id tool-call-id})
+                                                         (with-meta
+                                                           {"content" "Done."}
+                                                           {:provider-id :openrouter
+                                                            :model "moonshotai/kimi-k2.5"
+                                                            :workload :assistant
+                                                            :llm-call-id final-call-id})))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Done."
+             (agent/process-message session-id "reply to the billing emails" :channel :terminal))))
+    (let [events              (db/session-audit-events session-id)
+          tool-result-events  (filterv #(= :tool-result (:type %)) events)
+          success-event       (some #(when (= "web-search" (:tool-id %)) %) tool-result-events)
+          error-event         (some #(when (= "email-send" (:tool-id %)) %) tool-result-events)]
+      (is (= 2 (count tool-result-events)))
+      (is (= tool-call-id (:llm-call-id success-event)))
+      (is (= "call-1" (:tool-call-id success-event)))
+      (is (= {"tool-name" "web-search"
+              "status" "success"
+              "summary" "Found the billing thread."}
+             (:data success-event)))
+      (is (:message-id success-event))
+      (is (= tool-call-id (:llm-call-id error-event)))
+      (is (= "call-2" (:tool-call-id error-event)))
+      (is (= {"tool-name" "email-send"
+              "status" "error"
+              "summary" "{\"error\":\"SMTP rejected the recipient\"}"
+              "error" "SMTP rejected the recipient"}
+             (:data error-event)))
+      (is (:message-id error-event)))))
+
 (deftest process-message-reports-llm-partial-content
   (let [session-id (db/create-session! :terminal)
         statuses   (atom [])]
