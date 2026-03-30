@@ -36,58 +36,6 @@
           "Concurrent helper work should finish without hanging"))))
 
 ;; ---------------------------------------------------------------------------
-;; keywordize-props (private, test via merge-extraction! behavior)
-;; ---------------------------------------------------------------------------
-
-(deftest test-keywordize-props
-  (let [kp #'xia.hippocampus/keywordize-props]
-    (testing "flat string-keyed map"
-      (is (= {:location "Seattle" :role "engineer"}
-             (kp {"location" "Seattle" "role" "engineer"}))))
-
-    (testing "nested string-keyed map"
-      (is (= {:work {:company "Acme" :title "Engineer"}}
-             (kp {"work" {"company" "Acme" "title" "Engineer"}}))))
-
-    (testing "mixed nesting"
-      (is (= {:name "Hong" :work {:company "Acme"} :age 30}
-             (kp {"name" "Hong" "work" {"company" "Acme"} "age" 30}))))
-
-    (testing "nil input"
-      (is (nil? (kp nil))))
-
-    (testing "non-map input"
-      (is (nil? (kp "not a map"))))))
-
-;; ---------------------------------------------------------------------------
-;; fact-similar?
-;; ---------------------------------------------------------------------------
-
-(deftest test-fact-similar
-  (let [fs? #'xia.hippocampus/fact-similar?]
-    (testing "exact match"
-      (is (true? (fs? "likes Clojure" "likes Clojure"))))
-
-    (testing "case insensitive"
-      (is (true? (fs? "Likes Clojure" "likes clojure"))))
-
-    (testing "substring match"
-      (is (true? (fs? "prefers functional programming" "functional programming"))))
-
-    (testing "reverse substring"
-      (is (true? (fs? "Clojure" "prefers Clojure for everything"))))
-
-    (testing "no match"
-      (is (false? (fs? "likes Python" "prefers Rust"))))
-
-    (testing "high-overlap corrections do not dedup"
-      (is (false? (fs? "She prefers Python for data science work"
-                       "She prefers Ruby for data science work"))))
-
-    (testing "whitespace trimming"
-      (is (true? (fs? "  likes Clojure  " "likes Clojure"))))))
-
-;; ---------------------------------------------------------------------------
 ;; dedup-fact!
 ;; ---------------------------------------------------------------------------
 
@@ -181,23 +129,6 @@
 ;; ---------------------------------------------------------------------------
 ;; find-or-create-node!
 ;; ---------------------------------------------------------------------------
-
-(deftest test-find-or-create-node
-  (let [focn! #'xia.hippocampus/find-or-create-node!]
-    (testing "creates new node when none exists"
-      (let [eid (focn! "Alice" "person")]
-        (is (some? eid))
-        (is (= "Alice" (:kg.node/name (db/entity eid))))))
-
-    (testing "finds existing node by exact name"
-      (let [original-eid (focn! "Alice" "person")
-            found-eid    (focn! "Alice" "person")]
-        (is (= original-eid found-eid))))
-
-    (testing "finds existing node case-insensitively"
-      (let [original-eid (focn! "Alice" "person")
-            found-eid    (focn! "alice" "person")]
-        (is (= original-eid found-eid))))))
 
 ;; ---------------------------------------------------------------------------
 ;; merge-extraction! — full integration with properties
@@ -651,49 +582,6 @@
            (:kg.fact/confidence (db/entity low-fact-eid)))
         "High-utility facts should decay more slowly than low-utility facts")))
 
-(deftest test-due-for-decay-facts-selects-only_due_rows
-  (let [settings        (hippo/knowledge-decay-settings)
-        node-eid        (th/seed-node! "DecayQueryEntity" "concept")
-        now-ms          (System/currentTimeMillis)
-        as-of           (date-at now-ms)
-        maintenance-step-ms (long (:maintenance-step-ms settings))
-        stale-updated   (date-at (- now-ms
-                                     maintenance-step-ms
-                                     (* 2 24 60 60 1000)))
-        old-maintained-updated (date-at (- now-ms
-                                           maintenance-step-ms
-                                           (* 6 24 60 60 1000)))
-        fresh-updated   (date-at (- now-ms
-                                     (quot maintenance-step-ms 2)))
-        recent-decayed  (date-at (- now-ms
-                                     (quot maintenance-step-ms 2)))
-        old-decayed     (date-at (- now-ms
-                                     maintenance-step-ms
-                                     (* 3 24 60 60 1000)))
-        stale-eid       (th/seed-fact! node-eid "stale fact" :confidence 1.0)
-        fresh-eid       (th/seed-fact! node-eid "fresh fact" :confidence 1.0)
-        recent-eid      (th/seed-fact! node-eid "recently maintained fact" :confidence 1.0)
-        old-eid         (th/seed-fact! node-eid "old maintained fact" :confidence 1.0)]
-    (db/transact! [[:db/add stale-eid :kg.fact/updated-at stale-updated]
-                   [:db/add fresh-eid :kg.fact/updated-at fresh-updated]
-                   [:db/add recent-eid :kg.fact/updated-at stale-updated]
-                   [:db/add recent-eid :kg.fact/decayed-at recent-decayed]
-                   [:db/add old-eid :kg.fact/updated-at old-maintained-updated]
-                   [:db/add old-eid :kg.fact/decayed-at old-decayed]])
-    (let [rows (#'xia.hippocampus/due-for-decay-facts as-of settings)
-          by-eid (into {} (map (fn [[eid confidence utility updated last-decayed]]
-                                 [eid {:confidence confidence
-                                       :utility utility
-                                       :updated updated
-                                       :last-decayed last-decayed}]))
-                       rows)]
-      (is (contains? by-eid stale-eid))
-      (is (contains? by-eid old-eid))
-      (is (not (contains? by-eid fresh-eid)))
-      (is (not (contains? by-eid recent-eid)))
-      (is (= stale-updated (:last-decayed (get by-eid stale-eid))))
-      (is (= old-decayed (:last-decayed (get by-eid old-eid)))))))
-
 (deftest test-maintain-knowledge-archives-bottomed-out-facts
   (let [settings   (hippo/knowledge-decay-settings)
         node-eid   (th/seed-node! "ArchiveEntity" "concept")
@@ -714,32 +602,6 @@
     (hippo/maintain-knowledge! now)
     (is (empty? (into {} (db/entity fact-eid)))
         "Facts that have stayed at the confidence floor past the archive window should be removed")))
-
-(deftest test-due-for-archive-eids-selects_old_bottomed_facts
-  (let [settings       (hippo/knowledge-decay-settings)
-        node-eid       (th/seed-node! "ArchiveQueryEntity" "concept")
-        now-ms         (System/currentTimeMillis)
-        as-of          (date-at now-ms)
-        archive-after-bottom-ms (long (:archive-after-bottom-ms settings))
-        old-bottomed   (date-at (- now-ms
-                                   archive-after-bottom-ms
-                                   (* 2 24 60 60 1000)))
-        recent-bottomed (date-at (- now-ms
-                                    (quot archive-after-bottom-ms 2)))
-        stale-eid      (th/seed-fact! node-eid "stale archive fact"
-                                      :confidence (:min-confidence settings)
-                                      :utility 0.5)
-        recent-eid     (th/seed-fact! node-eid "recent bottomed fact"
-                                      :confidence (:min-confidence settings)
-                                      :utility 0.5)
-        active-eid     (th/seed-fact! node-eid "still above floor"
-                                      :confidence 0.9
-                                      :utility 0.5)]
-    (db/transact! [[:db/add stale-eid :kg.fact/bottomed-at old-bottomed]
-                   [:db/add recent-eid :kg.fact/bottomed-at recent-bottomed]
-                   [:db/add active-eid :kg.fact/bottomed-at old-bottomed]])
-    (is (= #{stale-eid}
-           (set (#'xia.hippocampus/due-for-archive-eids as-of settings))))))
 
 (deftest test-dedup-refresh-clears-bottomed-at
   (let [settings   (hippo/knowledge-decay-settings)

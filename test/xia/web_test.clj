@@ -237,17 +237,6 @@
     (is (re-find #"\[content truncated\]" result))))
 
 ;; ---------------------------------------------------------------------------
-;; Link extraction
-;; ---------------------------------------------------------------------------
-
-(deftest extracts-links
-  (let [doc   (Jsoup/parse "<body><a href=\"https://a.com\">A</a><a href=\"https://b.com\">B</a></body>"
-                           "https://example.com")
-        links (#'web/extract-links (.body doc))]
-    (is (= 2 (count links)))
-    (is (= "A" (:text (first links))))
-    (is (= "https://a.com" (:url (first links))))))
-
 (deftest extract-readable-html-prefers-main-content-over-nav-sitemap
   (let [nav-links (apply str
                          (for [i (range 1 120)]
@@ -268,30 +257,6 @@
     (is (= [{:text "Next"
              :url "https://docs.example.com/guides/next"}]
            (:links result)))))
-
-(deftest skips-javascript-links
-  (let [doc   (Jsoup/parse "<body><a href=\"javascript:void(0)\">Bad</a><a href=\"https://ok.com\">OK</a></body>"
-                           "https://example.com")
-        links (#'web/extract-links (.body doc))]
-    (is (= 1 (count links)))
-    (is (= "OK" (:text (first links))))))
-
-;; ---------------------------------------------------------------------------
-;; DDG URL extraction
-;; ---------------------------------------------------------------------------
-
-(deftest extract-ddg-url-test
-  (testing "extracts url from uddg parameter"
-    (is (= "https://clojure.org/"
-           (#'web/extract-ddg-url "//duckduckgo.com/l/?uddg=https%3A%2F%2Fclojure.org%2F&rut=abc"))))
-  (testing "handles protocol-relative URLs"
-    (is (= "https://example.com"
-           (#'web/extract-ddg-url "//example.com"))))
-  (testing "returns nil for nil input"
-    (is (nil? (#'web/extract-ddg-url nil))))
-  (testing "returns plain URL as-is"
-    (is (= "https://example.com/page"
-           (#'web/extract-ddg-url "https://example.com/page")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Web search

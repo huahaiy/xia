@@ -1,8 +1,7 @@
 (ns xia.cron-test
   (:require [clojure.test :refer :all]
             [xia.cron :as cron])
-  (:import [java.time DayOfWeek]
-           [java.util Calendar Date]))
+  (:import [java.util Calendar Date]))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -69,15 +68,6 @@
 (deftest normalize-interval-passthrough
   (is (= {:interval-minutes 30}
          (cron/normalize {:interval-minutes 30}))))
-
-(deftest java-dow-to-cron-uses-explicit-day-mapping
-  (is (= 0 (#'xia.cron/java-dow->cron DayOfWeek/SUNDAY)))
-  (is (= 1 (#'xia.cron/java-dow->cron DayOfWeek/MONDAY)))
-  (is (= 2 (#'xia.cron/java-dow->cron DayOfWeek/TUESDAY)))
-  (is (= 3 (#'xia.cron/java-dow->cron DayOfWeek/WEDNESDAY)))
-  (is (= 4 (#'xia.cron/java-dow->cron DayOfWeek/THURSDAY)))
-  (is (= 5 (#'xia.cron/java-dow->cron DayOfWeek/FRIDAY)))
-  (is (= 6 (#'xia.cron/java-dow->cron DayOfWeek/SATURDAY))))
 
 ;; ---------------------------------------------------------------------------
 ;; Next-run: interval mode

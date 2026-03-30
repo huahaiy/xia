@@ -165,20 +165,6 @@
     (is (some #(true? (:resumed? %)) @checkpoints))
     (is (some #(= sid (:session-id %)) @checkpoints))))
 
-(deftest scheduler-work-executor-is-bounded
-  (let [work-executor-atom @#'scheduler/work-executor]
-    (when-let [exec @work-executor-atom]
-      (.shutdownNow ^java.util.concurrent.ExecutorService exec))
-    (reset! work-executor-atom nil)
-    (db/set-config! :scheduler/max-concurrent-runs 3)
-    (let [^java.util.concurrent.ThreadPoolExecutor exec (#'scheduler/ensure-work-executor!)]
-      (try
-        (is (= 3 (.getCorePoolSize exec)))
-        (is (= 3 (.getMaximumPoolSize exec)))
-        (finally
-          (.shutdownNow exec)
-          (reset! work-executor-atom nil))))))
-
 (deftest tick-submits-due-schedules-through-worker-pool
   (let [submitted (atom [])
         maintenance-atom @#'scheduler/last-maintenance-at

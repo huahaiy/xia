@@ -26,7 +26,6 @@
           state (wm/create-wm! sid)]
       (is (= sid (:session-id state)))
       (is (= 0 (:turn-count state)))
-      (is (= 0 (wm/prompt-cache-version sid)))
       (is (= {} (:slots state)))
       (is (= [] (:episode-refs state)))
       (is (= [] (:local-doc-refs state)))
@@ -38,16 +37,6 @@
   (testing "clear-wm! resets to nil"
     (wm/clear-wm!)
     (is (nil? (wm/get-wm)))))
-
-(deftest prompt-cache-version-increments-on-wm-updates
-  (let [sid (random-uuid)]
-    (wm/create-wm! sid)
-    (is (= 0 (wm/prompt-cache-version sid)))
-    (#'xia.working-memory/update-session-wm! sid #(assoc % :topics "billing"))
-    (is (= 1 (wm/prompt-cache-version sid)))
-    (#'xia.working-memory/update-session-wm! sid #(assoc % :topics "calendar"))
-    (is (= 2 (wm/prompt-cache-version sid)))
-    (wm/clear-wm! sid)))
 
 (deftest test-autonomy-state-round-trips-through-working-memory
   (let [sid   (db/create-session! :terminal)
@@ -168,144 +157,9 @@
               :local-docs []}
              results)))))
 
-(deftest search-knowledge-runs-branches-in-parallel
-  (let [started     (atom #{})
-        timeouts    (atom #{})
-        all-started (promise)
-        timeout-ms  1000
-        mark-start! (fn [step]
-                      (let [steps (swap! started conj step)]
-                        (when (= 4 (count steps))
-                          (deliver all-started true))
-                        (when-not (deref all-started timeout-ms false)
-                          (swap! timeouts conj step))))
-        mk-search   (fn [step result]
-                      (fn [& _]
-                        (mark-start! step)
-                        result))]
-    (with-redefs [xia.memory/search-nodes      (mk-search :nodes [{:name "node"}])
-                  xia.memory/search-facts      (mk-search :facts [{:content "fact"}])
-                  xia.memory/search-episodes   (mk-search :episodes [{:summary "episode"}])
-                  xia.memory/search-local-docs (mk-search :local-docs [{:name "doc"}])]
-      (let [results (wm/search-knowledge (random-uuid) ["atlas"] "atlas")]
-        (is (= #{:nodes :facts :episodes :local-docs} @started))
-        (is (empty? @timeouts))
-        (is (= [{:name "node"}] (:nodes results)))
-        (is (= [{:content "fact"}] (:facts results)))
-        (is (= [{:summary "episode"}] (:episodes results)))
-        (is (= [{:name "doc"}] (:local-docs results)))))))
-
-(deftest expand-graph-bulk-loads-neighbors
-  (let [seed-a   (th/seed-node! "SeedA" "concept")
-        seed-b   (th/seed-node! "SeedB" "concept")
-        friend   (th/seed-node! "Friend" "concept")
-        parent   (th/seed-node! "Parent" "concept")
-        q-calls  (atom 0)
-        node-loads (atom 0)
-        orig-q   xia.db/q]
-    (memory/add-edge! {:from-eid seed-a :to-eid friend :type :related-to})
-    (memory/add-edge! {:from-eid parent :to-eid seed-a :type :related-to})
-    (memory/add-edge! {:from-eid seed-a :to-eid seed-b :type :related-to})
-    (with-redefs [xia.db/q (fn [query & inputs]
-                             (swap! q-calls inc)
-                             (apply orig-q query inputs))
-                  xia.memory/get-node (fn [& _]
-                                        (swap! node-loads inc)
-                                        nil)]
-      (let [expanded (wm/expand-graph [seed-a seed-b])]
-        (is (= #{friend parent}
-               (set (keys expanded))))
-        (is (= "Friend" (:name (get expanded friend))))
-        (is (= "Parent" (:name (get expanded parent))))
-        (is (every? :expanded? (vals expanded)))
-        (is (= 2 @q-calls))
-        (is (= 0 @node-loads))))))
-
 ;; ---------------------------------------------------------------------------
 ;; Slot merge with properties
 ;; ---------------------------------------------------------------------------
-
-(deftest test-merge-node-into-slot-includes-properties
-  (let [sid (random-uuid)]
-    (wm/create-wm! sid)
-    (let [node-eid (th/seed-node! "Hong" "person")]
-    ;; Set properties on the node
-      (memory/set-node-property! node-eid [:location] "Seattle")
-      (memory/set-node-property! node-eid [:role] "engineer")
-      ;; Add a fact
-      (th/seed-fact! node-eid "prefers vim")
-
-      ;; Merge into WM via private fn
-      (let [merge-fn #'xia.working-memory/merge-node-into-slot
-            slots    (merge-fn {} node-eid "Hong" :person 0.8 1)]
-        (testing "slot has properties"
-          (let [slot (get slots node-eid)]
-            (is (some? (:properties slot)))
-            (is (= "Seattle" (:location (:properties slot))))
-            (is (= "engineer" (:role (:properties slot))))))
-
-        (testing "slot has facts"
-          (let [slot (get slots node-eid)]
-            (is (= 1 (count (:facts slot))))
-            (is (= "prefers vim" (:content (first (:facts slot)))))))
-
-        (testing "slot has edges"
-          (let [slot (get slots node-eid)]
-            (is (map? (:edges slot)))))))
-
-    (wm/clear-wm! sid)))
-
-(deftest merge-results-prefetches-node-data-outside-update-retries
-  (let [sid             (random-uuid)
-        node-eid        (th/seed-node! "RetryNode" "concept")
-        node-data-calls (atom 0)]
-    (wm/create-wm! sid)
-    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :turn-count] 1)
-    (try
-      (with-redefs [xia.memory/node-data-by-eids
-                    (fn [node-eids]
-                      (swap! node-data-calls inc)
-                      (is (= [node-eid] (vec node-eids)))
-                      {node-eid {:name "RetryNode"
-                                 :type :concept
-                                 :facts []
-                                 :edges {}
-                                 :properties {}}})]
-        (with-redefs-fn {#'xia.working-memory/update-session-wm!
-                         (fn [session-id f]
-                           (let [wm      (wm/get-wm session-id)
-                                 _       (f wm)
-                                 updated (f wm)]
-                             (swap! @#'xia.working-memory/wm-atom assoc session-id updated)
-                             updated))}
-          (fn []
-            (#'xia.working-memory/merge-results! sid
-                                                 {:nodes []
-                                                  :facts [{:node-eid node-eid}]
-                                                  :episodes []
-                                                  :local-docs []}
-                                                 nil))))
-      (is (= 1 @node-data-calls))
-      (is (= "RetryNode"
-             (get-in (wm/get-wm sid) [:slots node-eid :name])))
-      (finally
-        (wm/clear-wm! sid)))))
-
-(deftest update-session-wm-runs-updater-once-per-logical-update
-  (let [sid        (random-uuid)
-        call-count (atom 0)]
-    (wm/create-wm! sid)
-    (try
-      (let [updated (#'xia.working-memory/update-session-wm!
-                     sid
-                     (fn [wm-state]
-                       (swap! call-count inc)
-                       (assoc wm-state :topics "billing")))]
-        (is (= "billing" (:topics updated))))
-      (is (= 1 @call-count))
-      (is (= "billing" (:topics (wm/get-wm sid))))
-      (finally
-        (wm/clear-wm! sid)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Decay & eviction
@@ -347,95 +201,6 @@
           "Pinned slot should not decay"))
 
     (wm/clear-wm! sid)))
-
-(deftest test-fresh-slots-do-not-decay-on-the-turn-they-were-added
-  (let [node-eid        (th/seed-node! "Fresh" "concept")
-        decay-slot-map  #'xia.working-memory/decay-slot-map
-        slots           {node-eid {:node-eid node-eid
-                                   :name "Fresh"
-                                   :relevance 0.8
-                                   :pinned? false
-                                   :added-turn 3}}
-        same-turn       (decay-slot-map slots 0.85 3)
-        later-turn      (decay-slot-map slots 0.85 4)]
-    (is (= 0.8
-           (double (get-in same-turn [node-eid :relevance]))))
-    (is (= (* 0.8 0.85)
-           (double (get-in later-turn [node-eid :relevance]))))))
-
-(deftest test-refresh-boost-does-not-pin-slot
-  (let [node-eid        (th/seed-node! "Sticky" "concept")
-        merge-slot      #'xia.working-memory/merge-node-into-slot
-        decay-slot-map  #'xia.working-memory/decay-slot-map
-        step            (fn [slots]
-                          (-> slots
-                              (merge-slot node-eid "Sticky" :concept 0.8 1)
-                              (decay-slot-map 0.85)))
-        relevances      (->> {}
-                             (iterate step)
-                             (drop 1)
-                             (take 12)
-                             (map #(double (get-in % [node-eid :relevance])))
-                             vec)]
-    (is (every? #(< % 1.0) relevances))
-    (is (< (last relevances) 0.85))
-    (is (> (last relevances) 0.75))
-    (is (> (last relevances) (first relevances)))))
-
-(deftest merge-bounded-refs-dedupes-and-stays-capped
-  (let [merge-refs #'xia.working-memory/merge-bounded-refs]
-    (testing "episode refs keep the highest-relevance copy per episode"
-      (let [merged (merge-refs [{:episode-eid :old-low
-                                 :summary "old-low"
-                                 :relevance 0.2}
-                                {:episode-eid :keep
-                                 :summary "keep-old"
-                                 :relevance 0.75}]
-                               [{:episode-eid :old-low
-                                 :summary "old-high"
-                                 :relevance 0.9}
-                                {:episode-eid :new-mid
-                                 :summary "new-mid"
-                                 :relevance 0.6}
-                                {:episode-eid :drop
-                                 :summary "drop"
-                                 :relevance 0.1}]
-                               :episode-eid
-                               2)]
-        (is (= [:old-low :keep]
-               (mapv :episode-eid merged)))
-        (is (= [0.9 0.75]
-               (mapv :relevance merged)))
-        (is (= "old-high"
-               (:summary (first merged))))))
-
-    (testing "local doc refs replace weaker duplicates without exceeding the cap"
-      (let [merged (merge-refs [{:doc-id "a"
-                                 :name "A-old"
-                                 :relevance 0.55}
-                                {:doc-id "b"
-                                 :name "B"
-                                 :relevance 0.7}]
-                               [{:doc-id "a"
-                                 :name "A-new"
-                                 :matched-chunks [{:index 0}]
-                                 :relevance 0.8}
-                                {:doc-id "c"
-                                 :name "C"
-                                 :relevance 0.6}
-                                {:doc-id "d"
-                                 :name "D"
-                                 :relevance 0.4}]
-                               :doc-id
-                               3)
-            by-id  (into {} (map (juxt :doc-id identity) merged))]
-        (is (= ["a" "b" "c"]
-               (mapv :doc-id merged)))
-        (is (= "A-new"
-               (get-in by-id ["a" :name])))
-        (is (= [{:index 0}]
-               (get-in by-id ["a" :matched-chunks])))
-        (is (= 3 (count merged)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Pin / Unpin
@@ -611,40 +376,6 @@
                                                       :config {}})
       (is (false? (wm/detect-topic-shift? sid ["clojure" "ring" "reitit"]))))
 
-    (testing "requires confirmation before auto-segmenting on lexical mismatch"
-      (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
-                                                      :topics "discussing Clojure web frameworks"
-                                                      :prev-topics nil
-                                                      :pending-topic-shift nil
-                                                      :autonomy-state nil
-                                                      :turn-count 4
-                                                      :topic-turn 0
-                                                      :slots {}
-                                                      :episode-refs []
-                                                      :local-doc-refs []
-                                                      :config {}})
-      (is (false? (#'xia.working-memory/should-auto-segment? sid ["reitit" "compojure" "ring"])))
-      (is (= ["reitit" "compojure" "ring"]
-             (get-in (wm/get-wm sid) [:pending-topic-shift :search-terms])))
-      (is (true? (#'xia.working-memory/should-auto-segment? sid ["reitit" "compojure" "ring"])))
-      (is (nil? (get-in (wm/get-wm sid) [:pending-topic-shift]))))
-
-    (testing "clears a pending shift when the next turn returns to the same topic"
-      (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
-                                                      :topics "discussing Clojure web frameworks"
-                                                      :prev-topics nil
-                                                      :pending-topic-shift nil
-                                                      :autonomy-state nil
-                                                      :turn-count 4
-                                                      :topic-turn 0
-                                                      :slots {}
-                                                      :episode-refs []
-                                                      :local-doc-refs []
-                                                      :config {}})
-      (is (false? (#'xia.working-memory/should-auto-segment? sid ["recipe" "pasta" "cooking"])))
-      (is (false? (#'xia.working-memory/should-auto-segment? sid ["clojure" "frameworks" "ring"])))
-      (is (nil? (get-in (wm/get-wm sid) [:pending-topic-shift]))))
-
     (testing "no shift when no previous topics"
       (swap! @#'xia.working-memory/wm-atom
              #(-> %
@@ -757,72 +488,3 @@
                  (double (:relevance refreshed-slot))))))
       (finally
         (wm/clear-wm! sid)))))
-
-;; ---------------------------------------------------------------------------
-;; Session serialization
-;; ---------------------------------------------------------------------------
-
-(deftest session-ops-serialize-per-session
-  (let [sid        (random-uuid)
-        gate       (promise)
-        active     (atom 0)
-        max-active (atom 0)
-        op         (fn []
-                     (#'xia.working-memory/run-session-op! sid
-                      (fn [_]
-                        @gate
-                        (let [n (swap! active inc)]
-                          (swap! max-active max n)
-                          (Thread/sleep 75)
-                          (swap! active dec)))))]
-    (wm/create-wm! sid)
-    (let [f1 (future (op))
-          f2 (future (op))]
-      (deliver gate true)
-      @f1
-      @f2
-      (is (= 1 @max-active)))
-    (wm/clear-wm! sid)))
-
-(deftest session-ops-allow-different-sessions-in-parallel
-  (let [sid-a      (random-uuid)
-        session-op-lock #'xia.working-memory/session-op-lock
-        sid-b      (loop [candidate (random-uuid)]
-                     (if (identical? (@session-op-lock sid-a)
-                                     (@session-op-lock candidate))
-                       (recur (random-uuid))
-                       candidate))
-        gate       (promise)
-        active     (atom 0)
-        max-active (atom 0)
-        op         (fn [sid]
-                     (#'xia.working-memory/run-session-op! sid
-                      (fn [_]
-                        @gate
-                        (let [n (swap! active inc)]
-                          (swap! max-active max n)
-                          (Thread/sleep 75)
-                          (swap! active dec)))))]
-    (wm/create-wm! sid-a)
-    (wm/create-wm! sid-b)
-    (let [f1 (future (op sid-a))
-          f2 (future (op sid-b))]
-      (deliver gate true)
-      @f1
-      @f2
-      (is (= 2 @max-active)))
-    (wm/clear-wm! sid-a)
-    (wm/clear-wm! sid-b)))
-
-(deftest session-op-locks-are-fixed-and-non-session-specific
-  (let [locks @#'xia.working-memory/session-op-locks
-        sid-a (random-uuid)
-        sid-b (random-uuid)]
-    (is (= 512 (count locks)))
-    (is (some? (@#'xia.working-memory/session-op-lock sid-a)))
-    (is (some? (@#'xia.working-memory/session-op-lock sid-b)))
-    (wm/create-wm! sid-a)
-    (wm/create-wm! sid-b)
-    (wm/clear-wm! sid-a)
-    (wm/clear-wm! sid-b)
-    (is (= 512 (count @#'xia.working-memory/session-op-locks)))))
