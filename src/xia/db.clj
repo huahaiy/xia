@@ -2110,6 +2110,75 @@
        (sort-by (juxt :created-at :eid))
        vec))
 
+(defn session-message-count
+  [session-id]
+  (if-let [count* (ffirst (q '[:find (count ?m)
+                              :in $ ?sid
+                              :where
+                              [?s :session/id ?sid]
+                              [?m :message/session ?s]]
+                            session-id))]
+    (long count*)
+    0))
+
+(defn session-message-eids-range
+  "Return message entity ids for a session in stable oldest->newest order for
+   the half-open range [start, end). When `total-count` is supplied, reuse it
+   to avoid an extra count query."
+  ([session-id start end]
+   (session-message-eids-range session-id start end nil))
+  ([session-id start end total-count]
+   (let [start* (max 0 (long (or start 0)))
+         end0   (max 0 (long (or end 0)))]
+     (if-let [sid-eid (session-eid session-id)]
+       (let [db*          (d/db (conn))
+             total*       (long (or total-count (session-message-count session-id)))
+             end*         (max start* (min total* end0))
+             count-needed (- end* start*)]
+         (if (<= count-needed 0)
+           []
+           (if (<= start* (- total* end*))
+             (->> (d/datoms db* :ave :message/session sid-eid)
+                  (drop start*)
+                  (take count-needed)
+                  (mapv :e))
+             (->> (d/rseek-datoms db* :ave :message/session sid-eid)
+                  (drop (- total* end*))
+                  (take count-needed)
+                  (map :e)
+                  reverse
+                  vec))))
+       []))))
+
+(defn session-message-metadata-range
+  "Return message metadata for a session in stable oldest->newest order for the
+   half-open range [start, end). Only the requested window is hydrated."
+  ([session-id start end]
+   (session-message-metadata-range session-id start end nil))
+  ([session-id start end total-count]
+   (let [message-eids (session-message-eids-range session-id start end total-count)
+         message-eids* (vec message-eids)]
+     (if-not (seq message-eids*)
+       []
+       (let [by-eid
+             (into {}
+                   (map (fn [[eid mid created-at token-estimate]]
+                          [eid
+                           {:eid eid
+                            :id mid
+                            :created-at (epoch-millis->date created-at)
+                            :token-estimate (long token-estimate)}]))
+                   (q '[:find ?m ?mid ?dca ?tokens
+                        :in $ [?m ...]
+                        :where
+                        [?m :message/id ?mid]
+                        [(get-else $ ?m :db/created-at 0) ?dca]
+                        [(get-else $ ?m :message/token-estimate 0) ?tokens]]
+                      message-eids*))]
+         (->> message-eids*
+              (keep by-eid)
+              vec))))))
+
 (defn session-messages-by-eids
   [message-eids]
   (let [message-eids* (vec message-eids)]

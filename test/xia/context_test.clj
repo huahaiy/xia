@@ -657,6 +657,24 @@
                               "message 0"))
           "Incremental recap updates should only archive the newly evicted message"))))
 
+(deftest test-build-history-with-session-recap-does-not-load-full-metadata
+  (let [sid (db/create-session! :terminal)]
+    (doseq [i (range 6)]
+      (db/add-message! sid
+                       (if (even? i) :user :assistant)
+                       (str "message " i " " (token-rich-text (str "m" i) 40))))
+    (with-redefs [xia.db/session-message-metadata
+                  (fn [& _]
+                    (throw (ex-info "full metadata load should not be used" {})))
+                  xia.context/summarize-history-text
+                  (fn [& _] "recap-windowed")]
+      (let [result (#'xia.context/build-history-with-session-recap
+                    sid
+                    {:recent-message-limit 4})
+            message-texts (map :content (:messages result))]
+        (is (true? (:history-recap-updated? result)))
+        (is (some #(str/includes? % "recap-windowed") message-texts))))))
+
 (deftest test-build-messages-data-preserves-archived-tool-recap
   (let [sid        (db/create-session! :terminal)
         llm-calls  (atom 0)

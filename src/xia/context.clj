@@ -941,12 +941,14 @@
 (defn- build-history-with-session-recap
   [session-id opts]
   (let [recent-limit (long (recent-history-message-limit opts))
-        metadata     (db/session-message-metadata session-id)
-        total        (long (count metadata))]
+        total        (db/session-message-count session-id)]
     (if (<= total recent-limit)
       {:messages (into [] (map history-message->llm-message)
                        (restore-history-tool-call-ids
-                         (db/session-messages-by-eids (into [] (map :eid) metadata))))
+                         (db/session-messages-by-eids
+                          (into []
+                                (map :eid)
+                                (db/session-message-metadata-range session-id 0 total total)))))
        :history-recap-updated? false}
       (let [recent-start       (long-max 0 (- total recent-limit))
             recap-state        (db/session-history-recap session-id)
@@ -959,9 +961,18 @@
             tool-count         (if (<= tool-count0 recent-start) tool-count0 0)
             tool-recap-content (when (= tool-count tool-count0)
                                  (:content tool-recap-state))
-            new-recap-meta     (subvec metadata recap-count recent-start)
-            new-tool-meta      (subvec metadata tool-count recent-start)
-            recent-meta        (subvec metadata recent-start total)
+            new-recap-meta     (db/session-message-metadata-range session-id
+                                                                  recap-count
+                                                                  recent-start
+                                                                  total)
+            new-tool-meta      (db/session-message-metadata-range session-id
+                                                                  tool-count
+                                                                  recent-start
+                                                                  total)
+            recent-meta        (db/session-message-metadata-range session-id
+                                                                  recent-start
+                                                                  total
+                                                                  total)
             recent-eids        (into [] (map :eid) recent-meta)
             recent-messages    (restore-history-tool-call-ids
                                  (db/session-messages-by-eids recent-eids))

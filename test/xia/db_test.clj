@@ -276,3 +276,17 @@
       (is (true? (:worker? worker)))
       (is (= parent (:parent-id worker)))
       (is (= "site-a" (:label worker))))))
+
+(deftest session-message-window-queries-return-ordered-slices
+  (let [sid         (db/create-session! :terminal)
+        message-ids (vec (for [i (range 6)]
+                           (db/add-message! sid
+                                            (if (even? i) :user :assistant)
+                                            (str "message " i))))]
+    (is (= 6 (db/session-message-count sid)))
+    (is (= (subvec message-ids 2 5)
+           (mapv :id (db/session-message-metadata-range sid 2 5 6))))
+    (is (= (subvec message-ids 4 6)
+           (mapv :id (db/session-message-metadata-range sid 4 6 6))))
+    (is (every? pos? (map :token-estimate
+                          (db/session-message-metadata-range sid 0 6 6))))))
