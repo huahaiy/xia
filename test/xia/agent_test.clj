@@ -805,7 +805,7 @@
     (is (= 2 @snapshot-calls)
         "one snapshot after the iteration update, one after clearing autonomy state")))
 
-(deftest process-message-clears-autonomy-state-when-control-envelope-is-missing
+(deftest process-message-preserves-autonomy-state-when-control-envelope-is-missing
   (let [session-id (db/create-session! :terminal)]
     (wm/ensure-wm! session-id)
     (wm/set-autonomy-state! session-id
@@ -832,12 +832,28 @@
              (agent/process-message session-id
                                     "thanks"
                                     :channel :terminal))))
-    (is (nil? (wm/autonomy-state session-id)))
+    (is (= {:goal "Reply to the billing emails"
+            :stack [{:title "Reply to the billing emails"
+                     :summary "Need invoice ids from the user"
+                     :next-step "Wait for invoice ids"
+                     :reason "Blocked on user input"
+                     :progress-status :resumable
+                     :agenda [{:item "Wait for invoice ids"
+                               :status :resumable}]}]}
+           (wm/autonomy-state session-id)))
     (wm/clear-wm! session-id)
     (wm/ensure-wm! session-id)
-    (is (nil? (wm/autonomy-state session-id)))))
+    (is (= {:goal "Reply to the billing emails"
+            :stack [{:title "Reply to the billing emails"
+                     :summary "Need invoice ids from the user"
+                     :next-step "Wait for invoice ids"
+                     :reason "Blocked on user input"
+                     :progress-status :resumable
+                     :agenda [{:item "Wait for invoice ids"
+                               :status :resumable}]}]}
+           (wm/autonomy-state session-id)))))
 
-(deftest process-message-clears-autonomy-state-and-strips-malformed-control-envelope
+(deftest process-message-preserves-autonomy-state-and-strips-malformed-control-envelope
   (let [session-id (db/create-session! :terminal)]
     (wm/ensure-wm! session-id)
     (wm/set-autonomy-state! session-id
@@ -865,7 +881,15 @@
              (agent/process-message session-id
                                     "continue"
                                     :channel :terminal))))
-    (is (nil? (wm/autonomy-state session-id)))))
+    (is (= {:goal "Reply to the billing emails"
+            :stack [{:title "Reply to the billing emails"
+                     :summary "Drafted the reply"
+                     :next-step "Send it"
+                     :reason "One step remains"
+                     :progress-status :in-progress
+                     :agenda [{:item "Send it"
+                               :status :in-progress}]}]}
+           (wm/autonomy-state session-id)))))
 
 (deftest process-message-restores-resumable-stack-across-top-level-turns
   (let [session-id   (db/create-session! :terminal)

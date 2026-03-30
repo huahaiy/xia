@@ -1702,11 +1702,11 @@
 (defn- clear-autonomy-state-on-terminal?
   [parsed]
   (let [control (:control parsed)]
-  (boolean
-   (or (not= :parsed (:control-status parsed))
-       (= :clear (:stack-action control))
-       (:goal-complete? control)
-       (= :complete (:progress-status control))))))
+    (and (= :parsed (:control-status parsed))
+         (boolean
+          (or (= :clear (:stack-action control))
+              (:goal-complete? control)
+              (= :complete (:progress-status control)))))))
 
 (defn- persist-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]
