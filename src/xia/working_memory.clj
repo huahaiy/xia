@@ -79,17 +79,14 @@
 
 (defn- update-session-wm!
   [session-id f]
-  (let [sid (resolve-session-id session-id)
-        result (atom nil)]
-    (when sid
-      (swap! wm-atom
-             (fn [states]
-               (if-let [wm (get states sid)]
-                 (let [updated (f wm)]
-                   (reset! result updated)
-                   (assoc states sid updated))
-                 states))))
-    @result))
+  (run-session-op! session-id
+    (fn [sid]
+      (when sid
+        (let [states @wm-atom]
+          (when-let [wm (get states sid)]
+            (let [updated (f wm)]
+              (reset! wm-atom (assoc states sid updated))
+              updated)))))))
 
 (def ^:private default-config
   {:max-slots             15

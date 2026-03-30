@@ -280,6 +280,22 @@
       (finally
         (wm/clear-wm! sid)))))
 
+(deftest update-session-wm-runs-updater-once-per-logical-update
+  (let [sid        (random-uuid)
+        call-count (atom 0)]
+    (wm/create-wm! sid)
+    (try
+      (let [updated (#'xia.working-memory/update-session-wm!
+                     sid
+                     (fn [wm-state]
+                       (swap! call-count inc)
+                       (assoc wm-state :topics "billing")))]
+        (is (= "billing" (:topics updated))))
+      (is (= 1 @call-count))
+      (is (= "billing" (:topics (wm/get-wm sid))))
+      (finally
+        (wm/clear-wm! sid)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Decay & eviction
 ;; ---------------------------------------------------------------------------
