@@ -614,9 +614,10 @@
     (is (str/includes? (get-in @llm-messages [1 2 :content])
                        "Here are the invoice ids: 12 and 13"))))
 
-(deftest process-message-fails-when-autonomous-loop-hits-iteration-cap
+(deftest process-message-returns-final-message-when-autonomous-loop-hits-iteration-cap
   (let [session-id (db/create-session! :terminal)
-        llm-calls  (atom 0)]
+        llm-calls  (atom 0)
+        reviewed   (atom nil)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
                   xia.working-memory/update-wm!      (fn [& _] nil)
                   xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
@@ -630,28 +631,28 @@
                                                        {"content" (str "Still working.\n\n"
                                                                        "AUTONOMOUS_STATUS_JSON:"
                                                                        "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")})
-                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
-      (let [err (try
-                  (agent/process-message session-id "keep going" :channel :terminal)
-                  (catch clojure.lang.ExceptionInfo e
-                    e))]
-        (is (instance? clojure.lang.ExceptionInfo err))
-        (is (re-find #"Autonomous loop exceeded iteration limit of 2"
-                     (.getMessage ^Exception err)))
-        (is (= {:session-id session-id
-                :channel :terminal
-                :iteration 2
-                :max-iterations 2
-                :last-progress-status :blocked
-                :last-agenda [{:item "Retry task" :status :blocked}]}
-               (select-keys (ex-data err)
-                            [:session-id :channel :iteration :max-iterations
-                             :last-progress-status :last-agenda])))))
+                  xia.agent/schedule-fact-utility-review!
+                  (fn [review-session-id _fact-eids _user-message assistant-response]
+                    (reset! reviewed {:session-id review-session-id
+                                      :assistant-response assistant-response}))]
+      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
+        (is (str/includes? result "Still working."))
+        (is (str/includes? result "Note: I stopped after reaching the autonomous iteration limit for this turn (2)."))
+        (is (str/includes? result "Suggested next step: Keep going"))))
     (is (= 2 @llm-calls))
-    (is (= [[:user "keep going"]]
+    (is (= [[:user "keep going"]
+            [:assistant (str "Still working.\n\n"
+                             "Note: I stopped after reaching the autonomous iteration limit for this turn (2). Suggested next step: Keep going Reply to continue from the current agenda.")]]
            (->> (db/session-messages session-id)
+                (filter #(contains? #{:user :assistant} (:role %)))
                 (mapv (fn [{:keys [role content]}]
-                        [role content])))))))
+                        [role content])))))
+    (is (= {:session-id session-id
+            :assistant-response "Still working."}
+           @reviewed))
+    (is (= :blocked (some-> (wm/autonomy-state session-id)
+                            autonomous/current-frame
+                            :progress-status)))))
 
 (deftest process-message-supervisor-stops-a-stalled-llm-worker
   (let [session-id (db/create-session! :terminal)
@@ -909,16 +910,10 @@
                                                                          "AUTONOMOUS_STATUS_JSON:"
                                                                          "{\"status\":\"continue\",\"summary\":\"Step three finished\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}))
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
-      (let [err (try
-                  (agent/process-message session-id "keep going" :channel :terminal)
-                  (catch clojure.lang.ExceptionInfo e
-                    e))]
-        (is (instance? clojure.lang.ExceptionInfo err))
-        (is (re-find #"Autonomous loop exceeded iteration limit of 3"
-                     (.getMessage ^Exception err)))
-        (is (not= :autonomous-loop-stalled
-                  (:type (ex-data err)))))
-      (is (= 3 @llm-calls)))))
+      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
+        (is (str/includes? result "Step three finished."))
+        (is (str/includes? result "Note: I stopped after reaching the autonomous iteration limit for this turn (3)."))))
+    (is (= 3 @llm-calls))))
 
 (deftest process-message-allows-final-llm-call-after-last-tool-round
   (let [session-id (db/create-session! :terminal)

@@ -1626,6 +1626,24 @@
       (some-> response response-content str not-empty)
       ""))
 
+(defn- append-assistant-note
+  [text note]
+  (let [text* (some-> text str str/trim)
+        note* (some-> note str str/trim)]
+    (cond
+      (str/blank? note*) (or text* "")
+      (str/blank? text*) note*
+      :else (str text* "\n\n" note*))))
+
+(defn- iteration-limit-note
+  [max-iterations control]
+  (str "Note: I stopped after reaching the autonomous iteration limit for this turn ("
+       max-iterations
+       ")."
+       (when-let [next-step (some-> (:next-step control) str str/trim not-empty)]
+         (str " Suggested next step: " next-step))
+       " Reply to continue from the current agenda."))
+
 (defn- clear-autonomy-state-on-terminal?
   [parsed]
   (let [control (:control parsed)]
@@ -1988,17 +2006,37 @@
                             text)
 
                           (>= iteration max-iterations*)
-                          (throw (ex-info (str "Autonomous loop exceeded iteration limit of "
-                                               max-iterations*)
-                                          {:session-id session-id
-                                           :channel channel
-                                           :iteration iteration
-                                           :max-iterations max-iterations*
-                                           :last-summary summary
-                                           :last-next-step (:next-step control)
-                                           :last-progress-status (some-> updated-tip :progress-status)
-                                           :last-agenda (some-> updated-tip :agenda)
-                                           :last-stack (some-> updated-autonomy-state :stack)}))
+                          (let [final-text (append-assistant-note text
+                                                                  (iteration-limit-note max-iterations*
+                                                                                        control))]
+                            (persist-final-assistant-message! session-id
+                                                              final-text
+                                                              iteration-context
+                                                              response
+                                                              local-doc-ids
+                                                              artifact-ids)
+                            (launch-fact-utility-review! session-id fact-eids* user-message text)
+                            (save-schedule-checkpoint!
+                             iteration-context
+                             {:phase :complete
+                              :iteration iteration
+                              :summary (or (truncate-summary final-text 500)
+                                           "Stopped after reaching the autonomous iteration limit for this turn.")
+                              :session-id session-id
+                              :status :iteration-limit
+                              :next-step (:next-step control)
+                              :progress-status (some-> updated-tip :progress-status)
+                              :agenda (some-> updated-tip :agenda)
+                              :stack (some-> updated-autonomy-state :stack)})
+                            (prompt/status! (merge {:state :done
+                                                    :phase :complete
+                                                    :message (str "Paused after reaching iteration limit ("
+                                                                  max-iterations*
+                                                                  ")")}
+                                                   (autonomy-status-fields updated-autonomy-state
+                                                                           iteration
+                                                                           max-iterations*)))
+                            final-text)
 
                           :else
                           (let [next-loop-state (update-iteration-loop-state
