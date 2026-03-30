@@ -338,6 +338,7 @@
               :worker-thread nil
               :worker-future nil
               :parallel-tool-futures []
+              :child-session-ids #{}
               :cancelled? false
               :cancel-reason nil})
       (try
@@ -363,6 +364,22 @@
              (if-let [entry (get runs session-id)]
                (assoc runs session-id (f entry))
                runs)))))
+
+(defn- register-child-session!
+  [parent-session-id child-session-id]
+  (when (and parent-session-id
+             child-session-id
+             (not= parent-session-id child-session-id))
+    (update-session-run-entry! parent-session-id
+                               #(update % :child-session-ids (fnil conj #{}) child-session-id))))
+
+(defn- unregister-child-session!
+  [parent-session-id child-session-id]
+  (when (and parent-session-id
+             child-session-id
+             (not= parent-session-id child-session-id))
+    (update-session-run-entry! parent-session-id
+                               #(update % :child-session-ids disj child-session-id))))
 
 (defn- begin-worker-run!
   [session-id worker-token]
@@ -468,6 +485,11 @@
           (cancel-futures! parallel-tool-futures))
         (when-let [^Future worker-future (:worker-future entry)]
           (future-cancel worker-future))
+        (doseq [child-session-id (:child-session-ids entry)]
+          (when (not= child-session-id session-id)
+            (request-session-cancel! child-session-id
+                                     reason
+                                     :interrupt-supervisor? true)))
         true))))
 
 (defn- cancel-futures!
@@ -2249,6 +2271,7 @@
                                              {:parent-session-id parent-session-id
                                               :worker? true
                                               :label task})]
+    (register-child-session! parent-session-id child-session-id)
     (try
       (throw-if-runtime-stopping! child-session-id)
       (throw-if-cancelled! child-session-id)
@@ -2286,6 +2309,7 @@
                 :error (.getMessage t)
                 :error-detail (throwable-detail t)}))
       (finally
+        (unregister-child-session! parent-session-id child-session-id)
         (try
           (db/set-session-active! child-session-id false)
           (catch Throwable t

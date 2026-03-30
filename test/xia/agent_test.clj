@@ -1816,6 +1816,56 @@
                               [:type :timeout-ms :task]))))
         (is (= true (deref stopped 1000 ::timeout)))))))
 
+(deftest cancel-session-cancels-active-branch-child-sessions
+  (let [parent-session-id (db/create-session! :terminal)
+        child-started     (promise)
+        child-cancelled   (promise)
+        child-stopped     (promise)]
+    (binding [prompt/*interaction-context* {:channel :terminal}]
+      (with-redefs [xia.agent/process-message
+                    (fn [child-session-id _message & _opts]
+                      (#'xia.agent/with-session-run
+                       child-session-id
+                       (fn []
+                         (deliver child-started child-session-id)
+                         (try
+                           (loop []
+                             (#'xia.agent/throw-if-cancelled! child-session-id)
+                             (try
+                               (Thread/sleep 20)
+                               (catch InterruptedException _
+                                 (when (true? (:cancelled? (#'xia.agent/session-run-entry child-session-id)))
+                                   (deliver child-cancelled child-session-id))
+                                 (.interrupt (Thread/currentThread))))
+                             (when (true? (:cancelled? (#'xia.agent/session-run-entry child-session-id)))
+                               (deliver child-cancelled child-session-id))
+                             (recur))
+                           (catch clojure.lang.ExceptionInfo e
+                             (when (= :request-cancelled (:type (ex-data e)))
+                               (deliver child-cancelled child-session-id))
+                             (throw e))
+                           (finally
+                             (deliver child-stopped true))))))]
+        (let [result (future
+                       (try
+                         (#'xia.agent/with-session-run
+                          parent-session-id
+                          (fn []
+                            (agent/run-branch-tasks
+                             [{:task "slow" :prompt "slow branch"}]
+                             :session-id parent-session-id
+                             :max-parallel 1)))
+                         (catch Throwable t
+                           t)))
+              child-session-id (deref child-started 1000 ::timeout)]
+          (is (not= ::timeout child-session-id))
+          (is (contains? (:child-session-ids (#'xia.agent/session-run-entry parent-session-id))
+                         child-session-id))
+          (is (true? (agent/cancel-session! parent-session-id "user requested cancel")))
+          (is (= child-session-id (deref child-cancelled 1000 ::timeout)))
+          (is (= true (deref child-stopped 1000 ::timeout)))
+          (is (instance? Throwable (deref result 1000 ::timeout))))))))
+
 (deftest run-branch-task-cleans-up-when-working-memory-creation-fails
   (let [parent-session-id (db/create-session! :terminal)
         deactivated       (atom [])
