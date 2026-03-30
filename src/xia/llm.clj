@@ -29,25 +29,32 @@
 (def ^:private workload-options
   [{:id :assistant
     :label "Assistant"
-    :description "Main user-facing replies and tool calling."}
+    :description "Main user-facing replies and tool calling."
+    :async? false}
    {:id :history-compaction
     :label "History Compaction"
-    :description "Summarizing older conversation history to fit the prompt budget."}
+    :description "Summarizing older conversation history to fit the prompt budget."
+    :async? false}
    {:id :topic-summary
     :label "Topic Summary"
-    :description "Working-memory topic summarization."}
+    :description "Working-memory topic summarization."
+    :async? true}
    {:id :memory-summary
     :label "Memory Summary"
-    :description "Conversation summarization for episodic memory."}
+    :description "Conversation summarization for episodic memory."
+    :async? true}
    {:id :memory-importance
     :label "Memory Importance"
-    :description "Batch rating episodic-memory importance for retention."}
+    :description "Batch rating episodic-memory importance for retention."
+    :async? true}
    {:id :memory-extraction
     :label "Memory Extraction"
-    :description "Knowledge extraction during hippocampus consolidation."}
+    :description "Knowledge extraction during hippocampus consolidation."
+    :async? true}
    {:id :fact-utility
     :label "Fact Utility"
-    :description "Post-response rating of which retrieved facts were useful."}])
+    :description "Post-response rating of which retrieved facts were useful."
+    :async? true}])
 (defonce ^:private workload-counters (atom {}))
 (defonce ^:private provider-health (atom {}))
 (defonce ^ConcurrentHashMap ^:private provider-rate-limits (ConcurrentHashMap.))

@@ -1755,6 +1755,32 @@
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
 
+(deftest with-session-turn-lock-is-keyed-by-session-id-not-hash-stripe
+  (let [session-a "FB"
+        session-b "Ea"
+        started-a (promise)
+        started-b (promise)
+        release-a (promise)
+        turn-a    (future
+                    (#'xia.agent/with-session-turn-lock
+                     session-a
+                     (fn []
+                       (deliver started-a true)
+                       @release-a
+                       :a)))
+        _         (is (= (hash session-a) (hash session-b)))
+        _         (is (= true (deref started-a 1000 ::timeout)))
+        turn-b    (future
+                    (#'xia.agent/with-session-turn-lock
+                     session-b
+                     (fn []
+                       (deliver started-b true)
+                       :b)))]
+    (is (= true (deref started-b 1000 ::timeout)))
+    (deliver release-a true)
+    (is (= :a @turn-a))
+    (is (= :b @turn-b))))
+
 (deftest run-branch-tasks-creates-worker-sessions-with_isolated_context
   (let [parent-session-id (db/create-session! :terminal)
         seen              (atom [])]

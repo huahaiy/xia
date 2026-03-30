@@ -23,8 +23,7 @@
             [xia.ssrf :as ssrf]
             [xia.tool :as tool]
             [xia.working-memory :as wm])
-  (:import [java.util.concurrent Future TimeUnit TimeoutException]
-           [java.util.concurrent.locks ReentrantLock]))
+  (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
 (def ^:private default-max-tool-rounds 100)
 (def ^:private default-max-tool-calls-per-round 12)
@@ -36,7 +35,6 @@
 (def ^:private default-parallel-tool-timeout-ms 30000)
 (def ^:private default-branch-task-timeout-ms 300000)
 (def ^:private default-branch-error-stack-frames 12)
-(def ^:private session-turn-lock-count 256)
 (def ^:private default-llm-status-preview-chars 160)
 (def ^:private default-llm-status-update-interval-ms 500)
 (def ^:private default-supervisor-tick-ms 250)
@@ -47,8 +45,7 @@
 (def ^:private default-supervisor-max-restarts 1)
 (def ^:private default-supervisor-restart-backoff-ms 100)
 (def ^:private default-supervisor-restart-grace-ms 1000)
-(defonce ^:private session-turn-locks
-  (vec (repeatedly session-turn-lock-count #(ReentrantLock.))))
+(defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
 
 (def ^:private trace-context-keys
@@ -68,21 +65,34 @@
 
 ;; build-messages is now in xia.context
 
-(defn- session-turn-lock
+(defn- try-acquire-session-turn!
+  [session-id]
+  (loop []
+    (let [active @active-session-turns]
+      (cond
+        (contains? active session-id)
+        false
+
+        (compare-and-set! active-session-turns active (conj active session-id))
+        true
+
+        :else
+        (recur)))))
+
+(defn- release-session-turn!
   [session-id]
   (when session-id
-    (nth session-turn-locks
-         (mod (bit-and Integer/MAX_VALUE (int (hash session-id)))
-              session-turn-lock-count))))
+    (swap! active-session-turns disj session-id))
+  nil)
 
 (defn- with-session-turn-lock
   [session-id f]
-  (if-let [^ReentrantLock lock (session-turn-lock session-id)]
-    (if (.tryLock lock)
+  (if session-id
+    (if (try-acquire-session-turn! session-id)
       (try
         (f)
         (finally
-          (.unlock lock)))
+          (release-session-turn! session-id)))
       (throw (ex-info "Session is already processing another request"
                       {:type :session-busy
                        :status 409

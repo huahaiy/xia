@@ -2888,10 +2888,11 @@
      :local_doc_summarization (local-doc-summarization->admin-body)
      :local_doc_ocr (local-doc-ocr->admin-body)
      :database_backup (database-backup->admin-body)
-     :llm_workloads (into [] (map (fn [{:keys [id label description]}]
+     :llm_workloads (into [] (map (fn [{:keys [id label description async?]}]
                                     {:id          (name id)
                                      :label       label
-                                     :description description}))
+                                     :description description
+                                     :async       (boolean async?)}))
                           (llm/workload-routes))
      :oauth_provider_templates (->> (oauth-template/list-templates)
                                     (into [] (map oauth-template->admin-body))

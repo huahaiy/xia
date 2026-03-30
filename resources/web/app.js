@@ -2720,6 +2720,15 @@ function renderWorkloadRouting() {
     nameText.className = 'workload-route-name-text';
     nameText.textContent = wl.label;
     name.appendChild(nameText);
+    if (typeof wl.async === 'boolean') {
+      const modeBadge = document.createElement('span');
+      modeBadge.className = 'admin-item-capability-badge';
+      modeBadge.textContent = wl.async ? 'Async' : 'Sync';
+      modeBadge.title = wl.async
+        ? 'Background workload. Slower models are usually acceptable.'
+        : 'Interactive workload. Response latency is user-visible.';
+      name.appendChild(modeBadge);
+    }
     const hint = buildInfoHint(wl.description);
     if (hint) name.appendChild(hint);
 

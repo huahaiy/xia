@@ -1,6 +1,7 @@
 (ns xia.llm-test
   (:require [clojure.test :refer :all]
             [charred.api :as json]
+            [xia.async :as async]
             [xia.llm :as llm]))
 
 (deftest build-request-sets-request-timeout
@@ -271,6 +272,16 @@
     (is (= :default
            (:provider-id (llm/resolve-provider-selection {:workload :memory-summary}))))))
 
+(deftest workload-routes-expose-async-classification
+  (let [routes-by-id (into {} (map (juxt :id identity)) (llm/workload-routes))]
+    (is (false? (:async? (get routes-by-id :assistant))))
+    (is (false? (:async? (get routes-by-id :history-compaction))))
+    (is (true? (:async? (get routes-by-id :topic-summary))))
+    (is (true? (:async? (get routes-by-id :memory-summary))))
+    (is (true? (:async? (get routes-by-id :memory-importance))))
+    (is (true? (:async? (get routes-by-id :memory-extraction))))
+    (is (true? (:async? (get routes-by-id :fact-utility))))))
+
 (deftest provider-health-summary-falls-back-to-configured-default-provider
   (let [future-ms (+ (System/currentTimeMillis) 60000)]
     (with-redefs [xia.db/get-default-provider (constantly {:llm.provider/id :fallback})
@@ -418,6 +429,9 @@
                     (constantly 4)
                     xia.llm/max-provider-retry-wait-ms
                     (constantly 300000)
+                    xia.async/submit-background!
+                    (fn [_description f]
+                      (future (f)))
                     xia.http-client/request
                     (fn [_]
                       {:status 200
@@ -448,6 +462,9 @@
                     (constantly 4)
                     xia.llm/max-provider-retry-wait-ms
                     (constantly 300000)
+                    xia.async/submit-background!
+                    (fn [_description f]
+                      (future (f)))
                     xia.http-client/request
                     (fn [_]
                       {:status 200

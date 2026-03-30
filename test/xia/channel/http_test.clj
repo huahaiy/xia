@@ -1660,6 +1660,17 @@
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
+    (is (= {"assistant" false
+            "history-compaction" false
+            "topic-summary" true
+            "memory-summary" true
+            "memory-importance" true
+            "memory-extraction" true
+            "fact-utility" true}
+           (into {}
+                 (map (juxt #(get % "id")
+                            #(get % "async")))
+                 llm-workloads)))
     (is (every? (set (map #(get % "id") (get body "llm_provider_templates")))
                 ["claude" "custom" "deepinfra" "deepseek" "fireworks" "gemini"
                  "groq" "kimi" "minimax" "novita" "ollama" "openai" "openrouter"

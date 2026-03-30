@@ -89,12 +89,18 @@
           (swap! executors assoc kind new-exec)
           new-exec)))))
 
+(defn- convey-bindings
+  [f]
+  (let [bindings (get-thread-bindings)]
+    (fn []
+      (with-bindings* bindings f))))
+
 (defn submit!
   ([kind f]
    (submit! kind nil f))
   ([kind description f]
    (let [^ExecutorService exec (ensure-executor! kind)
-         task-fn (bound-fn [] (f))]
+         task-fn (convey-bindings f)]
      (try
        (.submit exec
                 ^Callable
