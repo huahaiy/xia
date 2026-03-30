@@ -1654,7 +1654,7 @@
        (:goal-complete? control)
        (= :complete (:progress-status control))))))
 
-(defn- persist-final-assistant-message!
+(defn- persist-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]
   (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
         assistant-message-id
@@ -1994,12 +1994,12 @@
                           (or (nil? control)
                               (= :complete (:status control)))
                           (do
-                            (persist-final-assistant-message! session-id
-                                                              text
-                                                              iteration-context
-                                                              response
-                                                              local-doc-ids
-                                                              artifact-ids)
+                            (persist-assistant-message! session-id
+                                                        text
+                                                        iteration-context
+                                                        response
+                                                        local-doc-ids
+                                                        artifact-ids)
                             (when (clear-autonomy-state-on-terminal? parsed)
                               (wm/clear-autonomy-state! session-id)
                               (wm/snapshot! session-id))
@@ -2013,12 +2013,12 @@
                           (let [final-text (append-assistant-note text
                                                                   (iteration-limit-note max-iterations*
                                                                                         control))]
-                            (persist-final-assistant-message! session-id
-                                                              final-text
-                                                              iteration-context
-                                                              response
-                                                              local-doc-ids
-                                                              artifact-ids)
+                            (persist-assistant-message! session-id
+                                                        final-text
+                                                        iteration-context
+                                                        response
+                                                        local-doc-ids
+                                                        artifact-ids)
                             (launch-fact-utility-review! session-id fact-eids* user-message text)
                             (save-schedule-checkpoint!
                              iteration-context
@@ -2047,6 +2047,12 @@
                                                  loop-state
                                                  (iteration-signature updated-autonomy-state
                                                                       control))]
+                            (persist-assistant-message! session-id
+                                                        text
+                                                        iteration-context
+                                                        response
+                                                        nil
+                                                        nil)
                             (throw-if-identical-iteration-loop! session-id
                                                                 channel
                                                                 iteration
