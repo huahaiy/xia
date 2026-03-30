@@ -2053,6 +2053,14 @@
                                                         response
                                                         nil
                                                         nil)
+                            (when-not (str/blank? text)
+                              (prompt/assistant-message! {:text text
+                                                          :iteration iteration
+                                                          :max-iterations max-iterations*
+                                                          :status :continue
+                                                          :progress-status (some-> updated-tip :progress-status)
+                                                          :agenda (some-> updated-tip :agenda)
+                                                          :stack (some-> updated-autonomy-state :stack)}))
                             (throw-if-identical-iteration-loop! session-id
                                                                 channel
                                                                 iteration

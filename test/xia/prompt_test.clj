@@ -35,3 +35,22 @@
       (finally
         (prompt/register-prompt! :terminal nil)
         (prompt/register-approval! :terminal nil)))))
+
+(deftest assistant-message-dispatches-to-the-current-channel-handler
+  (let [session-id (db/create-session! :terminal)
+        messages   (atom [])]
+    (prompt/register-assistant-message! :terminal
+                                        (fn [message]
+                                          (swap! messages conj message)))
+    (try
+      (binding [prompt/*interaction-context* {:channel :terminal
+                                              :session-id session-id}]
+        (prompt/assistant-message! {:text "Checked inbox."
+                                    :iteration 1}))
+      (is (= [{:channel :terminal
+               :session-id session-id
+               :text "Checked inbox."
+               :iteration 1}]
+             @messages))
+      (finally
+        (prompt/register-assistant-message! :terminal nil)))))

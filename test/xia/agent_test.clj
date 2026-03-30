@@ -459,6 +459,50 @@
             :assistant-response "Sent the replies."}
            @reviewed))))
 
+(deftest process-message-emits-intermediate-assistant-messages-for-continue-iterations
+  (let [session-id         (db/create-session! :terminal)
+        assistant-messages (atom [])
+        llm-calls          (atom 0)]
+    (prompt/register-assistant-message! :terminal
+                                        (fn [message]
+                                          (swap! assistant-messages conj
+                                                 (select-keys message
+                                                              [:channel :session-id :text
+                                                               :iteration :max-iterations
+                                                               :status :progress-status]))))
+    (try
+      (with-redefs [xia.tool/tool-definitions          (constantly [])
+                    xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.working-memory/refresh-wm!     (fn [& _] nil)
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         (case (swap! llm-calls inc)
+                                                           1 {"content" (str "Checked inbox.\n\n"
+                                                                             "AUTONOMOUS_STATUS_JSON:"
+                                                                             "{\"status\":\"continue\",\"summary\":\"Checked inbox\",\"next_step\":\"Draft replies\",\"reason\":\"Unread messages remain\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"in_progress\"}]}")}
+                                                           {"content" (str "Sent the replies.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"completed\"}]}")} ))
+                    xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+        (is (= "Sent the replies."
+               (agent/process-message session-id
+                                      "reply to the billing emails"
+                                      :channel :terminal))))
+      (is (= [{:channel :terminal
+               :session-id session-id
+               :text "Checked inbox."
+               :iteration 1
+               :max-iterations 6
+               :status :continue
+               :progress-status :in-progress}]
+             @assistant-messages))
+      (finally
+        (prompt/register-assistant-message! :terminal nil)))))
+
 (deftest process-message-refreshes-working-memory-between-autonomous-iterations
   (let [session-id (db/create-session! :terminal)
         wm-updates (atom [])

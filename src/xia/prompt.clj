@@ -14,6 +14,7 @@
 (defonce ^:private prompt-handlers (atom {}))
 (defonce ^:private approval-handlers (atom {}))
 (defonce ^:private status-handlers (atom {}))
+(defonce ^:private assistant-message-handlers (atom {}))
 
 (def ^:dynamic *interaction-context*
   "Dynamic execution context for tool interactions, e.g. {:channel :terminal :session-id ...}."
@@ -135,3 +136,23 @@
   "True if a status handler is registered."
   []
   (some? (resolve-handler status-handlers)))
+
+(defn register-assistant-message!
+  "Register an assistant message callback for a channel.
+   The handler signature is: (fn [message-map] => any)."
+  ([f]
+   (register-assistant-message! :default f))
+  ([channel f]
+   (register-handler! assistant-message-handlers channel f)))
+
+(defn assistant-message!
+  "Report an assistant message for the current interaction context.
+   Returns nil if no assistant message handler is registered for the current channel."
+  [message]
+  (when-let [f (resolve-handler assistant-message-handlers)]
+    (f (merge {:channel (current-channel)} *interaction-context* message))))
+
+(defn assistant-message-available?
+  "True if an assistant message handler is registered."
+  []
+  (some? (resolve-handler assistant-message-handlers)))

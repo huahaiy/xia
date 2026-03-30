@@ -72,6 +72,14 @@
         (when (= :error state)
           (swap! terminal-statuses dissoc sid))))))
 
+(defn- terminal-assistant-message
+  [{:keys [text]}]
+  (when-not (str/blank? text)
+    (println)
+    (println (str "Xia> " text))
+    (println)
+    (flush)))
+
 (defn start!
   "Start the terminal REPL loop."
   []
@@ -79,6 +87,7 @@
   (prompt/register-prompt! :terminal terminal-prompt)
   (prompt/register-approval! :terminal terminal-approval)
   (prompt/register-status! :terminal terminal-status)
+  (prompt/register-assistant-message! :terminal terminal-assistant-message)
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
     (wm/ensure-wm! session-id)
