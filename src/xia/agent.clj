@@ -969,6 +969,20 @@
                           (get tool-call "arguments"))})
         (or tool-calls [])))
 
+(defn- tool-call-signature
+  [tool-calls]
+  (mapv (fn [tool-call]
+          {:name (or (get-in tool-call ["function" "name"])
+                     (get tool-call "name"))
+           :arguments (or (get-in tool-call ["function" "arguments"])
+                          (get tool-call "arguments"))})
+        (or tool-calls [])))
+
+(defn- tool-round-signature
+  [tool-calls tool-results]
+  {:calls (tool-call-signature tool-calls)
+   :results (mapv tool-result-audit-data tool-results)})
+
 (defn- save-schedule-checkpoint!
   [execution-context checkpoint]
   (when-let [schedule-id (:schedule-id execution-context)]
@@ -1629,7 +1643,7 @@
           (:ok result))))))
 
 (defn- iteration-signature
-  [autonomy-state control]
+  [autonomy-state control tool-activity]
   (let [tip (autonomous/current-frame autonomy-state)]
     {:title (:title tip)
      :progress-status (:progress-status tip)
@@ -1637,6 +1651,7 @@
      :reason (:reason control)
      :next-step (:next-step control)
      :stack-action (:stack-action control)
+     :tool-activity tool-activity
      :agenda (:agenda tip)
      :stack (status-stack (:stack autonomy-state))}))
 
@@ -1797,7 +1812,8 @@
                                  :message-count (count messages)
                                  :session-id session-id}})
       (loop [messages messages
-             round 0]
+             round 0
+             tool-activity []]
         (throw-if-cancelled! session-id)
         (emit-event! {:phase :llm
                       :message (if (zero? round)
@@ -1861,7 +1877,9 @@
                                        tool-results)
                     follow-up-messages (->> tool-results
                                             (mapcat :follow-up-messages)
-                                            vec)]
+                                            vec)
+                    tool-activity* (conj tool-activity
+                                         (tool-round-signature tool-calls tool-results))]
                 (let [assistant-message-id
                       (db/add-message! session-id :assistant
                                        assistant-content
@@ -1915,7 +1933,8 @@
                            (conj assistant-msg)
                            (into tool-history)
                            (into follow-up-messages))
-                       (inc round))))
+                       (inc round)
+                       tool-activity*)))
             (do
               (throw-if-cancelled! session-id)
               (emit-event! {:phase :finalizing
@@ -1924,6 +1943,7 @@
               {:response response
                :parsed-response parsed-response
                :used-fact-eids used-fact-eids
+               :tool-activity tool-activity
                :refresh-needed? (retrieval-state/changed? retrieval-version-before
                                                          retrieval-session-id)
                :system-prompt-cache-entry system-prompt-cache-entry})))))))
@@ -2021,7 +2041,7 @@
                                    "Understanding the goal and preparing the first plan."
                                    "Resuming the autonomous loop with the updated plan.")
                         :session-id session-id})
-                      (let [{:keys [response parsed-response used-fact-eids refresh-needed?
+                      (let [{:keys [response parsed-response used-fact-eids tool-activity refresh-needed?
                                     system-prompt-cache-entry]}
                             (run-supervised-agent-iteration session-id
                                                             channel
@@ -2126,7 +2146,8 @@
                           (let [next-loop-state (update-iteration-loop-state
                                                  loop-state
                                                  (iteration-signature updated-autonomy-state
-                                                                      control))]
+                                                                      control
+                                                                      tool-activity))]
                             (persist-assistant-message! session-id
                                                         text
                                                         iteration-context

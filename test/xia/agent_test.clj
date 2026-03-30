@@ -1235,6 +1235,62 @@
         (is (str/includes? result "Note: I stopped after reaching the autonomous iteration limit for this turn (3)."))))
     (is (= 3 @llm-calls))))
 
+(deftest process-message-does-not-treat-different-tool-activity-as-identical-iterations
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}
+                                                                  {:type "function"
+                                                                   :function {:name "workspace-read"
+                                                                              :parameters {}}}
+                                                                  {:type "function"
+                                                                   :function {:name "email-read"
+                                                                              :parameters {}}}])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [tool-id _args _context]
+                                                       (case tool-id
+                                                         :web-search {:summary "Searched the web."}
+                                                         :workspace-read {:summary "Read the workspace note."}
+                                                         :email-read {:summary "Read the latest email."}
+                                                         {:summary "done"}))
+                  xia.autonomous/max-iterations      (constantly 3)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" ""
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{\"q\":\"billing invoices\"}"}}]}
+                                                         2 {"content" (str "Still working.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}
+                                                         3 {"content" ""
+                                                            "tool_calls" [{"id" "call-2"
+                                                                           "function" {"name" "workspace-read"
+                                                                                       "arguments" "{\"path\":\"notes/billing.md\"}"}}]}
+                                                         4 {"content" (str "Still working.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}
+                                                         5 {"content" ""
+                                                            "tool_calls" [{"id" "call-3"
+                                                                           "function" {"name" "email-read"
+                                                                                       "arguments" "{\"message_id\":\"latest\"}"}}]}
+                                                         {"content" (str "Still working.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
+        (is (str/includes? result "Still working."))
+        (is (str/includes? result "Note: I stopped after reaching the autonomous iteration limit for this turn (3)."))))
+    (is (= 6 @llm-calls))))
+
 (deftest process-message-allows-final-llm-call-after-last-tool-round
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom 0)]
