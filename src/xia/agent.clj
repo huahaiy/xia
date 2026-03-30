@@ -603,63 +603,78 @@
 
 (declare run-fact-utility-review-worker!)
 
+(defn- update-fact-utility-review-state!
+  ([f]
+   (update-fact-utility-review-state! fact-utility-review-state compare-and-set! f))
+  ([state-atom cas-fn f]
+   (loop []
+     (let [before @state-atom
+           [after result] (f before)]
+       (if (cas-fn state-atom before after)
+         result
+         (recur))))))
+
+(defn- enqueue-fact-utility-review-state
+  [state session-id observations]
+  (let [{:keys [pending] :as session-state}
+        (get state session-id)
+        pending* (->> (concat pending observations)
+                      (take-last fact-utility-review-max-pending)
+                      vec)]
+    (if-let [existing-token (:worker-token session-state)]
+      [(assoc state session-id (assoc session-state :pending pending*)) nil]
+      (let [token (random-uuid)]
+        [(assoc state session-id {:pending pending*
+                                  :worker-token token})
+         token]))))
+
+(defn- claim-fact-utility-review-batch-state
+  [state session-id worker-token]
+  (let [{:keys [pending] :as session-state}
+        (get state session-id)]
+    (if (= worker-token (:worker-token session-state))
+      (let [batch*     (vec (take fact-utility-review-batch-size pending))
+            remaining* (vec (drop fact-utility-review-batch-size pending))]
+        [(assoc state session-id (assoc session-state :pending remaining*))
+         batch*])
+      [state nil])))
+
+(defn- finish-fact-utility-review-worker-state
+  [state session-id worker-token]
+  (let [{:keys [pending] :as session-state} (get state session-id)]
+    (cond
+      (not= worker-token (:worker-token session-state))
+      [state nil]
+
+      (seq pending)
+      (let [next-token (random-uuid)]
+        [(assoc state session-id {:pending pending
+                                  :worker-token next-token})
+         next-token])
+
+      :else
+      [(dissoc state session-id) nil])))
+
 (defn- enqueue-fact-utility-review!
   [session-id fact-eids user-message assistant-response]
-  (let [observations (fact-utility-observations fact-eids user-message assistant-response)
-        worker-token (atom nil)]
+  (let [observations (fact-utility-observations fact-eids user-message assistant-response)]
     (when (seq observations)
-      (swap! fact-utility-review-state
-             (fn [state]
-               (let [{:keys [pending] :as session-state}
-                     (get state session-id)
-                     pending* (->> (concat pending observations)
-                                   (take-last fact-utility-review-max-pending)
-                                   vec)]
-                 (if (:worker-token session-state)
-                   (assoc state session-id (assoc session-state :pending pending*))
-                   (let [token (random-uuid)]
-                     (reset! worker-token token)
-                     (assoc state session-id {:pending pending*
-                                              :worker-token token}))))))
-      (when-let [token @worker-token]
+      (when-let [token (update-fact-utility-review-state!
+                        #(enqueue-fact-utility-review-state % session-id observations))]
         (future (run-fact-utility-review-worker! session-id token))))
     (count observations)))
 
 (defn- claim-fact-utility-review-batch!
   [session-id worker-token]
-  (let [batch (atom nil)]
-    (swap! fact-utility-review-state
-           (fn [state]
-             (let [{:keys [pending] :as session-state}
-                   (get state session-id)]
-               (if (= worker-token (:worker-token session-state))
-                 (let [batch*     (vec (take fact-utility-review-batch-size pending))
-                       remaining* (vec (drop fact-utility-review-batch-size pending))]
-                   (reset! batch batch*)
-                   (assoc state session-id (assoc session-state :pending remaining*)))
-                 state))))
-    @batch))
+  (update-fact-utility-review-state!
+   #(claim-fact-utility-review-batch-state % session-id worker-token)))
 
 (defn- finish-fact-utility-review-worker!
   [session-id worker-token]
-  (let [next-token (atom nil)]
-    (swap! fact-utility-review-state
-           (fn [state]
-             (let [{:keys [pending] :as session-state} (get state session-id)]
-               (cond
-                 (not= worker-token (:worker-token session-state))
-                 state
-
-                 (seq pending)
-                 (let [token (random-uuid)]
-                   (reset! next-token token)
-                   (assoc state session-id {:pending pending
-                                            :worker-token token}))
-
-                 :else
-                 (dissoc state session-id)))))
-    (when-let [token @next-token]
-      (future (run-fact-utility-review-worker! session-id token)))))
+  (when-let [token
+             (update-fact-utility-review-state!
+              #(finish-fact-utility-review-worker-state % session-id worker-token))]
+    (future (run-fact-utility-review-worker! session-id token))))
 
 (defn- run-fact-utility-review-worker!
   [session-id worker-token]

@@ -1045,6 +1045,78 @@
     (finally
       (reset! @#'xia.agent/fact-utility-review-state {}))))
 
+(deftest fact-utility-review-state-update-returns-committed-enqueue-result-after-retry
+  (let [session-id  (random-uuid)
+        state-atom  (atom {})
+        cas-calls   (atom 0)
+        observations [{:fact-eid 11
+                        :user-message "hello"
+                        :assistant-response "reply"}]
+        cas-fn      (fn [atm old new]
+                      (if (= 1 (swap! cas-calls inc))
+                        (do
+                          (reset! atm {session-id {:pending [{:fact-eid 99
+                                                              :user-message "prior"
+                                                              :assistant-response "prior"}]
+                                                   :worker-token :external-token}})
+                          false)
+                        (compare-and-set! atm old new)))]
+    (with-redefs [clojure.core/random-uuid (let [ids (atom [:stale-token :fresh-token])]
+                                             (fn []
+                                               (let [id (first @ids)]
+                                                 (swap! ids rest)
+                                                 id)))]
+      (is (nil? (#'xia.agent/update-fact-utility-review-state!
+                 state-atom
+                 cas-fn
+                 #(#'xia.agent/enqueue-fact-utility-review-state % session-id observations))))
+      (is (= :external-token
+             (get-in @state-atom [session-id :worker-token])))
+      (is (= [{:fact-eid 99
+               :user-message "prior"
+               :assistant-response "prior"}
+              {:fact-eid 11
+               :user-message "hello"
+               :assistant-response "reply"}]
+             (get-in @state-atom [session-id :pending]))))))
+
+(deftest fact-utility-review-state-update-returns-committed-claim-result-after-retry
+  (let [session-id (random-uuid)
+        state-atom (atom {session-id {:pending [{:fact-eid 1} {:fact-eid 2}]
+                                      :worker-token :worker-a}})
+        cas-calls  (atom 0)
+        cas-fn     (fn [atm old new]
+                     (if (= 1 (swap! cas-calls inc))
+                       (do
+                         (reset! atm {session-id {:pending [{:fact-eid 3}]
+                                                  :worker-token :worker-b}})
+                         false)
+                       (compare-and-set! atm old new)))]
+    (is (nil? (#'xia.agent/update-fact-utility-review-state!
+               state-atom
+               cas-fn
+               #(#'xia.agent/claim-fact-utility-review-batch-state % session-id :worker-a))))
+    (is (= :worker-b
+           (get-in @state-atom [session-id :worker-token])))))
+
+(deftest fact-utility-review-state-update-returns-committed-finish-result-after-retry
+  (let [session-id (random-uuid)
+        state-atom (atom {session-id {:pending [{:fact-eid 1}]
+                                      :worker-token :worker-a}})
+        cas-calls  (atom 0)
+        cas-fn     (fn [atm old new]
+                     (if (= 1 (swap! cas-calls inc))
+                       (do
+                         (reset! atm {})
+                         false)
+                       (compare-and-set! atm old new)))]
+    (with-redefs [clojure.core/random-uuid (constantly :stale-token)]
+      (is (nil? (#'xia.agent/update-fact-utility-review-state!
+                 state-atom
+                 cas-fn
+                 #(#'xia.agent/finish-fact-utility-review-worker-state % session-id :worker-a))))
+      (is (= {} @state-atom)))))
+
 (deftest process-message-continues-when-working-memory-update-fails
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
