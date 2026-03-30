@@ -59,7 +59,9 @@
    :schedule-id
    :channel])
 
-(declare truncate-summary status-agenda status-stack run-agent-iteration)
+(declare truncate-summary status-agenda status-stack run-agent-iteration
+         cancel-futures!
+         request-session-cancel!)
 
 ;; build-messages is now in xia.context
 
@@ -286,26 +288,9 @@
   ([session-id]
    (cancel-session! session-id "cancel requested"))
   ([session-id reason]
-   (let [entry* (atom nil)]
-     (when session-id
-       (swap! active-session-runs
-               (fn [runs]
-                 (if-let [entry (get runs session-id)]
-                   (let [updated (assoc entry
-                                        :cancelled? true
-                                       :cancel-reason (or (:cancel-reason entry)
-                                                          reason))]
-                     (reset! entry* updated)
-                     (assoc runs session-id updated))
-                   runs)))
-       (when-let [entry @entry*]
-         (when-let [^Thread supervisor-thread (:supervisor-thread entry)]
-           (.interrupt supervisor-thread))
-         (when-let [^Thread worker-thread (:worker-thread entry)]
-           (.interrupt worker-thread))
-         (when-let [^Future worker-future (:worker-future entry)]
-           (future-cancel worker-future))
-         true)))))
+   (request-session-cancel! session-id
+                            reason
+                            :interrupt-supervisor? true)))
 
 (defn cancel-all-sessions!
   "Request cancellation for every currently running agent turn."
@@ -350,6 +335,7 @@
               :worker-token nil
               :worker-thread nil
               :worker-future nil
+              :parallel-tool-futures []
               :cancelled? false
               :cancel-reason nil})
       (try
@@ -381,7 +367,8 @@
   (update-session-run-entry! session-id
                              #(assoc % :worker-token worker-token
                                        :worker-thread nil
-                                       :worker-future nil)))
+                                       :worker-future nil
+                                       :parallel-tool-futures [])))
 
 (defn- register-worker-thread!
   [session-id worker-token]
@@ -415,7 +402,35 @@
                                  (assoc entry
                                         :worker-token nil
                                         :worker-thread nil
-                                        :worker-future nil)
+                                        :worker-future nil
+                                        :parallel-tool-futures [])
+                                 entry))))
+
+(defn- register-parallel-tool-futures!
+  [session-id worker-token futures]
+  (update-session-run-entry! session-id
+                             (fn [entry]
+                               (if (= worker-token (:worker-token entry))
+                                 (update entry
+                                         :parallel-tool-futures
+                                         (fn [existing]
+                                           (->> (concat (or existing []) futures)
+                                                distinct
+                                                vec)))
+                                 entry))))
+
+(defn- clear-parallel-tool-futures!
+  [session-id worker-token futures]
+  (update-session-run-entry! session-id
+                             (fn [entry]
+                               (if (= worker-token (:worker-token entry))
+                                 (update entry
+                                         :parallel-tool-futures
+                                         (fn [existing]
+                                           (let [to-clear (set futures)]
+                                             (->> (or existing [])
+                                                  (remove to-clear)
+                                                  vec))))
                                  entry))))
 
 (defn- interrupt-worker-thread!
@@ -447,6 +462,8 @@
         (when (and (:worker-thread entry)
                    (not= (Thread/currentThread) ^Thread (:worker-thread entry)))
           (.interrupt ^Thread (:worker-thread entry)))
+        (when-let [parallel-tool-futures (seq (:parallel-tool-futures entry))]
+          (cancel-futures! parallel-tool-futures))
         (when-let [^Future worker-future (:worker-future entry)]
           (future-cancel worker-future))
         true))))
@@ -612,6 +629,17 @@
       (wm/update-wm! message session-id channel opts)
       (catch Exception e
         (log/warn e "Working memory update failed; continuing without refreshed WM"
+                  {:session-id session-id
+                   :channel channel})
+        nil))))
+
+(defn- best-effort-refresh-working-memory!
+  [session-id user-message channel opts]
+  (when-let [message (some-> user-message str str/trim not-empty)]
+    (try
+      (wm/refresh-wm! message session-id channel opts)
+      (catch Exception e
+        (log/warn e "Working memory refresh failed; continuing without refreshed WM"
                   {:session-id session-id
                    :channel channel})
         nil))))
@@ -946,16 +974,26 @@
                                   {:call call
                                    :exception t}))))
                           calls)
-            results (await-futures! futures
-                                    (parallel-tool-timeout-ms)
-                                    (fn [idx timeout-ms]
-                                      (let [call (nth calls idx)]
-                                        (ex-info (str "Parallel tool execution timed out: " (:func-name call))
-                                                 (merge (trace-context context)
-                                                        {:type :parallel-tool-timeout
-                                                         :timeout-ms timeout-ms
-                                                         :tool-id (:tool-id call)
-                                                         :func-name (:func-name call)})))))
+            _ (when-let [session-id (:session-id context)]
+                (register-parallel-tool-futures! session-id
+                                                (:worker-token context)
+                                                futures))
+            results (try
+                      (await-futures! futures
+                                      (parallel-tool-timeout-ms)
+                                      (fn [idx timeout-ms]
+                                        (let [call (nth calls idx)]
+                                          (ex-info (str "Parallel tool execution timed out: " (:func-name call))
+                                                   (merge (trace-context context)
+                                                          {:type :parallel-tool-timeout
+                                                           :timeout-ms timeout-ms
+                                                           :tool-id (:tool-id call)
+                                                           :func-name (:func-name call)})))))
+                      (finally
+                        (when-let [session-id (:session-id context)]
+                          (clear-parallel-tool-futures! session-id
+                                                        (:worker-token context)
+                                                        futures))))
             failures (keep #(when-let [t (:exception %)]
                               (assoc % :throwable t))
                            results)]
@@ -1173,9 +1211,14 @@
   ([session-id worker]
    (let [worker* (or worker
                      (:worker-future (session-run-entry session-id)))
+         parallel-tool-futures (some-> (session-run-entry session-id)
+                                       :parallel-tool-futures
+                                       seq)
          interrupted? (volatile! (Thread/interrupted))]
      (try
        (interrupt-worker-thread! session-id)
+       (when parallel-tool-futures
+         (cancel-futures! parallel-tool-futures))
        (when worker*
          (future-cancel worker*))
        (if (nil? worker*)
@@ -1349,7 +1392,8 @@
 (defn- run-supervised-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
-   working-memory-message update-working-memory? max-tool-rounds autonomy-state max-iterations]
+   working-memory-message update-working-memory? refresh-working-memory?
+   max-tool-rounds autonomy-state max-iterations]
   (loop [attempt 0]
     (let [worker-token (Object.)
           worker-state (atom {:phase nil
@@ -1365,12 +1409,14 @@
                                           resource-session-id
                                           local-doc-ids
                                           artifact-ids
-                                          execution-context
+                                          (assoc execution-context
+                                                 :worker-token worker-token)
                                           assistant-provider
                                           assistant-provider-id
                                           transient-messages
                                           working-memory-message
                                           update-working-memory?
+                                          refresh-working-memory?
                                           max-tool-rounds
                                           worker-state)
                      (finally
@@ -1505,16 +1551,24 @@
 (defn- run-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
-   working-memory-message update-working-memory? max-tool-rounds worker-state]
+   working-memory-message update-working-memory? refresh-working-memory?
+   max-tool-rounds worker-state]
   (let [emit-event! #(emit-worker-event! worker-state %)]
-    (when update-working-memory?
+    (when (or update-working-memory? refresh-working-memory?)
       (emit-event! {:phase :working-memory
-                    :message "Updating working memory"
+                    :message (if update-working-memory?
+                               "Updating working memory"
+                               "Refreshing working memory")
                     :iteration (:iteration execution-context)})
-      (best-effort-update-working-memory! session-id
-                                          working-memory-message
-                                          channel
-                                          {:resource-session-id resource-session-id}))
+      (if update-working-memory?
+        (best-effort-update-working-memory! session-id
+                                            working-memory-message
+                                            channel
+                                            {:resource-session-id resource-session-id})
+        (best-effort-refresh-working-memory! session-id
+                                             working-memory-message
+                                             channel
+                                             {:resource-session-id resource-session-id})))
     (throw-if-cancelled! session-id)
     (let [tools (tool/tool-definitions execution-context)
           {:keys [messages used-fact-eids]}
@@ -1749,8 +1803,8 @@
                                                      iteration
                                                      max-iterations*)
                           update-working-memory? (= iteration 1)
-                          wm-message (when update-working-memory?
-                                       (or working-memory-message user-message))]
+                          refresh-working-memory? (> iteration 1)
+                          wm-message (or working-memory-message user-message)]
                       (save-schedule-checkpoint!
                        iteration-context
                        {:phase :understanding
@@ -1771,6 +1825,7 @@
                                                             transient-messages**
                                                             wm-message
                                                             update-working-memory?
+                                                            refresh-working-memory?
                                                             max-tool-rounds*
                                                             autonomy-state
                                                             max-iterations*)

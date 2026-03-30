@@ -257,6 +257,17 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest cancel-session-does-not-self-interrupt-the-supervisor-thread
+  (let [session-id (db/create-session! :terminal)]
+    (#'xia.agent/with-session-run
+     session-id
+     (fn []
+       (is (true? (agent/cancel-session! session-id "self cancel")))
+       (is (= "self cancel"
+              (-> (#'xia.agent/session-run-entry session-id)
+                  :cancel-reason)))
+       (is (false? (Thread/interrupted)))))))
+
 (deftest process-message-propagates-request-trace-to-status-and-checkpoints
   (let [session-id   (db/create-session! :scheduler)
         statuses     (atom [])
@@ -445,13 +456,16 @@
             :assistant-response "Sent the replies."}
            @reviewed))))
 
-(deftest process-message-updates-working-memory-only-once-per-top-level-turn
+(deftest process-message-refreshes-working-memory-between-autonomous-iterations
   (let [session-id (db/create-session! :terminal)
-        wm-inputs  (atom [])
+        wm-updates (atom [])
+        wm-refreshes (atom [])
         llm-calls  (atom 0)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
                   xia.working-memory/update-wm!      (fn [message _session-id _channel _opts]
-                                                       (swap! wm-inputs conj message))
+                                                       (swap! wm-updates conj message))
+                  xia.working-memory/refresh-wm!     (fn [message _session-id _channel _opts]
+                                                       (swap! wm-refreshes conj message))
                   xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
                                                                   :provider-id :default})
                   xia.context/build-messages-data    (fn [_session-id _opts]
@@ -470,7 +484,8 @@
              (agent/process-message session-id
                                     "reply to the billing emails"
                                     :channel :terminal))))
-    (is (= ["reply to the billing emails"] @wm-inputs))))
+    (is (= ["reply to the billing emails"] @wm-updates))
+    (is (= ["reply to the billing emails"] @wm-refreshes))))
 
 (deftest process-message-clears-autonomy-state-after-completed-goal
   (let [session-id (db/create-session! :terminal)]
@@ -1422,6 +1437,64 @@
         (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))
         (is (= ["web-fetch" "web-search"]
                (mapv #(get (json/read-json (:content %)) "tool") results)))))))
+
+(deftest stop-worker-cancels-registered-parallel-tool-futures
+  (let [session-id    (db/create-session! :terminal)
+        worker-token  (Object.)
+        started-tools (atom #{})
+        interrupted   {:web-fetch (promise)
+                       :web-search (promise)}
+        tool-calls    [{"id"       "call-1"
+                        "function" {"name"      "web-fetch"
+                                    "arguments" "{}"}}
+                       {"id"       "call-2"
+                        "function" {"name"      "web-search"
+                                    "arguments" "{}"}}]]
+    (#'xia.agent/with-session-run
+     session-id
+     (fn []
+       (#'xia.agent/begin-worker-run! session-id worker-token)
+       (with-redefs [tool/parallel-safe? (constantly true)
+                     tool/execute-tool   (fn [tool-id _args _context]
+                                           (swap! started-tools conj tool-id)
+                                           (try
+                                             (Thread/sleep 10000)
+                                             {:tool (name tool-id)}
+                                             (catch InterruptedException e
+                                               (deliver (get interrupted tool-id) true)
+                                               (.interrupt (Thread/currentThread))
+                                               (throw e))))]
+         (let [batch-future (future
+                              (try
+                                (#'xia.agent/register-worker-thread! session-id worker-token)
+                                (#'agent/execute-tool-calls tool-calls
+                                                            {:channel :terminal
+                                                             :session-id session-id
+                                                             :worker-token worker-token})
+                                (catch Exception e
+                                  e)
+                                (finally
+                                  (#'xia.agent/clear-worker-run! session-id worker-token))))]
+           (#'xia.agent/register-worker-future! session-id worker-token batch-future)
+           (loop [attempt 0]
+             (when (and (< attempt 50)
+                        (or (not= #{:web-fetch :web-search} @started-tools)
+                            (not= 2 (count (:parallel-tool-futures (#'xia.agent/session-run-entry session-id))))))
+               (Thread/sleep 10)
+               (recur (inc attempt))))
+           (is (= #{:web-fetch :web-search} @started-tools))
+           (is (= 2 (count (:parallel-tool-futures (#'xia.agent/session-run-entry session-id)))))
+           (is (true? (#'xia.agent/stop-worker! session-id batch-future)))
+           (is (= true (deref (:web-fetch interrupted) 1000 ::timeout)))
+           (is (= true (deref (:web-search interrupted) 1000 ::timeout)))
+           (let [result (try
+                          (deref batch-future 1000 ::timeout)
+                          (catch java.util.concurrent.CancellationException e
+                            e))]
+             (is (or (instance? InterruptedException result)
+                     (instance? clojure.lang.ExceptionInfo result)
+                     (instance? java.util.concurrent.CancellationException result))))
+           (is (= [] (:parallel-tool-futures (#'xia.agent/session-run-entry session-id))))))))))
 
 (deftest execute-tool-calls-keeps-unsafe-tools-sequential
   (let [active     (atom 0)

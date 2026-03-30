@@ -217,6 +217,52 @@
 
     (wm/clear-wm! sid)))
 
+(deftest merge-results-prefetches-node-data-outside-update-retries
+  (let [sid             (random-uuid)
+        node-eid        (th/seed-node! "RetryNode" "concept")
+        get-node-calls  (atom 0)
+        facts-calls     (atom 0)
+        edges-calls     (atom 0)
+        props-calls     (atom 0)]
+    (wm/create-wm! sid)
+    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :turn-count] 1)
+    (try
+      (with-redefs [xia.memory/get-node        (fn [_]
+                                                 (swap! get-node-calls inc)
+                                                 {:kg.node/name "RetryNode"
+                                                  :kg.node/type :concept})
+                    xia.memory/node-facts      (fn [_]
+                                                 (swap! facts-calls inc)
+                                                 [])
+                    xia.memory/node-edges      (fn [_]
+                                                 (swap! edges-calls inc)
+                                                 {})
+                    xia.memory/node-properties (fn [_]
+                                                 (swap! props-calls inc)
+                                                 {})]
+        (with-redefs-fn {#'xia.working-memory/update-session-wm!
+                         (fn [session-id f]
+                           (let [wm      (wm/get-wm session-id)
+                                 _       (f wm)
+                                 updated (f wm)]
+                             (swap! @#'xia.working-memory/wm-atom assoc session-id updated)
+                             updated))}
+          (fn []
+            (#'xia.working-memory/merge-results! sid
+                                                 {:nodes []
+                                                  :facts [{:node-eid node-eid}]
+                                                  :episodes []
+                                                  :local-docs []}
+                                                 nil))))
+      (is (= 1 @get-node-calls))
+      (is (= 1 @facts-calls))
+      (is (= 1 @edges-calls))
+      (is (= 1 @props-calls))
+      (is (= "RetryNode"
+             (get-in (wm/get-wm sid) [:slots node-eid :name])))
+      (finally
+        (wm/clear-wm! sid)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Decay & eviction
 ;; ---------------------------------------------------------------------------
@@ -532,6 +578,31 @@
           (is (= 1 (:turn-count state)))
           (is (= 1 (:added-turn slot)))
           (is (= 0.8 (double (:relevance slot))))))
+      (finally
+        (wm/clear-wm! sid)))))
+
+(deftest refresh-wm-does-not-increment-turn-or-reboost-existing-slots
+  (let [sid      (random-uuid)
+        node-eid (th/seed-node! "Refreshable" "concept")]
+    (db/transact! [{:session/id sid :session/channel :terminal :session/active? true}])
+    (wm/create-wm! sid)
+    (try
+      (with-redefs [xia.memory/search-nodes      (fn [_semantic-query & _opts]
+                                                   [{:eid node-eid
+                                                     :name "Refreshable"
+                                                     :type :concept}])
+                    xia.memory/search-facts      (constantly [])
+                    xia.memory/search-episodes   (constantly [])
+                    xia.memory/search-local-docs (constantly [])
+                    xia.memory/connected-node-summaries (fn [_matched-eids] nil)]
+        (let [initial (wm/update-wm! "refreshable" sid :terminal)
+              initial-slot (get-in initial [:slots node-eid])
+              refreshed (wm/refresh-wm! "refreshable" sid :terminal)
+              refreshed-slot (get-in refreshed [:slots node-eid])]
+          (is (= 1 (:turn-count refreshed)))
+          (is (= 1 (:added-turn refreshed-slot)))
+          (is (= (double (:relevance initial-slot))
+                 (double (:relevance refreshed-slot)))))))
       (finally
         (wm/clear-wm! sid)))))
 

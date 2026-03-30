@@ -254,23 +254,45 @@ Rules:
 
 (defn- merge-node-into-slot
   "Merge a search result node into WM, refreshing or creating a slot."
-  [slots node-eid name type relevance turn-count]
-  (if-let [existing (get slots node-eid)]
-    ;; Refresh: boost relevance
-    (assoc slots node-eid
-           (assoc existing :relevance (boost-relevance (:relevance existing)
-                                                       relevance)))
-    ;; New slot
-    (assoc slots node-eid
-           {:node-eid   node-eid
-            :name       name
-            :type       type
-            :facts      (memory/node-facts node-eid)
-            :edges      (memory/node-edges node-eid)
-            :properties (memory/node-properties node-eid)
-            :relevance  relevance
-            :pinned?    false
-            :added-turn turn-count})))
+  ([slots node-eid name type relevance turn-count]
+   (merge-node-into-slot slots node-eid name type relevance turn-count nil))
+  ([slots node-eid name type relevance turn-count node-data]
+   (merge-node-into-slot slots node-eid name type relevance turn-count node-data nil))
+  ([slots node-eid name type relevance turn-count node-data
+    {:keys [boost-existing? refresh-existing?]
+     :or {boost-existing? true
+          refresh-existing? false}}]
+   (if-let [existing (get slots node-eid)]
+     (let [{:keys [facts edges properties]} node-data
+           refreshed (cond-> existing
+                       refresh-existing?
+                       (cond-> (assoc :name name
+                                      :type type)
+                         (some? node-data)
+                         (assoc :facts facts
+                                :edges edges
+                                :properties properties)))
+           updated   (if boost-existing?
+                       (assoc refreshed
+                              :relevance (boost-relevance (:relevance refreshed)
+                                                          relevance))
+                       refreshed)]
+       (assoc slots node-eid updated))
+     ;; New slot
+     (let [{:keys [facts edges properties]} (or node-data
+                                                {:facts      (memory/node-facts node-eid)
+                                                 :edges      (memory/node-edges node-eid)
+                                                 :properties (memory/node-properties node-eid)})]
+       (assoc slots node-eid
+              {:node-eid   node-eid
+               :name       name
+               :type       type
+               :facts      facts
+               :edges      edges
+               :properties properties
+               :relevance  relevance
+               :pinned?    false
+               :added-turn turn-count})))))
 
 (defn- ref-relevance
   ^double
@@ -319,39 +341,116 @@ Rules:
            vec))
     []))
 
+(defn- hydrate-slot-node-data
+  [node-eid]
+  {:facts      (memory/node-facts node-eid)
+   :edges      (memory/node-edges node-eid)
+   :properties (memory/node-properties node-eid)})
+
+(defn- preload-merge-node-data
+  [current-slots search-results expanded-nodes & {:keys [refresh-existing?]
+                                                  :or {refresh-existing? false}}]
+  (let [existing-eids     (set (keys (or current-slots {})))
+        include-node?     (fn [eid]
+                            (or refresh-existing?
+                                (not (contains? existing-eids eid))))
+        direct-nodes      (into {}
+                                (keep (fn [{:keys [eid name type]}]
+                                        (when (include-node? eid)
+                                          [eid {:name name
+                                                :type type}])))
+                                (:nodes search-results))
+        fact-node-eids    (->> (:facts search-results)
+                               (map :node-eid)
+                               distinct
+                               (remove #(or (and (not refresh-existing?)
+                                                 (contains? existing-eids %))
+                                            (contains? direct-nodes %))))
+        fact-nodes        (into {}
+                                (map (fn [node-eid]
+                                       (let [node (memory/get-node node-eid)]
+                                         [node-eid {:name (:kg.node/name node)
+                                                    :type (:kg.node/type node)}])))
+                                fact-node-eids)
+        expanded-node-map (into {}
+                                (keep (fn [[eid {:keys [name type]}]]
+                                        (when-not (or (and (not refresh-existing?)
+                                                           (contains? existing-eids eid))
+                                                      (contains? direct-nodes eid)
+                                                      (contains? fact-nodes eid))
+                                          [eid {:name name
+                                                :type type}])))
+                                expanded-nodes)]
+    (into {}
+          (map (fn [[node-eid {:keys [name type]}]]
+                 [node-eid {:name name
+                            :type type
+                            :slot-data (hydrate-slot-node-data node-eid)}]))
+          (merge direct-nodes fact-nodes expanded-node-map))))
+
 (defn- merge-results!
   "Merge search + expansion results into working memory."
-  [session-id search-results expanded-nodes]
-  (update-session-wm! session-id
-    (fn [wm]
-      (let [turn (:turn-count wm)
+  ([session-id search-results expanded-nodes]
+   (merge-results! session-id search-results expanded-nodes nil))
+  ([session-id search-results expanded-nodes {:keys [boost-existing? refresh-existing?]
+                                              :or {boost-existing? true
+                                                   refresh-existing? false}}]
+  (let [merge-opts          {:boost-existing? boost-existing?
+                             :refresh-existing? refresh-existing?}
+        preloaded-node-data (preload-merge-node-data (some-> (session-wm session-id) :slots)
+                                                     search-results
+                                                     expanded-nodes
+                                                     :refresh-existing? refresh-existing?)]
+    (update-session-wm! session-id
+      (fn [wm]
+        (let [turn (:turn-count wm)
             ;; Merge direct search hits at high relevance
             slots-with-nodes
             (reduce (fn [slots {:keys [eid name type]}]
-                      (merge-node-into-slot slots eid name type 0.8 turn))
+                      (merge-node-into-slot slots
+                                            eid
+                                            name
+                                            type
+                                            0.8
+                                            turn
+                                            (some-> (get preloaded-node-data eid) :slot-data)
+                                            merge-opts))
                     (:slots wm)
                     (:nodes search-results))
             ;; Merge nodes found via fact search
             slots-with-fact-nodes
             (reduce (fn [slots {:keys [node-eid]}]
-	                      (if (contains? slots node-eid)
-	                        ;; Boost existing slot
-	                        (update-in slots [node-eid :relevance]
-	                                   #(boost-relevance % 0.3))
-                        ;; Add the node
-                        (let [node (memory/get-node node-eid)]
-                          (merge-node-into-slot
-                            slots node-eid
-                            (:kg.node/name node) (:kg.node/type node)
-                            0.6 turn))))
+	                      (let [{:keys [name type slot-data]} (get preloaded-node-data node-eid)
+                                in-slots? (contains? slots node-eid)]
+                            (if (and in-slots?
+                                     (not refresh-existing?)
+                                     boost-existing?)
+	                          ;; Boost existing slot
+	                          (update-in slots [node-eid :relevance]
+	                                     #(boost-relevance % 0.3))
+                              (merge-node-into-slot
+                               slots node-eid
+                               (or name (get-in slots [node-eid :name]))
+                               (or type (get-in slots [node-eid :type]))
+                               0.6 turn
+                               slot-data
+                               merge-opts))))
                     slots-with-nodes
                     (:facts search-results))
             ;; Merge expanded (one-hop) nodes at lower relevance
             slots-with-expanded
             (reduce (fn [slots [eid {:keys [name type]}]]
-                      (if (contains? slots eid)
+                      (if (and (contains? slots eid)
+                               (not refresh-existing?))
                         slots ; already in WM from direct search
-                        (merge-node-into-slot slots eid name type 0.3 turn)))
+                        (merge-node-into-slot slots
+                                              eid
+                                              name
+                                              type
+                                              0.3
+                                              turn
+                                              (some-> (get preloaded-node-data eid) :slot-data)
+                                              merge-opts)))
                     slots-with-fact-nodes
                     expanded-nodes)
             ;; Merge episode refs
@@ -385,7 +484,7 @@ Rules:
         (assoc wm
                :slots        slots-with-expanded
                :episode-refs merged-refs
-               :local-doc-refs merged-doc-refs)))))
+               :local-doc-refs merged-doc-refs)))))))
 
 (defn- decay-slot-map
   ([slots factor]
@@ -617,6 +716,57 @@ Rules:
 ;; Per-turn Update (orchestrator)
 ;; ============================================================================
 
+(defn- run-wm-retrieval!
+  [user-message session-id channel {:keys [resource-session-id
+                                           increment-turn?
+                                           decay-slots?
+                                           topic-maintenance?
+                                           boost-existing?
+                                           refresh-existing?]
+                                    :or {increment-turn? true
+                                         decay-slots? true
+                                         topic-maintenance? true
+                                         boost-existing? true
+                                         refresh-existing? false}}]
+  (run-session-op! session-id
+    (fn [sid]
+      (when (session-wm sid)
+        (when increment-turn?
+          (update-session-wm! sid #(update % :turn-count inc)))
+        (let [terms   (extract-search-terms sid user-message)
+              results (search-knowledge sid terms user-message resource-session-id)]
+          (when results
+            (let [matched-eids (mapv :eid (:nodes results))
+                  expanded     (when (seq matched-eids)
+                                 (expand-graph matched-eids))]
+              (merge-results! sid
+                              results
+                              expanded
+                              {:boost-existing? boost-existing?
+                               :refresh-existing? refresh-existing?})
+              (when decay-slots?
+                (update-session-wm! sid
+                  (fn [wm]
+                    (let [factor       (get-in wm [:config :decay-factor])
+                          threshold    (get-in wm [:config :eviction-threshold])
+                          max-slots    (get-in wm [:config :max-slots])
+                          current-turn (:turn-count wm)
+                          decayed      (decay-slot-map (:slots wm) factor current-turn)
+                          filtered     (prune-slot-map decayed threshold max-slots)]
+                      (assoc wm :slots filtered)))))))
+          (when topic-maintenance?
+            (let [wm (session-wm sid)]
+              (when (and wm
+                         (> (long (:turn-count wm)) 3)
+                         (detect-topic-shift? sid terms))
+                (auto-segment! sid channel))
+              (when wm
+                (let [interval    (get-in wm [:config :topic-update-interval])
+                      turns-since (- (long (:turn-count wm)) (long (:topic-turn wm)))]
+                  (when (and interval (>= turns-since (long interval)))
+                    (schedule-topic-update! sid))))))
+          (get-wm sid))))))
+
 (defn update-wm!
   "Per-turn working memory update. Runs the full retrieval pipeline:
    1. Extract search terms from user message
@@ -627,38 +777,27 @@ Rules:
   6. Periodically update topic summary"
   ([user-message session-id channel]
    (update-wm! user-message session-id channel nil))
-  ([user-message session-id channel {:keys [resource-session-id]}]
-   (run-session-op! session-id
-     (fn [sid]
-       (when (session-wm sid)
-         (update-session-wm! sid #(update % :turn-count inc))
-         (let [terms   (extract-search-terms sid user-message)
-               results (search-knowledge sid terms user-message resource-session-id)]
-           (when results
-             (let [matched-eids (mapv :eid (:nodes results))
-                   expanded     (when (seq matched-eids)
-                                  (expand-graph matched-eids))]
-               (merge-results! sid results expanded)
-               (update-session-wm! sid
-                 (fn [wm]
-                   (let [factor       (get-in wm [:config :decay-factor])
-                         threshold    (get-in wm [:config :eviction-threshold])
-                         max-slots    (get-in wm [:config :max-slots])
-                         current-turn (:turn-count wm)
-                         decayed      (decay-slot-map (:slots wm) factor current-turn)
-                         filtered     (prune-slot-map decayed threshold max-slots)]
-                     (assoc wm :slots filtered))))))
-	           (let [wm (session-wm sid)]
-	             (when (and wm
-	                        (> (long (:turn-count wm)) 3)
-	                        (detect-topic-shift? sid terms))
-	               (auto-segment! sid channel))
-	             (when wm
-	               (let [interval    (get-in wm [:config :topic-update-interval])
-	                     turns-since (- (long (:turn-count wm)) (long (:topic-turn wm)))]
-	                 (when (and interval (>= turns-since (long interval)))
-	                   (schedule-topic-update! sid))))))
-         (get-wm sid))))))
+  ([user-message session-id channel opts]
+   (run-wm-retrieval! user-message session-id channel opts)))
+
+(defn refresh-wm!
+  "Refresh retrieval-backed WM state during a running turn without creating a
+   new conversational turn. This re-runs retrieval against the current query
+   so memory writes from earlier tool activity become visible in later
+   iterations, while avoiding turn-count inflation, decay, and repeated
+   relevance boosting for already-present slots."
+  ([user-message session-id channel]
+   (refresh-wm! user-message session-id channel nil))
+  ([user-message session-id channel opts]
+   (run-wm-retrieval! user-message
+                      session-id
+                      channel
+                      (merge {:increment-turn? false
+                              :decay-slots? false
+                              :topic-maintenance? false
+                              :boost-existing? false
+                              :refresh-existing? true}
+                             opts))))
 
 ;; ============================================================================
 ;; Lifecycle
