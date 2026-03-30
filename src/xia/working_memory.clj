@@ -210,20 +210,27 @@ Rules:
                               (log/warn e "Working-memory search step failed; continuing with empty results"
                                         {:step step
                                          :session-id session-id})
-                              [])))]
-    (when (or (not (str/blank? fts-query))
-              (not (str/blank? semantic-query)))
-      {:nodes      (safe-search :nodes
-                                #(memory/search-nodes semantic-query :fts-query fts-query :top 10))
-       :facts      (safe-search :facts
-                                #(memory/search-facts semantic-query :fts-query fts-query :top 15))
-       :episodes   (safe-search :episodes
-                                #(memory/search-episodes semantic-query :fts-query fts-query :top 5))
-       :local-docs (safe-search :local-docs
-                                #(memory/search-local-docs local-doc-session-id
-                                                           semantic-query
-                                                           :fts-query fts-query
-                                                           :top 4))}))))
+                              [])))
+         search-steps   [[:nodes
+                          #(memory/search-nodes semantic-query :fts-query fts-query :top 10)]
+                         [:facts
+                          #(memory/search-facts semantic-query :fts-query fts-query :top 15)]
+                         [:episodes
+                          #(memory/search-episodes semantic-query :fts-query fts-query :top 5)]
+                         [:local-docs
+                          #(memory/search-local-docs local-doc-session-id
+                                                     semantic-query
+                                                     :fts-query fts-query
+                                                     :top 4)]]]
+     (when (or (not (str/blank? fts-query))
+               (not (str/blank? semantic-query)))
+       (let [search-futures (mapv (fn [[step f]]
+                                    [step (future (safe-search step f))])
+                                  search-steps)]
+         (into (array-map)
+               (map (fn [[step result-future]]
+                      [step @result-future]))
+               search-futures))))))
 
 ;; ============================================================================
 ;; Stage 3: Graph Expansion (spreading activation)

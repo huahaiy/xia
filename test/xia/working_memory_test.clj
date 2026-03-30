@@ -157,6 +157,33 @@
               :local-docs []}
              results)))))
 
+(deftest search-knowledge-runs-branches-in-parallel
+  (let [started     (atom #{})
+        timeouts    (atom #{})
+        all-started (promise)
+        timeout-ms  1000
+        mark-start! (fn [step]
+                      (let [steps (swap! started conj step)]
+                        (when (= 4 (count steps))
+                          (deliver all-started true))
+                        (when-not (deref all-started timeout-ms false)
+                          (swap! timeouts conj step))))
+        mk-search   (fn [step result]
+                      (fn [& _]
+                        (mark-start! step)
+                        result))]
+    (with-redefs [xia.memory/search-nodes      (mk-search :nodes [{:name "node"}])
+                  xia.memory/search-facts      (mk-search :facts [{:content "fact"}])
+                  xia.memory/search-episodes   (mk-search :episodes [{:summary "episode"}])
+                  xia.memory/search-local-docs (mk-search :local-docs [{:name "doc"}])]
+      (let [results (wm/search-knowledge (random-uuid) ["atlas"] "atlas")]
+        (is (= #{:nodes :facts :episodes :local-docs} @started))
+        (is (empty? @timeouts))
+        (is (= [{:name "node"}] (:nodes results)))
+        (is (= [{:content "fact"}] (:facts results)))
+        (is (= [{:summary "episode"}] (:episodes results)))
+        (is (= [{:name "doc"}] (:local-docs results)))))))
+
 (deftest expand-graph-bulk-loads-neighbors
   (let [seed-a   (th/seed-node! "SeedA" "concept")
         seed-b   (th/seed-node! "SeedB" "concept")
