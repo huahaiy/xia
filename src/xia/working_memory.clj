@@ -84,7 +84,9 @@
       (when sid
         (let [states @wm-atom]
           (when-let [wm (get states sid)]
-            (let [updated (f wm)]
+            (let [updated (-> (f wm)
+                              (assoc :prompt-cache-version
+                                     (inc (long (or (:prompt-cache-version wm) 0)))))]
               (reset! wm-atom (assoc states sid updated))
               updated)))))))
 
@@ -968,6 +970,7 @@ Rules:
       (let [wm {:session-id      sid
                 :topics          nil
                 :prev-topics     nil
+                :prompt-cache-version 0
                 :topic-shift-baseline nil
                 :pending-topic-shift nil
                 :autonomy-state  nil
@@ -1130,6 +1133,14 @@ Rules:
                                  :relevance      relevance}))
                          (sort-by :relevance > (:local-doc-refs wm)))
      :turn-count   (:turn-count wm)})))
+
+(defn prompt-cache-version
+  ([]
+   (prompt-cache-version nil))
+  ([session-id]
+   (if-let [wm (session-wm session-id)]
+     (long (or (:prompt-cache-version wm) 0))
+     ::no-working-memory)))
 
 ;; ============================================================================
 ;; Snapshot (crash-recovery)

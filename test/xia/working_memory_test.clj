@@ -26,6 +26,7 @@
           state (wm/create-wm! sid)]
       (is (= sid (:session-id state)))
       (is (= 0 (:turn-count state)))
+      (is (= 0 (wm/prompt-cache-version sid)))
       (is (= {} (:slots state)))
       (is (= [] (:episode-refs state)))
       (is (= [] (:local-doc-refs state)))
@@ -37,6 +38,16 @@
   (testing "clear-wm! resets to nil"
     (wm/clear-wm!)
     (is (nil? (wm/get-wm)))))
+
+(deftest prompt-cache-version-increments-on-wm-updates
+  (let [sid (random-uuid)]
+    (wm/create-wm! sid)
+    (is (= 0 (wm/prompt-cache-version sid)))
+    (#'xia.working-memory/update-session-wm! sid #(assoc % :topics "billing"))
+    (is (= 1 (wm/prompt-cache-version sid)))
+    (#'xia.working-memory/update-session-wm! sid #(assoc % :topics "calendar"))
+    (is (= 2 (wm/prompt-cache-version sid)))
+    (wm/clear-wm! sid)))
 
 (deftest test-autonomy-state-round-trips-through-working-memory
   (let [sid   (db/create-session! :terminal)

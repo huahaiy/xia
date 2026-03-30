@@ -756,7 +756,10 @@
       (let [first-result (#'xia.context/build-messages-data
                           sid
                           {:provider {:llm.provider/id :default}})
-            _ (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "calendar scheduling")
+            _ (swap! @#'xia.working-memory/wm-atom
+                     #(-> %
+                          (assoc-in [sid :topics] "calendar scheduling")
+                          (update-in [sid :prompt-cache-version] (fnil inc 0))))
             second-result (#'xia.context/build-messages-data
                            sid
                            {:provider {:llm.provider/id :default}
