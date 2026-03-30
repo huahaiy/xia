@@ -1049,6 +1049,10 @@
 
 (defn- tool-call-batches
   [prepared-calls]
+  ;; Only consecutive parallel-safe calls are grouped together. We preserve the
+  ;; original round order across safe/unsafe boundaries, so a sequence like
+  ;; [safe unsafe safe] remains three ordered batches rather than merging the
+  ;; two safe calls into one parallel group.
   (->> prepared-calls
        (partition-by :parallel?)
        (mapv (fn [calls]

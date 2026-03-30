@@ -915,22 +915,26 @@
            (let [recap-tokens (long (transduce (map #(estimate-tokens (:content %))) + 0 recap-prefix))
                  live-budget  (long-max 0 (- budget* recap-tokens))
                  min-keep     (long-min 4 msg-count)
-                 kept         (loop [idx (dec msg-count)
-                                     tokens 0
-                                     kept-count 0
-                                     acc []]
-                                (if (neg? idx)
-                                  acc
-                                  (let [msg       (nth live-history idx)
-                                        msg-tokens (long (estimate-tokens (:content msg)))
-                                        must-keep? (< kept-count min-keep)
-                                        keep?      (or must-keep?
-                                                       (<= (+ tokens msg-tokens) live-budget))]
-                                    (recur (dec idx)
-                                           (if keep? (+ tokens msg-tokens) tokens)
-                                           (if keep? (inc kept-count) kept-count)
-                                           (if keep? (conj acc msg) acc)))))]
-             (into recap-prefix (reverse kept)))))))))
+                 ;; Walk newest->oldest so we can preserve the most recent live
+                 ;; history under budget, but accumulate into a list so kept
+                 ;; messages remain in chronological order without a final
+                 ;; reverse pass.
+                 kept         (:kept
+                               (reduce (fn [{:keys [tokens kept-count kept] :as acc} msg]
+                                         (let [msg-tokens (long (estimate-tokens (:content msg)))
+                                               must-keep? (< kept-count min-keep)
+                                               keep?      (or must-keep?
+                                                              (<= (+ tokens msg-tokens) live-budget))]
+                                           (if keep?
+                                             {:tokens     (+ tokens msg-tokens)
+                                              :kept-count (inc kept-count)
+                                              :kept       (conj kept msg)}
+                                             acc)))
+                                       {:tokens 0
+                                        :kept-count 0
+                                        :kept '()}
+                                       (rseq live-history)))]
+             (into recap-prefix kept))))))))
 
 (defn- recent-history-message-limit
   [opts]

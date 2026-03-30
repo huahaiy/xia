@@ -1548,6 +1548,23 @@
         (is (= ["web-fetch" "web-search"]
                (mapv #(get (json/read-json (:content %)) "tool") results)))))))
 
+(deftest tool-call-batches-only-group-consecutive-parallel-safe-calls
+  (let [prepared-calls [{:func-name "web-search-1" :parallel? true}
+                        {:func-name "browser-click" :parallel? false}
+                        {:func-name "web-search-2" :parallel? true}
+                        {:func-name "web-fetch" :parallel? true}
+                        {:func-name "browser-type" :parallel? false}]]
+    (is (= [{:parallel? true
+             :calls [{:func-name "web-search-1" :parallel? true}]}
+            {:parallel? false
+             :calls [{:func-name "browser-click" :parallel? false}]}
+            {:parallel? true
+             :calls [{:func-name "web-search-2" :parallel? true}
+                     {:func-name "web-fetch" :parallel? true}]}
+            {:parallel? false
+             :calls [{:func-name "browser-type" :parallel? false}]}]
+           (#'agent/tool-call-batches prepared-calls)))))
+
 (deftest stop-worker-cancels-registered-parallel-tool-futures
   (let [session-id    (db/create-session! :terminal)
         worker-token  (Object.)

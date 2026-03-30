@@ -783,16 +783,15 @@ Rules:
              overlap          (count (clojure.set/intersection prev-words current-words))
              prev-count       (max 1 (count prev-words))
              current-count    (max 1 (count current-words))
+             max-count        (max prev-count current-count)
              union-count      (max 1 (count (clojure.set/union prev-words current-words)))
-             prev-coverage    (/ (double overlap) (double prev-count))
-             current-coverage (/ (double overlap) (double current-count))
+             max-coverage     (/ (double overlap) (double max-count))
              jaccard          (/ (double overlap) (double union-count))]
          (and (seq prev-words)
               (seq current-words)
               (or (zero? overlap)
                   (and (< jaccard 0.15)
-                       (< prev-coverage 0.34)
-                       (< current-coverage 0.34)))))))))
+                       (< max-coverage 0.34)))))))))
 
 (defn- should-auto-segment?
   [session-id search-terms]

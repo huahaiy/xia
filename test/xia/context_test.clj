@@ -472,6 +472,26 @@
         (ctx/compact-history msgs 100 {:workload :history-compaction})
         (is (= [:workload :history-compaction] @opts-seen)))))
 
+  (testing "fallback trimming without summary preserves chronological order"
+    (let [msgs   (vec (for [i (range 8)]
+                        {:role    (if (even? i) :user :assistant)
+                         :content (str "message-" i)}))
+          result (with-redefs [xia.context/estimate-tokens
+                               (fn [text]
+                                 (case text
+                                   "message-0" 10
+                                   "message-1" 10
+                                   "message-2" 10
+                                   "message-3" 10
+                                   "message-4" 10
+                                   "message-5" 10
+                                   "message-6" 80
+                                   "message-7" 10
+                                   0))]
+                   (ctx/compact-history msgs 100 {:allow-summary? false}))]
+      (is (= ["message-4" "message-5" "message-6" "message-7"]
+             (mapv :content result)))))
+
   (testing "includes tool usage and results in the compaction transcript"
     (let [tool-calls [{"id" "call_1"
                        "function" {"name" "web-search"

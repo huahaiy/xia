@@ -566,6 +566,19 @@
       (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "discussing Clojure web frameworks")
       (is (true? (wm/detect-topic-shift? sid ["recipe" "pasta" "cooking"]))))
 
+    (testing "shift when a tiny prior topic is diluted by a much larger new topic bag"
+      (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "clojure")
+      (is (true? (wm/detect-topic-shift? sid ["clojure"
+                                              "pasta"
+                                              "cooking"
+                                              "sauces"
+                                              "recipes"
+                                              "kitchen"
+                                              "baking"
+                                              "desserts"
+                                              "fermentation"
+                                              "nutrition"]))))
+
     (testing "requires confirmation before auto-segmenting on lexical mismatch"
       (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
                                                       :topics "discussing Clojure web frameworks"
