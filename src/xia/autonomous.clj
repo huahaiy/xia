@@ -11,6 +11,7 @@
 (def ^:private max-agenda-items 8)
 (def ^:private max-agenda-item-chars 160)
 (def ^:private max-stack-depth 8)
+(def ^:private normalized-state-meta-key ::normalized-state)
 (def ^:private intent-marker "ACTION_INTENT_JSON:")
 (def ^:private control-marker "AUTONOMOUS_STATUS_JSON:")
 
@@ -409,23 +410,37 @@
                            :progress-status :pending}
                           default-title)]))))
 
+(defn- normalized-state?
+  [state]
+  (true? (some-> state meta normalized-state-meta-key)))
+
+(defn- mark-normalized-state
+  [state]
+  (if (instance? clojure.lang.IObj state)
+    (vary-meta state assoc normalized-state-meta-key true)
+    state))
+
 (defn initial-state
   [goal]
   (let [goal* (truncate-field goal)]
-    {:goal  goal*
-     :stack (normalize-stack goal* nil)}))
+    (mark-normalized-state
+     {:goal  goal*
+      :stack (normalize-stack goal* nil)})))
 
 (defn normalize-state
   [state]
-  (let [raw-stack (or (:stack state)
-                      (get state "stack"))
-        goal*     (truncate-field (or (:goal state)
-                                      (get state "goal")
-                                      (some-> raw-stack peek :title)
-                                      (some-> raw-stack peek (get "title"))))
-        stack*    (normalize-stack goal* raw-stack)]
-    {:goal  goal*
-     :stack stack*}))
+  (if (normalized-state? state)
+    state
+    (let [raw-stack (or (:stack state)
+                        (get state "stack"))
+          goal*     (truncate-field (or (:goal state)
+                                        (get state "goal")
+                                        (some-> raw-stack peek :title)
+                                        (some-> raw-stack peek (get "title"))))
+          stack*    (normalize-stack goal* raw-stack)]
+      (mark-normalized-state
+       {:goal  goal*
+        :stack stack*}))))
 
 (defn prepare-turn-state
   [state user-message]
@@ -445,9 +460,10 @@
 
 (defn current-frame
   [state]
-  (peek (:stack (if (map? state)
-                  (normalize-state state)
-                  (initial-state nil)))))
+  (peek (:stack (cond
+                  (normalized-state? state) state
+                  (map? state)             (normalize-state state)
+                  :else                    (initial-state nil)))))
 
 (defn- suspend-progress-status
   [status]
@@ -540,8 +556,9 @@
 
                         :stay
                         (replace-top stack merged-tip))]
-    {:goal  goal
-     :stack next-stack}))
+    (mark-normalized-state
+     {:goal  goal
+      :stack next-stack})))
 
 (defn working-memory-message
   [{:keys [goal stack] :as state} iteration max-iterations]

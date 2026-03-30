@@ -252,3 +252,18 @@
            (get-in state [:stack 0 :progress-status])))
     (is (= [{:item "Wait for invoice ids" :status :resumable}]
            (get-in state [:stack 0 :agenda])))))
+
+(deftest current-frame-skips-renormalizing-normalized-state
+  (let [state          (autonomous/normalize-state
+                        {:goal "Handle billing emails"
+                         :stack [{:title "Handle billing emails"
+                                  :progress-status :in-progress}]})
+        normalize-calls (atom 0)
+        orig-normalize  @#'xia.autonomous/normalize-state]
+    (with-redefs [xia.autonomous/normalize-state
+                  (fn [value]
+                    (swap! normalize-calls inc)
+                    (orig-normalize value))]
+      (is (= "Handle billing emails"
+             (:title (autonomous/current-frame state))))
+      (is (zero? @normalize-calls)))))
