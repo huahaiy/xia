@@ -805,7 +805,13 @@
                             "- tool: the tool you expect to call next, or empty when none.\n"
                             "- tool_args_summary: short human-readable summary of the expected tool arguments.\n"
                             "- Emit this intent object even when you will immediately call tools.\n\n"
-                            "At the very end of every response, append the literal marker "
+                            "If you request any tool calls in a response, do not append "
+                            control-marker
+                            " yet. In tool-requesting responses, emit the intent object but leave the control envelope out.\n"
+                            "Append "
+                            control-marker
+                            " only on the final assistant response of the iteration, after all needed tool rounds are complete and you are not requesting more tools.\n"
+                            "At the very end of that final response, append the literal marker "
                             control-marker
                             " followed by one valid JSON object with this exact shape:\n"
                             "{\"status\":\"continue|complete\",\"summary\":\"...\",\"next_step\":\"...\",\"reason\":\"...\",\"goal_complete\":true|false,\"current_focus\":\"...\",\"stack_action\":\"stay|push|pop|replace|clear\",\"progress_status\":\"not_started|pending|in_progress|paused|resumable|diverged|blocked|complete\",\"agenda\":[{\"item\":\"...\",\"status\":\"pending|in_progress|paused|resumable|diverged|completed|blocked|skipped\"}]}\n"
@@ -842,6 +848,9 @@
           "Start the first assistant response in this iteration with "
           intent-marker
           "{...} before any explanation or tool call.\n"
+          "If this response requests tools, do not append "
+          control-marker
+          " yet. Append it only on the final response of the iteration when you are not requesting more tools.\n"
           (when-let [input (truncate-field incoming-message)]
             (str "\nNew input for this turn:\n"
                  input

@@ -110,6 +110,13 @@
     (is (= summary (:summary control)))
     (is (= next-step (:next-step control)))))
 
+(deftest controller-system-message-reserves-control-envelope-for-final-non-tool-response
+  (let [content (:content (autonomous/controller-system-message))]
+    (is (str/includes? content
+                       "If you request any tool calls in a response, do not append AUTONOMOUS_STATUS_JSON: yet."))
+    (is (str/includes? content
+                       "Append AUTONOMOUS_STATUS_JSON: only on the final assistant response of the iteration"))))
+
 (deftest initial-state-preserves-a-long-goal
   (let [goal  (str "Handle the multi-account billing remediation workflow for the March support backlog, including invoice verification, refund eligibility review, payment retry checks, customer reply drafting, and the follow-up notes needed for finance escalation when ownership records disagree across systems.")
         state (autonomous/initial-state goal)]
