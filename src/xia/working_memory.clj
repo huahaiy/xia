@@ -388,15 +388,20 @@ Rules:
                :local-doc-refs merged-doc-refs)))))
 
 (defn- decay-slot-map
-  [slots factor]
-  (reduce-kv
-    (fn [acc eid slot]
-	      (assoc acc eid
-	             (if (:pinned? slot)
-	               slot
-	               (update slot :relevance #(* (double %) (double factor))))))
-    {}
-    slots))
+  ([slots factor]
+   (decay-slot-map slots factor nil))
+  ([slots factor current-turn]
+   (reduce-kv
+     (fn [acc eid slot]
+       (assoc acc eid
+              (if (or (:pinned? slot)
+                      (and (some? current-turn)
+                           (= (long current-turn)
+                              (long (or (:added-turn slot) -1)))))
+                slot
+                (update slot :relevance #(* (double %) (double factor))))))
+     {}
+     slots)))
 
 (defn- prune-slot-map
   [slots threshold max-slots]
@@ -416,10 +421,11 @@ Rules:
    (run-session-op! session-id
      (fn [sid]
        (update-session-wm! sid
-        (fn [wm]
-          (let [factor (get-in wm [:config :decay-factor])]
-            (update wm :slots
-                    #(decay-slot-map % factor)))))))))
+         (fn [wm]
+           (let [factor       (get-in wm [:config :decay-factor])
+                 current-turn (:turn-count wm)]
+             (update wm :slots
+                     #(decay-slot-map % factor current-turn)))))))))
 
 (defn evict-slots!
   "Remove slots below the eviction threshold. Enforce max capacity."
@@ -635,11 +641,12 @@ Rules:
                (merge-results! sid results expanded)
                (update-session-wm! sid
                  (fn [wm]
-                   (let [factor    (get-in wm [:config :decay-factor])
-                         threshold (get-in wm [:config :eviction-threshold])
-                         max-slots (get-in wm [:config :max-slots])
-                         decayed   (decay-slot-map (:slots wm) factor)
-                         filtered  (prune-slot-map decayed threshold max-slots)]
+                   (let [factor       (get-in wm [:config :decay-factor])
+                         threshold    (get-in wm [:config :eviction-threshold])
+                         max-slots    (get-in wm [:config :max-slots])
+                         current-turn (:turn-count wm)
+                         decayed      (decay-slot-map (:slots wm) factor current-turn)
+                         filtered     (prune-slot-map decayed threshold max-slots)]
                      (assoc wm :slots filtered))))))
 	           (let [wm (session-wm sid)]
 	             (when (and wm

@@ -1663,6 +1663,7 @@
                            :message "Preparing response"
                            :iteration (:iteration execution-context)})
               {:response response
+               :parsed-response parsed-response
                :used-fact-eids used-fact-eids})))))))
 
 (defn process-message
@@ -1758,7 +1759,7 @@
                                    "Understanding the goal and preparing the first plan."
                                    "Resuming the autonomous loop with the updated plan.")
                         :session-id session-id})
-                      (let [{:keys [response used-fact-eids]}
+                      (let [{:keys [response parsed-response used-fact-eids]}
                             (run-supervised-agent-iteration session-id
                                                             channel
                                                             resource-session-id
@@ -1773,8 +1774,7 @@
                                                             max-tool-rounds*
                                                             autonomy-state
                                                             max-iterations*)
-                            parsed (autonomous/parse-controller-response
-                                    (response-content response))
+                            parsed parsed-response
                             control (:control parsed)
                             summary (autonomous-iteration-summary parsed)
                             fact-eids* (merge-fact-eids fact-eids used-fact-eids)

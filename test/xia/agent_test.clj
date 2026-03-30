@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.tool :as tool]
@@ -69,6 +70,28 @@
              (last @statuses)))
       (finally
         (prompt/register-status! :terminal nil)))))
+
+(deftest process-message-parses-the-final-controller-response-once
+  (let [session-id   (db/create-session! :terminal)
+        parse-calls  (atom 0)
+        parse-fn     autonomous/parse-controller-response]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/parse-controller-response
+                  (fn [response]
+                    (swap! parse-calls inc)
+                    (parse-fn response))
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" "All set."})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (is (= 1 @parse-calls))))
 
 (deftest process-message-persists-llm-provenance-and-audit-events
   (let [session-id (db/create-session! :terminal)

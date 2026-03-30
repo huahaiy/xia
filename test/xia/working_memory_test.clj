@@ -258,6 +258,21 @@
 
     (wm/clear-wm! sid)))
 
+(deftest test-fresh-slots-do-not-decay-on-the-turn-they-were-added
+  (let [node-eid        (th/seed-node! "Fresh" "concept")
+        decay-slot-map  #'xia.working-memory/decay-slot-map
+        slots           {node-eid {:node-eid node-eid
+                                   :name "Fresh"
+                                   :relevance 0.8
+                                   :pinned? false
+                                   :added-turn 3}}
+        same-turn       (decay-slot-map slots 0.85 3)
+        later-turn      (decay-slot-map slots 0.85 4)]
+    (is (= 0.8
+           (double (get-in same-turn [node-eid :relevance]))))
+    (is (= (* 0.8 0.85)
+           (double (get-in later-turn [node-eid :relevance]))))))
+
 (deftest test-refresh-boost-does-not-pin-slot
   (let [node-eid        (th/seed-node! "Sticky" "concept")
         merge-slot      #'xia.working-memory/merge-node-into-slot
@@ -497,6 +512,28 @@
         (is (= {} (:slots state)))
         (is (= [] (:local-doc-refs state)))))
     (wm/clear-wm! sid)))
+
+(deftest update-wm-does-not-immediately-decay-fresh-slots
+  (let [sid      (random-uuid)
+        node-eid (th/seed-node! "Fresh slot" "concept")]
+    (db/transact! [{:session/id sid :session/channel :terminal :session/active? true}])
+    (wm/create-wm! sid)
+    (try
+      (with-redefs [xia.memory/search-nodes      (fn [_semantic-query & _opts]
+                                                   [{:eid node-eid
+                                                     :name "Fresh slot"
+                                                     :type :concept}])
+                    xia.memory/search-facts      (constantly [])
+                    xia.memory/search-episodes   (constantly [])
+                    xia.memory/search-local-docs (constantly [])
+                    xia.memory/connected-node-summaries (fn [_matched-eids] nil)]
+        (let [state (wm/update-wm! "fresh" sid :terminal)
+              slot  (get-in state [:slots node-eid])]
+          (is (= 1 (:turn-count state)))
+          (is (= 1 (:added-turn slot)))
+          (is (= 0.8 (double (:relevance slot))))))
+      (finally
+        (wm/clear-wm! sid)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Session serialization
