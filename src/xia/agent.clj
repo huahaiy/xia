@@ -2213,8 +2213,22 @@
                 :error (.getMessage t)
                 :error-detail (throwable-detail t)}))
       (finally
-        (db/set-session-active! child-session-id false)
-        (wm/clear-wm! child-session-id)))))
+        (try
+          (db/set-session-active! child-session-id false)
+          (catch Throwable t
+            (log/warn t "Failed to deactivate branch worker session"
+                      (merge {:task task
+                              :session-id child-session-id
+                              :parent-session-id parent-session-id}
+                             branch-trace))))
+        (try
+          (wm/clear-wm! child-session-id)
+          (catch Throwable t
+            (log/warn t "Failed to clear branch worker working memory"
+                      (merge {:task task
+                              :session-id child-session-id
+                              :parent-session-id parent-session-id}
+                             branch-trace))))))))
 
 (defn run-branch-tasks
   "Run independent branch tasks in separate worker sessions with isolated

@@ -1579,6 +1579,46 @@
                               [:type :timeout-ms :task]))))
         (is (= true (deref stopped 1000 ::timeout)))))))
 
+(deftest run-branch-task-cleans-up-when-working-memory-creation-fails
+  (let [parent-session-id (db/create-session! :terminal)
+        deactivated       (atom [])
+        cleared           (atom [])]
+    (binding [prompt/*interaction-context* {:channel :terminal}]
+      (with-redefs [xia.working-memory/create-wm! (fn [_session-id]
+                                                    (throw (ex-info "wm boom" {})))
+                    xia.db/set-session-active!  (fn [session-id active?]
+                                                  (swap! deactivated conj [session-id active?]))
+                    xia.working-memory/clear-wm! (fn [session-id]
+                                                   (swap! cleared conj session-id))]
+        (let [result (#'xia.agent/run-branch-task*
+                      parent-session-id
+                      {:task "site a" :prompt "inspect site a"}
+                      {:channel :terminal})]
+          (is (= "failed" (:status result)))
+          (is (= "wm boom" (:error result)))
+          (is (= [[(:session-id result) false]] @deactivated))
+          (is (= [(:session-id result)] @cleared)))))))
+
+(deftest run-branch-task-clears-wm-even-when-session-deactivation-fails
+  (let [parent-session-id (db/create-session! :terminal)
+        deactivated       (atom [])
+        cleared           (atom [])]
+    (binding [prompt/*interaction-context* {:channel :terminal}]
+      (with-redefs [xia.agent/process-message     (fn [_session-id _message & _]
+                                                    "branch result")
+                    xia.db/set-session-active!  (fn [session-id active?]
+                                                  (swap! deactivated conj [session-id active?])
+                                                  (throw (ex-info "deactivate boom" {})))
+                    xia.working-memory/clear-wm! (fn [session-id]
+                                                   (swap! cleared conj session-id))]
+        (let [result (#'xia.agent/run-branch-task*
+                      parent-session-id
+                      {:task "site a" :prompt "inspect site a"}
+                      {:channel :terminal})]
+          (is (= "completed" (:status result)))
+          (is (= [[(:session-id result) false]] @deactivated))
+          (is (= [(:session-id result)] @cleared)))))))
+
 (deftest execute-tool-calls-runs-independent-batches-in-parallel
   (let [active     (atom 0)
         max-active (atom 0)
