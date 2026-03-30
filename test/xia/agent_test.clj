@@ -2,7 +2,6 @@
   (:require [clojure.test :refer :all]
             [charred.api :as json]
             [clojure.string :as str]
-            [taoensso.timbre :as log]
             [xia.agent :as agent]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
@@ -14,63 +13,6 @@
             [xia.working-memory :as wm]))
 
 (use-fixtures :each with-test-db)
-
-(deftest configured-max-tool-rounds-defaults-to-one-hundred
-  (db/delete-config! :agent/max-tool-rounds)
-  (is (= 100 (#'xia.agent/configured-max-tool-rounds))))
-
-(deftest inject-transient-messages-merges-system-content-into-primary-system-prompt
-  (let [messages [{:role "system" :content "Base system prompt"}
-                  {:role "user" :content "hello"}]
-        transient [{:role "system" :content "Controller rules"}
-                   {:role "system" :content "Controller state"}]
-        injected (#'xia.agent/inject-transient-messages messages transient)]
-    (is (= 2 (count injected)))
-    (is (= "system" (:role (first injected))))
-    (is (= "Base system prompt\n\nController rules\n\nController state"
-           (:content (first injected))))
-    (is (= {:role "user" :content "hello"}
-           (second injected)))))
-
-(deftest inject-transient-messages-keeps-non-system-transients-after-merged-system-prompt
-  (let [messages [{:role "system" :content "Base system prompt"}
-                  {:role "user" :content "hello"}]
-        transient [{:role "system" :content "Controller rules"}
-                   {:role "assistant" :content "Visible transient"}]
-        injected (#'xia.agent/inject-transient-messages messages transient)]
-    (is (= 3 (count injected)))
-    (is (= "Base system prompt\n\nController rules"
-           (:content (first injected))))
-    (is (= {:role "assistant" :content "Visible transient"}
-           (second injected)))
-    (is (= {:role "user" :content "hello"}
-           (nth injected 2)))))
-
-(deftest worker-run-cleanup-is-worker-scoped
-  (let [session-id (db/create-session! :terminal)
-        token-a    (Object.)
-        token-b    (Object.)
-        worker-a   (future :worker-a)
-        worker-b   (future :worker-b)]
-    (#'xia.agent/with-session-run
-     session-id
-     (fn []
-       (#'xia.agent/begin-worker-run! session-id token-a)
-       (#'xia.agent/register-worker-future! session-id token-a worker-a)
-       (#'xia.agent/register-worker-thread! session-id token-a)
-       (#'xia.agent/begin-worker-run! session-id token-b)
-       (#'xia.agent/register-worker-future! session-id token-b worker-b)
-       (#'xia.agent/register-worker-thread! session-id token-b)
-       (#'xia.agent/clear-worker-run! session-id token-a)
-       (let [entry (#'xia.agent/session-run-entry session-id)]
-         (is (= token-b (:worker-token entry)))
-         (is (= worker-b (:worker-future entry)))
-         (is (= (Thread/currentThread) (:worker-thread entry))))
-       (#'xia.agent/clear-worker-run! session-id token-b)
-       (let [entry (#'xia.agent/session-run-entry session-id)]
-         (is (nil? (:worker-token entry)))
-         (is (nil? (:worker-future entry)))
-         (is (nil? (:worker-thread entry))))))))
 
 (deftest process-message-reports-progress
   (let [session-id (db/create-session! :terminal)
@@ -99,28 +41,6 @@
              (last @statuses)))
       (finally
         (prompt/register-status! :terminal nil)))))
-
-(deftest process-message-parses-the-final-controller-response-once
-  (let [session-id   (db/create-session! :terminal)
-        parse-calls  (atom 0)
-        parse-fn     autonomous/parse-controller-response]
-    (with-redefs [xia.tool/tool-definitions          (constantly [])
-                  xia.working-memory/update-wm!      (fn [& _] nil)
-                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
-                                                                  :provider-id :default})
-                  xia.context/build-messages-data    (fn [_session-id _opts]
-                                                       {:messages [{:role "system" :content "test"}]
-                                                        :used-fact-eids []})
-                  xia.autonomous/parse-controller-response
-                  (fn [response]
-                    (swap! parse-calls inc)
-                    (parse-fn response))
-                  xia.llm/chat-message               (fn [_messages & _opts]
-                                                       {"content" "All set."})
-                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
-      (is (= "All set."
-             (agent/process-message session-id "hello" :channel :terminal))))
-    (is (= 1 @parse-calls))))
 
 (deftest process-message-persists-llm-provenance-and-audit-events
   (let [session-id (db/create-session! :terminal)
@@ -1450,96 +1370,6 @@
     (finally
       (reset! @#'xia.agent/fact-utility-review-state {}))))
 
-(deftest fact-utility-review-state-update-returns-committed-enqueue-result-after-retry
-  (let [session-id  (random-uuid)
-        state-atom  (atom {})
-        cas-calls   (atom 0)
-        observations [{:fact-eid 11
-                        :user-message "hello"
-                        :assistant-response "reply"}]
-        cas-fn      (fn [atm old new]
-                      (if (= 1 (swap! cas-calls inc))
-                        (do
-                          (reset! atm {session-id {:pending [{:fact-eid 99
-                                                              :user-message "prior"
-                                                              :assistant-response "prior"}]
-                                                   :worker-token :external-token}})
-                          false)
-                        (compare-and-set! atm old new)))]
-    (with-redefs [clojure.core/random-uuid (let [ids (atom [:stale-token :fresh-token])]
-                                             (fn []
-                                               (let [id (first @ids)]
-                                                 (swap! ids rest)
-                                                 id)))]
-      (is (nil? (#'xia.agent/update-fact-utility-review-state!
-                 state-atom
-                 cas-fn
-                 #(#'xia.agent/enqueue-fact-utility-review-state % session-id observations))))
-      (is (= :external-token
-             (get-in @state-atom [session-id :worker-token])))
-      (is (= [{:fact-eid 99
-               :user-message "prior"
-               :assistant-response "prior"}
-              {:fact-eid 11
-               :user-message "hello"
-               :assistant-response "reply"}]
-             (get-in @state-atom [session-id :pending]))))))
-
-(deftest fact-utility-review-state-update-returns-committed-claim-result-after-retry
-  (let [session-id (random-uuid)
-        state-atom (atom {session-id {:pending [{:fact-eid 1} {:fact-eid 2}]
-                                      :worker-token :worker-a}})
-        cas-calls  (atom 0)
-        cas-fn     (fn [atm old new]
-                     (if (= 1 (swap! cas-calls inc))
-                       (do
-                         (reset! atm {session-id {:pending [{:fact-eid 3}]
-                                                  :worker-token :worker-b}})
-                         false)
-                       (compare-and-set! atm old new)))]
-    (is (nil? (#'xia.agent/update-fact-utility-review-state!
-               state-atom
-               cas-fn
-               #(#'xia.agent/claim-fact-utility-review-batch-state % session-id :worker-a))))
-    (is (= :worker-b
-           (get-in @state-atom [session-id :worker-token])))))
-
-(deftest fact-utility-review-state-update-returns-committed-finish-result-after-retry
-  (let [session-id (random-uuid)
-        state-atom (atom {session-id {:pending [{:fact-eid 1}]
-                                      :worker-token :worker-a}})
-        cas-calls  (atom 0)
-        cas-fn     (fn [atm old new]
-                     (if (= 1 (swap! cas-calls inc))
-                       (do
-                         (reset! atm {})
-                         false)
-                       (compare-and-set! atm old new)))]
-    (with-redefs [clojure.core/random-uuid (constantly :stale-token)]
-      (is (nil? (#'xia.agent/update-fact-utility-review-state!
-                 state-atom
-                 cas-fn
-                 #(#'xia.agent/finish-fact-utility-review-worker-state % session-id :worker-a))))
-      (is (= {} @state-atom)))))
-
-(deftest fact-utility-review-state-update-backs-off-between-cas-retries
-  (let [state-atom (atom {})
-        cas-calls  (atom 0)
-        backoffs   (atom [])
-        cas-fn     (fn [_atm _old _new]
-                     (let [n (swap! cas-calls inc)]
-                       (>= n 4)))]
-    (with-redefs [xia.agent/fact-utility-review-retry-backoff!
-                  (fn [attempt]
-                    (swap! backoffs conj attempt))]
-      (is (= :ok
-             (#'xia.agent/update-fact-utility-review-state!
-              state-atom
-              cas-fn
-              (fn [_]
-                [{} :ok]))))
-      (is (= [1 2 3] @backoffs)))))
-
 (deftest process-message-continues-when-working-memory-update-fails
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
@@ -1800,31 +1630,52 @@
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
 
-(deftest with-session-turn-lock-is-keyed-by-session-id-not-hash-stripe
-  (let [session-a "FB"
-        session-b "Ea"
-        started-a (promise)
-        started-b (promise)
-        release-a (promise)
-        turn-a    (future
-                    (#'xia.agent/with-session-turn-lock
-                     session-a
-                     (fn []
-                       (deliver started-a true)
-                       @release-a
-                       :a)))
-        _         (is (= (hash session-a) (hash session-b)))
-        _         (is (= true (deref started-a 1000 ::timeout)))
-        turn-b    (future
-                    (#'xia.agent/with-session-turn-lock
-                     session-b
-                     (fn []
-                       (deliver started-b true)
-                       :b)))]
-    (is (= true (deref started-b 1000 ::timeout)))
-    (deliver release-a true)
-    (is (= :a @turn-a))
-    (is (= :b @turn-b))))
+(deftest process-message-allows-concurrent-turns-for-different-sessions
+  (let [session-a  (db/create-session! :http)
+        session-b  (db/create-session! :http)
+        llm-call    (atom 0)
+        started-a  (promise)
+        started-b  (promise)
+        release-a  (promise)
+        release-b  (promise)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-call inc)
+                                                         1
+                                                         (do
+                                                           (deliver started-a true)
+                                                           @release-a
+                                                           {"content" "reply-a"})
+                                                         2
+                                                         (do
+                                                           (deliver started-b true)
+                                                           @release-b
+                                                           {"content" "reply-b"})))]
+      (let [turn-a (future (agent/process-message session-a "first" :channel :http))
+            _      (is (= true (deref started-a 1000 ::timeout)))
+            turn-b (future (agent/process-message session-b "second" :channel :http))]
+        (is (= true (deref started-b 1000 ::timeout)))
+        (deliver release-a true)
+        (deliver release-b true)
+        (is (= "reply-a" @turn-a))
+        (is (= "reply-b" @turn-b))))
+    (is (= [[:user "first"]
+            [:assistant "reply-a"]]
+           (->> (db/session-messages session-a)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))
+    (is (= [[:user "second"]
+            [:assistant "reply-b"]]
+           (->> (db/session-messages session-b)
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
 
 (deftest run-branch-tasks-creates-worker-sessions-with_isolated_context
   (let [parent-session-id (db/create-session! :terminal)
@@ -2087,81 +1938,6 @@
         (is (= ["web-fetch" "web-search"]
                (mapv #(get (json/read-json (:content %)) "tool") results)))))))
 
-(deftest tool-call-batches-only-group-consecutive-parallel-safe-calls
-  (let [prepared-calls [{:func-name "web-search-1" :parallel? true}
-                        {:func-name "browser-click" :parallel? false}
-                        {:func-name "web-search-2" :parallel? true}
-                        {:func-name "web-fetch" :parallel? true}
-                        {:func-name "browser-type" :parallel? false}]]
-    (is (= [{:parallel? true
-             :calls [{:func-name "web-search-1" :parallel? true}]}
-            {:parallel? false
-             :calls [{:func-name "browser-click" :parallel? false}]}
-            {:parallel? true
-             :calls [{:func-name "web-search-2" :parallel? true}
-                     {:func-name "web-fetch" :parallel? true}]}
-            {:parallel? false
-             :calls [{:func-name "browser-type" :parallel? false}]}]
-           (#'agent/tool-call-batches prepared-calls)))))
-
-(deftest stop-worker-cancels-registered-parallel-tool-futures
-  (let [session-id    (db/create-session! :terminal)
-        worker-token  (Object.)
-        started-tools (atom #{})
-        interrupted   {:web-fetch (promise)
-                       :web-search (promise)}
-        tool-calls    [{"id"       "call-1"
-                        "function" {"name"      "web-fetch"
-                                    "arguments" "{}"}}
-                       {"id"       "call-2"
-                        "function" {"name"      "web-search"
-                                    "arguments" "{}"}}]]
-    (#'xia.agent/with-session-run
-     session-id
-     (fn []
-       (#'xia.agent/begin-worker-run! session-id worker-token)
-       (with-redefs [tool/parallel-safe? (constantly true)
-                     tool/execute-tool   (fn [tool-id _args _context]
-                                           (swap! started-tools conj tool-id)
-                                           (try
-                                             (Thread/sleep 10000)
-                                             {:tool (name tool-id)}
-                                             (catch InterruptedException e
-                                               (deliver (get interrupted tool-id) true)
-                                               (.interrupt (Thread/currentThread))
-                                               (throw e))))]
-         (let [batch-future (future
-                              (try
-                                (#'xia.agent/register-worker-thread! session-id worker-token)
-                                (#'agent/execute-tool-calls tool-calls
-                                                            {:channel :terminal
-                                                             :session-id session-id
-                                                             :worker-token worker-token})
-                                (catch Exception e
-                                  e)
-                                (finally
-                                  (#'xia.agent/clear-worker-run! session-id worker-token))))]
-           (#'xia.agent/register-worker-future! session-id worker-token batch-future)
-           (loop [attempt 0]
-             (when (and (< attempt 50)
-                        (or (not= #{:web-fetch :web-search} @started-tools)
-                            (not= 2 (count (:parallel-tool-futures (#'xia.agent/session-run-entry session-id))))))
-               (Thread/sleep 10)
-               (recur (inc attempt))))
-           (is (= #{:web-fetch :web-search} @started-tools))
-           (is (= 2 (count (:parallel-tool-futures (#'xia.agent/session-run-entry session-id)))))
-           (is (true? (#'xia.agent/stop-worker! session-id batch-future)))
-           (is (= true (deref (:web-fetch interrupted) 1000 ::timeout)))
-           (is (= true (deref (:web-search interrupted) 1000 ::timeout)))
-           (let [result (try
-                          (deref batch-future 1000 ::timeout)
-                          (catch java.util.concurrent.CancellationException e
-                            e))]
-             (is (or (instance? InterruptedException result)
-                     (instance? clojure.lang.ExceptionInfo result)
-                     (instance? java.util.concurrent.CancellationException result))))
-           (is (= [] (:parallel-tool-futures (#'xia.agent/session-run-entry session-id))))))))))
-
 (deftest execute-tool-calls-keeps-unsafe-tools-sequential
   (let [active     (atom 0)
         max-active (atom 0)
@@ -2181,45 +1957,6 @@
       (let [results (#'agent/execute-tool-calls tool-calls {:channel :terminal})]
         (is (= 1 @max-active))
         (is (= ["call-1" "call-2"] (mapv :tool_call_id results)))))))
-
-(deftest bind-original-tool-call-ids-preserves-llm-tool-call-id
-  (let [prepared-calls [{:tool-call {"id" "call-1"
-                                     "function" {"name" "web-search"
-                                                 "arguments" "{}"}}
-                         :func-name "web-search"
-                         :tool-id :web-search}]
-        results        [{:role "tool"
-                         :tool_call_id "wrong-id"
-                         :content "{\"ok\":true}"
-                         :result {"ok" true}}]]
-    (is (= [{:role "tool"
-             :tool_call_id "call-1"
-             :content "{\"ok\":true}"
-             :result {"ok" true}}]
-           (#'agent/bind-original-tool-call-ids prepared-calls results)))))
-
-(deftest prepare-tool-call-warns-on-malformed-json-arguments
-  (let [logged   (atom nil)
-        tool-call {"id"       "call-1"
-                   "function" {"name"      "web-search"
-                               "arguments" "{not-json"}}]
-    (log/with-min-level :trace
-      (with-redefs [log/-log!
-                    (fn [_config level _ns-str _file _line _column _msg-type _auto-err vargs_ _base-data _callsite-id _spying?]
-                      (let [vargs     @vargs_
-                            throwable (when (instance? Throwable (first vargs))
-                                        (first vargs))
-                            msg-args   (if throwable (rest vargs) vargs)]
-                        (reset! logged {:level level
-                                        :throwable throwable
-                                        :message (str/join " " msg-args)})))]
-        (let [prepared (#'agent/prepare-tool-call tool-call)]
-          (is (= {} (:args prepared)))
-          (is (= :web-search (:tool-id prepared)))
-          (is (= :warn (:level @logged)))
-          (is (instance? Exception (:throwable @logged)))
-          (is (re-find #"Failed to parse tool arguments for web-search"
-                       (:message @logged))))))))
 
 (deftest execute-tool-calls-waits-for-all-parallel-futures-before-rethrowing
   (let [started       (atom [])

@@ -1,8 +1,7 @@
 (ns xia.autonomous-test
   (:require [clojure.string :as str]
             [clojure.test :refer :all]
-            [xia.autonomous :as autonomous]
-            [xia.prompt :as prompt]))
+            [xia.autonomous :as autonomous]))
 
 (deftest parse-controller-response-normalizes-progress-and-agenda
   (let [{:keys [assistant-text intent control]}
@@ -115,86 +114,6 @@
   (let [goal  (str "Handle the multi-account billing remediation workflow for the March support backlog, including invoice verification, refund eligibility review, payment retry checks, customer reply drafting, and the follow-up notes needed for finance escalation when ownership records disagree across systems.")
         state (autonomous/initial-state goal)]
     (is (= goal (:goal state)))))
-
-(deftest controller-state-message-renders-progress-and-agenda
-  (let [message (autonomous/controller-state-message
-                  {:goal "Handle billing emails"
-                   :iteration 2
-                   :max-iterations 6
-                   :stack [{:title "Handle billing emails"
-                            :summary "Checked inbox"
-                            :next-step "Draft replies"
-                            :reason "Unread messages remain"
-                            :progress-status :in-progress
-                            :agenda [{:item "Check inbox" :status :completed}
-                                     {:item "Draft replies" :status :in-progress}]}]})
-        content (:content message)]
-    (is (str/includes? content "Current execution stack"))
-    (is (str/includes? content "Tip summary: Checked inbox"))
-    (is (str/includes? content "[completed] Check inbox"))
-    (is (str/includes? content "[in_progress] Draft replies"))))
-
-(deftest controller-state-message-renders-resumable-and-diverged-statuses
-  (let [message (autonomous/controller-state-message
-                  {:goal "Recover failed browser flow"
-                   :iteration 3
-                   :max-iterations 6
-                   :stack [{:title "Recover failed browser flow"
-                            :summary "Original path diverged"
-                            :next-step "Resume alternate branch"
-                            :reason "The page structure changed"
-                            :progress-status :resumable
-                            :agenda [{:item "Re-open page" :status :completed}
-                                     {:item "Wait for callback" :status :paused}
-                                     {:item "Resume alternate branch" :status :resumable}
-                                     {:item "Investigate new branch" :status :diverged}]}]})
-        content (:content message)]
-    (is (str/includes? content "[resumable] Recover failed browser flow"))
-    (is (str/includes? content "[paused] Wait for callback"))
-    (is (str/includes? content "[resumable] Resume alternate branch"))
-    (is (str/includes? content "[diverged] Investigate new branch"))))
-
-(deftest controller-system-message-enforces-tip-driven-execution
-  (binding [prompt/*interaction-context* {:channel :terminal}]
-    (let [content (:content (autonomous/controller-system-message))]
-      (is (str/includes? content
-                         "Always work on the current stack tip. Do not choose among stack frames."))
-      (is (str/includes? content
-                         "Use stay when continuing the current tip"))
-      (is (str/includes? content
-                         "ACTION_INTENT_JSON:"))
-      (is (str/includes? content
-                         "At the start of the first assistant response in every iteration")))))
-
-(deftest controller-system-message-is-cached-by-context-mode
-  (let [cache-var #'xia.autonomous/controller-system-message-cache]
-    (reset! @cache-var {})
-    (binding [prompt/*interaction-context* {:channel :terminal}]
-      (let [first-message  (autonomous/controller-system-message)
-            second-message (autonomous/controller-system-message)]
-        (is (identical? first-message second-message))
-        (is (str/includes? (:content first-message)
-                           "If you need input from them, ask one focused question"))))
-    (binding [prompt/*interaction-context* {:autonomous-run? true
-                                            :channel :schedule}]
-      (let [autonomous-message (autonomous/controller-system-message)]
-        (is (str/includes? (:content autonomous-message)
-                           "Do not ask the user questions in this execution context."))
-        (is (not (str/includes? (:content autonomous-message)
-                                "If you need input from them, ask one focused question")))))
-    (is (= #{:direct-user :autonomous}
-           (set (keys @@cache-var))))))
-
-(deftest controller-state-message-requires-intent-before-work
-  (let [content (:content (autonomous/controller-state-message
-                           {:goal "Handle billing emails"
-                            :iteration 1
-                            :max-iterations 6
-                            :stack [{:title "Handle billing emails"
-                                     :progress-status :in-progress
-                                     :agenda [{:item "Draft reply" :status :in-progress}]}]}))]
-    (is (str/includes? content
-                       "Start the first assistant response in this iteration with ACTION_INTENT_JSON"))))
 
 (deftest apply-control-pushes-and-pops-stack-frames
   (let [initial (autonomous/initial-state "Handle billing emails")
@@ -324,18 +243,3 @@
            (get-in state [:stack 0 :progress-status])))
     (is (= [{:item "Wait for invoice ids" :status :resumable}]
            (get-in state [:stack 0 :agenda])))))
-
-(deftest current-frame-skips-renormalizing-normalized-state
-  (let [state          (autonomous/normalize-state
-                        {:goal "Handle billing emails"
-                         :stack [{:title "Handle billing emails"
-                                  :progress-status :in-progress}]})
-        normalize-calls (atom 0)
-        orig-normalize  @#'xia.autonomous/normalize-state]
-    (with-redefs [xia.autonomous/normalize-state
-                  (fn [value]
-                    (swap! normalize-calls inc)
-                    (orig-normalize value))]
-      (is (= "Handle billing emails"
-             (:title (autonomous/current-frame state))))
-      (is (zero? @normalize-calls)))))

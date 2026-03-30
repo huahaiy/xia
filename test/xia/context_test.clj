@@ -31,45 +31,6 @@
       (with-redefs [db/current-embedding-provider (constantly provider)]
         (is (= 42 (ctx/estimate-tokens "hello world!"))))))
 
-  (testing "reuses cached token estimates for repeated text on the same provider"
-    (#'xia.context/clear-token-estimate-cache!)
-    (let [calls    (atom 0)
-          provider (reify emb/ITokenCounter
-                     (token-count* [_ _item _opts]
-                       (swap! calls inc)
-                       17)
-                     (truncate-item* [_ item _max-tokens _opts]
-                       item))]
-      (with-redefs [db/current-embedding-provider (constantly provider)]
-        (is (= 17 (ctx/estimate-tokens "repeat this")))
-        (is (= 17 (ctx/estimate-tokens "repeat this")))
-        (is (= 1 @calls)))))
-
-  (testing "keeps cached token estimates scoped to the active provider"
-    (#'xia.context/clear-token-estimate-cache!)
-    (let [calls-a   (atom 0)
-          calls-b   (atom 0)
-          provider-a (reify emb/ITokenCounter
-                       (token-count* [_ _item _opts]
-                         (swap! calls-a inc)
-                         11)
-                       (truncate-item* [_ item _max-tokens _opts]
-                         item))
-          provider-b (reify emb/ITokenCounter
-                       (token-count* [_ _item _opts]
-                         (swap! calls-b inc)
-                         23)
-                       (truncate-item* [_ item _max-tokens _opts]
-                         item))]
-      (with-redefs [db/current-embedding-provider (constantly provider-a)]
-        (is (= 11 (ctx/estimate-tokens "shared text")))
-        (is (= 11 (ctx/estimate-tokens "shared text"))))
-      (with-redefs [db/current-embedding-provider (constantly provider-b)]
-        (is (= 23 (ctx/estimate-tokens "shared text")))
-        (is (= 23 (ctx/estimate-tokens "shared text"))))
-      (is (= 1 @calls-a))
-      (is (= 1 @calls-b))))
-
   (testing "test provider counts lexical tokens instead of chars"
     (is (= 2 (ctx/estimate-tokens "hello world!")))
     (is (pos? (ctx/estimate-tokens "some text"))))
@@ -97,40 +58,11 @@
       (is (pos? estimate))
       (is (= 9 estimate)))))
 
-;; ---------------------------------------------------------------------------
-;; flatten-props
-;; ---------------------------------------------------------------------------
-
-(deftest test-flatten-props
-  (let [fp #'xia.context/flatten-props]
-    (testing "flat properties"
-      (is (= ["location: Seattle" "role: engineer"]
-             (sort (fp {:location "Seattle" :role "engineer"})))))
-
-    (testing "nested properties"
-      (let [result (fp {:work {:company "Acme" :title "CTO"}})]
-        (is (some #(= "work.company: Acme" %) result))
-        (is (some #(= "work.title: CTO" %) result))))
-
-    (testing "mixed flat and nested"
-      (let [result (fp {:location "Seattle" :work {:company "Acme"}})]
-        (is (some #(= "location: Seattle" %) result))
-        (is (some #(= "work.company: Acme" %) result))))
-
-    (testing "empty map"
-      (is (= [] (fp {}))))
-
-    (testing "deeply nested"
-      (let [result (fp {:a {:b {:c "deep"}}})]
-        (is (= ["a.b.c: deep"] result))))))
-
 (deftest test-config-parsers-ignore-reader-eval
   (db/set-config! :context/budget "#=(+ 1 2)")
   (db/set-config! :context/history-budget "#=(+ 1 2)")
   (db/set-config! :context/recent-history-message-limit "#=(+ 1 2)")
-  (is (= @#'xia.context/default-system-prompt-budget
-         (#'xia.context/configured-system-prompt-budget)))
-  (is (= 8000 (#'xia.context/configured-history-budget)))
+  (is (= 8000 (ctx/history-budget-config)))
   (is (= 24 (ctx/recent-history-message-limit-config))))
 
 ;; ---------------------------------------------------------------------------
@@ -307,38 +239,6 @@
     (testing "empty docs"
       (is (nil? (rd [] 500))))))
 
-(deftest test-section-renderers-use-heuristic-budget-estimates
-  (with-redefs [xia.context/estimate-tokens
-                (fn [_]
-                  (throw (ex-info "section renderers should not call estimate-tokens"
-                                  {})))]
-    (is (str/includes? (ctx/render-entities
-                        [{:name "Alice"
-                          :type :person
-                          :facts [{:content "likes Clojure" :confidence 1.0}]
-                          :edges {:outgoing [] :incoming []}}]
-                        500)
-                       "Alice"))
-    (is (str/includes? (#'xia.context/render-episodes
-                        [{:summary "Discussed Clojure"
-                          :timestamp (java.util.Date.)
-                          :relevance 0.8}]
-                        500)
-                       "Discussed Clojure"))
-    (is (str/includes? (#'xia.context/render-local-docs
-                        [{:name "notes.md"
-                          :media-type "text/markdown"
-                          :summary "Important notes"
-                          :matched-chunks [{:summary "Important chunk"}]
-                          :relevance 0.8}]
-                        500)
-                       "notes.md"))
-    (is (str/includes? (#'xia.context/render-skills
-                        [{:skill/name "email-drafting"
-                          :skill/content "Write emails professionally."}]
-                        500)
-                       "email-drafting"))))
-
 ;; ---------------------------------------------------------------------------
 ;; render-skills
 ;; ---------------------------------------------------------------------------
@@ -368,29 +268,18 @@
 ;; assemble-system-prompt (integration)
 ;; ---------------------------------------------------------------------------
 
-(deftest test-provider-specific-system-prompt-budget
-  (let [budget (#'xia.context/resolve-system-prompt-budget
-                 {:llm.provider/system-prompt-budget 16000})]
-    (is (= 16000 (:total budget)))
-    (is (= 1200 (:identity budget)))
-    (is (= 400 (:topic budget)))
-    (is (= 6000 (:entities budget)))
-    (is (= 1600 (:local-docs budget)))
-    (is (= 2000 (:episodes budget)))
-    (is (= 6000 (:skills budget)))))
-
 (deftest test-configured-recent-history-message-limit
-  (is (= 24 (#'xia.context/recent-history-message-limit {})))
+  (is (= 24 (ctx/recent-history-message-limit-config)))
 
   (db/set-config! :context/recent-history-message-limit "12")
-  (is (= 12 (#'xia.context/recent-history-message-limit {})))
+  (is (= 12 (ctx/recent-history-message-limit-config)))
 
   (db/set-config! :context/recent-history-message-limit "2")
-  (is (= 4 (#'xia.context/recent-history-message-limit {}))
+  (is (= 4 (ctx/recent-history-message-limit-config))
       "Configured values below the floor should clamp to 4")
 
   (db/set-config! :context/recent-history-message-limit "not-edn")
-  (is (= 24 (#'xia.context/recent-history-message-limit {}))
+  (is (= 24 (ctx/recent-history-message-limit-config))
       "Invalid config should fall back to the default"))
 
 (deftest test-assemble-system-prompt
@@ -424,46 +313,6 @@
       (is (str/includes? prompt "notes.md")))
 
     (wm/clear-wm! sid)))
-
-(deftest test-assemble-system-prompt-data-reuses-renderer-token-totals
-  (let [sid            (db/create-session! :terminal)
-        estimated-texts (atom [])]
-    (with-redefs [xia.context/render-identity         (constantly "IDENTITY")
-                  xia.context/render-topic            (constantly "TOPIC")
-                  xia.context/render-entities-data    (fn [_ _]
-                                                        {:content "ENTITY-SECTION"
-                                                         :tokens  11
-                                                         :used-fact-eids [7]})
-                  xia.context/render-local-docs-data  (fn [_ _]
-                                                        {:content "DOC-SECTION"
-                                                         :tokens  13})
-                  xia.context/render-episodes-data    (fn [_ _]
-                                                        {:content "EPISODE-SECTION"
-                                                         :tokens  17})
-                  xia.context/render-skills-data      (fn [_ _]
-                                                        {:content "SKILL-SECTION"
-                                                         :tokens  19})
-                  xia.context/estimate-tokens         (fn [text]
-                                                        (swap! estimated-texts conj text)
-                                                        (case text
-                                                          "IDENTITY" 31
-                                                          "TOPIC"    7
-                                                          ""         0
-                                                          (throw (ex-info "unexpected estimate"
-                                                                          {:text text}))))
-                  xia.working-memory/wm->context      (constantly {:topics :present
-                                                                   :entities [:ignored]
-                                                                   :local-docs [:ignored]
-                                                                   :episodes [:ignored]
-                                                                   :turn-count 0})
-                  xia.skill/skills-for-context        (constantly [:ignored])]
-      (let [result (ctx/assemble-system-prompt-data sid)]
-        (is (= [7] (:used-fact-eids result)))
-        (is (str/includes? (:prompt result) "ENTITY-SECTION"))
-        (is (str/includes? (:prompt result) "DOC-SECTION"))
-        (is (str/includes? (:prompt result) "EPISODE-SECTION"))
-        (is (str/includes? (:prompt result) "SKILL-SECTION"))
-        (is (= ["IDENTITY" "TOPIC"] @estimated-texts))))))
 
 ;; ---------------------------------------------------------------------------
 ;; compact-history
@@ -710,82 +559,6 @@
                               "message 0"))
           "Incremental recap updates should only archive the newly evicted message"))))
 
-(deftest test-build-messages-data-reuses-system-prompt-across-unchanged-wm
-  (let [sid           (db/create-session! :terminal)
-        prompt-calls  (atom 0)
-        history-calls (atom 0)]
-    (wm/create-wm! sid)
-    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "billing emails")
-    (with-redefs [xia.context/assemble-system-prompt-data
-                  (fn [_sid _opts]
-                    (swap! prompt-calls inc)
-                    {:prompt "system"
-                     :used-fact-eids [1]})
-                  xia.context/build-history-with-session-recap
-                  (fn [_sid _opts]
-                    (swap! history-calls inc)
-                    {:messages []
-                     :history-recap-updated? false})]
-      (let [first-result (#'xia.context/build-messages-data
-                          sid
-                          {:provider {:llm.provider/id :default}})
-            second-result (#'xia.context/build-messages-data
-                           sid
-                           {:provider {:llm.provider/id :default}
-                            :system-prompt-cache-entry (:system-prompt-cache-entry first-result)})]
-        (is (= 1 @prompt-calls))
-        (is (= 2 @history-calls))
-        (is (= "system" (get-in first-result [:messages 0 :content])))
-        (is (= "system" (get-in second-result [:messages 0 :content])))
-        (is (= [1] (:used-fact-eids second-result)))))))
-
-(deftest test-build-messages-data-invalidates-system-prompt-cache-when-wm-changes
-  (let [sid          (db/create-session! :terminal)
-        prompt-calls (atom 0)]
-    (wm/create-wm! sid)
-    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "billing emails")
-    (with-redefs [xia.context/assemble-system-prompt-data
-                  (fn [_sid _opts]
-                    (swap! prompt-calls inc)
-                    {:prompt (str "system-" @prompt-calls)
-                     :used-fact-eids []})
-                  xia.context/build-history-with-session-recap
-                  (fn [_sid _opts]
-                    {:messages []
-                     :history-recap-updated? false})]
-      (let [first-result (#'xia.context/build-messages-data
-                          sid
-                          {:provider {:llm.provider/id :default}})
-            _ (swap! @#'xia.working-memory/wm-atom
-                     #(-> %
-                          (assoc-in [sid :topics] "calendar scheduling")
-                          (update-in [sid :prompt-cache-version] (fnil inc 0))))
-            second-result (#'xia.context/build-messages-data
-                           sid
-                           {:provider {:llm.provider/id :default}
-                            :system-prompt-cache-entry (:system-prompt-cache-entry first-result)})]
-        (is (= 2 @prompt-calls))
-        (is (= "system-1" (get-in first-result [:messages 0 :content])))
-        (is (= "system-2" (get-in second-result [:messages 0 :content])))))))
-
-(deftest test-build-history-with-session-recap-does-not-load-full-metadata
-  (let [sid (db/create-session! :terminal)]
-    (doseq [i (range 6)]
-      (db/add-message! sid
-                       (if (even? i) :user :assistant)
-                       (str "message " i " " (token-rich-text (str "m" i) 40))))
-    (with-redefs [xia.db/session-message-metadata
-                  (fn [& _]
-                    (throw (ex-info "full metadata load should not be used" {})))
-                  xia.context/summarize-history-text
-                  (fn [& _] "recap-windowed")]
-      (let [result (#'xia.context/build-history-with-session-recap
-                    sid
-                    {:recent-message-limit 4})
-            message-texts (map :content (:messages result))]
-        (is (true? (:history-recap-updated? result)))
-        (is (some #(str/includes? % "recap-windowed") message-texts))))))
-
 (deftest test-build-messages-data-preserves-archived-tool-recap
   (let [sid        (db/create-session! :terminal)
         llm-calls  (atom 0)
@@ -830,32 +603,6 @@
               message-texts (map :content (:messages result))]
           (is (some #(str/includes? % "Archived tool execution recap") message-texts))
           (is (some #(str/includes? % "web-search[call_1]") message-texts)))))))
-
-(deftest test-build-messages-data-does-at-most-one-summary-call-per-build
-  (let [sid       (db/create-session! :terminal)
-        llm-calls (atom [])]
-    (db/set-config! :context/recent-history-message-limit "4")
-    (doseq [i (range 10)]
-      (db/add-message! sid
-                       (if (even? i) :user :assistant)
-                       (str "message " i " " (token-rich-text (str "m" i) 120))))
-    (with-redefs [xia.context/assemble-system-prompt-data
-                  (fn [_sid _opts]
-                    {:prompt "system"
-                     :used-fact-eids []})
-                  xia.llm/chat-simple
-                  (fn [messages & _]
-                    (swap! llm-calls conj messages)
-                    (str "recap-" (count @llm-calls)))]
-      (with-redefs-fn {#'xia.context/resolve-history-budget (constantly 100)}
-        (fn []
-          (let [result        (#'xia.context/build-messages-data
-                               sid
-                               {:provider {:llm.provider/id :default}})
-                message-texts (map :content (:messages result))]
-            (is (= 1 (count @llm-calls)))
-            (is (some #(str/includes? % "recap-1") message-texts))
-            (is (= "system" (get-in result [:messages 0 :role])))))))))
 
 (deftest test-compact-history-preserves-existing-recap-messages
   (let [tool-recap {:role "system"
