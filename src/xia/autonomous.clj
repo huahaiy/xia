@@ -789,22 +789,56 @@
                   :else
                   (recur (inc idx) depth false false))))))))))
 
+(defn- next-protocol-marker-index
+  [text]
+  (->> [(str/index-of text intent-marker)
+        (str/index-of text control-marker)]
+       (remove nil?)
+       sort
+       first))
+
+(defn- json-start-candidate-indices
+  [text]
+  (let [text* (or text "")]
+    (loop [idx 0
+           indices []]
+      (if (>= idx (count text*))
+        indices
+        (let [ch (.charAt ^String text* idx)]
+          (cond
+            (= ch \{)
+            (recur (inc idx) (conj indices idx))
+
+            (and (= ch \`)
+                 (.startsWith ^String text* "```" idx))
+            (recur (+ idx 3) (conj indices idx))
+
+            :else
+            (recur (inc idx) indices)))))))
+
 (defn- parse-json-after-marker
   [text marker]
   (let [text* (or text "")]
     (if-let [idx (str/index-of text* marker)]
       (let [before (subs text* 0 idx)
-            after  (subs text* (+ idx (count marker)))]
-        (if-let [{:keys [json-text rest]} (extract-json-object after)]
-          (try
-            {:status :parsed
-             :before before
-             :after rest
-             :parsed (json/read-json json-text)}
-            (catch Exception _
-              {:status :malformed
-               :before before
-               :after after}))
+            after  (subs text* (+ idx (count marker)))
+            search-window (if-let [next-marker-idx (next-protocol-marker-index after)]
+                            (subs after 0 next-marker-idx)
+                            after)]
+        (if-let [{:keys [parsed after]}
+                 (some (fn [candidate-idx]
+                         (when-let [{:keys [json-text rest]}
+                                    (extract-json-object (subs after candidate-idx))]
+                           (try
+                             {:parsed (json/read-json json-text)
+                              :after rest}
+                             (catch Exception _
+                               nil))))
+                       (json-start-candidate-indices search-window))]
+          {:status :parsed
+           :before before
+           :after after
+           :parsed parsed}
           {:status :malformed
            :before before
            :after after}))
@@ -816,7 +850,7 @@
   [response]
   (let [text            (or response "")
         parsed-intent   (parse-json-after-marker text intent-marker)
-        text-without-intent (if (= :parsed (:status parsed-intent))
+        text-without-intent (if (contains? #{:parsed :malformed} (:status parsed-intent))
                               (str (:before parsed-intent)
                                    (:after parsed-intent))
                               text)
