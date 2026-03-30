@@ -677,6 +677,61 @@
                               "message 0"))
           "Incremental recap updates should only archive the newly evicted message"))))
 
+(deftest test-build-messages-data-reuses-system-prompt-across-unchanged-wm
+  (let [sid           (db/create-session! :terminal)
+        prompt-calls  (atom 0)
+        history-calls (atom 0)]
+    (wm/create-wm! sid)
+    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "billing emails")
+    (with-redefs [xia.context/assemble-system-prompt-data
+                  (fn [_sid _opts]
+                    (swap! prompt-calls inc)
+                    {:prompt "system"
+                     :used-fact-eids [1]})
+                  xia.context/build-history-with-session-recap
+                  (fn [_sid _opts]
+                    (swap! history-calls inc)
+                    {:messages []
+                     :history-recap-updated? false})]
+      (let [first-result (#'xia.context/build-messages-data
+                          sid
+                          {:provider {:llm.provider/id :default}})
+            second-result (#'xia.context/build-messages-data
+                           sid
+                           {:provider {:llm.provider/id :default}
+                            :system-prompt-cache-entry (:system-prompt-cache-entry first-result)})]
+        (is (= 1 @prompt-calls))
+        (is (= 2 @history-calls))
+        (is (= "system" (get-in first-result [:messages 0 :content])))
+        (is (= "system" (get-in second-result [:messages 0 :content])))
+        (is (= [1] (:used-fact-eids second-result)))))))
+
+(deftest test-build-messages-data-invalidates-system-prompt-cache-when-wm-changes
+  (let [sid          (db/create-session! :terminal)
+        prompt-calls (atom 0)]
+    (wm/create-wm! sid)
+    (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "billing emails")
+    (with-redefs [xia.context/assemble-system-prompt-data
+                  (fn [_sid _opts]
+                    (swap! prompt-calls inc)
+                    {:prompt (str "system-" @prompt-calls)
+                     :used-fact-eids []})
+                  xia.context/build-history-with-session-recap
+                  (fn [_sid _opts]
+                    {:messages []
+                     :history-recap-updated? false})]
+      (let [first-result (#'xia.context/build-messages-data
+                          sid
+                          {:provider {:llm.provider/id :default}})
+            _ (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "calendar scheduling")
+            second-result (#'xia.context/build-messages-data
+                           sid
+                           {:provider {:llm.provider/id :default}
+                            :system-prompt-cache-entry (:system-prompt-cache-entry first-result)})]
+        (is (= 2 @prompt-calls))
+        (is (= "system-1" (get-in first-result [:messages 0 :content])))
+        (is (= "system-2" (get-in second-result [:messages 0 :content])))))))
+
 (deftest test-build-history-with-session-recap-does-not-load-full-metadata
   (let [sid (db/create-session! :terminal)]
     (doseq [i (range 6)]

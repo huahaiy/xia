@@ -879,6 +879,48 @@
   ([session-id opts]
    (:prompt (assemble-system-prompt-data session-id opts))))
 
+(defn- prompt-cache-slot-data
+  [slot]
+  (select-keys slot [:node-eid
+                     :name
+                     :type
+                     :facts
+                     :edges
+                     :properties
+                     :relevance
+                     :pinned?]))
+
+(defn- prompt-cache-wm-source
+  [session-id]
+  (if-let [wm-state (wm/get-wm session-id)]
+    {:topics      (:topics wm-state)
+     :turn-count  (:turn-count wm-state)
+     :slots       (into (sorted-map)
+                        (map (fn [[node-eid slot]]
+                               [node-eid (prompt-cache-slot-data slot)]))
+                        (:slots wm-state))
+     :episode-refs (into []
+                         (map #(select-keys % [:episode-id
+                                               :summary
+                                               :timestamp
+                                               :relevance]))
+                         (:episode-refs wm-state))
+     :local-doc-refs (into []
+                           (map #(select-keys % [:doc-id
+                                                 :name
+                                                 :media-type
+                                                 :summary
+                                                 :preview
+                                                 :matched-chunks
+                                                 :relevance]))
+                           (:local-doc-refs wm-state))}
+    ::no-working-memory))
+
+(defn- system-prompt-cache-key
+  [session-id provider]
+  {:budget (resolve-system-prompt-budget provider)
+   :wm     (prompt-cache-wm-source session-id)})
+
 ;; ============================================================================
 ;; Message history compaction
 ;; ============================================================================
@@ -1043,11 +1085,15 @@
    (build-messages-data session-id nil))
   ([session-id opts]
    (let [provider     (resolve-context-provider opts)
+         cache-key    (system-prompt-cache-key session-id provider)
+         cache-entry  (:system-prompt-cache-entry opts)
          compaction-provider-id (:compaction-provider-id opts)
          compaction-workload    (or (:compaction-workload opts)
                                     :history-compaction)
-         {:keys [prompt used-fact-eids]}
-         (assemble-system-prompt-data session-id (assoc opts :provider provider))
+         {:keys [prompt used-fact-eids] :as system-prompt-data}
+         (if (= cache-key (:key cache-entry))
+           (:data cache-entry)
+           (assemble-system-prompt-data session-id (assoc opts :provider provider)))
          {:keys [messages history-recap-updated?]}
          (build-history-with-session-recap
           session-id
@@ -1069,7 +1115,9 @@
                                         (assoc :workload compaction-workload)))]
      {:messages      (into [{:role "system" :content prompt}]
                            compacted)
-      :used-fact-eids used-fact-eids})))
+      :used-fact-eids used-fact-eids
+      :system-prompt-cache-entry {:key cache-key
+                                  :data system-prompt-data}})))
 
 (defn build-messages
   ([session-id]

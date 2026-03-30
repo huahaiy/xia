@@ -1501,7 +1501,7 @@
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
    working-memory-message update-working-memory? refresh-working-memory?
-   max-tool-rounds autonomy-state max-iterations]
+   max-tool-rounds autonomy-state max-iterations system-prompt-cache-entry]
   (loop [attempt 0]
     (let [worker-token (Object.)
           worker-state (atom {:phase nil
@@ -1526,7 +1526,8 @@
                                           update-working-memory?
                                           refresh-working-memory?
                                           max-tool-rounds
-                                          worker-state)
+                                          worker-state
+                                          system-prompt-cache-entry)
                      (finally
                        (clear-worker-run! session-id worker-token))))]
       (register-worker-future! session-id worker-token worker)
@@ -1678,7 +1679,7 @@
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
    working-memory-message update-working-memory? refresh-working-memory?
-   max-tool-rounds worker-state]
+   max-tool-rounds worker-state system-prompt-cache-entry]
   (let [emit-event! #(emit-worker-event! worker-state %)]
     (when (or update-working-memory? refresh-working-memory?)
       (emit-event! {:phase :working-memory
@@ -1697,10 +1698,11 @@
                                              {:resource-session-id resource-session-id})))
     (throw-if-cancelled! session-id)
     (let [tools (tool/tool-definitions execution-context)
-          {:keys [messages used-fact-eids]}
+          {:keys [messages used-fact-eids system-prompt-cache-entry]}
           (context/build-messages-data session-id
                                        {:provider assistant-provider
                                         :provider-id assistant-provider-id
+                                        :system-prompt-cache-entry system-prompt-cache-entry
                                         :compaction-workload :history-compaction})
           messages (inject-transient-messages messages transient-messages)]
       (emit-event! {:phase :planning
@@ -1844,7 +1846,8 @@
                            :iteration (:iteration execution-context)})
               {:response response
                :parsed-response parsed-response
-               :used-fact-eids used-fact-eids})))))))
+               :used-fact-eids used-fact-eids
+               :system-prompt-cache-entry system-prompt-cache-entry})))))))
 
 (defn process-message
   "Process a user message in the given session. Returns the assistant's response.
@@ -1909,7 +1912,8 @@
                   (wm/snapshot! session-id)
                   (loop [iteration 1
                          fact-eids []
-                         loop-state nil]
+                         loop-state nil
+                         system-prompt-cache-entry nil]
                     (throw-if-cancelled! session-id)
                     (let [autonomy-state (or (wm/autonomy-state session-id)
                                              initial-autonomy-state)
@@ -1939,7 +1943,7 @@
                                    "Understanding the goal and preparing the first plan."
                                    "Resuming the autonomous loop with the updated plan.")
                         :session-id session-id})
-                      (let [{:keys [response parsed-response used-fact-eids]}
+                      (let [{:keys [response parsed-response used-fact-eids system-prompt-cache-entry]}
                             (run-supervised-agent-iteration session-id
                                                             channel
                                                             resource-session-id
@@ -1954,7 +1958,8 @@
                                                             refresh-working-memory?
                                                             max-tool-rounds*
                                                             autonomy-state
-                                                            max-iterations*)
+                                                            max-iterations*
+                                                            system-prompt-cache-entry)
                             parsed parsed-response
                             control (:control parsed)
                             summary (autonomous-iteration-summary parsed)
@@ -2068,7 +2073,8 @@
                               :stack (some-> updated-autonomy-state :stack)})
                             (recur (inc iteration)
                                    fact-eids*
-                                   next-loop-state)))))))
+                                   next-loop-state
+                                   system-prompt-cache-entry)))))))
                 (catch InterruptedException e
                   (request-session-cancel! session-id "request interrupted")
                   (if (stop-worker! session-id)

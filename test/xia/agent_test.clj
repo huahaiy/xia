@@ -489,6 +489,41 @@
     (is (= ["reply to the billing emails"] @wm-updates))
     (is (= ["reply to the billing emails"] @wm-refreshes))))
 
+(deftest process-message-reuses-system-prompt-cache-entry-across-autonomous-iterations
+  (let [session-id    (db/create-session! :terminal)
+        build-opts    (atom [])
+        llm-calls     (atom 0)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.working-memory/refresh-wm!     (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id opts]
+                                                       (swap! build-opts conj (select-keys opts [:system-prompt-cache-entry]))
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []
+                                                        :system-prompt-cache-entry {:key (count @build-opts)
+                                                                                   :data {:prompt "cached"
+                                                                                          :used-fact-eids []}}})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Checked inbox.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Checked inbox\",\"next_step\":\"Draft replies\",\"reason\":\"Unread messages remain\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" (str "Sent the replies.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"completed\"}]}")} ))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent the replies."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (nil? (get-in @build-opts [0 :system-prompt-cache-entry])))
+    (is (= {:key 1
+            :data {:prompt "cached"
+                   :used-fact-eids []}}
+           (get-in @build-opts [1 :system-prompt-cache-entry])))))
+
 (deftest process-message-clears-autonomy-state-after-completed-goal
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
