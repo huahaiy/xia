@@ -547,6 +547,30 @@
     (wm/ensure-wm! session-id)
     (is (nil? (wm/autonomy-state session-id)))))
 
+(deftest process-message-does-not-snapshot-before-first-iteration
+  (let [session-id      (db/create-session! :terminal)
+        snapshot-calls  (atom 0)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "Sent the replies.\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:"
+                                                                       "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Send replies\",\"status\":\"completed\"}]}")})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)
+                  xia.working-memory/snapshot!       (fn [_session-id]
+                                                       (swap! snapshot-calls inc))]
+      (is (= "Sent the replies."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (= 2 @snapshot-calls)
+        "one snapshot after the iteration update, one after clearing autonomy state")))
+
 (deftest process-message-clears-autonomy-state-when-control-envelope-is-missing
   (let [session-id (db/create-session! :terminal)]
     (wm/ensure-wm! session-id)

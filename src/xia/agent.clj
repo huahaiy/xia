@@ -1909,7 +1909,6 @@
                                               (wm/autonomy-state session-id)
                                               user-message)]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
-                  (wm/snapshot! session-id)
                   (loop [iteration 1
                          fact-eids []
                          loop-state nil
