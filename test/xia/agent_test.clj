@@ -429,8 +429,9 @@
                                                                          "AUTONOMOUS_STATUS_JSON:"
                                                                          "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"completed\"},{\"item\":\"Send replies\",\"status\":\"completed\"}]}")} ))
                   xia.agent/schedule-fact-utility-review!
-                  (fn [fact-eids user-message assistant-response]
-                    (reset! reviewed {:fact-eids fact-eids
+                  (fn [review-session-id fact-eids user-message assistant-response]
+                    (reset! reviewed {:session-id review-session-id
+                                      :fact-eids fact-eids
                                       :user-message user-message
                                       :assistant-response assistant-response}))]
       (is (= "Sent the replies."
@@ -451,7 +452,8 @@
                 (filter #(contains? #{:user :assistant} (:role %)))
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))
-    (is (= {:fact-eids [1 2]
+    (is (= {:session-id session-id
+            :fact-eids [1 2]
             :user-message "reply to the billing emails"
             :assistant-response "Sent the replies."}
            @reviewed))))
@@ -996,16 +998,52 @@
                                                            :used-fact-eids [11 22]})
                   xia.llm/chat-message                  (fn [_messages & _opts] {"content" "All set."})
                   xia.agent/schedule-fact-utility-review!
-                  (fn [fact-eids user-message assistant-response]
-                    (reset! reviewed {:fact-eids fact-eids
+                  (fn [review-session-id fact-eids user-message assistant-response]
+                    (reset! reviewed {:session-id review-session-id
+                                      :fact-eids fact-eids
                                       :user-message user-message
                                       :assistant-response assistant-response}))]
       (is (= "All set."
              (agent/process-message session-id "hello" :channel :terminal))))
-    (is (= {:fact-eids [11 22]
+    (is (= {:session-id session-id
+            :fact-eids [11 22]
             :user-message "hello"
             :assistant-response "All set."}
            @reviewed))))
+
+(deftest schedule-fact-utility-review-batches-turns-per-session
+  (reset! @#'xia.agent/fact-utility-review-state {})
+  (try
+    (let [session-id       (random-uuid)
+          reviewed         (promise)
+          heuristic-calls  (atom [])
+          review-call-count (atom 0)]
+      (with-redefs [xia.agent/fact-utility-review-debounce-ms 25
+                    xia.working-memory/apply-fact-utility-heuristic!
+                    (fn [fact-eids assistant-response]
+                      (swap! heuristic-calls conj {:fact-eids fact-eids
+                                                   :assistant-response assistant-response})
+                      0)
+                    xia.working-memory/review-fact-utility-observations!
+                    (fn [observations]
+                      (swap! review-call-count inc)
+                      (deliver reviewed observations)
+                      (count observations))]
+        (agent/schedule-fact-utility-review! session-id [11] "hello" "first response")
+        (agent/schedule-fact-utility-review! session-id [22] "follow up" "second response")
+        (is (= [{:fact-eids [11] :assistant-response "first response"}
+                {:fact-eids [22] :assistant-response "second response"}]
+               @heuristic-calls))
+        (is (= [{:fact-eid 11
+                 :user-message "hello"
+                 :assistant-response "first response"}
+                {:fact-eid 22
+                 :user-message "follow up"
+                 :assistant-response "second response"}]
+               (deref reviewed 1000 ::timeout)))
+        (is (= 1 @review-call-count))))
+    (finally
+      (reset! @#'xia.agent/fact-utility-review-state {}))))
 
 (deftest process-message-continues-when-working-memory-update-fails
   (let [session-id (db/create-session! :terminal)]

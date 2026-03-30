@@ -100,6 +100,7 @@
    :topic-update-interval 5})   ; update topic summary every N turns
 
 (def ^:private fact-utility-batch-size 20)
+(def ^:private fact-utility-heuristic-utility 1.0)
 (def ^:private fact-utility-prompt
   "You are rating how useful retrieved memory facts were for answering the user.
 
@@ -619,18 +620,70 @@ Rules:
                [eid (memory/normalize-fact-utility utility)]))
         facts))
 
+(defn- fact-utility-text
+  [text]
+  (-> (or text "")
+      str/lower-case
+      (str/replace #"[^\w'-]+" " ")
+      str/trim))
+
+(defn- fact-utility-terms
+  [text]
+  (->> (str/split (fact-utility-text text) #"\s+")
+       (remove str/blank?)
+       (remove #(< (count %) 3))
+       (remove stopwords)
+       distinct
+       vec))
+
+(defn- fact-clearly-used?
+  [fact assistant-response]
+  (let [fact-text      (fact-utility-text (:content fact))
+        response-text  (fact-utility-text assistant-response)
+        exact-match?   (and (>= (count fact-text) 8)
+                            (str/includes? response-text fact-text))
+        fact-terms     (fact-utility-terms (:content fact))
+        response-terms (set (fact-utility-terms assistant-response))
+        overlap        (count (filter response-terms fact-terms))
+        term-count     (count fact-terms)
+        overlap-ratio  (if (pos? term-count)
+                         (/ (double overlap) (double term-count))
+                         0.0)]
+    (or exact-match?
+        (and (= 1 term-count)
+             (= 1 overlap))
+        (and (>= term-count 2)
+             (>= overlap 2)
+             (>= overlap-ratio 0.75)))))
+
+(defn apply-fact-utility-heuristic!
+  [fact-eids assistant-response]
+  (let [facts     (memory/facts-by-eids fact-eids)
+        response* (some-> assistant-response str str/trim)]
+    (if-not (seq response*)
+      0
+      (reduce (fn [updated {:keys [eid] :as fact}]
+                (if (fact-clearly-used? fact response*)
+                  (do
+                    (memory/update-fact-utility! eid fact-utility-heuristic-utility)
+                    (inc updated))
+                  updated))
+              0
+              facts))))
+
 (defn- rate-fact-utility-batch
-  [facts user-message assistant-response]
-  (let [user-msg  (str "User message:\n" (or user-message "")
-                       "\n\nAssistant response:\n" (or assistant-response "")
-                       "\n\nFacts:\n"
+  [entries]
+  (let [user-msg  (str "Fact-use review items:\n\n"
                        (transduce
                          (map-indexed
-                           (fn [idx {:keys [content confidence utility]}]
-                             (str "Fact " idx
-                                  "\nContent: " content
-                                  "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
-                                  "\nUtility: " (format "%.3f" (double (or utility 0.5))))))
+                           (fn [idx {:keys [fact user-message assistant-response]}]
+                             (let [{:keys [content confidence utility]} fact]
+                               (str "Fact " idx
+                                    "\nUser message: " (or user-message "")
+                                    "\nAssistant response: " (or assistant-response "")
+                                    "\nContent: " content
+                                    "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
+                                    "\nUtility: " (format "%.3f" (double (or utility 0.5)))))))
                          (completing
                            (fn [^StringBuilder sb fact-text]
                              (when (pos? (.length sb))
@@ -639,40 +692,82 @@ Rules:
                            (fn [^StringBuilder sb]
                              (.toString sb)))
                          (StringBuilder.)
-                         facts))
-        defaults  (fact-utility-defaults facts)]
-    (try
-      (let [response (llm/chat-simple
-                       [{:role "system" :content fact-utility-prompt}
-                        {:role "user" :content user-msg}]
-                       :workload :fact-utility)
-            parsed   (json/read-json response)]
-        (reduce
-          (fn [scores entry]
-            (let [idx (get entry "index")]
-              (if (and (number? idx)
-                       (<= 0 (long idx))
-                       (< (long idx) (count facts)))
-                (assoc scores
-                       (:eid (nth facts (long idx)))
-                       (normalize-fact-utility (get entry "utility")))
-                scores)))
-          defaults
-          (get parsed "facts" [])))
-      (catch Exception e
-        (log/warn "Failed to rate fact utility batch:" (.getMessage e))
-        defaults))))
+                         entries))
+        defaults  (fact-utility-defaults (map :fact entries))]
+    (if-not (seq entries)
+      {}
+      (try
+        (let [response (llm/chat-simple
+                         [{:role "system" :content fact-utility-prompt}
+                          {:role "user" :content user-msg}]
+                         :workload :fact-utility)
+              parsed   (json/read-json response)]
+          (let [observed
+                (reduce
+                  (fn [scores entry]
+                    (let [idx (get entry "index")]
+                      (if (and (number? idx)
+                               (<= 0 (long idx))
+                               (< (long idx) (count entries)))
+                        (let [fact-eid (:eid (:fact (nth entries (long idx))))
+                              utility  (normalize-fact-utility (get entry "utility"))]
+                          (update scores fact-eid
+                                  (fn [existing]
+                                    (if (nil? existing)
+                                      utility
+                                      (max (double existing) utility)))))
+                        scores)))
+                  {}
+                  (get parsed "facts" []))]
+            (merge defaults observed)))
+        (catch Exception e
+          (log/warn "Failed to rate fact utility batch:" (.getMessage e))
+          defaults)))))
+
+(defn review-fact-utility-observations!
+  [observations]
+  (let [facts-by-eid (into {}
+                           (map (juxt :eid identity))
+                           (memory/facts-by-eids (keep :fact-eid observations)))
+        entries      (into []
+                           (keep (fn [{:keys [fact-eid user-message assistant-response]}]
+                                   (when-let [fact (get facts-by-eid fact-eid)]
+                                     {:fact fact
+                                      :user-message user-message
+                                      :assistant-response assistant-response})))
+                           observations)]
+    (doseq [batch (partition-all fact-utility-batch-size entries)]
+      (let [ratings (rate-fact-utility-batch (vec batch))]
+        (doseq [[fact-eid utility] ratings]
+          (memory/update-fact-utility! fact-eid utility))))
+    (count entries)))
 
 (defn review-fact-utility!
   [fact-eids user-message assistant-response]
-  (let [facts (memory/facts-by-eids fact-eids)]
-    (when (and (seq facts)
-               (seq (str/trim (or assistant-response ""))))
-      (doseq [batch (partition-all fact-utility-batch-size facts)]
-        (let [ratings (rate-fact-utility-batch (vec batch) user-message assistant-response)]
-          (doseq [[fact-eid utility] ratings]
-            (memory/update-fact-utility! fact-eid utility)))))
-    (count facts)))
+  (review-fact-utility-observations!
+   (into []
+         (map (fn [fact-eid]
+                {:fact-eid fact-eid
+                 :user-message user-message
+                 :assistant-response assistant-response}))
+         fact-eids)))
+
+(defn- topic-shift-terms
+  [value]
+  (cond
+    (string? value)
+    (set (extract-search-terms value))
+
+    (sequential? value)
+    (->> value
+         (keep #(some-> % str str/lower-case str/trim))
+         (remove str/blank?)
+         (remove #(< (count %) 2))
+         (remove stopwords)
+         set)
+
+    :else
+    #{}))
 
 (defn detect-topic-shift?
   "Compare current search terms with previous topic summary.
@@ -683,15 +778,45 @@ Rules:
    (let [wm (session-wm session-id)
         prev-topics (:topics wm)]
      (when (and prev-topics (seq search-terms))
-       (let [prev-words (->> (str/split (str/lower-case prev-topics) #"[^\w]+")
-                             (remove str/blank?)
-                             set)
-             current-words (set (map str/lower-case search-terms))
-             overlap (count (clojure.set/intersection prev-words current-words))
-             max-possible (max 1 (min (count prev-words) (count current-words)))
-             similarity (/ (double overlap) max-possible)]
-         ;; Shift if less than 20% overlap
-         (< similarity 0.2))))))
+       (let [prev-words       (topic-shift-terms prev-topics)
+             current-words    (topic-shift-terms search-terms)
+             overlap          (count (clojure.set/intersection prev-words current-words))
+             prev-count       (max 1 (count prev-words))
+             current-count    (max 1 (count current-words))
+             union-count      (max 1 (count (clojure.set/union prev-words current-words)))
+             prev-coverage    (/ (double overlap) (double prev-count))
+             current-coverage (/ (double overlap) (double current-count))
+             jaccard          (/ (double overlap) (double union-count))]
+         (and (seq prev-words)
+              (seq current-words)
+              (or (zero? overlap)
+                  (and (< jaccard 0.15)
+                       (< prev-coverage 0.34)
+                       (< current-coverage 0.34)))))))))
+
+(defn- should-auto-segment?
+  [session-id search-terms]
+  (let [wm       (session-wm session-id)
+        shift?   (detect-topic-shift? session-id search-terms)
+        pending? (some? (:pending-topic-shift wm))]
+    (cond
+      (not shift?)
+      (do
+        (when pending?
+          (update-session-wm! session-id #(assoc % :pending-topic-shift nil)))
+        false)
+
+      pending?
+      (do
+        (update-session-wm! session-id #(assoc % :pending-topic-shift nil))
+        true)
+
+      :else
+      (do
+        (update-session-wm! session-id
+          #(assoc % :pending-topic-shift {:search-terms (vec search-terms)
+                                          :turn-count (:turn-count %)}))
+        false))))
 
 ;; ============================================================================
 ;; Auto-segmentation
@@ -716,9 +841,10 @@ Rules:
         (update-session-wm! sid
           (fn [wm]
             (assoc wm
-                   :prev-topics (:topics wm)
-                   :topics      nil
-                   :topic-turn  (:turn-count wm))))))))
+                   :prev-topics         (:topics wm)
+                   :topics              nil
+                   :pending-topic-shift nil
+                   :topic-turn          (:turn-count wm))))))))
 
 ;; ============================================================================
 ;; Per-turn Update (orchestrator)
@@ -766,7 +892,7 @@ Rules:
             (let [wm (session-wm sid)]
               (when (and wm
                          (> (long (:turn-count wm)) 3)
-                         (detect-topic-shift? sid terms))
+                         (should-auto-segment? sid terms))
                 (auto-segment! sid channel))
               (when wm
                 (let [interval    (get-in wm [:config :topic-update-interval])
@@ -819,6 +945,7 @@ Rules:
       (let [wm {:session-id      sid
                 :topics          nil
                 :prev-topics     nil
+                :pending-topic-shift nil
                 :autonomy-state  nil
                 :turn-count      0
                 :topic-turn      0

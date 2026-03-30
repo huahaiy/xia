@@ -587,6 +587,98 @@
   [message & {:as extra}]
   (apply emit-status! message (mapcat identity extra)))
 
+(def ^:private fact-utility-review-debounce-ms 2000)
+(def ^:private fact-utility-review-batch-size 20)
+(def ^:private fact-utility-review-max-pending 120)
+(defonce ^:private fact-utility-review-state (atom {}))
+
+(defn- fact-utility-observations
+  [fact-eids user-message assistant-response]
+  (into []
+        (map (fn [fact-eid]
+               {:fact-eid fact-eid
+                :user-message user-message
+                :assistant-response assistant-response}))
+        (distinct fact-eids)))
+
+(declare run-fact-utility-review-worker!)
+
+(defn- enqueue-fact-utility-review!
+  [session-id fact-eids user-message assistant-response]
+  (let [observations (fact-utility-observations fact-eids user-message assistant-response)
+        worker-token (atom nil)]
+    (when (seq observations)
+      (swap! fact-utility-review-state
+             (fn [state]
+               (let [{:keys [pending] :as session-state}
+                     (get state session-id)
+                     pending* (->> (concat pending observations)
+                                   (take-last fact-utility-review-max-pending)
+                                   vec)]
+                 (if (:worker-token session-state)
+                   (assoc state session-id (assoc session-state :pending pending*))
+                   (let [token (random-uuid)]
+                     (reset! worker-token token)
+                     (assoc state session-id {:pending pending*
+                                              :worker-token token}))))))
+      (when-let [token @worker-token]
+        (future (run-fact-utility-review-worker! session-id token))))
+    (count observations)))
+
+(defn- claim-fact-utility-review-batch!
+  [session-id worker-token]
+  (let [batch (atom nil)]
+    (swap! fact-utility-review-state
+           (fn [state]
+             (let [{:keys [pending] :as session-state}
+                   (get state session-id)]
+               (if (= worker-token (:worker-token session-state))
+                 (let [batch*     (vec (take fact-utility-review-batch-size pending))
+                       remaining* (vec (drop fact-utility-review-batch-size pending))]
+                   (reset! batch batch*)
+                   (assoc state session-id (assoc session-state :pending remaining*)))
+                 state))))
+    @batch))
+
+(defn- finish-fact-utility-review-worker!
+  [session-id worker-token]
+  (let [next-token (atom nil)]
+    (swap! fact-utility-review-state
+           (fn [state]
+             (let [{:keys [pending] :as session-state} (get state session-id)]
+               (cond
+                 (not= worker-token (:worker-token session-state))
+                 state
+
+                 (seq pending)
+                 (let [token (random-uuid)]
+                   (reset! next-token token)
+                   (assoc state session-id {:pending pending
+                                            :worker-token token}))
+
+                 :else
+                 (dissoc state session-id)))))
+    (when-let [token @next-token]
+      (future (run-fact-utility-review-worker! session-id token)))))
+
+(defn- run-fact-utility-review-worker!
+  [session-id worker-token]
+  (try
+    (Thread/sleep (long fact-utility-review-debounce-ms))
+    (loop []
+      (when-let [batch (seq (claim-fact-utility-review-batch! session-id worker-token))]
+        (try
+          (wm/review-fact-utility-observations! batch)
+          (catch Exception e
+            (log/warn e "Failed to review fact utility batch"
+                      {:session-id session-id
+                       :batch-size (count batch)})))
+        (recur)))
+    (catch InterruptedException _
+      (.interrupt (Thread/currentThread)))
+    (finally
+      (finish-fact-utility-review-worker! session-id worker-token))))
+
 (defn- llm-preview-text
   [content]
   (let [text (some-> content str str/trim)]
@@ -613,14 +705,11 @@
                           :partial-content preview})))))))
 
 (defn schedule-fact-utility-review!
-  [fact-eids user-message assistant-response]
+  [session-id fact-eids user-message assistant-response]
   (when (and (seq fact-eids)
              (seq assistant-response))
-    (future
-      (try
-        (wm/review-fact-utility! fact-eids user-message assistant-response)
-        (catch Exception e
-          (log/warn "Failed to review fact utility:" (.getMessage e)))))))
+    (wm/apply-fact-utility-heuristic! fact-eids assistant-response)
+    (enqueue-fact-utility-review! session-id fact-eids user-message assistant-response)))
 
 (defn- best-effort-update-working-memory!
   [session-id user-message channel opts]
@@ -645,9 +734,9 @@
         nil))))
 
 (defn- launch-fact-utility-review!
-  [fact-eids user-message assistant-response]
+  [session-id fact-eids user-message assistant-response]
   (try
-    (schedule-fact-utility-review! fact-eids user-message assistant-response)
+    (schedule-fact-utility-review! session-id fact-eids user-message assistant-response)
     (catch Exception e
       (log/warn e "Failed to schedule fact utility review; continuing without it"
                 {:fact-count (count fact-eids)})
@@ -1873,7 +1962,7 @@
                             (when (clear-autonomy-state-on-terminal? parsed)
                               (wm/clear-autonomy-state! session-id)
                               (wm/snapshot! session-id))
-                            (launch-fact-utility-review! fact-eids* user-message text)
+                            (launch-fact-utility-review! session-id fact-eids* user-message text)
                             (prompt/status! {:state :done
                                              :phase :complete
                                              :message "Ready"})

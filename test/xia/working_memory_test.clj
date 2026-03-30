@@ -507,6 +507,49 @@
                           (double (:kg.fact/utility (db/entity fact-eid)))))
            1.0e-6))))
 
+(deftest test-apply-fact-utility-heuristic-boosts-cited-facts-only
+  (let [node-eid        (th/seed-node! "UtilityHeuristic" "concept")
+        cited-fact-eid  (th/seed-fact! node-eid "likes Clojure" :utility 0.5)
+        other-fact-eid  (th/seed-fact! node-eid "works remotely" :utility 0.5)]
+    (is (= 1
+           (wm/apply-fact-utility-heuristic!
+            [cited-fact-eid other-fact-eid]
+            "Hong likes Clojure and uses it every day.")))
+    (is (< (abs-double (- 0.7
+                          (double (:kg.fact/utility (db/entity cited-fact-eid)))))
+           1.0e-6))
+    (is (< (abs-double (- 0.5
+                          (double (:kg.fact/utility (db/entity other-fact-eid)))))
+           1.0e-6))))
+
+(deftest test-review-fact-utility-observations-batches-across-turns
+  (let [node-eid-a (th/seed-node! "UtilityBatchA" "concept")
+        node-eid-b (th/seed-node! "UtilityBatchB" "concept")
+        fact-a     (th/seed-fact! node-eid-a "likes Clojure" :utility 0.5)
+        fact-b     (th/seed-fact! node-eid-b "uses Datalevin" :utility 0.5)
+        llm-calls  (atom [])]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [messages & opts]
+                    (swap! llm-calls conj {:messages messages :opts opts})
+                    "{\"facts\":[{\"index\":0,\"utility\":1.0},{\"index\":1,\"utility\":0.0}]}")]
+      (is (= 2
+             (wm/review-fact-utility-observations!
+              [{:fact-eid fact-a
+                :user-message "What does Hong like?"
+                :assistant-response "Hong likes Clojure."}
+               {:fact-eid fact-b
+                :user-message "What database does Xia use?"
+                :assistant-response "It uses Datalevin."}])))
+      (is (= 1 (count @llm-calls)))
+      (is (re-find #"What does Hong like\?" (get-in @llm-calls [0 :messages 1 :content])))
+      (is (re-find #"What database does Xia use\?" (get-in @llm-calls [0 :messages 1 :content]))))
+    (is (< (abs-double (- 0.7
+                          (double (:kg.fact/utility (db/entity fact-a)))))
+           1.0e-6))
+    (is (< (abs-double (- 0.3
+                          (double (:kg.fact/utility (db/entity fact-b)))))
+           1.0e-6))))
+
 ;; ---------------------------------------------------------------------------
 ;; Topic shift detection
 ;; ---------------------------------------------------------------------------
@@ -522,6 +565,40 @@
     (testing "shift when topics completely different"
       (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] "discussing Clojure web frameworks")
       (is (true? (wm/detect-topic-shift? sid ["recipe" "pasta" "cooking"]))))
+
+    (testing "requires confirmation before auto-segmenting on lexical mismatch"
+      (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
+                                                      :topics "discussing Clojure web frameworks"
+                                                      :prev-topics nil
+                                                      :pending-topic-shift nil
+                                                      :autonomy-state nil
+                                                      :turn-count 4
+                                                      :topic-turn 0
+                                                      :slots {}
+                                                      :episode-refs []
+                                                      :local-doc-refs []
+                                                      :config {}})
+      (is (false? (#'xia.working-memory/should-auto-segment? sid ["reitit" "compojure" "ring"])))
+      (is (= ["reitit" "compojure" "ring"]
+             (get-in (wm/get-wm sid) [:pending-topic-shift :search-terms])))
+      (is (true? (#'xia.working-memory/should-auto-segment? sid ["reitit" "compojure" "ring"])))
+      (is (nil? (get-in (wm/get-wm sid) [:pending-topic-shift]))))
+
+    (testing "clears a pending shift when the next turn returns to the same topic"
+      (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
+                                                      :topics "discussing Clojure web frameworks"
+                                                      :prev-topics nil
+                                                      :pending-topic-shift nil
+                                                      :autonomy-state nil
+                                                      :turn-count 4
+                                                      :topic-turn 0
+                                                      :slots {}
+                                                      :episode-refs []
+                                                      :local-doc-refs []
+                                                      :config {}})
+      (is (false? (#'xia.working-memory/should-auto-segment? sid ["recipe" "pasta" "cooking"])))
+      (is (false? (#'xia.working-memory/should-auto-segment? sid ["clojure" "frameworks" "ring"])))
+      (is (nil? (get-in (wm/get-wm sid) [:pending-topic-shift]))))
 
     (testing "no shift when no previous topics"
       (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] nil)
