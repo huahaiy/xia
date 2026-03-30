@@ -14,6 +14,7 @@
 (def ^:private normalized-state-meta-key ::normalized-state)
 (def ^:private intent-marker "ACTION_INTENT_JSON:")
 (def ^:private control-marker "AUTONOMOUS_STATUS_JSON:")
+(defonce ^:private controller-system-message-cache (atom {}))
 
 (defn context
   []
@@ -31,6 +32,16 @@
   ([ctx]
    (and (autonomous-run? ctx)
         (true? (:approval-bypass? ctx)))))
+
+(defn- controller-system-message-mode
+  [ctx]
+  (let [autonomous?    (autonomous-run? ctx)
+        branch-worker? (true? (:branch-worker? ctx))
+        direct-user?   (not (or autonomous? branch-worker? (= :branch (:channel ctx))))]
+    (cond
+      direct-user? :direct-user
+      branch-worker? :branch-worker
+      :else :autonomous)))
 
 (defn audit!
   ([event]
@@ -620,56 +631,58 @@
 (defn controller-system-message
   []
   (let [ctx            (context)
-        autonomous?    (autonomous-run? ctx)
-        branch-worker? (true? (:branch-worker? ctx))
-        direct-user?   (not (or autonomous? branch-worker? (= :branch (:channel ctx))))]
-    {:role "system"
-     :content
-     (str "You are running inside Xia's iterative control loop.\n"
-        "For each iteration, follow this loop:\n"
-        "1. Understand the current goal and state.\n"
-        "2. Update the plan.\n"
-        "3. Act using tools when useful.\n"
-        "4. Observe the results already present in tool outputs and conversation history.\n"
-        "5. Update the plan again.\n"
-        "6. End the iteration by deciding whether to continue or complete.\n\n"
-        "Rules:\n"
-        (if direct-user?
-          "- You are interacting with the user directly. If you need input from them, ask one focused question and mark the iteration complete.\n"
-          "- Do not ask the user questions in this execution context.\n")
-        "- If progress now depends on missing approval, missing credentials, or waiting for later external change, describe the blocker and mark the run complete.\n"
-        "- Prefer bounded progress in each iteration over aimless repetition.\n"
-        "- Always work on the current stack tip. Do not choose among stack frames.\n"
-        "- Treat new user input, tool results, and observations as inputs about the current tip. If they imply subordinate work, interruption, return-to-parent, replacement, or discard, report that with stack_action at the end of the iteration.\n"
-        "- Use stay when continuing the current tip. Use push to suspend the current tip and enter a child task. Use pop when the current child is done and control should return to its parent. Use replace when the current tip should be superseded. Use clear only when prior stack state should be discarded and the stack should be reset.\n"
-        "- Reuse observations already present in the session instead of repeating the same tool calls.\n\n"
-        "At the start of the first assistant response in every iteration, before any explanation or tool call, prepend the literal marker "
-        intent-marker
-        " followed by one valid JSON object with this exact shape:\n"
-        "{\"focus\":\"...\",\"agenda_item\":\"...\",\"plan_step\":\"...\",\"why\":\"...\",\"tool\":\"optional-tool-name\",\"tool_args_summary\":\"optional short arguments summary\"}\n"
-        "- focus: the current stack tip you are acting on right now.\n"
-        "- agenda_item: the agenda item for this step when there is one.\n"
-        "- plan_step: the concrete next action you are about to take in this iteration.\n"
-        "- why: why this action helps the current tip.\n"
-        "- tool: the tool you expect to call next, or empty when none.\n"
-        "- tool_args_summary: short human-readable summary of the expected tool arguments.\n"
-        "- Emit this intent object even when you will immediately call tools.\n\n"
-        "At the very end of every response, append the literal marker "
-        control-marker
-        " followed by one valid JSON object with this exact shape:\n"
-        "{\"status\":\"continue|complete\",\"summary\":\"...\",\"next_step\":\"...\",\"reason\":\"...\",\"goal_complete\":true|false,\"current_focus\":\"...\",\"stack_action\":\"stay|push|pop|replace|clear\",\"progress_status\":\"not_started|pending|in_progress|paused|resumable|diverged|blocked|complete\",\"agenda\":[{\"item\":\"...\",\"status\":\"pending|in_progress|paused|resumable|diverged|completed|blocked|skipped\"}]}\n"
-        "- summary: short factual summary of what changed this iteration.\n"
-        "- next_step: short concrete next action when status=continue, otherwise empty.\n"
-        "- reason: why you are continuing or completing.\n"
-        "- goal_complete: true only when the current goal is fully satisfied.\n"
-        "- current_focus: title of the current stack tip after this iteration.\n"
-        "- stack_action: stay to keep working the current frame, push to enter a subroutine, pop to return to the parent frame, replace to switch the current frame, clear to discard prior stack state and reset from the current focus.\n"
-        "- progress_status: overall status of the current stack tip.\n"
-        "- agenda: ordered short checklist for the current stack tip only, not the full stack.\n"
-        "- Use paused when work should stop for now. Use resumable when it is paused but has a clear restart path. Use diverged when the work has meaningfully branched away from the original plan.\n"
-        (when direct-user?
-          "- For direct user-facing turns, use continue only when another internal iteration can make more progress without waiting on the user.\n")
-        "- Return JSON only after the marker, with no markdown fencing.")}))
+        mode           (controller-system-message-mode ctx)]
+    (or (get @controller-system-message-cache mode)
+        (let [direct-user? (= mode :direct-user)
+              message {:role "system"
+                       :content
+                       (str "You are running inside Xia's iterative control loop.\n"
+                            "For each iteration, follow this loop:\n"
+                            "1. Understand the current goal and state.\n"
+                            "2. Update the plan.\n"
+                            "3. Act using tools when useful.\n"
+                            "4. Observe the results already present in tool outputs and conversation history.\n"
+                            "5. Update the plan again.\n"
+                            "6. End the iteration by deciding whether to continue or complete.\n\n"
+                            "Rules:\n"
+                            (if direct-user?
+                              "- You are interacting with the user directly. If you need input from them, ask one focused question and mark the iteration complete.\n"
+                              "- Do not ask the user questions in this execution context.\n")
+                            "- If progress now depends on missing approval, missing credentials, or waiting for later external change, describe the blocker and mark the run complete.\n"
+                            "- Prefer bounded progress in each iteration over aimless repetition.\n"
+                            "- Always work on the current stack tip. Do not choose among stack frames.\n"
+                            "- Treat new user input, tool results, and observations as inputs about the current tip. If they imply subordinate work, interruption, return-to-parent, replacement, or discard, report that with stack_action at the end of the iteration.\n"
+                            "- Use stay when continuing the current tip. Use push to suspend the current tip and enter a child task. Use pop when the current child is done and control should return to its parent. Use replace when the current tip should be superseded. Use clear only when prior stack state should be discarded and the stack should be reset.\n"
+                            "- Reuse observations already present in the session instead of repeating the same tool calls.\n\n"
+                            "At the start of the first assistant response in every iteration, before any explanation or tool call, prepend the literal marker "
+                            intent-marker
+                            " followed by one valid JSON object with this exact shape:\n"
+                            "{\"focus\":\"...\",\"agenda_item\":\"...\",\"plan_step\":\"...\",\"why\":\"...\",\"tool\":\"optional-tool-name\",\"tool_args_summary\":\"optional short arguments summary\"}\n"
+                            "- focus: the current stack tip you are acting on right now.\n"
+                            "- agenda_item: the agenda item for this step when there is one.\n"
+                            "- plan_step: the concrete next action you are about to take in this iteration.\n"
+                            "- why: why this action helps the current tip.\n"
+                            "- tool: the tool you expect to call next, or empty when none.\n"
+                            "- tool_args_summary: short human-readable summary of the expected tool arguments.\n"
+                            "- Emit this intent object even when you will immediately call tools.\n\n"
+                            "At the very end of every response, append the literal marker "
+                            control-marker
+                            " followed by one valid JSON object with this exact shape:\n"
+                            "{\"status\":\"continue|complete\",\"summary\":\"...\",\"next_step\":\"...\",\"reason\":\"...\",\"goal_complete\":true|false,\"current_focus\":\"...\",\"stack_action\":\"stay|push|pop|replace|clear\",\"progress_status\":\"not_started|pending|in_progress|paused|resumable|diverged|blocked|complete\",\"agenda\":[{\"item\":\"...\",\"status\":\"pending|in_progress|paused|resumable|diverged|completed|blocked|skipped\"}]}\n"
+                            "- summary: short factual summary of what changed this iteration.\n"
+                            "- next_step: short concrete next action when status=continue, otherwise empty.\n"
+                            "- reason: why you are continuing or completing.\n"
+                            "- goal_complete: true only when the current goal is fully satisfied.\n"
+                            "- current_focus: title of the current stack tip after this iteration.\n"
+                            "- stack_action: stay to keep working the current frame, push to enter a subroutine, pop to return to the parent frame, replace to switch the current frame, clear to discard prior stack state and reset from the current focus.\n"
+                            "- progress_status: overall status of the current stack tip.\n"
+                            "- agenda: ordered short checklist for the current stack tip only, not the full stack.\n"
+                            "- Use paused when work should stop for now. Use resumable when it is paused but has a clear restart path. Use diverged when the work has meaningfully branched away from the original plan.\n"
+                            (when direct-user?
+                              "- For direct user-facing turns, use continue only when another internal iteration can make more progress without waiting on the user.\n")
+                            "- Return JSON only after the marker, with no markdown fencing.")}]
+          (or (get (swap! controller-system-message-cache assoc mode message) mode)
+              message)))))
 
 (defn controller-state-message
   [{:keys [goal iteration max-iterations stack previous-summary previous-next-step

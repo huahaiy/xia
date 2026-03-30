@@ -113,6 +113,25 @@
       (is (str/includes? content
                          "At the start of the first assistant response in every iteration")))))
 
+(deftest controller-system-message-is-cached-by-context-mode
+  (let [cache-var #'xia.autonomous/controller-system-message-cache]
+    (reset! @cache-var {})
+    (binding [prompt/*interaction-context* {:channel :terminal}]
+      (let [first-message  (autonomous/controller-system-message)
+            second-message (autonomous/controller-system-message)]
+        (is (identical? first-message second-message))
+        (is (str/includes? (:content first-message)
+                           "If you need input from them, ask one focused question"))))
+    (binding [prompt/*interaction-context* {:autonomous-run? true
+                                            :channel :schedule}]
+      (let [autonomous-message (autonomous/controller-system-message)]
+        (is (str/includes? (:content autonomous-message)
+                           "Do not ask the user questions in this execution context."))
+        (is (not (str/includes? (:content autonomous-message)
+                                "If you need input from them, ask one focused question")))))
+    (is (= #{:direct-user :autonomous}
+           (set (keys @@cache-var))))))
+
 (deftest controller-state-message-requires-intent-before-work
   (let [content (:content (autonomous/controller-state-message
                            {:goal "Handle billing emails"
