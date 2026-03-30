@@ -96,6 +96,26 @@
     (is (not (str/includes? assistant-text "ACTION_INTENT_JSON:")))
     (is (= :continue (:status control)))))
 
+(deftest parse-controller-response-preserves-long-summary-and-next-step
+  (let [summary   (str "Completed the data gathering pass across the subscription migration checklist, including payment-state verification, account-ownership confirmation, retry-window analysis, and the unresolved edge cases for invoices 17 through 24. "
+                       "Captured the discrepancies, identified the missing confirmations, and wrote down the exact remaining follow-up actions for support, billing, and the browser automation retry path.")
+        next-step (str "Draft the customer reply using the verified invoice ownership details, then queue the follow-up browser check for the payment retry state, and finally update the internal billing note with the unresolved invoice discrepancies.")
+        {:keys [control]}
+        (autonomous/parse-controller-response
+         (str "Worked the plan.\n\n"
+              "AUTONOMOUS_STATUS_JSON:"
+              "{\"status\":\"continue\","
+              "\"summary\":" (pr-str summary) ","
+              "\"next_step\":" (pr-str next-step) ","
+              "\"reason\":\"More work remains\",\"goal_complete\":false}"))]
+    (is (= summary (:summary control)))
+    (is (= next-step (:next-step control)))))
+
+(deftest initial-state-preserves-a-long-goal
+  (let [goal  (str "Handle the multi-account billing remediation workflow for the March support backlog, including invoice verification, refund eligibility review, payment retry checks, customer reply drafting, and the follow-up notes needed for finance escalation when ownership records disagree across systems.")
+        state (autonomous/initial-state goal)]
+    (is (= goal (:goal state)))))
+
 (deftest controller-state-message-renders-progress-and-agenda
   (let [message (autonomous/controller-state-message
                   {:goal "Handle billing emails"

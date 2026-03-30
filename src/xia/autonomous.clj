@@ -8,6 +8,10 @@
 
 (def ^:private default-max-iterations 6)
 (def ^:private default-control-field-chars 280)
+(def ^:private default-goal-chars 1200)
+(def ^:private default-summary-chars 1200)
+(def ^:private default-next-step-chars 800)
+(def ^:private default-reason-chars 600)
 (def ^:private max-agenda-items 8)
 (def ^:private max-agenda-item-chars 160)
 (def ^:private max-stack-depth 8)
@@ -112,13 +116,31 @@
   intent-marker)
 
 (defn- truncate-field
+  ([value]
+   (truncate-field value default-control-field-chars))
+  ([value limit]
+   (let [text (some-> value str str/trim)
+         limit (long limit)]
+     (when (seq text)
+       (if (> (long (count text)) limit)
+         (str (subs text 0 (max 1 (dec limit))) "…")
+         text)))))
+
+(defn- truncate-goal
   [value]
-  (let [text (some-> value str str/trim)
-        limit (long default-control-field-chars)]
-    (when (seq text)
-      (if (> (long (count text)) limit)
-        (str (subs text 0 (max 1 (dec limit))) "…")
-        text))))
+  (truncate-field value default-goal-chars))
+
+(defn- truncate-summary
+  [value]
+  (truncate-field value default-summary-chars))
+
+(defn- truncate-next-step
+  [value]
+  (truncate-field value default-next-step-chars))
+
+(defn- truncate-reason
+  [value]
+  (truncate-field value default-reason-chars))
 
 (defn- truncate-agenda-item
   [value]
@@ -376,13 +398,13 @@
                                                        (get frame "current-focus")))
                              default-title)]
     {:title           title
-     :summary         (truncate-field (or (:summary frame)
-                                          (get frame "summary")))
-     :next-step       (truncate-field (or (:next-step frame)
-                                          (:next_step frame)
-                                          (get frame "next_step")
-                                          (get frame "next-step")))
-     :reason          (truncate-field (or (:reason frame)
+     :summary         (truncate-summary (or (:summary frame)
+                                            (get frame "summary")))
+     :next-step       (truncate-next-step (or (:next-step frame)
+                                              (:next_step frame)
+                                              (get frame "next_step")
+                                              (get frame "next-step")))
+     :reason          (truncate-reason (or (:reason frame)
                                           (get frame "reason")))
      :progress-status status
      :agenda          agenda}))
@@ -433,7 +455,7 @@
 
 (defn initial-state
   [goal]
-  (let [goal* (truncate-field goal)]
+  (let [goal* (truncate-goal goal)]
     (mark-normalized-state
      {:goal  goal*
       :stack (normalize-stack goal* nil)})))
@@ -444,10 +466,10 @@
     state
     (let [raw-stack (or (:stack state)
                         (get state "stack"))
-          goal*     (truncate-field (or (:goal state)
-                                        (get state "goal")
-                                        (some-> raw-stack peek :title)
-                                        (some-> raw-stack peek (get "title"))))
+          goal*     (truncate-goal (or (:goal state)
+                                       (get state "goal")
+                                       (some-> raw-stack peek :title)
+                                       (some-> raw-stack peek (get "title"))))
           stack*    (normalize-stack goal* raw-stack)]
       (mark-normalized-state
        {:goal  goal*
@@ -519,9 +541,9 @@
 
 (defn apply-control
   [state control]
-  (let [goal          (truncate-field (or (:goal state)
-                                          (:current-focus control)
-                                          (:summary control)))
+  (let [goal          (truncate-goal (or (:goal state)
+                                         (:current-focus control)
+                                         (:summary control)))
         stack         (normalize-stack goal (:stack state))
         current-tip   (peek stack)
         action        (normalize-stack-action (:stack-action control))
@@ -710,9 +732,9 @@
             (str "\nCurrent execution stack (bottom -> top):\n"
                  (str/join "\n" (stack-lines stack*))
                  "\n"
-                 (when-let [summary (some-> tip :summary truncate-field)]
+                 (when-let [summary (some-> tip :summary truncate-summary)]
                    (str "- Tip summary: " summary "\n"))
-                 (when-let [reason (some-> tip :reason truncate-field)]
+                 (when-let [reason (some-> tip :reason truncate-reason)]
                    (str "- Tip reason: " reason "\n"))
                  (when-let [lines (some-> tip :agenda agenda-lines)]
                    (str "- Tip agenda:\n"
@@ -724,11 +746,11 @@
                       previous-progress-status
                       (seq previous-agenda))
               (str "\nState from the previous iteration:\n"
-                   (when-let [summary (truncate-field previous-summary)]
+                   (when-let [summary (truncate-summary previous-summary)]
                      (str "- Summary: " summary "\n"))
-                   (when-let [next-step (truncate-field previous-next-step)]
+                   (when-let [next-step (truncate-next-step previous-next-step)]
                      (str "- Next step: " next-step "\n"))
-                   (when-let [reason (truncate-field previous-reason)]
+                   (when-let [reason (truncate-reason previous-reason)]
                      (str "- Reason: " reason "\n"))
                    (when-let [progress-status (progress-status-label previous-progress-status)]
                      (str "- Progress status: " progress-status "\n"))
@@ -872,15 +894,15 @@
                            str/trim
                            str/lower-case)
         status     (if (= "continue" status-raw) :continue :complete)
-        summary    (or (truncate-field (or (get parsed "summary")
-                                           (:summary parsed)))
-                       (truncate-field head))
-        next-step  (truncate-field (or (get parsed "next_step")
-                                       (:next_step parsed)
-                                       (get parsed "next-step")
-                                       (:next-step parsed)))
-        reason     (truncate-field (or (get parsed "reason")
-                                       (:reason parsed)))
+        summary    (or (truncate-summary (or (get parsed "summary")
+                                             (:summary parsed)))
+                       (truncate-summary head))
+        next-step  (truncate-next-step (or (get parsed "next_step")
+                                           (:next_step parsed)
+                                           (get parsed "next-step")
+                                           (:next-step parsed)))
+        reason     (truncate-reason (or (get parsed "reason")
+                                        (:reason parsed)))
         goal-complete? (true? (or (get parsed "goal_complete")
                                   (:goal_complete parsed)
                                   (get parsed "goal-complete")

@@ -7,6 +7,7 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.prompt :as prompt]
+            [xia.retrieval-state :as retrieval-state]
             [xia.tool :as tool]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory :as wm]))
@@ -503,7 +504,7 @@
       (finally
         (prompt/register-assistant-message! :terminal nil)))))
 
-(deftest process-message-refreshes-working-memory-between-autonomous-iterations
+(deftest process-message-does-not-refresh-working-memory-between-text-only-autonomous-iterations
   (let [session-id (db/create-session! :terminal)
         wm-updates (atom [])
         wm-refreshes (atom [])
@@ -528,6 +529,89 @@
                                                                          "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft replies\",\"status\":\"completed\"}]}")} ))
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
       (is (= "Sent the replies."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (= ["reply to the billing emails"] @wm-updates))
+    (is (= [] @wm-refreshes))))
+
+(deftest process-message-does-not-refresh-working-memory-after-non-mutating-tool-using-iterations
+  (let [session-id    (db/create-session! :terminal)
+        wm-updates    (atom [])
+        wm-refreshes  (atom [])
+        llm-calls     (atom 0)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [message _session-id _channel _opts]
+                                                       (swap! wm-updates conj message))
+                  xia.working-memory/refresh-wm!     (fn [message _session-id _channel _opts]
+                                                       (swap! wm-refreshes conj message))
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                       {:summary "Found the invoices."})
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Checking the inbox.\n\n"
+                                                                           "ACTION_INTENT_JSON:{\"focus\":\"Reply to the billing emails\",\"agenda_item\":\"Check inbox\",\"plan_step\":\"Search unread billing email\",\"why\":\"Need the latest unread items\",\"tool\":\"web-search\",\"tool_args_summary\":\"label:billing unread\"}")
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{}"}}]}
+                                                         2 {"content" (str "Checked the inbox.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Checked the inbox\",\"next_step\":\"Draft the reply\",\"reason\":\"Need one more pass\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" (str "Sent the reply.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Sent the reply\",\"next_step\":\"\",\"reason\":\"Done\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"completed\"}]}")} ))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent the reply."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (= ["reply to the billing emails"] @wm-updates))
+    (is (= [] @wm-refreshes))))
+
+(deftest process-message-refreshes-working-memory-after-retrieval-state-changes
+  (let [session-id    (db/create-session! :terminal)
+        wm-updates    (atom [])
+        wm-refreshes  (atom [])
+        llm-calls     (atom 0)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [message _session-id _channel _opts]
+                                                       (swap! wm-updates conj message))
+                  xia.working-memory/refresh-wm!     (fn [message _session-id _channel _opts]
+                                                       (swap! wm-refreshes conj message))
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                       (retrieval-state/bump-knowledge!)
+                                                       {:summary "Found the invoices."})
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Checking the inbox.\n\n"
+                                                                           "ACTION_INTENT_JSON:{\"focus\":\"Reply to the billing emails\",\"agenda_item\":\"Check inbox\",\"plan_step\":\"Search unread billing email\",\"why\":\"Need the latest unread items\",\"tool\":\"web-search\",\"tool_args_summary\":\"label:billing unread\"}")
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{}"}}]}
+                                                         2 {"content" (str "Checked the inbox.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Checked the inbox\",\"next_step\":\"Draft the reply\",\"reason\":\"Need one more pass\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" (str "Sent the reply.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Sent the reply\",\"next_step\":\"\",\"reason\":\"Done\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"completed\"}]}")} ))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent the reply."
              (agent/process-message session-id
                                     "reply to the billing emails"
                                     :channel :terminal))))

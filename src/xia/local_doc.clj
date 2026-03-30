@@ -5,6 +5,7 @@
             [xia.extractive-summary :as extractive-summary]
             [xia.local-ocr :as local-ocr]
             [xia.memory :as memory]
+            [xia.retrieval-state :as retrieval-state]
             [xia.summarizer :as summarizer]
             [xia.working-memory :as wm]
             [xia.scratch :as scratch])
@@ -1397,6 +1398,7 @@
         (when (or (not existing)
                   (not= existing-chunk-count chunk-count))
           (replace-doc-chunks! doc-eid* session-eid* chunks))
+        (retrieval-state/bump-local-docs! session-id*)
         (document-from-eid doc-eid*)))))
 
 (defn save-failed-upload!
@@ -1452,12 +1454,14 @@
   ([doc-id]
    (let [doc-id* (normalize-doc-id doc-id)
          eid     (doc-eid doc-id*)
+         doc     (document-from-eid eid)
          chunk-eids (doc-chunk-eids eid)]
      (when-not eid
        (throw (doc-not-found-ex doc-id*)))
      (db/transact! (into (mapv (fn [chunk-eid*] [:db/retractEntity chunk-eid*])
                                chunk-eids)
                          [[:db/retractEntity eid]]))
+     (retrieval-state/bump-local-docs! (:session-id doc))
      {:status "deleted" :id (str doc-id*)}))
   ([session-id doc-id]
    (let [session-id*  (normalize-session-id session-id)
@@ -1482,6 +1486,7 @@
                          (concat (map (fn [chunk-eid*] [:db/retractEntity chunk-eid*])
                                       chunk-eids)
                                  [[:db/retractEntity eid]])))
+     (retrieval-state/bump-local-docs! session-id*)
      {:status "deleted" :id (str doc-id*)})))
 
 (defn create-scratch-pad-from-doc!

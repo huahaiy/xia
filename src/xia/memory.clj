@@ -14,7 +14,8 @@
             [datalevin.built-ins :as builtins]
             [datalevin.core :as d]
             [xia.config :as cfg]
-            [xia.db :as db]))
+            [xia.db :as db]
+            [xia.retrieval-state :as retrieval-state]))
 
 ;; ============================================================================
 ;; Episodic Memory
@@ -26,17 +27,20 @@
 (defn record-episode!
   "Record an episode — a bounded event or interaction."
   [{:keys [type summary context participants channel session-id importance]}]
-  (db/transact!
-    [(cond-> {:episode/id         (random-uuid)
-              :episode/type       (or type :conversation)
-              :episode/summary    (or summary "")
-              :episode/timestamp  (java.util.Date.)
-              :episode/processed? false}
-       context      (assoc :episode/context context)
-       participants (assoc :episode/participants participants)
-       channel      (assoc :episode/channel (name channel))
-       importance   (assoc :episode/importance (float importance))
-       session-id   (assoc :episode/session-id (str session-id)))]))
+  (let [result
+        (db/transact!
+          [(cond-> {:episode/id         (random-uuid)
+                    :episode/type       (or type :conversation)
+                    :episode/summary    (or summary "")
+                    :episode/timestamp  (java.util.Date.)
+                    :episode/processed? false}
+             context      (assoc :episode/context context)
+             participants (assoc :episode/participants participants)
+             channel      (assoc :episode/channel (name channel))
+             importance   (assoc :episode/importance (float importance))
+             session-id   (assoc :episode/session-id (str session-id)))])]
+    (retrieval-state/bump-knowledge!)
+    result))
 
 (defn- empty->nil [s] (when-not (= "" s) s))
 
@@ -339,7 +343,8 @@
   ([^java.util.Date as-of]
    (let [{:keys [to-remove tx-data]} (processed-episode-prune-plan as-of)]
      (when (seq tx-data)
-       (db/transact! tx-data))
+       (db/transact! tx-data)
+       (retrieval-state/bump-knowledge!))
      (count to-remove))))
 
 ;; ============================================================================
@@ -363,6 +368,7 @@
                 :kg.node/created-at (java.util.Date.)
                 :kg.node/updated-at (java.util.Date.)}
          properties (assoc :kg.node/properties properties))])
+    (retrieval-state/bump-knowledge!)
     id))
 
 (defn find-node
@@ -437,7 +443,8 @@
       ;; Create new properties map
       (db/transact! [[:db/add node-eid :kg.node/properties
                       (assoc-in {} path value)]]))
-    (db/transact! [[:db/add node-eid :kg.node/updated-at (java.util.Date.)]])))
+    (db/transact! [[:db/add node-eid :kg.node/updated-at (java.util.Date.)]])
+    (retrieval-state/bump-knowledge!)))
 
 (defn remove-node-property!
   "Remove a property from a node.
@@ -447,7 +454,8 @@
   (when (node-properties node-eid)
     (db/transact! [[:db.fn/patchIdoc node-eid :kg.node/properties
                     [[:unset path]]]])
-    (db/transact! [[:db/add node-eid :kg.node/updated-at (java.util.Date.)]])))
+    (db/transact! [[:db/add node-eid :kg.node/updated-at (java.util.Date.)]])
+    (retrieval-state/bump-knowledge!)))
 
 (defn query-nodes-by-property
   "Find nodes whose properties match a pattern via idoc-match.
@@ -484,6 +492,7 @@
          label      (assoc :kg.edge/label label)
          weight     (assoc :kg.edge/weight weight)
          source-eid (assoc :kg.edge/source source-eid))])
+    (retrieval-state/bump-knowledge!)
     id))
 
 (defn node-edges
@@ -605,16 +614,19 @@
   "Add a fact about an entity."
   [{:keys [node-eid content confidence utility source-eid]}]
   (let [now (java.util.Date.)]
-    (db/transact!
-      [(cond-> {:kg.fact/id         (random-uuid)
-                :kg.fact/node       node-eid
-                :kg.fact/content    content
-                :kg.fact/confidence (or confidence 1.0)
-                :kg.fact/utility    (float (normalize-fact-utility utility))
-                :kg.fact/created-at now
-                :kg.fact/updated-at now
-                :kg.fact/decayed-at now}
-         source-eid (assoc :kg.fact/source source-eid))])))
+    (let [result
+          (db/transact!
+            [(cond-> {:kg.fact/id         (random-uuid)
+                      :kg.fact/node       node-eid
+                      :kg.fact/content    content
+                      :kg.fact/confidence (or confidence 1.0)
+                      :kg.fact/utility    (float (normalize-fact-utility utility))
+                      :kg.fact/created-at now
+                      :kg.fact/updated-at now
+                      :kg.fact/decayed-at now}
+               source-eid (assoc :kg.fact/source source-eid))])]
+      (retrieval-state/bump-knowledge!)
+      result)))
 
 (defn node-facts
   "Get all facts about a node."
@@ -1358,6 +1370,7 @@
     (let [now (java.util.Date.)]
       (db/transact! [[:db/retractEntity fact-eid]
                      [:db/add (:node-eid fact) :kg.node/updated-at now]])
+      (retrieval-state/bump-knowledge!)
       fact)))
 
 (defn update-fact-utility!
@@ -1367,6 +1380,7 @@
           observed   (normalize-fact-utility observed-utility)
           adjusted   (+ (* 0.6 (double current)) (* 0.4 (double observed)))]
       (db/transact! [[:db/add fact-eid :kg.fact/utility (float adjusted)]])
+      (retrieval-state/bump-knowledge!)
       adjusted)))
 
 ;; ============================================================================

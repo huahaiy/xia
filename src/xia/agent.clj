@@ -16,6 +16,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.retrieval-state :as retrieval-state]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.ssrf :as ssrf]
@@ -1680,7 +1681,8 @@
    execution-context assistant-provider assistant-provider-id transient-messages
    working-memory-message update-working-memory? refresh-working-memory?
    max-tool-rounds worker-state system-prompt-cache-entry]
-  (let [emit-event! #(emit-worker-event! worker-state %)]
+  (let [emit-event! #(emit-worker-event! worker-state %)
+        retrieval-session-id (or resource-session-id session-id)]
     (when (or update-working-memory? refresh-working-memory?)
       (emit-event! {:phase :working-memory
                     :message (if update-working-memory?
@@ -1697,7 +1699,8 @@
                                              channel
                                              {:resource-session-id resource-session-id})))
     (throw-if-cancelled! session-id)
-    (let [tools (tool/tool-definitions execution-context)
+    (let [retrieval-version-before (retrieval-state/version retrieval-session-id)
+          tools (tool/tool-definitions execution-context)
           {:keys [messages used-fact-eids system-prompt-cache-entry]}
           (context/build-messages-data session-id
                                        {:provider assistant-provider
@@ -1847,6 +1850,8 @@
               {:response response
                :parsed-response parsed-response
                :used-fact-eids used-fact-eids
+               :refresh-needed? (retrieval-state/changed? retrieval-version-before
+                                                         retrieval-session-id)
                :system-prompt-cache-entry system-prompt-cache-entry})))))))
 
 (defn process-message
@@ -1912,6 +1917,7 @@
                   (loop [iteration 1
                          fact-eids []
                          loop-state nil
+                         refresh-working-memory? false
                          system-prompt-cache-entry nil]
                     (throw-if-cancelled! session-id)
                     (let [autonomy-state (or (wm/autonomy-state session-id)
@@ -1932,7 +1938,6 @@
                                                      iteration
                                                      max-iterations*)
                           update-working-memory? (= iteration 1)
-                          refresh-working-memory? (> iteration 1)
                           wm-message (or working-memory-message user-message)]
                       (save-schedule-checkpoint!
                        iteration-context
@@ -1942,7 +1947,8 @@
                                    "Understanding the goal and preparing the first plan."
                                    "Resuming the autonomous loop with the updated plan.")
                         :session-id session-id})
-                      (let [{:keys [response parsed-response used-fact-eids system-prompt-cache-entry]}
+                      (let [{:keys [response parsed-response used-fact-eids refresh-needed?
+                                    system-prompt-cache-entry]}
                             (run-supervised-agent-iteration session-id
                                                             channel
                                                             resource-session-id
@@ -2087,6 +2093,7 @@
                             (recur (inc iteration)
                                    fact-eids*
                                    next-loop-state
+                                   (boolean refresh-needed?)
                                    system-prompt-cache-entry)))))))
                 (catch InterruptedException e
                   (request-session-cancel! session-id "request interrupted")
