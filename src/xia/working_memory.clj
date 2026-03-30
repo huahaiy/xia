@@ -767,16 +767,32 @@ Rules:
     :else
     #{}))
 
+(defn- normalized-topic-shift-baseline
+  [search-terms]
+  (some->> (topic-shift-terms search-terms)
+           seq
+           sort
+           vec))
+
+(defn- topic-shift-baseline-terms
+  [wm]
+  (let [baseline-terms (some-> (:topic-shift-baseline wm) topic-shift-terms)
+        topic-terms    (some-> (:topics wm) topic-shift-terms)]
+    (cond
+      (seq baseline-terms) baseline-terms
+      (seq topic-terms) topic-terms
+      :else nil)))
+
 (defn detect-topic-shift?
-  "Compare current search terms with previous topic summary.
+  "Compare current search terms with the latest lexical topic baseline.
    Returns true if topics have shifted significantly."
   ([search-terms]
    (detect-topic-shift? nil search-terms))
   ([session-id search-terms]
    (let [wm (session-wm session-id)
-        prev-topics (:topics wm)]
-     (when (and prev-topics (seq search-terms))
-       (let [prev-words       (topic-shift-terms prev-topics)
+         prev-words (topic-shift-baseline-terms wm)]
+     (when (and (seq prev-words) (seq search-terms))
+       (let [prev-words       prev-words
              current-words    (topic-shift-terms search-terms)
              overlap          (count (clojure.set/intersection prev-words current-words))
              prev-count       (max 1 (count prev-words))
@@ -794,13 +810,16 @@ Rules:
 (defn- should-auto-segment?
   [session-id search-terms]
   (let [wm       (session-wm session-id)
-        shift?   (detect-topic-shift? session-id search-terms)
+        baseline (normalized-topic-shift-baseline search-terms)
+        shift?   (detect-topic-shift? session-id baseline)
         pending? (some? (:pending-topic-shift wm))]
     (cond
       (not shift?)
       (do
-        (when pending?
-          (update-session-wm! session-id #(assoc % :pending-topic-shift nil)))
+        (update-session-wm! session-id
+                            #(cond-> (assoc % :pending-topic-shift nil)
+                               baseline
+                               (assoc :topic-shift-baseline baseline)))
         false)
 
       pending?
@@ -822,7 +841,7 @@ Rules:
 (defn auto-segment!
   "Close the current episode and start a new one within the same session.
    Called when a significant topic shift is detected."
-  [session-id channel]
+  [session-id channel search-terms]
   (run-session-op! session-id
     (fn [sid]
       (let [wm (session-wm sid)]
@@ -840,6 +859,7 @@ Rules:
             (assoc wm
                    :prev-topics         (:topics wm)
                    :topics              nil
+                   :topic-shift-baseline (normalized-topic-shift-baseline search-terms)
                    :pending-topic-shift nil
                    :topic-turn          (:turn-count wm))))))))
 
@@ -888,9 +908,15 @@ Rules:
           (when topic-maintenance?
             (let [wm (session-wm sid)]
               (when (and wm
-                         (> (long (:turn-count wm)) 3)
-                         (should-auto-segment? sid terms))
-                (auto-segment! sid channel))
+                         (seq terms))
+                (if (> (long (:turn-count wm)) 3)
+                  (when (should-auto-segment? sid terms)
+                    (auto-segment! sid channel terms))
+                  (update-session-wm! sid
+                                      #(cond-> %
+                                         (normalized-topic-shift-baseline terms)
+                                         (assoc :topic-shift-baseline
+                                                (normalized-topic-shift-baseline terms))))))
               (when wm
                 (let [interval    (get-in wm [:config :topic-update-interval])
                       turns-since (- (long (:turn-count wm)) (long (:topic-turn wm)))]
@@ -942,6 +968,7 @@ Rules:
       (let [wm {:session-id      sid
                 :topics          nil
                 :prev-topics     nil
+                :topic-shift-baseline nil
                 :pending-topic-shift nil
                 :autonomy-state  nil
                 :turn-count      0

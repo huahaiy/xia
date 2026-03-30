@@ -585,6 +585,21 @@
                                               "fermentation"
                                               "nutrition"]))))
 
+    (testing "prefers the lexical baseline over a stale topic summary"
+      (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
+                                                      :topics "discussing cooking recipes"
+                                                      :prev-topics nil
+                                                      :topic-shift-baseline ["clojure" "web" "frameworks"]
+                                                      :pending-topic-shift nil
+                                                      :autonomy-state nil
+                                                      :turn-count 4
+                                                      :topic-turn 0
+                                                      :slots {}
+                                                      :episode-refs []
+                                                      :local-doc-refs []
+                                                      :config {}})
+      (is (false? (wm/detect-topic-shift? sid ["clojure" "ring" "reitit"]))))
+
     (testing "requires confirmation before auto-segmenting on lexical mismatch"
       (swap! @#'xia.working-memory/wm-atom assoc sid {:session-id sid
                                                       :topics "discussing Clojure web frameworks"
@@ -620,7 +635,10 @@
       (is (nil? (get-in (wm/get-wm sid) [:pending-topic-shift]))))
 
     (testing "no shift when no previous topics"
-      (swap! @#'xia.working-memory/wm-atom assoc-in [sid :topics] nil)
+      (swap! @#'xia.working-memory/wm-atom
+             #(-> %
+                  (assoc-in [sid :topics] nil)
+                  (assoc-in [sid :topic-shift-baseline] nil)))
       (is (nil? (wm/detect-topic-shift? sid ["anything"]))))
 
     (wm/clear-wm! sid)))
