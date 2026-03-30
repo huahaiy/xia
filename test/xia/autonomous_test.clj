@@ -113,7 +113,7 @@
 (deftest initial-state-preserves-a-long-goal
   (let [goal  (str "Handle the multi-account billing remediation workflow for the March support backlog, including invoice verification, refund eligibility review, payment retry checks, customer reply drafting, and the follow-up notes needed for finance escalation when ownership records disagree across systems.")
         state (autonomous/initial-state goal)]
-    (is (= goal (:goal state)))))
+    (is (= goal (autonomous/root-goal state)))))
 
 (deftest apply-control-pushes-and-pops-stack-frames
   (let [initial (autonomous/initial-state "Handle billing emails")
@@ -153,8 +153,7 @@
            (get-in popped [:stack 0 :agenda])))))
 
 (deftest apply-control-stay-preserves-existing-frame-fields
-  (let [initial {:goal "Handle billing emails"
-                 :stack [{:title "Handle billing emails"
+  (let [initial {:stack [{:title "Handle billing emails"
                           :summary "Checked inbox"
                           :next-step "Draft replies"
                           :reason "Unread messages remain"
@@ -181,8 +180,7 @@
            (get-in updated [:stack 0 :agenda])))))
 
 (deftest apply-control-preserves-existing-progress-status-when-parser-derived-it
-  (let [initial {:goal "Handle billing emails"
-                 :stack [{:title "Handle billing emails"
+  (let [initial {:stack [{:title "Handle billing emails"
                           :summary "Checked inbox"
                           :next-step "Draft replies"
                           :reason "Unread messages remain"
@@ -201,8 +199,7 @@
            (get-in updated [:stack 0 :next-step])))))
 
 (deftest apply-control-clear-resets-or-empties-the-stack
-  (let [initial {:goal "Handle billing emails"
-                 :stack [{:title "Handle billing emails"
+  (let [initial {:stack [{:title "Handle billing emails"
                           :progress-status :in-progress}
                          {:title "Find invoice ids"
                           :progress-status :in-progress}]}
@@ -229,6 +226,26 @@
     (is (= []
            (:stack cleared-state)))))
 
+(deftest apply-control-replace-commits-a-new-top-level-goal
+  (let [initial {:stack [{:title "Handle billing emails"
+                          :summary "Working the inbox"
+                          :next-step "Draft replies"
+                          :reason "Unread messages remain"
+                          :progress-status :in-progress}]}
+        updated (autonomous/apply-control
+                 initial
+                 {:status :continue
+                  :summary "Switched to refund follow-up"
+                  :next-step "Review the refund thread"
+                  :reason "The user changed the task"
+                  :current-focus "Handle refund follow-up"
+                  :stack-action :replace
+                  :progress-status :pending})]
+    (is (= "Handle refund follow-up"
+           (autonomous/root-goal updated)))
+    (is (= ["Handle refund follow-up"]
+           (mapv :title (:stack updated))))))
+
 (deftest normalize-state-handles-string-keyed-snapshots
   (let [state (autonomous/normalize-state
                {"goal" "Handle billing emails"
@@ -236,7 +253,7 @@
                           "progress_status" "resumable"
                           "agenda" [{"item" "Wait for invoice ids"
                                      "status" "resumable"}]}]})]
-    (is (= "Handle billing emails" (:goal state)))
+    (is (= "Handle billing emails" (autonomous/root-goal state)))
     (is (= "Handle billing emails"
            (get-in state [:stack 0 :title])))
     (is (= :resumable

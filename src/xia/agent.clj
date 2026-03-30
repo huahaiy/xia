@@ -1283,7 +1283,7 @@
   [autonomy-state iteration max-iterations & {:keys [incoming-message]}]
   [(autonomous/controller-system-message)
    (autonomous/controller-state-message
-    {:goal (:goal autonomy-state)
+    {:goal (autonomous/root-goal autonomy-state)
      :iteration iteration
      :max-iterations max-iterations
      :stack (:stack autonomy-state)

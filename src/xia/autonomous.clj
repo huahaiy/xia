@@ -365,7 +365,7 @@
 
 (defn- default-frame-title
   [goal]
-  (or (truncate-agenda-item goal)
+  (or (truncate-goal goal)
       "Current task"))
 
 (def ^:private missing-field ::missing-field)
@@ -390,12 +390,12 @@
                                                             (get frame "status")))
                              (derive-progress-status :continue false agenda)
                              :pending)
-        title            (or (truncate-agenda-item (or (:title frame)
-                                                       (get frame "title")))
-                             (truncate-agenda-item (or (:current-focus frame)
-                                                       (:current_focus frame)
-                                                       (get frame "current_focus")
-                                                       (get frame "current-focus")))
+        title            (or (truncate-goal (or (:title frame)
+                                                (get frame "title")))
+                             (truncate-goal (or (:current-focus frame)
+                                                (:current_focus frame)
+                                                (get frame "current_focus")
+                                                (get frame "current-focus")))
                              default-title)]
     {:title           title
      :summary         (truncate-summary (or (:summary frame)
@@ -457,8 +457,7 @@
   [goal]
   (let [goal* (truncate-goal goal)]
     (mark-normalized-state
-     {:goal  goal*
-      :stack (normalize-stack goal* nil)})))
+     {:stack (normalize-stack goal* nil)})))
 
 (defn normalize-state
   [state]
@@ -466,14 +465,16 @@
     state
     (let [raw-stack (or (:stack state)
                         (get state "stack"))
-          goal*     (truncate-goal (or (:goal state)
-                                       (get state "goal")
-                                       (some-> raw-stack peek :title)
-                                       (some-> raw-stack peek (get "title"))))
-          stack*    (normalize-stack goal* raw-stack)]
+          legacy-goal (truncate-goal (or (:goal state)
+                                         (get state "goal")))
+          seed-title   (truncate-goal (or legacy-goal
+                                          (some-> raw-stack first :title)
+                                          (some-> raw-stack first (get "title"))
+                                          (some-> raw-stack peek :title)
+                                          (some-> raw-stack peek (get "title"))))
+          stack*      (normalize-stack seed-title raw-stack)]
       (mark-normalized-state
-       {:goal  goal*
-        :stack stack*}))))
+       {:stack stack*}))))
 
 (defn prepare-turn-state
   [state user-message]
@@ -490,6 +491,37 @@
     (if resumable-state?
       state*
       (initial-state user-message))))
+
+(defn root-frame
+  [state]
+  (first (:stack (cond
+                   (normalized-state? state) state
+                   (map? state)             (normalize-state state)
+                   :else                    (initial-state nil)))))
+
+(defn root-goal
+  [state]
+  (some-> (root-frame state) :title))
+
+(defn- goal-section-text
+  [goal incoming-message]
+  (let [goal*  (truncate-goal goal)
+        input* (truncate-goal incoming-message)
+        same?  (and goal* input* (= goal* input*))]
+    (cond
+      (and goal* input* (not same?))
+      (str "Current root goal:\n"
+           goal*
+           "\n\n"
+           "Latest turn input:\n"
+           input*
+           "\n\n"
+           "The stack is the source of truth for execution. Treat the latest turn input as the freshest signal for this turn. "
+           "If it changes the task, reflect that with current_focus and stack_action at the end of the iteration.")
+
+      goal* goal*
+      input* input*
+      :else "")))
 
 (defn current-frame
   [state]
@@ -541,15 +573,16 @@
 
 (defn apply-control
   [state control]
-  (let [goal          (truncate-goal (or (:goal state)
-                                         (:current-focus control)
-                                         (:summary control)))
-        stack         (normalize-stack goal (:stack state))
+  (let [seed-title    (or (root-goal state)
+                          (truncate-goal (:goal state))
+                          (truncate-goal (:current-focus control))
+                          (truncate-goal (:summary control)))
+        stack         (normalize-stack seed-title (:stack state))
         current-tip   (peek stack)
         action        (normalize-stack-action (:stack-action control))
         tip-title     (or (truncate-agenda-item (:current-focus control))
                           (:title current-tip)
-                          (default-frame-title goal))
+                          (default-frame-title seed-title))
         next-tip      (normalize-frame (assoc control :title tip-title)
                                        tip-title)
         merged-tip    (merge-frame current-tip
@@ -572,7 +605,7 @@
                                 parent-tip   (peek parent-stack)
                                 parent-title (or (truncate-agenda-item (:current-focus control))
                                                  (:title parent-tip)
-                                                 (default-frame-title goal))
+                                                 (default-frame-title seed-title))
                                 parent-frame (merge-frame parent-tip
                                                           (assoc control :title parent-title)
                                                           parent-title)]
@@ -590,13 +623,12 @@
                         :stay
                         (replace-top stack merged-tip))]
     (mark-normalized-state
-     {:goal  goal
-      :stack next-stack})))
+     {:stack next-stack})))
 
 (defn working-memory-message
-  [{:keys [goal stack] :as state} iteration max-iterations]
+  [{:keys [stack] :as state} iteration max-iterations]
   (:content (controller-state-message
-             {:goal goal
+             {:goal (root-goal state)
               :iteration iteration
               :max-iterations max-iterations
               :stack stack
@@ -608,9 +640,11 @@
 
 (defn status-line
   [phase {:keys [stack] :as state} iteration max-iterations & {:keys [stack-action]}]
-  (let [stack*        (normalize-stack (:goal state) stack)
+  (let [stack*        (normalize-stack (root-goal state) stack)
         tip           (peek stack*)
-        title         (or (:title tip) (default-frame-title (:goal state)))
+        title         (or (some-> tip :title truncate-agenda-item)
+                          (some-> stack* first :title truncate-agenda-item)
+                          (default-frame-title nil))
         progress      (progress-status-label (:progress-status tip))
         next-step     (truncate-field (:next-step tip))
         depth         (count stack*)
@@ -711,12 +745,13 @@
            previous-reason previous-progress-status previous-agenda incoming-message]}]
   (let [stack* (when (seq stack)
                  (normalize-stack goal stack))
-        tip    (peek stack*)]
+        tip    (peek stack*)
+        goal*  (goal-section-text goal incoming-message)]
     {:role "system"
      :content
      (str "Autonomous agent control state.\n\n"
           "Goal:\n"
-          (or (some-> goal str str/trim) "")
+          goal*
           "\n\n"
           "Current iteration: " iteration " of " max-iterations ".\n"
           "Observe the current session history and tool results before deciding the next step.\n"

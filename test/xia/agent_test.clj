@@ -757,8 +757,7 @@
   (let [session-id (db/create-session! :terminal)]
     (wm/ensure-wm! session-id)
     (wm/set-autonomy-state! session-id
-                            {:goal "Reply to the billing emails"
-                             :stack [{:title "Reply to the billing emails"
+                            {:stack [{:title "Reply to the billing emails"
                                       :summary "Need invoice ids from the user"
                                       :next-step "Wait for invoice ids"
                                       :reason "Blocked on user input"
@@ -780,8 +779,7 @@
              (agent/process-message session-id
                                     "thanks"
                                     :channel :terminal))))
-    (is (= {:goal "Reply to the billing emails"
-            :stack [{:title "Reply to the billing emails"
+    (is (= {:stack [{:title "Reply to the billing emails"
                      :summary "Need invoice ids from the user"
                      :next-step "Wait for invoice ids"
                      :reason "Blocked on user input"
@@ -791,8 +789,7 @@
            (wm/autonomy-state session-id)))
     (wm/clear-wm! session-id)
     (wm/ensure-wm! session-id)
-    (is (= {:goal "Reply to the billing emails"
-            :stack [{:title "Reply to the billing emails"
+    (is (= {:stack [{:title "Reply to the billing emails"
                      :summary "Need invoice ids from the user"
                      :next-step "Wait for invoice ids"
                      :reason "Blocked on user input"
@@ -805,8 +802,7 @@
   (let [session-id (db/create-session! :terminal)]
     (wm/ensure-wm! session-id)
     (wm/set-autonomy-state! session-id
-                            {:goal "Reply to the billing emails"
-                             :stack [{:title "Reply to the billing emails"
+                            {:stack [{:title "Reply to the billing emails"
                                       :summary "Drafted the reply"
                                       :next-step "Send it"
                                       :reason "One step remains"
@@ -829,8 +825,7 @@
              (agent/process-message session-id
                                     "continue"
                                     :channel :terminal))))
-    (is (= {:goal "Reply to the billing emails"
-            :stack [{:title "Reply to the billing emails"
+    (is (= {:stack [{:title "Reply to the billing emails"
                      :summary "Drafted the reply"
                      :next-step "Send it"
                      :reason "One step remains"
@@ -878,6 +873,46 @@
                        "New input for this turn:"))
     (is (str/includes? (get-in @llm-messages [1 0 :content])
                        "Here are the invoice ids: 12 and 13"))))
+
+(deftest process-message-surfaces-turn-input-in-goal-block-and-commits-pivoted-goal
+  (let [session-id   (db/create-session! :terminal)
+        llm-messages (atom [])]
+    (wm/ensure-wm! session-id)
+    (wm/set-autonomy-state! session-id
+                            {:stack [{:title "Reply to the billing emails"
+                                      :summary "Draft the reply"
+                                      :next-step "Send the reply"
+                                      :reason "Still in progress"
+                                      :progress-status :in-progress
+                                      :agenda [{:item "Send the reply"
+                                                :status :in-progress}]}]})
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [messages & _opts]
+                                                       (swap! llm-messages conj messages)
+                                                       {"content" (str "Switched to the refund task.\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:"
+                                                                       "{\"status\":\"complete\",\"summary\":\"Switched to the refund task\",\"next_step\":\"Review the refund thread\",\"reason\":\"The user changed the task\",\"goal_complete\":false,\"current_focus\":\"Handle the refund follow-up\",\"stack_action\":\"replace\",\"progress_status\":\"pending\",\"agenda\":[{\"item\":\"Review the refund thread\",\"status\":\"pending\"}]}")})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+    (is (= "Switched to the refund task."
+             (agent/process-message session-id
+                                    "Stop the billing work and handle the refund follow-up instead."
+                                    :channel :terminal))))
+    (is (str/includes? (get-in @llm-messages [0 0 :content])
+                       "Current root goal:\nReply to the billing emails"))
+    (is (str/includes? (get-in @llm-messages [0 0 :content])
+                       "Latest turn input:\nStop the billing work and handle the refund follow-up instead."))
+    (is (= "Handle the refund follow-up"
+           (autonomous/root-goal (wm/autonomy-state session-id))))
+    (is (= "Handle the refund follow-up"
+           (some-> (wm/autonomy-state session-id)
+                   autonomous/current-frame
+                   :title)))))
 
 (deftest process-message-returns-final-message-when-autonomous-loop-hits-iteration-cap
   (let [session-id (db/create-session! :terminal)

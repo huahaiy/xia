@@ -41,8 +41,7 @@
 (deftest test-autonomy-state-round-trips-through-working-memory
   (let [sid   (db/create-session! :terminal)
         state (autonomous/normalize-state
-               {:goal "Handle billing emails"
-                :stack [{:title "Handle billing emails"
+               {:stack [{:title "Handle billing emails"
                          :progress-status :in-progress
                          :agenda [{:item "Check inbox" :status :completed}]}]})]
     (wm/ensure-wm! sid)
