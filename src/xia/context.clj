@@ -888,28 +888,49 @@
    Returns compacted message list. Raw messages remain in DB."
   ([messages budget]
    (compact-history messages budget nil))
-  ([messages budget {:keys [provider-id workload]}]
-   (let [messages*     (if (vector? messages) messages (vec messages))
-         recap-prefix  (into [] (take-while recap-message?) messages*)
-         live-history  (subvec messages* (count recap-prefix))
-         total-tokens  (long (transduce (map #(estimate-tokens (:content %))) + 0 messages*))
-         msg-count     (long (count live-history))
-         budget*       (long budget)]
+  ([messages budget {:keys [provider-id workload allow-summary?]
+                     :or {allow-summary? true}}]
+   (let [messages*    (if (vector? messages) messages (vec messages))
+         recap-prefix (into [] (take-while recap-message?) messages*)
+         live-history (subvec messages* (count recap-prefix))
+         total-tokens (long (transduce (map #(estimate-tokens (:content %))) + 0 messages*))
+         msg-count    (long (count live-history))
+         budget*      (long budget)]
      (if (or (<= total-tokens budget*) (<= msg-count 4))
-       messages* ; fits in budget or too few to compact
-       ;; Summarize the older half
+       messages*
        (let [keep-count  (long-max 4 (quot msg-count 2))
              old-msgs    (subvec live-history 0 (- msg-count keep-count))
              recent-msgs (subvec live-history (- msg-count keep-count))
              old-text    (history-summary-text old-msgs)]
-         (try
-           (let [recap (summarize-history-text old-text {:provider-id provider-id
-                                                         :workload workload})]
-             (into recap-prefix
-                   (into [(history-recap-message recap)] recent-msgs)))
-           (catch Exception e
-             (log/warn "Failed to compact history:" (.getMessage e))
-             messages)))))))
+         (if allow-summary?
+           (try
+             (let [recap (summarize-history-text old-text
+                                                 {:provider-id provider-id
+                                                  :workload workload})]
+               (into recap-prefix
+                     (into [(history-recap-message recap)] recent-msgs)))
+             (catch Exception e
+               (log/warn "Failed to compact history:" (.getMessage e))
+               messages))
+           (let [recap-tokens (long (transduce (map #(estimate-tokens (:content %))) + 0 recap-prefix))
+                 live-budget  (long-max 0 (- budget* recap-tokens))
+                 min-keep     (long-min 4 msg-count)
+                 kept         (loop [idx (dec msg-count)
+                                     tokens 0
+                                     kept-count 0
+                                     acc []]
+                                (if (neg? idx)
+                                  acc
+                                  (let [msg       (nth live-history idx)
+                                        msg-tokens (long (estimate-tokens (:content msg)))
+                                        must-keep? (< kept-count min-keep)
+                                        keep?      (or must-keep?
+                                                       (<= (+ tokens msg-tokens) live-budget))]
+                                    (recur (dec idx)
+                                           (if keep? (+ tokens msg-tokens) tokens)
+                                           (if keep? (inc kept-count) kept-count)
+                                           (if keep? (conj acc msg) acc)))))]
+             (into recap-prefix (reverse kept)))))))))
 
 (defn- recent-history-message-limit
   [opts]
@@ -923,9 +944,10 @@
         metadata     (db/session-message-metadata session-id)
         total        (long (count metadata))]
     (if (<= total recent-limit)
-      (into [] (map history-message->llm-message)
-            (restore-history-tool-call-ids
-              (db/session-messages-by-eids (into [] (map :eid) metadata))))
+      {:messages (into [] (map history-message->llm-message)
+                       (restore-history-tool-call-ids
+                         (db/session-messages-by-eids (into [] (map :eid) metadata))))
+       :history-recap-updated? false}
       (let [recent-start       (long-max 0 (- total recent-limit))
             recap-state        (db/session-history-recap session-id)
             recap-count0       (long (or (:message-count recap-state) 0))
@@ -946,10 +968,11 @@
             recent-history     (into [] (map history-message->llm-message) recent-messages)]
         (if (and (not (seq new-recap-meta))
                  (not (seq new-tool-meta)))
-          (cond-> []
-            (seq tool-recap-content) (conj (tool-recap-message tool-recap-content))
-            (seq recap-content)      (conj (history-recap-message recap-content))
-            true                     (into recent-history))
+          {:messages (cond-> []
+                       (seq tool-recap-content) (conj (tool-recap-message tool-recap-content))
+                       (seq recap-content)      (conj (history-recap-message recap-content))
+                       true                     (into recent-history))
+           :history-recap-updated? false}
           (let [history-archived-messages (when (seq new-recap-meta)
                                             (restore-history-tool-call-ids
                                               (db/session-messages-by-eids
@@ -968,28 +991,31 @@
                                   (history-summary-text history-archived-messages)
                                   recap-content
                                   {:provider-id (:compaction-provider-id opts)
-                                   :workload    (or (:compaction-workload opts)
-                                                    :history-compaction)})
+                                    :workload    (or (:compaction-workload opts)
+                                                     :history-compaction)})
                                 recap-content)]
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
                 (if (seq new-recap)
                   (do
                     (db/save-session-history-recap! session-id new-recap recent-start)
-                    (cond-> []
-                      (seq new-tool-recap) (conj (tool-recap-message new-tool-recap))
-                      true                 (conj (history-recap-message new-recap))
-                      true                 (into recent-history)))
-                  (into [] (map history-message->llm-message)
-                        (restore-history-tool-call-ids
-                          (db/session-messages session-id)))))
+                    {:messages (cond-> []
+                                 (seq new-tool-recap) (conj (tool-recap-message new-tool-recap))
+                                 true                 (conj (history-recap-message new-recap))
+                                 true                 (into recent-history))
+                     :history-recap-updated? true})
+                  {:messages (into [] (map history-message->llm-message)
+                                   (restore-history-tool-call-ids
+                                     (db/session-messages session-id)))
+                   :history-recap-updated? false}))
               (catch Exception e
                 (log/warn "Failed to update session history recap:" (.getMessage e))
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
-                (into [] (map history-message->llm-message)
-                      (restore-history-tool-call-ids
-                        (db/session-messages session-id)))))))))))
+                {:messages (into [] (map history-message->llm-message)
+                                 (restore-history-tool-call-ids
+                                   (db/session-messages session-id)))
+                 :history-recap-updated? false}))))))))
 
 ;; ============================================================================
 ;; Build messages (moved from agent.clj)
@@ -1007,15 +1033,19 @@
                                     :history-compaction)
          {:keys [prompt used-fact-eids]}
          (assemble-system-prompt-data session-id (assoc opts :provider provider))
-         history-msgs (build-history-with-session-recap
-                       session-id
-                       {:recent-message-limit (:recent-message-limit opts)
-                        :compaction-provider-id compaction-provider-id
-                        :compaction-workload compaction-workload})
+         {:keys [messages history-recap-updated?]}
+         (build-history-with-session-recap
+          session-id
+          {:recent-message-limit (:recent-message-limit opts)
+           :compaction-provider-id compaction-provider-id
+           :compaction-workload compaction-workload})
          budget       (resolve-history-budget provider)
-         compacted    (compact-history history-msgs
+         compacted    (compact-history messages
                                       budget
                                       (cond-> {}
+                                        true
+                                        (assoc :allow-summary? (not history-recap-updated?))
+
                                         compaction-provider-id
                                         (assoc :provider-id compaction-provider-id)
 

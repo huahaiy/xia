@@ -702,6 +702,32 @@
           (is (some #(str/includes? % "Archived tool execution recap") message-texts))
           (is (some #(str/includes? % "web-search[call_1]") message-texts)))))))
 
+(deftest test-build-messages-data-does-at-most-one-summary-call-per-build
+  (let [sid       (db/create-session! :terminal)
+        llm-calls (atom [])]
+    (db/set-config! :context/recent-history-message-limit "4")
+    (doseq [i (range 10)]
+      (db/add-message! sid
+                       (if (even? i) :user :assistant)
+                       (str "message " i " " (token-rich-text (str "m" i) 120))))
+    (with-redefs [xia.context/assemble-system-prompt-data
+                  (fn [_sid _opts]
+                    {:prompt "system"
+                     :used-fact-eids []})
+                  xia.llm/chat-simple
+                  (fn [messages & _]
+                    (swap! llm-calls conj messages)
+                    (str "recap-" (count @llm-calls)))]
+      (with-redefs-fn {#'xia.context/resolve-history-budget (constantly 100)}
+        (fn []
+          (let [result        (#'xia.context/build-messages-data
+                               sid
+                               {:provider {:llm.provider/id :default}})
+                message-texts (map :content (:messages result))]
+            (is (= 1 (count @llm-calls)))
+            (is (some #(str/includes? % "recap-1") message-texts))
+            (is (= "system" (get-in result [:messages 0 :role])))))))))
+
 (deftest test-compact-history-preserves-existing-recap-messages
   (let [tool-recap {:role "system"
                     :content "[Archived tool execution recap:\n- web-search[call_1] args={\"q\":\"weather\"} => {\"success?\":true}\nUse this to avoid repeating tool calls unless the task has changed or fresher data is required.]"}
