@@ -602,7 +602,7 @@
           (is (= 1 (:turn-count refreshed)))
           (is (= 1 (:added-turn refreshed-slot)))
           (is (= (double (:relevance initial-slot))
-                 (double (:relevance refreshed-slot)))))))
+                 (double (:relevance refreshed-slot))))))
       (finally
         (wm/clear-wm! sid)))))
 

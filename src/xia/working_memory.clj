@@ -259,19 +259,20 @@ Rules:
   ([slots node-eid name type relevance turn-count node-data]
    (merge-node-into-slot slots node-eid name type relevance turn-count node-data nil))
   ([slots node-eid name type relevance turn-count node-data
-    {:keys [boost-existing? refresh-existing?]
+   {:keys [boost-existing? refresh-existing?]
      :or {boost-existing? true
           refresh-existing? false}}]
    (if-let [existing (get slots node-eid)]
      (let [{:keys [facts edges properties]} node-data
-           refreshed (cond-> existing
-                       refresh-existing?
-                       (cond-> (assoc :name name
+           refreshed (if refresh-existing?
+                       (cond-> (assoc existing
+                                      :name name
                                       :type type)
                          (some? node-data)
                          (assoc :facts facts
                                 :edges edges
-                                :properties properties)))
+                                :properties properties))
+                       existing)
            updated   (if boost-existing?
                        (assoc refreshed
                               :relevance (boost-relevance (:relevance refreshed)
