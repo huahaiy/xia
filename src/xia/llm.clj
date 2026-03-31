@@ -10,6 +10,7 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http]
+            [xia.llm.routing :as llm-routing]
             [xia.oauth :as oauth]
             [xia.rate-limit :as rate-limit])
   (:import [java.net URI URLEncoder]
@@ -84,137 +85,68 @@
 (defn workload-routes
   "Return the known LLM workload route definitions."
   []
-  workload-options)
+  (llm-routing/workload-routes workload-options))
 
 (defn reset-runtime!
   "Re-enable async LLM log writes for a fresh runtime."
   []
-  (locking async-log-lock
-    (reset! async-log-state
-            {:accepting? true
-             :tasks #{}})))
+  (llm-routing/reset-runtime! async-log-lock async-log-state))
 
 (defn prepare-shutdown!
   "Stop accepting new async LLM log writes and return the pending count."
   []
-  (locking async-log-lock
-    (let [{:keys [tasks]} (swap! async-log-state assoc :accepting? false)
-          pending        (count tasks)]
-      (when (pos? pending)
-        (log/info "Waiting for" pending "LLM log write(s) before database close"))
-      pending)))
+  (llm-routing/prepare-shutdown! async-log-lock async-log-state))
 
 (defn await-background-tasks!
   "Block until tracked async LLM log writes finish."
   []
-  (loop []
-    (when-let [task (locking async-log-lock
-                      (first (:tasks @async-log-state)))]
-      (try
-        @task
-        (catch Exception _
-          nil))
-      (recur))))
+  (llm-routing/await-background-tasks! async-log-lock async-log-state))
 
 (defn- submit-log-write!
   [log-entry]
-  (locking async-log-lock
-    (when (:accepting? @async-log-state)
-      (let [self (promise)
-            task (async/submit-background!
-                  "llm-log-write"
-                  #(let [me @self]
-                     (try
-                       (db/log-llm-call! log-entry)
-                       (catch Exception e
-                         (log/debug e "Failed to write LLM call log"))
-                       (finally
-                         (locking async-log-lock
-                           (swap! async-log-state update :tasks disj me))))))]
-        (when task
-          (swap! async-log-state update :tasks conj task)
-          (deliver self task))
-        task))))
-
-(defn- current-workload-id-set
-  []
-  (set (map :id (workload-routes))))
+  (llm-routing/submit-log-write! {:async-log-lock async-log-lock
+                                  :async-log-state async-log-state
+                                  :submit-background! async/submit-background!
+                                  :log-llm-call! db/log-llm-call!}
+                                 log-entry))
 
 (defn known-workload?
   [workload]
-  (contains? (current-workload-id-set) workload))
+  (llm-routing/known-workload? workload-options workload))
 
 (defn- normalize-workload
   [workload]
-  (let [normalized (cond
-                     (nil? workload) nil
-                     (keyword? workload) workload
-                     (string? workload) (keyword workload)
-                     :else (throw (ex-info "LLM workload must be a keyword or string"
-                                           {:workload workload})))]
-    (when (and normalized
-               (not (known-workload? normalized)))
-                      (throw (ex-info (str "Unknown LLM workload: " normalized)
-                                      {:workload normalized
-                       :known-workloads (mapv :id (workload-routes))})))
-    normalized))
-
-(defn- provider-key
-  [provider]
-  (or (:llm.provider/id provider) (:id provider)))
-
-(defn- provider-workloads
-  [provider]
-  (set (or (:llm.provider/workloads provider)
-           (:workloads provider))))
+  (llm-routing/normalize-workload workload-options workload))
 
 (defn effective-rate-limit-per-minute
   "Return the effective per-provider request cap for a minute window."
   [provider]
-  (long (or (:llm.provider/rate-limit-per-minute provider)
-            (:rate-limit-per-minute provider)
-            default-rate-limit-per-minute)))
+  (llm-routing/effective-rate-limit-per-minute default-rate-limit-per-minute provider))
 
 (defn- loopback-base-url?
   [base-url]
-  (try
-    (contains? loopback-hosts
-               (some-> base-url URI. .getHost str/lower-case))
-    (catch Exception _
-      false)))
+  (llm-routing/loopback-base-url? loopback-hosts base-url))
 
 (defn- provider-allows-private-network?
   [provider]
-  (or (:llm.provider/allow-private-network? provider)
-      (:allow-private-network? provider)
-      (loopback-base-url? (or (:llm.provider/base-url provider)
-                              (:base-url provider)))))
+  (llm-routing/provider-allows-private-network? loopback-hosts provider))
 
 (defn- normalize-base-url
   [base-url]
-  (str/replace (str (or base-url "")) #"/+$" ""))
+  (llm-routing/normalize-base-url base-url))
 
 (defn- base-url-host
   [base-url]
-  (try
-    (some-> base-url normalize-base-url URI. .getHost str/lower-case)
-    (catch Exception _
-      nil)))
+  (llm-routing/base-url-host base-url))
 
 (defn- provider-family-from-base-url
   [base-url]
-  (if (= "api.anthropic.com" (base-url-host base-url))
-    :anthropic
-    :openai))
+  (llm-routing/provider-family-from-base-url base-url))
 
 (defn vision-capable?
   "True when a provider is configured to accept image input."
   [provider-or-id]
-  (let [provider (cond
-                   (nil? provider-or-id) nil
-                   (map? provider-or-id) provider-or-id
-                   :else (db/get-provider provider-or-id))]
-    (boolean (:llm.provider/vision? provider))))
+  (llm-routing/vision-capable? db/get-provider provider-or-id))
 
 (defn- now-ms []
   (System/currentTimeMillis))
@@ -233,75 +165,28 @@
   (cfg/positive-long :llm/max-provider-retry-wait-ms
                      default-max-provider-retry-wait-ms))
 
-(defn- provider-cooldown-ms
-  ^long
-  [consecutive-failures]
-  (loop [cooldown (long provider-health-base-cooldown-ms)
-         remaining (long-max 0 (dec (long consecutive-failures)))]
-    (if (zero? remaining)
-      cooldown
-      (recur (long-min (long provider-health-max-cooldown-ms)
-                       (* 2 cooldown))
-             (dec remaining)))))
-
-(defn- provider-health-entry
-  [provider-id]
-  (get @provider-health provider-id))
-
-(defn- default-provider-id
-  []
-  (some-> (db/get-default-provider) provider-key))
-
 (defn provider-health-summary
   "Return the current in-memory health status for a provider."
   [provider-id]
-  (let [provider-id          (or provider-id (default-provider-id))
-        {:keys [consecutive-failures cooldown-until-ms last-success-ms last-failure-ms last-error]}
-        (provider-health-entry provider-id)
-        current-ms           (long (now-ms))
-        cooldown-remaining-ms (when cooldown-until-ms
-                                (long-max 0 (- (long cooldown-until-ms) current-ms)))
-        status               (cond
-                               (pos? (long (or cooldown-remaining-ms 0))) :cooling-down
-                               (pos? (long (or consecutive-failures 0)))   :degraded
-                               :else                                       :healthy)]
-    {:provider-id           provider-id
-     :status                status
-     :healthy?              (= :healthy status)
-     :available?            (not= :cooling-down status)
-     :consecutive-failures  (long (or consecutive-failures 0))
-     :cooldown-until-ms     cooldown-until-ms
-     :cooldown-remaining-ms cooldown-remaining-ms
-     :last-success-ms       last-success-ms
-     :last-failure-ms       last-failure-ms
-     :last-error            last-error}))
+  (llm-routing/provider-health-summary {:provider-health provider-health
+                                        :get-default-provider db/get-default-provider
+                                        :now-ms now-ms}
+                                       provider-id))
 
 (defn- record-provider-success!
   [provider-id]
-  (let [timestamp (long (now-ms))]
-    (swap! provider-health assoc provider-id
-           {:consecutive-failures 0
-            :cooldown-until-ms   nil
-            :last-success-ms     timestamp
-            :last-failure-ms     nil
-            :last-error          nil})))
+  (llm-routing/record-provider-success! provider-health now-ms provider-id))
 
 (defn- record-provider-failure!
   [provider-id error-message & {:keys [cooldown-ms]}]
-  (let [timestamp (long (now-ms))]
-    (swap! provider-health
-           (fn [state]
-             (let [previous             (get state provider-id)
-                   consecutive-failures (inc (long (or (:consecutive-failures previous) 0)))
-                   cooldown-ms          (long-max (long (or cooldown-ms 0))
-                                                  (provider-cooldown-ms consecutive-failures))]
-               (assoc state provider-id
-                      {:consecutive-failures consecutive-failures
-                       :cooldown-until-ms   (+ timestamp cooldown-ms)
-                       :last-success-ms     (:last-success-ms previous)
-                       :last-failure-ms     timestamp
-                       :last-error          error-message}))))
-    (provider-health-summary provider-id)))
+  (llm-routing/record-provider-failure!
+   {:provider-health provider-health
+    :now-ms now-ms
+    :base-cooldown-ms provider-health-base-cooldown-ms
+    :max-cooldown-ms provider-health-max-cooldown-ms}
+   provider-id
+   error-message
+   :cooldown-ms cooldown-ms))
 
 (defn- header-value
   [headers header-name]
@@ -344,14 +229,7 @@
 
 (defn- attempts-cooldown-delay-ms
   [attempts]
-  (let [health (mapv #(provider-health-summary (:provider-id %)) attempts)]
-    (when (and (seq health)
-               (every? (comp not :available?) health))
-      (some->> health
-               (keep :cooldown-remaining-ms)
-               (filter pos?)
-               seq
-               (apply min)))))
+  (llm-routing/attempts-cooldown-delay-ms provider-health-summary attempts))
 
 (defn- remaining-retry-wait-ms
   ^long
@@ -366,115 +244,35 @@
                (pos? (long (or requested-delay-ms 0))))
       (long-min remaining-ms (long requested-delay-ms)))))
 
-(defn- provider-group-key
-  [{:keys [available? consecutive-failures cooldown-until-ms]}]
-  (if available?
-    [0 consecutive-failures]
-    [1 (or cooldown-until-ms Long/MAX_VALUE) consecutive-failures]))
-
-(defn- provider-sort-key
-  [{:keys [available? consecutive-failures cooldown-until-ms provider-id]}]
-  (conj (provider-group-key {:available? available?
-                             :consecutive-failures consecutive-failures
-                             :cooldown-until-ms cooldown-until-ms})
-        (name provider-id)))
-
-(defn- rotate-vector
-  [items offset]
-  (let [items  (vec items)
-        length (count items)]
-    (cond
-      (<= length 1) items
-      :else
-      (let [offset (mod offset length)]
-        (vec (concat (subvec items offset)
-                     (subvec items 0 offset)))))))
-
-(defn- default-provider-selection []
-  (let [provider (or (db/get-default-provider)
-                     (throw (ex-info "No default LLM provider configured. Run first-time setup." {})))]
-    {:provider    provider
-     :provider-id (provider-key provider)}))
-
-(defn- workload-providers
-  [workload]
-  (->> (db/list-providers)
-       (filter #(contains? (provider-workloads %) workload))
-       (sort-by #(some-> % provider-key name))
-       vec))
-
-(defn- round-robin-provider
-  [workload providers]
-  (let [active-workloads (current-workload-id-set)
-        state (swap! workload-counters
-                     (fn [counters]
-                       (let [counters* (select-keys counters active-workloads)]
-                         (update counters* workload (fnil inc -1)))))
-        index (mod (get state workload 0) (count providers))]
-    (nth providers index)))
-
-(defn- ordered-workload-providers
-  [workload providers]
-  (let [annotated    (->> providers
-                          (mapv (fn [provider]
-                                  (let [provider-id (provider-key provider)
-                                        health      (provider-health-summary provider-id)]
-                                    (assoc health
-                                           :provider provider
-                                           :provider-id provider-id
-                                           :group-key (provider-group-key health)
-                                           :sort-key (provider-sort-key
-                                                       (assoc health :provider-id provider-id))))))
-                          (sort-by :sort-key))
-        grouped      (mapv vec (partition-by :group-key annotated))
-        first-group  (first grouped)
-        rotated-head (if (seq first-group)
-                       (let [seed-provider (round-robin-provider workload (mapv :provider first-group))
-                             seed-id       (provider-key seed-provider)
-                             start-index   (or (first (keep-indexed (fn [idx entry]
-                                                                      (when (= seed-id (:provider-id entry))
-                                                                        idx))
-                                                                    first-group))
-                                               0)]
-                         (rotate-vector first-group start-index))
-                       [])
-        rest-groups  (mapcat identity (rest grouped))]
-    (mapv :provider (concat rotated-head rest-groups))))
-
 (defn- provider-attempts
   [{:keys [provider-id workload]}]
-  (let [workload (normalize-workload workload)]
-    (cond
-      provider-id
-      [(let [provider (or (db/get-provider provider-id)
-                          (throw (ex-info (str "Unknown provider: " provider-id)
-                                          {:provider provider-id})))]
-         {:provider    provider
-          :provider-id (provider-key provider)})]
-
-      workload
-      (if-let [providers (seq (workload-providers workload))]
-        (mapv (fn [provider]
-                {:provider    provider
-                 :provider-id (provider-key provider)
-                 :workload    workload})
-              (ordered-workload-providers workload (vec providers)))
-        [(assoc (default-provider-selection) :workload workload)])
-
-      :else
-      [(default-provider-selection)])))
+  (llm-routing/provider-attempts {:workload-options workload-options
+                                  :get-provider db/get-provider
+                                  :get-default-provider db/get-default-provider
+                                  :list-providers db/list-providers
+                                  :workload-counters workload-counters
+                                  :provider-health-summary-fn provider-health-summary}
+                                 {:provider-id provider-id
+                                  :workload workload}))
 
 (defn resolve-provider-selection
   "Resolve the provider for an LLM request.
 
-   Selection order:
-   1. Explicit `:provider-id`
-   2. Providers assigned to `:workload` (round-robin if multiple)
-   3. Default provider"
+  Selection order:
+  1. Explicit `:provider-id`
+  2. Providers assigned to `:workload` (round-robin if multiple)
+  3. Default provider"
   ([] (resolve-provider-selection nil))
   ([{:keys [provider-id workload]}]
-   (first (provider-attempts {:provider-id provider-id
-                              :workload workload}))))
+   (llm-routing/resolve-provider-selection
+    {:workload-options workload-options
+     :get-provider db/get-provider
+     :get-default-provider db/get-default-provider
+     :list-providers db/list-providers
+     :workload-counters workload-counters
+     :provider-health-summary-fn provider-health-summary}
+    {:provider-id provider-id
+     :workload workload})))
 
 ;; ---------------------------------------------------------------------------
 ;; Chat completions
