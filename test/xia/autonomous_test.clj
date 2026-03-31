@@ -323,3 +323,14 @@
            (get-in state [:stack 0 :progress-status])))
     (is (= [{:item "Wait for invoice ids" :status :resumable}]
            (get-in state [:stack 0 :agenda])))))
+
+(deftest prepare-turn-state-preserves-completed-stack-for-follow-ups
+  (let [state {:stack [{:title "Handle billing emails"
+                        :summary "Sent the reply"
+                        :next-step nil
+                        :reason "Goal satisfied"
+                        :progress-status :complete
+                        :agenda [{:item "Send reply" :status :completed}]}]}]
+    (is (= state
+           (autonomous/prepare-turn-state state
+                                          "Can you also send the tracking link?")))))

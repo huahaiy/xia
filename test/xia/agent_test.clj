@@ -709,7 +709,7 @@
                    :used-fact-eids []}}
            (get-in @build-opts [1 :system-prompt-cache-entry])))))
 
-(deftest process-message-clears-autonomy-state-after-completed-goal
+(deftest process-message-preserves-autonomy-state-after-completed-goal
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
                   xia.working-memory/update-wm!      (fn [& _] nil)
@@ -727,10 +727,60 @@
              (agent/process-message session-id
                                     "reply to the billing emails"
                                     :channel :terminal))))
-    (is (nil? (wm/autonomy-state session-id)))
+    (is (= {:stack [{:title "reply to the billing emails"
+                     :summary "Sent replies"
+                     :next-step nil
+                     :reason "Goal satisfied"
+                     :progress-status :complete
+                     :agenda [{:item "Send replies" :status :completed}]}]}
+           (wm/autonomy-state session-id)))
     (wm/clear-wm! session-id)
     (wm/ensure-wm! session-id)
-    (is (nil? (wm/autonomy-state session-id)))))
+    (is (= {:stack [{:title "reply to the billing emails"
+                     :summary "Sent replies"
+                     :next-step nil
+                     :reason "Goal satisfied"
+                     :progress-status :complete
+                     :agenda [{:item "Send replies" :status :completed}]}]}
+           (wm/autonomy-state session-id)))))
+
+(deftest process-message-restores-completed-stack-across-top-level-follow-up-turns
+  (let [session-id   (db/create-session! :terminal)
+        llm-messages (atom [])
+        llm-calls    (atom 0)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [messages & _opts]
+                                                       (swap! llm-messages conj messages)
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Sent the replies.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"complete\",\"summary\":\"Sent replies\",\"next_step\":\"\",\"reason\":\"Goal satisfied\",\"goal_complete\":true,\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Send replies\",\"status\":\"completed\"}]}")}
+                                                         {"content" (str "Added the tracking link.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Added the tracking link\",\"next_step\":\"\",\"reason\":\"The follow-up is done\",\"goal_complete\":true,\"stack_action\":\"replace\",\"current_focus\":\"Send the tracking link\",\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Send the tracking link\",\"status\":\"completed\"}]}")} ))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent the replies."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal)))
+      (wm/clear-wm! session-id)
+      (is (= "Added the tracking link."
+             (agent/process-message session-id
+                                    "also send the tracking link"
+                                    :channel :terminal))))
+    (is (= 2 (count @llm-messages)))
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
+                       "Current execution stack"))
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
+                       "[complete] reply to the billing emails"))
+    (is (str/includes? (get-in @llm-messages [1 0 :content])
+                       "Latest turn input:\nalso send the tracking link"))))
 
 (deftest process-message-does-not-snapshot-before-first-iteration
   (let [session-id      (db/create-session! :terminal)
@@ -753,8 +803,8 @@
              (agent/process-message session-id
                                     "reply to the billing emails"
                                     :channel :terminal))))
-    (is (= 2 @snapshot-calls)
-        "one snapshot after the iteration update, one after clearing autonomy state")))
+    (is (= 1 @snapshot-calls)
+        "one snapshot after the iteration update")))
 
 (deftest process-message-preserves-autonomy-state-when-control-envelope-is-missing
   (let [session-id (db/create-session! :terminal)]

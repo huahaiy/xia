@@ -1341,10 +1341,7 @@
   [parsed]
   (let [control (:control parsed)]
     (and (= :parsed (:control-status parsed))
-         (boolean
-          (or (= :clear (:stack-action control))
-              (:goal-complete? control)
-              (= :complete (:progress-status control)))))))
+         (= :clear (:stack-action control)))))
 
 (defn- persist-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]

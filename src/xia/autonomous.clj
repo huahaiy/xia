@@ -572,7 +572,8 @@
                                       :paused
                                       :resumable
                                       :diverged
-                                      :blocked}
+                                      :blocked
+                                      :complete}
                                     current-status)]
     (if resumable-state?
       state*
