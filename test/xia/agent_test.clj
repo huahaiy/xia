@@ -126,7 +126,9 @@
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (if (= 1 (swap! llm-calls inc))
                                                          (with-meta
-                                                           {"content" "Checking tools."
+                                                           {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Reply to the billing emails\",\"agenda_item\":\"Check inbox\",\"plan_step\":\"Search billing and send reply\",\"why\":\"Need tool results before replying\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}\n\n"
+                                                                           "Checking tools.")
                                                             "tool_calls" [{"id" "call-1"
                                                                            "function" {"name" "web-search"
                                                                                        "arguments" "{}"}}
@@ -250,6 +252,72 @@
                                       (db/session-messages session-id))))))
       (finally
         (prompt/register-status! :terminal nil)))))
+
+(deftest process-message-rejects-tool-rounds-without-a-valid-intent-envelope
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [& _]
+                                                       {:summary "Found the message."})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" "Searching now."
+                                                        "tool_calls" [{"id" "call-1"
+                                                                       "function" {"name" "web-search"
+                                                                                   "arguments" "{}"}}]})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "reply to the billing emails" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-protocol-invalid
+               (:type (ex-data err))))
+        (is (= :missing
+               (:intent-status (ex-data err))))
+        (is (= :missing
+               (:control-status (ex-data err))))))))
+
+(deftest process-message-rejects-tool-rounds-with-malformed-control-envelopes
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [& _]
+                                                       {:summary "Found the message."})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "ACTION_INTENT_JSON:"
+                                                                       "{\"focus\":\"Handle billing emails\",\"agenda_item\":\"Check inbox\",\"plan_step\":\"Search unread billing email\",\"why\":\"Need the latest unread items\",\"tool\":\"web-search\",\"tool_args_summary\":\"label:billing unread\"}\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:{\"status\":\"continue\"")
+                                                        "tool_calls" [{"id" "call-1"
+                                                                       "function" {"name" "web-search"
+                                                                                   "arguments" "{}"}}]})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "reply to the billing emails" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-protocol-invalid
+               (:type (ex-data err))))
+        (is (= :parsed
+               (:intent-status (ex-data err))))
+        (is (= :malformed
+               (:control-status (ex-data err))))))))
 
 (deftest process-message-can-be-cancelled
   (let [session-id (db/create-session! :terminal)
@@ -429,7 +497,8 @@
                                                        (swap! checkpoints conj [schedule-id checkpoint]))
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (if (= 1 (swap! llm-calls inc))
-                                                         {"content" ""
+                                                         {"content" (str "ACTION_INTENT_JSON:"
+                                                                         "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search the page\",\"why\":\"Need the first search result before continuing\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}")
                                                           "tool_calls" [{"id" "call-1"
                                                                          "function" {"name" "web-search"
                                                                                      "arguments" "{}"}}]}
@@ -443,11 +512,12 @@
     (is (= :nightly-review (ffirst @checkpoints)))
     (is (= :understanding (get-in @checkpoints [0 1 :phase])))
     (is (= :planning (get-in @checkpoints [1 1 :phase])))
-    (is (= :tool (get-in @checkpoints [2 1 :phase])))
-    (is (= "web-search" (get-in @checkpoints [2 1 :tool-name])))
+    (is (= :intent (get-in @checkpoints [2 1 :phase])))
     (is (= :tool (get-in @checkpoints [3 1 :phase])))
-    (is (= ["web-search"] (get-in @checkpoints [3 1 :tool-ids])))
-    (is (= :observing (get-in @checkpoints [4 1 :phase])))))
+    (is (= "web-search" (get-in @checkpoints [3 1 :tool-name])))
+    (is (= :tool (get-in @checkpoints [4 1 :phase])))
+    (is (= ["web-search"] (get-in @checkpoints [4 1 :tool-ids])))
+    (is (= :observing (get-in @checkpoints [5 1 :phase])))))
 
 (deftest process-message-repeats-autonomous-loop-until-controller-completes
   (let [session-id        (db/create-session! :terminal)
@@ -1170,7 +1240,8 @@
                                                          {:summary "Found the page."})
                     xia.llm/chat-message               (fn [_messages & _opts]
                                                          (case (swap! llm-calls inc)
-                                                           1 {"content" ""
+                                                           1 {"content" (str "ACTION_INTENT_JSON:"
+                                                                             "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search the page\",\"why\":\"Need the first search result before continuing\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}")
                                                               "tool_calls" [{"id" "call-1"
                                                                              "function" {"name" "web-search"
                                                                                          "arguments" "{}"}}]}
@@ -1339,14 +1410,16 @@
                   xia.autonomous/max-iterations      (constantly 3)
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (case (swap! llm-calls inc)
-                                                         1 {"content" ""
+                                                         1 {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Retry task\",\"agenda_item\":\"Retry task\",\"plan_step\":\"Search billing invoices\",\"why\":\"Need more context before retrying the task\",\"tool\":\"web-search\",\"tool_args_summary\":\"q=billing invoices\"}")
                                                             "tool_calls" [{"id" "call-1"
                                                                            "function" {"name" "web-search"
                                                                                        "arguments" "{\"q\":\"billing invoices\"}"}}]}
                                                          2 {"content" (str "Still working.\n\n"
                                                                            "AUTONOMOUS_STATUS_JSON:"
                                                                            "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}
-                                                         3 {"content" ""
+                                                         3 {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Retry task\",\"agenda_item\":\"Retry task\",\"plan_step\":\"Read the billing note\",\"why\":\"Need more context before retrying the task\",\"tool\":\"workspace-read\",\"tool_args_summary\":\"path=notes/billing.md\"}")
                                                             "tool_calls" [{"id" "call-2"
                                                                            "function" {"name" "workspace-read"
                                                                                        "arguments" "{\"path\":\"notes/billing.md\"}"}}]}
@@ -1395,14 +1468,16 @@
                   xia.autonomous/max-iterations      (constantly 6)
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (case (swap! llm-calls inc)
-                                                         1 {"content" ""
+                                                         1 {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Search the invoices\",\"agenda_item\":\"Search the invoices\",\"plan_step\":\"Search the invoices\",\"why\":\"Need the billing details\",\"tool\":\"web-search\",\"tool_args_summary\":\"q=billing invoices\"}")
                                                             "tool_calls" [{"id" "call-1"
                                                                            "function" {"name" "web-search"
                                                                                        "arguments" "{\"q\":\"billing invoices\"}"}}]}
                                                          2 {"content" (str "The search failed.\n\n"
                                                                            "AUTONOMOUS_STATUS_JSON:"
                                                                            "{\"status\":\"continue\",\"summary\":\"The search failed\",\"next_step\":\"Search the invoices again\",\"reason\":\"Still need the billing details\",\"goal_complete\":false,\"current_focus\":\"Search the invoices\",\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Search the invoices\",\"status\":\"blocked\"}]}")}
-                                                         3 {"content" ""
+                                                         3 {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Review the billing notes\",\"agenda_item\":\"Review the billing notes\",\"plan_step\":\"Review the billing notes\",\"why\":\"Still need the billing details\",\"tool\":\"workspace-read\",\"tool_args_summary\":\"path=notes/billing.md\"}")
                                                             "tool_calls" [{"id" "call-2"
                                                                            "function" {"name" "workspace-read"
                                                                                        "arguments" "{\"path\":\"notes/billing.md\"}"}}]}
@@ -1556,7 +1631,8 @@
                                                        {:summary "Found the page."})
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (if (= 1 (swap! llm-calls inc))
-                                                         {"content" ""
+                                                         {"content" (str "ACTION_INTENT_JSON:"
+                                                                         "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search the page\",\"why\":\"Need the first search result before continuing\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}")
                                                           "tool_calls" [{"id" "call-1"
                                                                          "function" {"name" "web-search"
                                                                                      "arguments" "{}"}}]}
@@ -1585,11 +1661,16 @@
                   xia.tool/execute-tool              (fn [_tool-id _args _context]
                                                        {:summary "Found the page."})
                   xia.llm/chat-message               (fn [_messages & _opts]
-                                                       (swap! llm-calls inc)
-                                                       {"content" ""
-                                                        "tool_calls" [{"id" "call-1"
-                                                                       "function" {"name" "web-search"
-                                                                                   "arguments" "{}"}}]})
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "ACTION_INTENT_JSON:"
+                                                                           "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search the page\",\"why\":\"Need the first search result before continuing\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}")
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{}"}}]}
+                                                         {"content" ""
+                                                          "tool_calls" [{"id" "call-2"
+                                                                         "function" {"name" "web-search"
+                                                                                     "arguments" "{}"}}]}))
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
       (let [err (try
                   (agent/process-message session-id
@@ -1733,7 +1814,8 @@
                   xia.llm/chat-message               (fn [messages & _opts]
                                                        (swap! llm-calls conj messages)
                                                        (if (= 1 (count @llm-calls))
-                                                         {"content" ""
+                                                         {"content" (str "ACTION_INTENT_JSON:"
+                                                                         "{\"focus\":\"Interpret the chart\",\"agenda_item\":\"Capture chart\",\"plan_step\":\"Take a browser screenshot\",\"why\":\"Need the visual state to interpret the chart\",\"tool\":\"browser-screenshot\",\"tool_args_summary\":\"{}\"}")
                                                           "tool_calls" [{"id" "call-1"
                                                                          "function" {"name" "browser-screenshot"
                                                                                      "arguments" "{}"}}]}
@@ -1797,7 +1879,8 @@
                   xia.llm/chat-message               (fn [messages & _opts]
                                                        (swap! llm-calls conj messages)
                                                        (if (= 1 (count @llm-calls))
-                                                         {"content" ""
+                                                         {"content" (str "ACTION_INTENT_JSON:"
+                                                                         "{\"focus\":\"Interpret the chart\",\"agenda_item\":\"Capture chart\",\"plan_step\":\"Take a browser screenshot\",\"why\":\"Need the visual state to interpret the chart\",\"tool\":\"browser-screenshot\",\"tool_args_summary\":\"{}\"}")
                                                           "tool_calls" [{"id" "call-1"
                                                                          "function" {"name" "browser-screenshot"
                                                                                      "arguments" "{}"}}]}

@@ -1321,6 +1321,7 @@
 (def ^:private non-restartable-worker-error-types
   #{:request-cancelled
     :autonomous-loop-stalled
+    :autonomous-protocol-invalid
     :agent-stop-timeout
     :tool-round-limit-exceeded
     :tool-call-limit-exceeded
@@ -1345,6 +1346,35 @@
 
       :else
       true)))
+
+(defn- autonomous-protocol-ex
+  [session-id execution-context round parsed-response message]
+  (ex-info message
+           {:type :autonomous-protocol-invalid
+            :session-id session-id
+            :channel (:channel execution-context)
+            :iteration (:iteration execution-context)
+            :round round
+            :intent-status (:intent-status parsed-response)
+            :control-status (:control-status parsed-response)}))
+
+(defn- validate-tool-round-protocol!
+  [session-id execution-context round parsed-response]
+  (when (and (zero? round)
+             (not= :parsed (:intent-status parsed-response)))
+    (throw (autonomous-protocol-ex
+            session-id
+            execution-context
+            round
+            parsed-response
+            "First tool-calling response is missing a valid ACTION_INTENT_JSON envelope")))
+  (when (contains? #{:parsed :malformed} (:control-status parsed-response))
+    (throw (autonomous-protocol-ex
+            session-id
+            execution-context
+            round
+            parsed-response
+            "Tool-calling response must not include AUTONOMOUS_STATUS_JSON"))))
 
 (defn- worker-failure-summary
   [t]
@@ -1746,9 +1776,13 @@
                   (emit-intent-event! emit-event!
                                       execution-context
                                       parsed-response))
-              has-tools? (and (map? response) (seq (get response "tool_calls")))]
+          has-tools? (and (map? response) (seq (get response "tool_calls")))]
           (if has-tools?
             (do
+              (validate-tool-round-protocol! session-id
+                                            execution-context
+                                            round
+                                            parsed-response)
               (when (>= (long round) (long max-tool-rounds))
                 (throw (ex-info "Too many tool-calling rounds"
                                 {:type :tool-round-limit-exceeded
