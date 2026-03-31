@@ -1086,6 +1086,37 @@
      (* 2 (long (or agenda-active 0)))
      (long (get progress-status-scores tip-status 0))))
 
+(defn- iteration-tool-marker
+  [tool-activity]
+  (let [results        (->> tool-activity
+                            (mapcat :results)
+                            vec)
+        statuses       (frequencies (keep :status results))
+        failure-count  (long (get statuses "error" 0))
+        success-count  (long (get statuses "success" 0))
+        total-count    (+ failure-count success-count)
+        error-terms    (->> results
+                            (keep (fn [{:keys [error summary status]}]
+                                    (when (= status "error")
+                                      (or (loop-text-signature error)
+                                          (loop-text-signature summary)))))
+                            vec
+                            not-empty)]
+    {:round-count      (count tool-activity)
+     :total-count      total-count
+     :failure-count    failure-count
+     :success-count    success-count
+     :only-failures?   (and (pos? total-count)
+                            (zero? success-count))
+     :error-signature  error-terms}))
+
+(defn- repeated-tool-failure-loop?
+  [previous-signature next-signature]
+  (let [previous-tool-marker (:tool-marker previous-signature)
+        next-tool-marker     (:tool-marker next-signature)]
+    (and (:only-failures? previous-tool-marker)
+         (:only-failures? next-tool-marker))))
+
 (defn- iteration-stall-key
   [signature]
   (select-keys signature
@@ -1496,6 +1527,7 @@
     {:progress-status   (:progress-status tip)
      :stack-action      (:stack-action control)
      :tool-activity     tool-activity
+     :tool-marker       (iteration-tool-marker tool-activity)
      :progress-marker   progress-marker
      :semantic-text     (semantic-loop-text autonomy-state control)
      :semantic-fallback (semantic-loop-fallback-signature autonomy-state control)}))
@@ -1507,13 +1539,22 @@
         same-stall-state?   (= stall-key next-stall-key)
         progressed?         (> next-progress-score
                                (long (or progress-score Long/MIN_VALUE)))
+        repeated-tool-failure? (and signature
+                                    same-stall-state?
+                                    (not progressed?)
+                                    (repeated-tool-failure-loop? signature
+                                                                 next-signature))
         {:keys [embedding-cache same-semantic? semantic-similarity semantic-match-source]}
-        (if (and signature same-stall-state? (not progressed?))
+        (if (and signature
+                 same-stall-state?
+                 (not progressed?)
+                 (not repeated-tool-failure?))
           (semantic-loop-equivalent? (or embedding-cache {}) signature next-signature)
           {:embedding-cache (or embedding-cache {})
-           :same-semantic? false
+           :same-semantic? repeated-tool-failure?
            :semantic-similarity nil
-           :semantic-match-source nil})]
+           :semantic-match-source (when repeated-tool-failure?
+                                    :tool-failure)})]
     (if (and same-stall-state? same-semantic? (not progressed?))
       {:signature next-signature
        :stall-key next-stall-key

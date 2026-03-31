@@ -1370,6 +1370,57 @@
                (:type (ex-data err)))))
       (is (= 4 @llm-calls)))))
 
+(deftest process-message-detects-repeated-tool-failure-loops-even-when-focus-shifts
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}
+                                                                  {:type "function"
+                                                                   :function {:name "workspace-read"
+                                                                              :parameters {}}}])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [tool-id _args _context]
+                                                       (case tool-id
+                                                         :web-search {:error "Search backend timed out"}
+                                                         :workspace-read {:error "Workspace file could not be opened"}
+                                                         {:error "Tool failed"}))
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" ""
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "web-search"
+                                                                                       "arguments" "{\"q\":\"billing invoices\"}"}}]}
+                                                         2 {"content" (str "The search failed.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"The search failed\",\"next_step\":\"Search the invoices again\",\"reason\":\"Still need the billing details\",\"goal_complete\":false,\"current_focus\":\"Search the invoices\",\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Search the invoices\",\"status\":\"blocked\"}]}")}
+                                                         3 {"content" ""
+                                                            "tool_calls" [{"id" "call-2"
+                                                                           "function" {"name" "workspace-read"
+                                                                                       "arguments" "{\"path\":\"notes/billing.md\"}"}}]}
+                                                         {"content" (str "The notes lookup also failed.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"continue\",\"summary\":\"The notes lookup also failed\",\"next_step\":\"Review the billing notes\",\"reason\":\"Still need the billing details\",\"goal_complete\":false,\"current_focus\":\"Review the billing notes\",\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Review the billing notes\",\"status\":\"blocked\"}]}")}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "handle the billing issue" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-loop-stalled
+               (:type (ex-data err))))
+        (is (= :tool-failure
+               (:semantic-match-source (ex-data err))))))
+    (is (= 4 @llm-calls))))
+
 (deftest process-message-treats-semantic-focus-rephrasing-as-the-same-stall
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom 0)]
