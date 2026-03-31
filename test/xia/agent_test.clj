@@ -843,6 +843,33 @@
                      :agenda [{:item "Send replies" :status :completed}]}]}
            (wm/autonomy-state session-id)))))
 
+(deftest process-message-does-not-trust-goal-complete-when-agenda-remains
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "Almost done.\n\n"
+                                                                       "AUTONOMOUS_STATUS_JSON:"
+                                                                       "{\"status\":\"complete\",\"summary\":\"Drafted the reply\",\"next_step\":\"Send the reply\",\"reason\":\"One step remains\",\"goal_complete\":true,\"stack_action\":\"stay\",\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Draft the reply\",\"status\":\"completed\"},{\"item\":\"Send the reply\",\"status\":\"pending\"}]}")})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Almost done."
+             (agent/process-message session-id
+                                    "reply to the billing emails"
+                                    :channel :terminal))))
+    (is (= {:stack [{:title "reply to the billing emails"
+                     :summary "Drafted the reply"
+                     :next-step "Send the reply"
+                     :reason "One step remains"
+                     :progress-status :in-progress
+                     :agenda [{:item "Draft the reply" :status :completed}
+                              {:item "Send the reply" :status :pending}]}]}
+           (wm/autonomy-state session-id)))))
+
 (deftest process-message-restores-completed-stack-across-top-level-follow-up-turns
   (let [session-id   (db/create-session! :terminal)
         llm-messages (atom [])

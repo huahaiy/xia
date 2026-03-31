@@ -32,7 +32,13 @@
   []
   prompt/*interaction-context*)
 
-(declare controller-state-message current-frame suspend-progress-status)
+(declare controller-state-message
+         current-frame
+         suspend-progress-status
+         normalized-state?
+         normalize-state
+         initial-state
+         mark-normalized-state)
 
 (defn autonomous-run?
   ([] (autonomous-run? (context)))
@@ -515,6 +521,9 @@
 (def ^:private actionable-agenda-statuses
   #{:pending :in-progress :paused :resumable :diverged :blocked})
 
+(def ^:private terminal-agenda-statuses
+  #{:completed :skipped})
+
 (defn- derive-parent-agenda-on-pop
   [parent-tip child-tip]
   (let [agenda      (:agenda parent-tip)
@@ -539,6 +548,50 @@
                      (contains? actionable-agenda-statuses status))
             item))
         agenda))
+
+(defn structurally-complete?
+  [state]
+  (let [stack* (:stack (cond
+                         (normalized-state? state) state
+                         (map? state)             (normalize-state state)
+                         :else                    (initial-state nil)))]
+    (and (seq stack*)
+         (every? #(= :complete (:progress-status %)) stack*)
+         (every? (fn [{:keys [agenda]}]
+                   (every? (fn [{:keys [status]}]
+                             (contains? terminal-agenda-statuses status))
+                           agenda))
+                 stack*))))
+
+(defn- derive-incomplete-progress-status
+  [stack tip]
+  (let [agenda (:agenda tip)]
+    (cond
+      (some #(= :diverged (:status %)) agenda) :diverged
+      (some #(= :resumable (:status %)) agenda) :resumable
+      (some #(= :paused (:status %)) agenda) :paused
+      (some #(= :blocked (:status %)) agenda) :blocked
+      (seq agenda)
+      (if (some #(contains? #{:in-progress :completed :skipped} (:status %)) agenda)
+        :in-progress
+        :pending)
+      (> (count stack) 1) :resumable
+      :else :in-progress)))
+
+(defn reconcile-invalid-goal-complete
+  [state]
+  (let [state* (cond
+                 (normalized-state? state) state
+                 (map? state)             (normalize-state state)
+                 :else                    (initial-state nil))
+        stack* (:stack state*)
+        tip    (peek stack*)]
+    (if (or (empty? stack*)
+            (structurally-complete? state*))
+      state*
+      (let [updated-tip (assoc tip :progress-status (derive-incomplete-progress-status stack* tip))]
+        (mark-normalized-state
+         {:stack (conj (vec (butlast stack*)) updated-tip)})))))
 
 (defn- derive-parent-control-on-pop
   [parent-tip child-tip control parent-title]

@@ -362,6 +362,22 @@
     (is (= ["Handle refund follow-up"]
            (mapv :title (:stack updated))))))
 
+(deftest reconcile-invalid-goal-complete-keeps-the-stack-incomplete
+  (let [state {:stack [{:title "Handle billing emails"
+                        :summary "Drafted the reply"
+                        :next-step "Send the reply"
+                        :reason "One step remains"
+                        :progress-status :complete
+                        :agenda [{:item "Draft the reply" :status :completed}
+                                 {:item "Send the reply" :status :pending}]}]}
+        updated (autonomous/reconcile-invalid-goal-complete state)]
+    (is (false? (autonomous/structurally-complete? state)))
+    (is (= :in-progress
+           (get-in updated [:stack 0 :progress-status])))
+    (is (= [{:item "Draft the reply" :status :completed}
+            {:item "Send the reply" :status :pending}]
+           (get-in updated [:stack 0 :agenda])))))
+
 (deftest normalize-state-handles-string-keyed-snapshots
   (let [state (autonomous/normalize-state
                {"stack" [{"title" "Handle billing emails"

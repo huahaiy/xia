@@ -1660,6 +1660,19 @@
     (and (= :parsed (:control-status parsed))
          (= :clear (:stack-action control)))))
 
+(defn- validate-goal-complete
+  [control autonomy-state]
+  (let [claimed? (true? (:goal-complete? control))
+        valid?   (or (not claimed?)
+                     (autonomous/structurally-complete? autonomy-state))]
+    {:goal-complete-valid? valid?
+     :control (if valid?
+                control
+                (assoc control :goal-complete? false))
+     :autonomy-state (if valid?
+                       autonomy-state
+                       (autonomous/reconcile-invalid-goal-complete autonomy-state))}))
+
 (defn- persist-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]
   (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
@@ -2009,13 +2022,22 @@
                             control (:control parsed)
                             summary (autonomous-iteration-summary parsed)
                             fact-eids* (merge-fact-eids fact-eids used-fact-eids)
-                            updated-autonomy-state (if control
-                                                     (let [next-state (autonomous/apply-control autonomy-state
-                                                                                                control)]
-                                                       (wm/set-autonomy-state! session-id next-state)
-                                                       (or (wm/autonomy-state session-id)
-                                                           next-state))
-                                                     autonomy-state)
+                            updated-autonomy-state* (if control
+                                                      (let [next-state (autonomous/apply-control autonomy-state
+                                                                                                 control)]
+                                                        (wm/set-autonomy-state! session-id next-state)
+                                                        (or (wm/autonomy-state session-id)
+                                                            next-state))
+                                                      autonomy-state)
+                            {:keys [goal-complete-valid? control autonomy-state]}
+                            (if control
+                              (validate-goal-complete control updated-autonomy-state*)
+                              {:goal-complete-valid? true
+                               :control control
+                               :autonomy-state updated-autonomy-state*})
+                            _ (when (and control (not goal-complete-valid?))
+                                (wm/set-autonomy-state! session-id autonomy-state))
+                            updated-autonomy-state autonomy-state
                             updated-tip (autonomous/current-frame updated-autonomy-state)
                             _ (wm/snapshot! session-id)
                             text (final-assistant-text parsed response)]
@@ -2030,10 +2052,11 @@
                           :iteration iteration
                           :summary summary
                           :session-id session-id
-                          :control-status (:control-status parsed)
-                          :status (some-> control :status)
-                          :next-step (some-> control :next-step)
-                          :progress-status (some-> updated-tip :progress-status)
+                         :control-status (:control-status parsed)
+                         :goal-complete-valid? goal-complete-valid?
+                         :status (some-> control :status)
+                         :next-step (some-> control :next-step)
+                         :progress-status (some-> updated-tip :progress-status)
                           :agenda (some-> updated-tip :agenda)
                           :stack (some-> updated-autonomy-state :stack)})
                         (cond
