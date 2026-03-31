@@ -138,7 +138,7 @@
 
 (defn create-session!
   [deps channel & [opts]]
-  (let [{:keys [parent-session-id worker? label active?]
+  (let [{:keys [parent-session-id worker? label active? external-key external-meta]
          :or   {worker? false
                 active? true}} opts
         id (random-uuid)]
@@ -149,8 +149,37 @@
                 :session/worker? worker?
                 :session/active? active?}
          parent-session-id (assoc :session/parent-id parent-session-id)
-         (some? label) (assoc :session/label label))])
+         (some? label) (assoc :session/label label)
+         (some? external-key) (assoc :session/external-key external-key)
+         (some? external-meta) (assoc :session/external-meta external-meta))])
     id))
+
+(defn find-session-by-external-key
+  [deps external-key]
+  (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?external-key
+                                    :where [?e :session/external-key ?external-key]]
+                              external-key))]
+    (let [entity-map (raw-entity* deps eid)]
+      {:id            (:session/id entity-map)
+       :channel       (:session/channel entity-map)
+       :external-key  (:session/external-key entity-map)
+       :external-meta (:session/external-meta entity-map)
+       :active?       (boolean (:session/active? entity-map))
+       :worker?       (boolean (:session/worker? entity-map))
+       :parent-id     (:session/parent-id entity-map)
+       :label         (:session/label entity-map)})))
+
+(defn session-external-meta
+  [deps session-id]
+  (when-let [eid (session-eid deps session-id)]
+    (:session/external-meta (raw-entity* deps eid))))
+
+(defn save-session-external-meta!
+  [deps session-id external-meta]
+  (when-let [eid (session-eid deps session-id)]
+    (transact!* deps [{:db/id eid
+                       :session/external-meta external-meta}])
+    true))
 
 (defn list-sessions
   [deps & [opts]]
@@ -163,6 +192,8 @@
                 (let [entity-map (raw-entity* deps eid)]
                   {:id         sid
                    :channel    channel
+                   :external-key (:session/external-key entity-map)
+                   :external-meta (:session/external-meta entity-map)
                    :created-at (entity-created-at* deps entity-map)
                    :active?    (boolean (:session/active? entity-map))
                    :worker?    (boolean (:session/worker? entity-map))

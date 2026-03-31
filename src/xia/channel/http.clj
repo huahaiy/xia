@@ -10,8 +10,10 @@
             [xia.hippocampus :as hippo]
             [xia.memory :as memory]
             [xia.channel.http.admin :as http-admin]
+            [xia.channel.http.messaging :as http-messaging]
             [xia.channel.http.session :as http-session]
             [xia.channel.http.workspace :as http-workspace]
+            [xia.channel.messaging :as messaging]
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
@@ -1066,6 +1068,7 @@
    :parse-session-id             parse-session-id
    :read-body                    read-body
    :read-body-bytes              read-body-bytes
+   :request-header               request-header
    :session-exists?              session-exists?
    :throwable-message            throwable-message
    :touch-rest-session!          touch-rest-session!})
@@ -1347,6 +1350,12 @@
         (and (= method :post) (= uri "/command/chat"))
         (command-route-response req #(handle-chat req :command))
 
+        (and (= method :post) (= uri "/hooks/slack/events"))
+        (http-messaging/handle-slack-events (workspace-handler-deps) req)
+
+        (and (= method :post) (= uri "/hooks/telegram"))
+        (http-messaging/handle-telegram-webhook (workspace-handler-deps) req)
+
         (and (= method :post) (= uri "/command/shutdown"))
         (command-route-response req #(handle-command-shutdown req))
 
@@ -1532,6 +1541,9 @@
 
         (and (= method :post) (= uri "/admin/remote-bridge"))
         (protected-route-response req #(http-admin/handle-save-remote-bridge (admin-handler-deps) req))
+
+        (and (= method :post) (= uri "/admin/messaging"))
+        (protected-route-response req #(http-admin/handle-save-messaging (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/remote-bridge/pair"))
         (protected-route-response req #(http-admin/handle-pair-remote-device (admin-handler-deps) req))

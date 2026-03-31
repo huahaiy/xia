@@ -41,6 +41,7 @@ const state = {
     oauthAccounts: [],
     services: [],
     sites: [],
+    messagingChannels: null,
     schedules: [],
     tools: [],
     skills: [],
@@ -106,6 +107,7 @@ const state = {
   scheduleSaving: false,
   skillSaving: false,
   managedInstanceStoppingId: '',
+  messagingChannelsSaving: false,
   remoteBridgeSaving: false,
   remotePairing: false,
   localDocSummarizationStatus: 'Loading document summary settings...',
@@ -113,6 +115,7 @@ const state = {
   contextStatus: 'Loading conversation context settings...',
   workloadRoutingStatus: 'Loading workload routing...',
   databaseBackupStatus: 'Loading database backup settings...',
+  messagingChannelsStatus: 'Loading messaging channel settings...',
   remoteBridgeStatus: 'Loading notification bridge settings...',
   remotePairStatus: 'Paste a pairing token from the mobile app to authorize a phone.',
   littleXiaStatus: 'Loading child Xia instances...',
@@ -363,6 +366,16 @@ const remoteBridgeRelayUrlEl = document.getElementById('remote-bridge-relay-url'
 const remoteBridgePublicKeyEl = document.getElementById('remote-bridge-public-key');
 const remoteBridgeStatusEl = document.getElementById('remote-bridge-status');
 const saveRemoteBridgeEl = document.getElementById('save-remote-bridge');
+const messagingSlackEnabledEl = document.getElementById('messaging-slack-enabled');
+const messagingSlackBotTokenEl = document.getElementById('messaging-slack-bot-token');
+const messagingSlackSigningSecretEl = document.getElementById('messaging-slack-signing-secret');
+const messagingTelegramEnabledEl = document.getElementById('messaging-telegram-enabled');
+const messagingTelegramBotTokenEl = document.getElementById('messaging-telegram-bot-token');
+const messagingTelegramWebhookSecretEl = document.getElementById('messaging-telegram-webhook-secret');
+const messagingImessageEnabledEl = document.getElementById('messaging-imessage-enabled');
+const messagingImessagePollIntervalEl = document.getElementById('messaging-imessage-poll-interval-ms');
+const messagingChannelsStatusEl = document.getElementById('messaging-channels-status');
+const saveMessagingChannelsEl = document.getElementById('save-messaging-channels');
 const remotePairingTokenEl = document.getElementById('remote-pairing-token');
 const remotePairStatusEl = document.getElementById('remote-pair-status');
 const pairRemoteDeviceEl = document.getElementById('pair-remote-device');
@@ -1245,6 +1258,38 @@ function defaultRemotePairStatus() {
   return devices.length
     ? ('Paired ' + devices.length + ' ' + pluralize(devices.length, 'device') + '.')
     : 'Paste a pairing token from the mobile app to authorize a phone.';
+}
+
+function defaultMessagingChannelsStatus() {
+  const channels = state.admin.messagingChannels || {};
+  const slack = channels.slack || {};
+  const telegram = channels.telegram || {};
+  const imessage = channels.imessage || {};
+  const parts = [
+    'Slack ' + (slack.enabled ? 'enabled' : 'disabled')
+      + ', token ' + (slack.bot_token_configured ? 'configured' : 'missing'),
+    'Telegram ' + (telegram.enabled ? 'enabled' : 'disabled')
+      + ', token ' + (telegram.bot_token_configured ? 'configured' : 'missing'),
+    'iMessage ' + (imessage.enabled ? 'enabled' : 'disabled')
+      + ', local bridge ' + (imessage.available ? 'available' : 'unavailable')
+  ];
+  return parts.join(' • ');
+}
+
+function renderMessagingChannelSettings() {
+  const channels = state.admin.messagingChannels || {};
+  const slack = channels.slack || {};
+  const telegram = channels.telegram || {};
+  const imessage = channels.imessage || {};
+  messagingSlackEnabledEl.checked = !!slack.enabled;
+  messagingTelegramEnabledEl.checked = !!telegram.enabled;
+  messagingImessageEnabledEl.checked = !!imessage.enabled;
+  messagingImessagePollIntervalEl.value = imessage.poll_interval_ms || '';
+  messagingSlackBotTokenEl.placeholder = slack.bot_token_configured ? 'Configured' : 'xoxb-...';
+  messagingSlackSigningSecretEl.placeholder = slack.signing_secret_configured ? 'Configured' : 'Optional until webhook verification is set up';
+  messagingTelegramBotTokenEl.placeholder = telegram.bot_token_configured ? 'Configured' : '123456:ABC...';
+  messagingTelegramWebhookSecretEl.placeholder = telegram.webhook_secret_configured ? 'Configured' : 'Optional shared secret';
+  messagingChannelsStatusEl.textContent = state.messagingChannelsStatus || defaultMessagingChannelsStatus();
 }
 
 function renderRemoteBridge() {
@@ -3598,6 +3643,15 @@ function updateAdminButtons() {
   skillContentEl.disabled = state.skillSaving;
   saveSkillEl.disabled = state.skillSaving;
   deleteSkillEl.disabled = state.skillSaving || !state.activeSkillId;
+  messagingSlackEnabledEl.disabled = state.messagingChannelsSaving;
+  messagingSlackBotTokenEl.disabled = state.messagingChannelsSaving;
+  messagingSlackSigningSecretEl.disabled = state.messagingChannelsSaving;
+  messagingTelegramEnabledEl.disabled = state.messagingChannelsSaving;
+  messagingTelegramBotTokenEl.disabled = state.messagingChannelsSaving;
+  messagingTelegramWebhookSecretEl.disabled = state.messagingChannelsSaving;
+  messagingImessageEnabledEl.disabled = state.messagingChannelsSaving;
+  messagingImessagePollIntervalEl.disabled = state.messagingChannelsSaving;
+  saveMessagingChannelsEl.disabled = state.messagingChannelsSaving;
   remoteBridgeEnabledEl.disabled = state.remoteBridgeSaving;
   remoteBridgeInstanceLabelEl.disabled = state.remoteBridgeSaving;
   remoteBridgeRelayUrlEl.disabled = state.remoteBridgeSaving;
@@ -3825,6 +3879,7 @@ function renderSkillList() {
 function renderCapabilities() {
   renderToolList();
   renderSkillList();
+  renderMessagingChannelSettings();
   renderRemoteBridge();
   renderOpenClawImport();
 }
@@ -4872,6 +4927,7 @@ async function loadAdminConfigImpl() {
     state.admin.oauthAccounts = Array.isArray(data.oauth_accounts) ? data.oauth_accounts : [];
     state.admin.services = Array.isArray(data.services) ? data.services : [];
     state.admin.sites = Array.isArray(data.sites) ? data.sites : [];
+    state.admin.messagingChannels = data.messaging_channels || null;
     state.admin.schedules = Array.isArray(data.schedules) ? data.schedules : [];
     state.admin.tools = Array.isArray(data.tools) ? data.tools : [];
     state.admin.skills = Array.isArray(data.skills) ? data.skills : [];
@@ -4884,6 +4940,7 @@ async function loadAdminConfigImpl() {
     state.localDocSummarizationStatus = defaultLocalDocSummarizationStatus();
     state.localDocOcrStatus = defaultLocalDocOcrStatus();
     state.databaseBackupStatus = defaultDatabaseBackupStatus();
+    state.messagingChannelsStatus = defaultMessagingChannelsStatus();
     state.remoteBridgeStatus = defaultRemoteBridgeStatus();
     state.remotePairStatus = defaultRemotePairStatus();
     state.littleXiaStatus = state.admin.managedInstances.length
@@ -4918,6 +4975,7 @@ async function loadAdminConfigImpl() {
     renderLocalDocSummarizationSettings();
     renderLocalDocOcrSettings();
     renderDatabaseBackupSettings();
+    renderMessagingChannelSettings();
     if (state.providerDraft) {
       restoreProviderDraft(state.providerDraft);
     } else if (provider) {
@@ -4960,6 +5018,52 @@ async function loadAdminConfigImpl() {
     }
   } catch (err) {
     console.error(err);
+  }
+}
+
+async function saveMessagingChannels() {
+  if (state.messagingChannelsSaving) return;
+  state.messagingChannelsSaving = true;
+  state.messagingChannelsStatus = 'Saving messaging settings...';
+  renderMessagingChannelSettings();
+  updateAdminButtons();
+  try {
+    const slack = { enabled: messagingSlackEnabledEl.checked };
+    const slackBotToken = messagingSlackBotTokenEl.value.trim();
+    const slackSigningSecret = messagingSlackSigningSecretEl.value.trim();
+    if (slackBotToken) slack.bot_token = slackBotToken;
+    if (slackSigningSecret) slack.signing_secret = slackSigningSecret;
+
+    const telegram = { enabled: messagingTelegramEnabledEl.checked };
+    const telegramBotToken = messagingTelegramBotTokenEl.value.trim();
+    const telegramWebhookSecret = messagingTelegramWebhookSecretEl.value.trim();
+    if (telegramBotToken) telegram.bot_token = telegramBotToken;
+    if (telegramWebhookSecret) telegram.webhook_secret = telegramWebhookSecret;
+
+    const imessage = {
+      enabled: messagingImessageEnabledEl.checked,
+      poll_interval_ms: messagingImessagePollIntervalEl.value
+    };
+
+    const data = await fetchJson('/admin/messaging', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slack, telegram, imessage })
+    });
+    state.admin.messagingChannels = data.messaging_channels || state.admin.messagingChannels;
+    state.messagingChannelsStatus = 'Messaging settings saved.';
+    messagingSlackBotTokenEl.value = '';
+    messagingSlackSigningSecretEl.value = '';
+    messagingTelegramBotTokenEl.value = '';
+    messagingTelegramWebhookSecretEl.value = '';
+    setStatus('Messaging channels saved');
+  } catch (err) {
+    state.messagingChannelsStatus = err.message || 'Failed to save messaging settings.';
+    setStatus('Failed to save messaging channels');
+  } finally {
+    state.messagingChannelsSaving = false;
+    renderMessagingChannelSettings();
+    updateAdminButtons();
   }
 }
 
@@ -7378,6 +7482,15 @@ scheduleViewRunsEl.addEventListener('click', () => {
 });
 saveSkillEl.addEventListener('click', () => saveSkill());
 deleteSkillEl.addEventListener('click', () => deleteSkill());
+saveMessagingChannelsEl.addEventListener('click', () => saveMessagingChannels());
+messagingSlackEnabledEl.addEventListener('change', () => updateAdminButtons());
+messagingSlackBotTokenEl.addEventListener('input', () => updateAdminButtons());
+messagingSlackSigningSecretEl.addEventListener('input', () => updateAdminButtons());
+messagingTelegramEnabledEl.addEventListener('change', () => updateAdminButtons());
+messagingTelegramBotTokenEl.addEventListener('input', () => updateAdminButtons());
+messagingTelegramWebhookSecretEl.addEventListener('input', () => updateAdminButtons());
+messagingImessageEnabledEl.addEventListener('change', () => updateAdminButtons());
+messagingImessagePollIntervalEl.addEventListener('input', () => updateAdminButtons());
 saveRemoteBridgeEl.addEventListener('click', () => saveRemoteBridge());
 pairRemoteDeviceEl.addEventListener('click', () => pairRemoteDevice());
 remotePairingTokenEl.addEventListener('input', () => updateAdminButtons());

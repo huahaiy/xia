@@ -4,6 +4,7 @@
             [integrant.core :as ig]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.channel.messaging :as messaging]
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
@@ -161,10 +162,20 @@
   [_ _]
   (scheduler/stop!))
 
+(defmethod ig/init-key :xia/messaging
+  [_ {:keys [runtime-support]}]
+  (messaging/start!)
+  {:runtime-support runtime-support})
+
+(defmethod ig/halt-key! :xia/messaging
+  [_ _]
+  (messaging/stop!))
+
 (defmethod ig/init-key :xia/http
-  [_ {:keys [scheduler bind-host port web-dev?]}]
+  [_ {:keys [scheduler messaging bind-host port web-dev?]}]
   (http/start! bind-host port {:web-dev? (true? web-dev?)})
   {:scheduler scheduler
+   :messaging messaging
    :bind-host bind-host
    :port (or (http/current-port) port)})
 

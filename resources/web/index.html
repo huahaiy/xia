@@ -365,6 +365,7 @@
               <button class="settings-nav-item" data-section="site-logins">Site Logins</button>
               <button class="settings-nav-item" data-section="api-auth">API Auth</button>
               <button class="settings-nav-item" data-section="api-services">API Services</button>
+              <button class="settings-nav-item" data-section="messaging-channels">Messaging Channels</button>
               <button class="settings-nav-item" data-section="scheduled-work">Scheduled Work</button>
               <button class="settings-nav-item advanced-only" data-section="doc-summaries">Document Summaries</button>
               <button class="settings-nav-item advanced-only" data-section="ocr">OCR</button>
@@ -1180,6 +1181,66 @@
                     <label class="field-label">Recent Bridge Events</label>
                     <div class="capability-list" id="remote-event-list"></div>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="admin-card" data-settings-section="messaging-channels">
+              <div class="panel-header">
+                <div>
+                <h3 class="panel-title" title="Connect Xia to inbound and outbound messaging channels.">Messaging Channels</h3>
+                <p class="panel-note">Configure Slack, Telegram, and the local macOS iMessage bridge.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field full">
+                  <label class="field-label">Slack</label>
+                  <div class="check-row">
+                    <input type="checkbox" id="messaging-slack-enabled">
+                    <label class="check-label" for="messaging-slack-enabled">Enable Slack event + reply handling</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="messaging-slack-bot-token">Slack Bot Token</label>
+                  <input type="password" id="messaging-slack-bot-token" class="text-input" placeholder="xoxb-...">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="messaging-slack-signing-secret">Slack Signing Secret</label>
+                  <input type="password" id="messaging-slack-signing-secret" class="text-input" placeholder="Optional until webhook verification is set up">
+                </div>
+
+                <div class="field full">
+                  <label class="field-label">Telegram</label>
+                  <div class="check-row">
+                    <input type="checkbox" id="messaging-telegram-enabled">
+                    <label class="check-label" for="messaging-telegram-enabled">Enable Telegram webhook + reply handling</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="messaging-telegram-bot-token">Telegram Bot Token</label>
+                  <input type="password" id="messaging-telegram-bot-token" class="text-input" placeholder="123456:ABC...">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="messaging-telegram-webhook-secret">Telegram Webhook Secret</label>
+                  <input type="password" id="messaging-telegram-webhook-secret" class="text-input" placeholder="Optional shared secret">
+                </div>
+
+                <div class="field full">
+                  <label class="field-label">iMessage</label>
+                  <div class="check-row">
+                    <input type="checkbox" id="messaging-imessage-enabled">
+                    <label class="check-label" for="messaging-imessage-enabled">Enable local macOS iMessage polling + send</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="messaging-imessage-poll-interval-ms">Poll Interval (ms)</label>
+                  <input type="number" id="messaging-imessage-poll-interval-ms" class="text-input" min="500" step="500" placeholder="5000">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" id="messaging-channels-status">Loading messaging channel settings...</div>
+                <div class="actions">
+                  <button type="button" class="primary" id="save-messaging-channels">Save messaging settings</button>
                 </div>
               </div>
             </div>

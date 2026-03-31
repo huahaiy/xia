@@ -131,6 +131,8 @@
    ;; --- Session ---
    :session/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :session/channel    {:db/valueType :db.type/keyword} ; :terminal :http
+   :session/external-key {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :session/external-meta {:db/valueType :db.type/idoc :db/domain "session-external-meta"}
    :session/parent-id  {:db/valueType :db.type/uuid}
    :session/worker?    {:db/valueType :db.type/boolean}
    :session/label      {:db/valueType :db.type/string}
@@ -1604,6 +1606,18 @@
    (create-session! channel nil))
   ([channel opts]
    (db-session/create-session! (session-deps) channel opts)))
+
+(defn find-session-by-external-key
+  [external-key]
+  (db-session/find-session-by-external-key (session-deps) external-key))
+
+(defn session-external-meta
+  [session-id]
+  (db-session/session-external-meta (session-deps) session-id))
+
+(defn save-session-external-meta!
+  [session-id external-meta]
+  (db-session/save-session-external-meta! (session-deps) session-id external-meta))
 
 (defn list-sessions
   "List all sessions with basic metadata, newest first."

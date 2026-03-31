@@ -53,6 +53,28 @@
     (db/set-session-active! sid true)
     (is (true? (session-active)))))
 
+(deftest sessions-persist-external-channel-metadata
+  (let [external-key "slack:T1:C1:main"
+        external-meta {:team-id "T1"
+                       :channel-id "C1"}
+        sid (db/create-session! :slack {:label "Slack C1"
+                                        :external-key external-key
+                                        :external-meta external-meta})
+        session (db/find-session-by-external-key external-key)]
+    (is (= sid (:id session)))
+    (is (= :slack (:channel session)))
+    (is (= "Slack C1" (:label session)))
+    (is (= external-key (:external-key session)))
+    (is (= external-meta (:external-meta session)))
+    (is (= external-meta (db/session-external-meta sid)))
+    (is (true? (db/save-session-external-meta! sid {:team-id "T1"
+                                                    :channel-id "C1"
+                                                    :thread-ts "1710.1"})))
+    (is (= {:team-id "T1"
+            :channel-id "C1"
+            :thread-ts "1710.1"}
+           (db/session-external-meta sid)))))
+
 (deftest close-records-debug-event-when-runtime-is-running
   (runtime-state/mark-running!)
   (try

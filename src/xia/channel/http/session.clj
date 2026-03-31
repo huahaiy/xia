@@ -7,7 +7,7 @@
             [xia.schedule :as schedule]
             [xia.working-memory :as wm]))
 
-(def ^:private history-session-channels #{:http :websocket :terminal})
+(def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
 
 (defn- json-response*
   [deps status body]

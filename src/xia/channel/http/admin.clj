@@ -4,6 +4,7 @@
             [charred.api :as json]
             [xia.autonomous :as autonomous]
             [xia.backup :as backup]
+            [xia.channel.messaging :as messaging]
             [xia.context :as context]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
@@ -906,6 +907,7 @@
        :local_doc_summarization (local-doc-summarization->admin-body)
        :local_doc_ocr (local-doc-ocr->admin-body)
        :database_backup (database-backup->admin-body deps)
+       :messaging_channels (messaging/admin-body)
        :llm_workloads (into [] (map (fn [{:keys [id label description async?]}]
                                       {:id          (name id)
                                        :label       label
@@ -1416,6 +1418,29 @@
                                                                     (remote-bridge/status-snapshot))}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
+
+(defn handle-save-messaging
+  [deps req]
+  (try
+    (let [data  (or (read-body* deps req) {})
+          saved (messaging/save-admin-config!
+                 {:slack (when (contains? data "slack")
+                           {:enabled (get-in data ["slack" "enabled"])
+                            :bot-token (get-in data ["slack" "bot_token"])
+                            :signing-secret (get-in data ["slack" "signing_secret"])})
+                  :telegram (when (contains? data "telegram")
+                              {:enabled (get-in data ["telegram" "enabled"])
+                               :bot-token (get-in data ["telegram" "bot_token"])
+                               :webhook-secret (get-in data ["telegram" "webhook_secret"])})
+                  :imessage (when (contains? data "imessage")
+                              {:enabled (get-in data ["imessage" "enabled"])
+                               :poll-interval-ms (get-in data ["imessage" "poll_interval_ms"])})})]
+      (json-response* deps 200 {:messaging_channels saved}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))
+    (catch Exception e
+      (json-response* deps 500 {:error (or (.getMessage e)
+                                           "failed to save messaging settings")}))))
 
 (defn handle-pair-remote-device
   [deps req]

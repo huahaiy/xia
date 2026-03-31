@@ -200,7 +200,8 @@
             :db       db-path})))
 
 (def ^:private base-runtime-root-keys
-  [:xia/scheduler])
+  [:xia/scheduler
+   :xia/messaging])
 
 (def ^:private server-runtime-root-keys
   [:xia/http])
@@ -246,8 +247,12 @@
      :xia/scheduler
      {:tool-runtime (ig/ref :xia/tool-runtime)}
 
+     :xia/messaging
+     {:runtime-support (ig/ref :xia/runtime-support)}
+
      :xia/http
      {:scheduler (ig/ref :xia/scheduler)
+      :messaging (ig/ref :xia/messaging)
       :bind-host bind
       :port port
       :web-dev? web-dev}

@@ -849,6 +849,27 @@
       (is (string? (get session "created_at")))
       (is (string? (get session "last_message_at"))))))
 
+(deftest history-sessions-route-includes-messaging-channels
+  (let [slack-sid (db/create-session! :slack {:label "Slack channel"})
+        telegram-sid (db/create-session! :telegram {:label "Telegram chat"})
+        imessage-sid (db/create-session! :imessage {:label "iMessage thread"})
+        hidden-sid (db/create-session! :command)]
+    (db/add-message! slack-sid :assistant "Slack reply")
+    (db/add-message! telegram-sid :assistant "Telegram reply")
+    (db/add-message! imessage-sid :assistant "iMessage reply")
+    (db/add-message! hidden-sid :assistant "Hidden")
+    (let [response (#'http/router {:uri "/history/sessions"
+                                   :request-method :get
+                                   :headers (ui-headers)})
+          body     (response-json response)
+          sessions (get body "sessions")
+          channels (into #{} (map #(get % "channel")) sessions)]
+      (is (= 200 (:status response)))
+      (is (contains? channels "slack"))
+      (is (contains? channels "telegram"))
+      (is (contains? channels "imessage"))
+      (is (not (contains? channels "command"))))))
+
 (deftest history-schedules-route-returns-schedule-summaries
   (schedule/create-schedule!
     {:id :daily-brief
@@ -1587,6 +1608,7 @@
           local-doc-summarization (get body "local_doc_summarization")
           local-doc-ocr (get body "local_doc_ocr")
           database-backup (get body "database_backup")
+          messaging-channels (get body "messaging_channels")
           llm-workloads (get body "llm_workloads")
           templates (get body "oauth_provider_templates")
           oauth    (first (filter #(= "google" (get % "id")) (get body "oauth_accounts")))
@@ -1658,6 +1680,12 @@
     (is (= false (get database-backup "running")))
     (is (nil? (get database-backup "last_success_at")))
     (is (nil? (get database-backup "last_error")))
+    (is (= false (get-in messaging-channels ["slack" "enabled"])))
+    (is (= false (get-in messaging-channels ["slack" "bot_token_configured"])))
+    (is (= false (get-in messaging-channels ["telegram" "enabled"])))
+    (is (= false (get-in messaging-channels ["telegram" "bot_token_configured"])))
+    (is (= false (get-in messaging-channels ["imessage" "enabled"])))
+    (is (integer? (get-in messaging-channels ["imessage" "poll_interval_ms"])))
     (is (= "healthy" (get provider "health_status")))
     (is (= #{"assistant" "history-compaction" "topic-summary" "memory-summary" "memory-importance" "memory-extraction" "fact-utility"}
            (set (map #(get % "id") llm-workloads))))
@@ -1833,6 +1861,38 @@
     (is (= true (get-in body ["remote_snapshot" "connectivity" "enabled"])))
     (is (= "Desk Xia" (get-in body ["remote_snapshot" "instance" "label"])))
     (is (= true (:enabled? (remote-bridge/bridge-config))))))
+
+(deftest admin-messaging-route-saves-settings
+  (let [response (#'http/router {:uri "/admin/messaging"
+                                 :request-method :post
+                                 :headers (ui-headers)
+                                 :body (request-body {"slack" {"enabled" true
+                                                               "bot_token" "xapp-test"
+                                                               "signing_secret" "slack-secret"}
+                                                      "telegram" {"enabled" true
+                                                                  "bot_token" "telegram-secret"
+                                                                  "webhook_secret" "webhook-secret"}
+                                                      "imessage" {"enabled" true
+                                                                  "poll_interval_ms" 2500}})})
+        body     (response-json response)
+        channels (get body "messaging_channels")]
+    (is (= 200 (:status response)))
+    (is (= true (get-in channels ["slack" "enabled"])))
+    (is (= true (get-in channels ["slack" "bot_token_configured"])))
+    (is (= true (get-in channels ["slack" "signing_secret_configured"])))
+    (is (= true (get-in channels ["telegram" "enabled"])))
+    (is (= true (get-in channels ["telegram" "bot_token_configured"])))
+    (is (= true (get-in channels ["telegram" "webhook_secret_configured"])))
+    (is (= true (get-in channels ["imessage" "enabled"])))
+    (is (= 2500 (get-in channels ["imessage" "poll_interval_ms"])))
+    (is (= "true" (db/get-config :messaging/slack-enabled?)))
+    (is (= "xapp-test" (db/get-config :secret/messaging-slack-bot-token)))
+    (is (= "slack-secret" (db/get-config :secret/messaging-slack-signing-secret)))
+    (is (= "true" (db/get-config :messaging/telegram-enabled?)))
+    (is (= "telegram-secret" (db/get-config :secret/messaging-telegram-bot-token)))
+    (is (= "webhook-secret" (db/get-config :secret/messaging-telegram-webhook-secret)))
+    (is (= "true" (db/get-config :messaging/imessage-enabled?)))
+    (is (= "2500" (db/get-config :messaging/imessage-poll-interval-ms)))))
 
 (deftest admin-local-doc-summarization-route-saves-and-clears-settings
   (db/upsert-provider! {:id :openai
