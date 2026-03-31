@@ -245,6 +245,29 @@
             {:item "Draft billing reply" :status :completed}]
            (get-in popped [:stack 0 :agenda])))))
 
+(deftest apply-control-compresses-older-middle-stack-frames-at-max-depth
+  (let [state (reduce (fn [current idx]
+                        (autonomous/apply-control
+                         current
+                         {:status :continue
+                          :summary (str "Working task " idx)
+                          :next-step (str "Continue task " idx)
+                          :reason "Descending into a subtask"
+                          :current-focus (str "Task " idx)
+                          :stack-action :push
+                          :progress-status :pending
+                          :agenda [{:item (str "Task " idx) :status :pending}]}))
+                      (autonomous/initial-state "Task 0")
+                      (range 1 41))]
+    (is (= 32 (count (:stack state))))
+    (is (= "Task 0" (get-in state [:stack 0 :title])))
+    (is (true? (get-in state [:stack 1 :compressed?])))
+    (is (= 10 (get-in state [:stack 1 :compressed-count])))
+    (is (= "Task 10" (get-in state [:stack 1 :title])))
+    (is (= "Task 11" (get-in state [:stack 2 :title])))
+    (is (= "Task 40" (get-in state [:stack 31 :title])))
+    (is (= "Task 0" (autonomous/root-goal state)))))
+
 (deftest apply-control-stay-preserves-existing-frame-fields
   (let [initial {:stack [{:title "Handle billing emails"
                           :summary "Checked inbox"

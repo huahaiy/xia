@@ -15,7 +15,10 @@
 (def ^:private default-reason-chars 600)
 (def ^:private max-agenda-items 8)
 (def ^:private max-agenda-item-chars 160)
-(def ^:private max-stack-depth 8)
+(def ^:private max-stack-depth 32)
+(def ^:private compressed-frame-preview-limit 6)
+(def ^:private compressed-frame-reason
+  "Older suspended stack frames were compressed to stay within the depth limit.")
 (def ^:private normalized-state-meta-key ::normalized-state)
 (def ^:private intent-marker "ACTION_INTENT_JSON:")
 (def ^:private control-marker "AUTONOMOUS_STATUS_JSON:")
@@ -29,7 +32,7 @@
   []
   prompt/*interaction-context*)
 
-(declare controller-state-message current-frame)
+(declare controller-state-message current-frame suspend-progress-status)
 
 (defn autonomous-run?
   ([] (autonomous-run? (context)))
@@ -335,7 +338,7 @@
        not-empty))
 
 (defn- stack-line
-  [{:keys [title progress-status next-step]}]
+  [{:keys [title progress-status next-step compressed? compressed-count]}]
   (let [title*      (truncate-agenda-item title)
         status*     (progress-status-label progress-status)
         next-step*  (truncate-field next-step)]
@@ -343,6 +346,8 @@
       (str "  - "
            "[" (or status* "pending") "] "
            title*
+           (when compressed?
+             (str " (compressed " (or compressed-count 1) ")"))
            (when next-step*
              (str " -> " next-step*))))))
 
@@ -388,11 +393,27 @@
   [frame default-title]
   (let [agenda           (normalize-agenda (or (:agenda frame)
                                                (get frame "agenda")))
+        compressed?      (true? (or (:compressed? frame)
+                                    (get frame "compressed?")))
+        compressed-count (when compressed?
+                           (some-> (or (:compressed-count frame)
+                                       (get frame "compressed_count")
+                                       (get frame "compressed-count"))
+                                   long
+                                   (max 1)))
+        compressed-preview (when compressed?
+                             (->> (or (:compressed-preview frame)
+                                      (get frame "compressed_preview")
+                                      (get frame "compressed-preview"))
+                                  (keep truncate-agenda-item)
+                                  (take-last compressed-frame-preview-limit)
+                                  vec
+                                  not-empty))
         status           (or (normalize-progress-status (or (:progress-status frame)
                                                             (get frame "progress_status")
                                                             (get frame "progress-status")))
                              (normalize-progress-status (or (:status frame)
-                                                            (get frame "status")))
+                                                             (get frame "status")))
                              (derive-progress-status :continue false agenda)
                              :pending)
         title            (or (truncate-goal (or (:title frame)
@@ -402,17 +423,47 @@
                                                 (get frame "current_focus")
                                                 (get frame "current-focus")))
                              default-title)]
-    {:title           title
-     :summary         (truncate-summary (or (:summary frame)
-                                            (get frame "summary")))
-     :next-step       (truncate-next-step (or (:next-step frame)
-                                              (:next_step frame)
-                                              (get frame "next_step")
-                                              (get frame "next-step")))
-     :reason          (truncate-reason (or (:reason frame)
-                                          (get frame "reason")))
-     :progress-status status
-     :agenda          agenda}))
+    (cond-> {:title           title
+             :summary         (truncate-summary (or (:summary frame)
+                                                    (get frame "summary")))
+             :next-step       (truncate-next-step (or (:next-step frame)
+                                                      (:next_step frame)
+                                                      (get frame "next_step")
+                                                      (get frame "next-step")))
+             :reason          (truncate-reason (or (:reason frame)
+                                                  (get frame "reason")))
+             :progress-status status
+             :agenda          agenda}
+      compressed? (assoc :compressed? true)
+      compressed-count (assoc :compressed-count compressed-count)
+      compressed-preview (assoc :compressed-preview compressed-preview))))
+
+(defn- compressed-frame?
+  [frame]
+  (true? (:compressed? frame)))
+
+(defn- summarize-compressed-preview
+  [total-count preview]
+  (let [preview* (->> preview
+                      (keep truncate-agenda-item)
+                      (remove str/blank?)
+                      vec
+                      not-empty)
+        hidden   (max 0 (- total-count (count (or preview* []))))]
+    (truncate-summary
+     (str "Compressed "
+          total-count
+          " suspended stack frames to stay within the depth limit."
+          (when (seq preview*)
+            (str " Recent archived lineage: "
+                 (str/join " -> " preview*)
+                 "."))
+          (when (pos? hidden)
+            (str " "
+                 hidden
+                 " older frame"
+                 (when (not= hidden 1) "s")
+                 " omitted from the preview."))))))
 
 (defn- progress-status-present?
   [frame]
@@ -510,6 +561,52 @@
       derived-next-step (assoc :next-step derived-next-step)
       derived-progress (assoc :progress-status derived-progress))))
 
+(defn- compress-stack
+  [stack]
+  (let [stack* (vec stack)]
+    (if (<= (count stack*) max-stack-depth)
+      stack*
+      (let [root          (first stack*)
+            tail-count    (max 0 (- max-stack-depth 2))
+            descendants   (subvec stack* 1)
+            kept-tail     (vec (take-last tail-count descendants))
+            compressed    (vec (drop-last tail-count descendants))
+            aggregate     (reduce (fn [{:keys [count preview representative]} frame]
+                                    (if (compressed-frame? frame)
+                                      {:count (+ count (or (:compressed-count frame) 1))
+                                       :preview (into (vec preview)
+                                                      (or (:compressed-preview frame)
+                                                          (when-let [title (:title frame)]
+                                                            [title])))
+                                       :representative (or representative frame)}
+                                      {:count (inc count)
+                                       :preview (conj (vec preview) (:title frame))
+                                       :representative frame}))
+                                  {:count 0
+                                   :preview []
+                                   :representative nil}
+                                  compressed)
+            representative (or (:representative aggregate)
+                               (last compressed)
+                               root)
+            preview        (->> (:preview aggregate)
+                                (keep truncate-agenda-item)
+                                (remove str/blank?)
+                                (take-last compressed-frame-preview-limit)
+                                vec
+                                not-empty)
+            archive        {:title (:title representative)
+                            :summary (summarize-compressed-preview (:count aggregate) preview)
+                            :next-step (or (:next-step representative)
+                                           (first-actionable-agenda-item (:agenda representative)))
+                            :reason (truncate-reason compressed-frame-reason)
+                            :progress-status (suspend-progress-status (:progress-status representative))
+                            :agenda (:agenda representative)
+                            :compressed? true
+                            :compressed-count (:count aggregate)
+                            :compressed-preview preview}]
+        (vec (concat [root archive] kept-tail))))))
+
 (defn- normalize-stack
   [goal stack]
   (cond
@@ -523,10 +620,9 @@
           stack*        (->> (or stack [])
                              (keep #(when (map? %)
                                       (normalize-frame % default-title)))
-                             (take-last max-stack-depth)
                              vec)]
       (if (seq stack*)
-        stack*
+        (compress-stack stack*)
         [(normalize-frame {:title default-title
                            :progress-status :pending}
                           default-title)]))))
@@ -681,7 +777,7 @@
                         :push
                         (->> (conj (replace-top stack (suspend-frame current-tip))
                                    next-tip)
-                             (take-last max-stack-depth)
+                             compress-stack
                              vec)
 
                         :pop
@@ -768,6 +864,8 @@
                           (default-frame-title nil))
         progress      (progress-status-label (:progress-status tip))
         next-step     (truncate-field (:next-step tip))
+        compressed?   (true? (:compressed? tip))
+        compressed-count (:compressed-count tip)
         depth         (count stack*)
         prefix        (case phase
                         :understanding "Understanding"
@@ -786,6 +884,8 @@
          prefix
          " "
          title
+         (when compressed?
+           (str " (compressed " (or compressed-count 1) ")"))
          (when progress
            (str " [" progress "]"))
          (when (> depth 1)
