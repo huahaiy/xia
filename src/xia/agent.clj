@@ -1353,6 +1353,10 @@
        vec
        not-empty))
 
+(defn- wm-query-signature
+  [message]
+  (loop-text-signature message))
+
 (defn- report-autonomy-status!
   [phase autonomy-state iteration max-iterations & {:keys [stack-action]}]
   (apply emit-status!
@@ -2110,13 +2114,18 @@
                       transient-messages* (vec (filter map? transient-messages))
                       initial-autonomy-state (autonomous/prepare-turn-state
                                               (wm/autonomy-state session-id)
-                                              user-message)]
+                                              user-message)
+                      initial-wm-message (or working-memory-message
+                                             user-message)
+                      initial-wm-query-fingerprint (wm-query-signature initial-wm-message)]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
                   (loop [iteration 1
                          fact-eids []
                          loop-state nil
                          refresh-working-memory? false
-                         system-prompt-cache-entry nil]
+                         system-prompt-cache-entry nil
+                         wm-message initial-wm-message
+                         wm-query-fingerprint initial-wm-query-fingerprint]
                     (throw-if-cancelled! session-id)
                     (let [autonomy-state (or (wm/autonomy-state session-id)
                                              initial-autonomy-state)
@@ -2136,7 +2145,7 @@
                                                      iteration
                                                      max-iterations*)
                           update-working-memory? (= iteration 1)
-                          wm-message (or working-memory-message user-message)]
+                          wm-message wm-message]
                       (save-schedule-checkpoint!
                        iteration-context
                        {:phase :understanding
@@ -2251,7 +2260,15 @@
                                                  loop-state
                                                  (iteration-signature updated-autonomy-state
                                                                       control
-                                                                      tool-activity))]
+                                                                      tool-activity))
+                                next-wm-message (or working-memory-message
+                                                    (autonomous/retrieval-message updated-autonomy-state))
+                                next-wm-query-fingerprint (wm-query-signature next-wm-message)
+                                next-refresh-working-memory?
+                                (or refresh-needed?
+                                    (and next-wm-query-fingerprint
+                                         (not= wm-query-fingerprint
+                                               next-wm-query-fingerprint)))]
                             (persist-assistant-message! session-id
                                                         text
                                                         iteration-context
@@ -2292,8 +2309,10 @@
                             (recur (inc iteration)
                                    fact-eids*
                                    next-loop-state
-                                   (boolean refresh-needed?)
-                                   system-prompt-cache-entry)))))))
+                                   next-refresh-working-memory?
+                                   system-prompt-cache-entry
+                                   next-wm-message
+                                   next-wm-query-fingerprint)))))))
                 (catch InterruptedException e
                   (request-session-cancel! session-id "request interrupted")
                   (if (stop-worker! session-id)

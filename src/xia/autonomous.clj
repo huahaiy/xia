@@ -722,6 +722,38 @@
               :previous-progress-status (some-> (peek stack) :progress-status)
               :previous-agenda (some-> (peek stack) :agenda)})))
 
+(defn retrieval-message
+  [{:keys [stack] :as state} & {:keys [incoming-message]}]
+  (let [root-title    (some-> (root-frame state) :title)
+        tip           (current-frame state)
+        tip-title     (:title tip)
+        summary       (:summary tip)
+        next-step     (:next-step tip)
+        agenda-items  (->> (:agenda tip)
+                           (keep (fn [{:keys [item status]}]
+                                   (when (and item
+                                              (contains? actionable-agenda-statuses status))
+                                     item)))
+                           (take 4)
+                           vec
+                           not-empty)
+        input*        (truncate-field incoming-message)]
+    (->> [(when root-title
+            (str "Goal: " root-title))
+          (when (and tip-title
+                     (not= tip-title root-title))
+            (str "Current focus: " tip-title))
+          (when summary
+            (str "Current state: " summary))
+          (when next-step
+            (str "Next step: " next-step))
+          (when (seq agenda-items)
+            (str "Active agenda: " (str/join "; " agenda-items)))
+          (when input*
+            (str "New input: " input*))]
+         (remove str/blank?)
+         (str/join "\n"))))
+
 (defn status-line
   [phase {:keys [stack] :as state} iteration max-iterations & {:keys [stack-action]}]
   (let [stack*        (normalize-stack (root-goal state) stack)

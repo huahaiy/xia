@@ -519,7 +519,7 @@
       (finally
         (prompt/register-assistant-message! :terminal nil)))))
 
-(deftest process-message-does-not-refresh-working-memory-between-text-only-autonomous-iterations
+(deftest process-message-refreshes-working-memory-when-autonomy-query-changes-between-text-only-iterations
   (let [session-id (db/create-session! :terminal)
         wm-updates (atom [])
         wm-refreshes (atom [])
@@ -548,9 +548,10 @@
                                     "reply to the billing emails"
                                     :channel :terminal))))
     (is (= ["reply to the billing emails"] @wm-updates))
-    (is (= [] @wm-refreshes))))
+    (is (= 1 (count @wm-refreshes)))
+    (is (str/includes? (first @wm-refreshes) "Draft replies"))))
 
-(deftest process-message-does-not-refresh-working-memory-after-non-mutating-tool-using-iterations
+(deftest process-message-refreshes-working-memory-after-non-mutating-tool-iterations-when-the-query-evolves
   (let [session-id    (db/create-session! :terminal)
         wm-updates    (atom [])
         wm-refreshes  (atom [])
@@ -589,7 +590,8 @@
                                     "reply to the billing emails"
                                     :channel :terminal))))
     (is (= ["reply to the billing emails"] @wm-updates))
-    (is (= [] @wm-refreshes))))
+    (is (= 1 (count @wm-refreshes)))
+    (is (str/includes? (first @wm-refreshes) "Draft the reply"))))
 
 (deftest process-message-refreshes-working-memory-after-retrieval-state-changes
   (let [session-id    (db/create-session! :terminal)
@@ -631,7 +633,8 @@
                                     "reply to the billing emails"
                                     :channel :terminal))))
     (is (= ["reply to the billing emails"] @wm-updates))
-    (is (= ["reply to the billing emails"] @wm-refreshes))))
+    (is (= 1 (count @wm-refreshes)))
+    (is (str/includes? (first @wm-refreshes) "Draft the reply"))))
 
 (deftest process-message-rebuilds-next-iteration-context-from-persisted-continue-messages
   (let [session-id      (db/create-session! :terminal)
