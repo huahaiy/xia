@@ -4,7 +4,8 @@
             [clojure.string :as str]
             [xia.config :as cfg]
             [xia.db :as db]
-            [xia.prompt :as prompt]))
+            [xia.prompt :as prompt])
+  (:import (com.fasterxml.jackson.core JsonFactory JsonToken)))
 
 (def ^:private default-max-iterations 6)
 (def ^:private default-control-field-chars 280)
@@ -19,6 +20,10 @@
 (def ^:private intent-marker "ACTION_INTENT_JSON:")
 (def ^:private control-marker "AUTONOMOUS_STATUS_JSON:")
 (defonce ^:private controller-system-message-cache (atom {}))
+(defonce ^:private json-extract-factory (JsonFactory.))
+(def ^:private fenced-json-opening-pattern
+  #"(?s)\A```(?:[A-Za-z0-9_-]+)?[ \t]*\r?\n?")
+(def ^:private fenced-json-closing-pattern #"^\s*```")
 
 (defn context
   []
@@ -920,56 +925,63 @@
                           "\n")))))
           "\nMake real progress now. Use stack_action=push when entering a subroutine and stack_action=pop when returning to a parent frame.")}))
 
+(defn- extract-leading-json-object
+  [text]
+  (let [body (some-> text str str/triml)]
+    (when (and (seq body) (= \{ (.charAt ^String body 0)))
+      (try
+        (with-open [parser (.createParser ^JsonFactory json-extract-factory ^String body)]
+          (when (= JsonToken/START_OBJECT (.nextToken parser))
+            (loop [depth 1]
+              (when-let [token (.nextToken parser)]
+                (let [depth* (cond
+                               (= token JsonToken/START_OBJECT) (inc depth)
+                               (= token JsonToken/END_OBJECT)   (dec depth)
+                               :else                            depth)]
+                  (if (zero? depth*)
+                    (let [offset (long (.getCharOffset (.getCurrentLocation parser)))]
+                      {:json-text (subs body 0 offset)
+                       :consumed  offset
+                       :rest      (subs body offset)})
+                    (recur depth*)))))))
+        (catch Exception _
+          nil)))))
+
+(defn- brace-start-candidate-indices
+  [text]
+  (let [text* (or text "")]
+    (loop [idx 0
+           indices []]
+      (if (>= idx (count text*))
+        indices
+        (let [ch (.charAt ^String text* idx)]
+          (if (= ch \{)
+            (recur (inc idx) (conj indices idx))
+            (recur (inc idx) indices)))))))
+
+(defn- extract-fenced-json-object
+  [text]
+  (let [trimmed (some-> text str str/triml)]
+    (when-let [opening (when trimmed
+                         (re-find fenced-json-opening-pattern trimmed))]
+      (let [body (subs trimmed (count opening))
+            search-window (if-let [closing-idx (str/index-of body "```")]
+                            (subs body 0 closing-idx)
+                            body)]
+        (some (fn [candidate-idx]
+                (when-let [{:keys [json-text consumed]}
+                           (extract-leading-json-object (subs body candidate-idx))]
+                  {:json-text json-text
+                   :rest      (-> (subs body (+ candidate-idx consumed))
+                                  (str/replace-first fenced-json-closing-pattern ""))}))
+              (brace-start-candidate-indices search-window))))))
+
 (defn- extract-json-object
   [text]
   (let [trimmed (some-> text str str/triml)]
     (when (seq trimmed)
-      (let [[body fenced?]
-            (if-let [[_ inner] (re-matches #"(?s)\A```(?:json)?\s*(.*)\z" trimmed)]
-              [inner true]
-              [trimmed false])]
-        (when (and (seq body) (= \{ (.charAt ^String body 0)))
-          (loop [idx 0
-                 depth 0
-                 in-string? false
-                 escape? false]
-            (when (< idx (count body))
-              (let [ch (.charAt ^String body idx)]
-                (cond
-                  in-string?
-                  (cond
-                    escape?
-                    (recur (inc idx) depth true false)
-
-                    (= ch \\)
-                    (recur (inc idx) depth true true)
-
-                    (= ch \")
-                    (recur (inc idx) depth false false)
-
-                    :else
-                    (recur (inc idx) depth true false))
-
-                  (= ch \")
-                  (recur (inc idx) depth true false)
-
-                  (= ch \{)
-                  (recur (inc idx) (inc depth) false false)
-
-                  (= ch \})
-                  (let [depth* (dec depth)]
-                    (if (zero? depth*)
-                      (let [json-text (subs body 0 (inc idx))
-                            rest      (subs body (inc idx))
-                            rest*     (if fenced?
-                                        (str/replace-first rest #"^\s*```" "")
-                                        rest)]
-                        {:json-text json-text
-                         :rest rest*})
-                      (recur (inc idx) depth* false false)))
-
-                  :else
-                  (recur (inc idx) depth false false))))))))))
+      (or (extract-fenced-json-object trimmed)
+          (extract-leading-json-object trimmed)))))
 
 (defn- next-protocol-marker-index
   [text]

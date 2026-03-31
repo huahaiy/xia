@@ -82,6 +82,32 @@
     (is (= :continue (:status control)))
     (is (= "Send the reply" (:next-step control)))))
 
+(deftest parse-controller-response-supports-fenced-json-protocol-blocks
+  (let [{:keys [assistant-text intent-status intent control-status control]}
+        (autonomous/parse-controller-response
+         (str "ACTION_INTENT_JSON:\n"
+              "```json\n"
+              "Here is my intent:\n"
+              "{\"focus\":\"Reply to billing emails\",\"agenda_item\":\"Send reply\",\"plan_step\":\"Draft the reply\",\"why\":\"The inbox review is already done\"}\n"
+              "```\n\n"
+              "Worked the plan.\n\n"
+              "AUTONOMOUS_STATUS_JSON:\n"
+              "```json\n"
+              "Here is the updated status:\n"
+              "{\"status\":\"continue\",\"summary\":\"Worked the plan\",\"next_step\":\"Send the reply\",\"reason\":\"One step remains\",\"goal_complete\":false,"
+              "\"current_focus\":\"Reply to billing emails\","
+              "\"stack_action\":\"stay\","
+              "\"progress_status\":\"in_progress\","
+              "\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"done\"},"
+              "{\"item\":\"Send reply\",\"status\":\"pending\"}]}\n"
+              "```"))]
+    (is (= :parsed intent-status))
+    (is (= :parsed control-status))
+    (is (= "Worked the plan." assistant-text))
+    (is (= "Reply to billing emails" (:focus intent)))
+    (is (= :continue (:status control)))
+    (is (= "Send the reply" (:next-step control)))))
+
 (deftest parse-controller-response-does-not-parse-control-json-as-intent
   (let [{:keys [assistant-text intent-status intent control-status control]}
         (autonomous/parse-controller-response
