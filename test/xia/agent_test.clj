@@ -125,6 +125,17 @@
              :content "Read the billing note"}]
            (:results signature)))))
 
+(deftest semantic-loop-equivalent-does-not-treat-missing-fallbacks-as-a-match
+  (let [result (#'xia.agent/semantic-loop-equivalent?
+                {}
+                {:semantic-fallback nil
+                 :semantic-text nil}
+                {:semantic-fallback nil
+                 :semantic-text nil})]
+    (is (false? (:same-semantic? result)))
+    (is (nil? (:semantic-similarity result)))
+    (is (nil? (:semantic-match-source result)))))
+
 (deftest process-message-audits-tool-result-completions
   (let [session-id     (db/create-session! :terminal)
         tool-call-id   (random-uuid)

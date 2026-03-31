@@ -1039,7 +1039,9 @@
   [embedding-cache previous-signature next-signature]
   (let [previous-fallback (:semantic-fallback previous-signature)
         next-fallback     (:semantic-fallback next-signature)]
-    (if (= previous-fallback next-fallback)
+    (if (and previous-fallback
+             next-fallback
+             (= previous-fallback next-fallback))
       {:embedding-cache embedding-cache
        :same-semantic? true
        :semantic-similarity 1.0
