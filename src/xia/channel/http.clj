@@ -6,37 +6,18 @@
             [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
-            [xia.backup :as backup]
-            [xia.artifact :as artifact]
-            [xia.scratch :as scratch]
-            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
-            [xia.identity :as identity]
-            [xia.instance-supervisor :as instance-supervisor]
-            [xia.local-doc :as local-doc]
-            [xia.local-ocr :as local-ocr]
-            [xia.llm :as llm]
-            [xia.llm-provider-template :as llm-provider-template]
             [xia.memory :as memory]
-            [xia.oauth :as oauth]
-            [xia.oauth-template :as oauth-template]
-            [xia.paths :as paths]
-            [xia.context :as context]
-            [xia.remote-bridge :as remote-bridge]
+            [xia.channel.http.admin :as http-admin]
+            [xia.channel.http.session :as http-session]
+            [xia.channel.http.workspace :as http-workspace]
             [xia.runtime-state :as runtime-state]
-            [xia.service :as service-proxy]
-            [xia.schedule :as schedule]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
-            [xia.setup :as setup]
-            [xia.skill :as skill]
-            [xia.summarizer :as summarizer]
-            [xia.skill.openclaw :as openclaw-skill]
-            [xia.workspace :as workspace]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
-    [java.net BindException URI]
+    [java.net BindException]
     [java.nio.charset StandardCharsets]
     [java.nio.file Files LinkOption Path Paths]
     [java.security SecureRandom]
@@ -62,12 +43,7 @@
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private session-finalize-lock-count 256)
-(def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
-(def ^:private provider-access-modes #{:local :api :account})
-(def ^:private provider-credential-sources #{:none :api-key :oauth-account})
-(def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
 (def ^:private http-port-search-limit 100)
-(def ^:private ms-per-day (* 24 60 60 1000))
 (def ^:private rest-session-channels #{:http :command})
 (def ^:private byte-array-class (class (byte-array 0)))
 (defn- long-max
@@ -77,11 +53,6 @@
 (defn- long-min
   ^long [^long a ^long b]
   (if (< a b) a b))
-
-(defn- days->ms
-  [days]
-  (when-some [days* (some-> days long)]
-    (* (long days*) (long ms-per-day))))
 
 (defonce ^:private local-session-secret
   (delay
@@ -279,15 +250,6 @@
       (catch Exception _
         (throw (ex-info (str "invalid '" field "' field")
                         {:field field}))))))
-
-(defn- oauth-account-connection-mode
-  [account]
-  (or (:oauth.account/connection-mode account)
-      (if (or (some-> (:oauth.account/authorize-url account) str str/trim not-empty)
-              (some-> (:oauth.account/token-url account) str str/trim not-empty)
-              (some-> (:oauth.account/client-id account) str str/trim not-empty))
-        :oauth-flow
-        :manual-token)))
 
 (defn- date->millis
   [value]
@@ -912,8 +874,6 @@
   (when (session-active? session-id)
     (schedule-rest-session-finalizer! session-id)))
 
-(def ^:private history-session-channels #{:http :websocket :terminal})
-
 (defn- truncate-text
   [value limit]
   (let [text  (some-> value str str/trim)
@@ -922,70 +882,6 @@
       (if (> (long (count text)) limit)
         (str (subs text 0 (long-max 0 (- limit 1))) "…")
         text))))
-
-(defn- history-run->body
-  [run]
-  {:id          (some-> (:id run) str)
-   :schedule_id (some-> (:schedule-id run) name)
-   :started_at  (instant->str (:started-at run))
-   :finished_at (instant->str (:finished-at run))
-   :status      (some-> (:status run) name)
-   :actions     (:actions run)
-   :result      (:result run)
-   :error       (:error run)})
-
-(defn- history-schedule->body
-  [sched]
-  (let [latest-run (first (schedule/schedule-history (:id sched) 1))]
-    {:id            (some-> (:id sched) name)
-     :name          (:name sched)
-     :type          (some-> (:type sched) name)
-     :trusted       (boolean (:trusted? sched))
-     :enabled       (boolean (:enabled? sched))
-     :last_run      (instant->str (:last-run sched))
-     :next_run      (instant->str (:next-run sched))
-     :latest_status (some-> (:status latest-run) name)
-     :latest_error  (truncate-text (:error latest-run) 160)}))
-
-(defn- history-session->body
-  [session]
-  (let [messages     (->> (db/session-messages (:id session))
-                          (filter #(#{:user :assistant} (:role %)))
-                          vec)
-        last-message (last messages)]
-    {:id              (some-> (:id session) str)
-     :channel         (some-> (:channel session) name)
-     :created_at      (instant->str (:created-at session))
-     :active          (boolean (:active? session))
-     :message_count   (count messages)
-     :last_message_at (instant->str (:created-at last-message))
-     :preview         (truncate-text (:content last-message) 160)}))
-
-(defn- status->body
-  [status]
-  (when status
-    {:state      (some-> (:state status) name)
-     :phase      (some-> (:phase status) name)
-     :message    (:message status)
-     :partial_content (:partial-content status)
-     :tool_id    (some-> (:tool-id status) name)
-     :tool_name  (:tool-name status)
-     :iteration  (:iteration status)
-     :max_iterations (:max-iterations status)
-     :current_focus (:current-focus status)
-     :progress_status (:progress-status status)
-     :intent_focus (:intent-focus status)
-     :intent_agenda_item (:intent-agenda-item status)
-     :intent_plan_step (:intent-plan-step status)
-     :intent_why (:intent-why status)
-     :intent_tool_name (:intent-tool-name status)
-     :intent_tool_args_summary (:intent-tool-args-summary status)
-     :stack_depth (:stack-depth status)
-     :agenda     (:agenda status)
-     :stack      (:stack status)
-     :round      (:round status)
-     :tool_count (:tool-count status)
-     :updated_at (instant->str (:updated-at status))}))
 
 (defn- clear-session-status!
   [session-id]
@@ -1065,137 +961,6 @@
                        "reason" (name reason)))
            was-active?))))))
 
-(defn- scratch-pad->body
-  [pad]
-  {:id         (:id pad)
-   :scope      (name (:scope pad))
-   :session_id (:session-id pad)
-   :title      (:title pad)
-   :content    (:content pad)
-   :mime       (:mime pad)
-   :version    (:version pad)
-   :created_at (instant->str (:created-at pad))
-   :updated_at (instant->str (:updated-at pad))})
-
-(defn- scratch-metadata->body
-  [pad]
-  (dissoc (scratch-pad->body pad) :content))
-
-(defn- local-doc->body
-  [doc]
-  {:id         (some-> (:id doc) str)
-   :session_id (:session-id doc)
-   :name       (:name doc)
-   :media_type (:media-type doc)
-   :source     (some-> (:source doc) name)
-   :size_bytes (:size-bytes doc)
-   :sha256     (:sha256 doc)
-   :status     (some-> (:status doc) name)
-   :error      (:error doc)
-   :summary    (:summary doc)
-   :text       (:text doc)
-   :preview    (:preview doc)
-   :chunk_count (:chunk-count doc)
-   :created_at (instant->str (:created-at doc))
-   :updated_at (instant->str (:updated-at doc))})
-
-(defn- local-doc-metadata->body
-  [doc]
-  (dissoc (local-doc->body doc) :text :sha256))
-
-(defn- artifact->body
-  [artifact]
-  {:id         (some-> (:id artifact) str)
-   :session_id (:session-id artifact)
-   :name       (:name artifact)
-   :title      (:title artifact)
-   :kind       (some-> (:kind artifact) name)
-   :media_type (:media-type artifact)
-   :extension  (:extension artifact)
-   :source     (some-> (:source artifact) name)
-   :status     (some-> (:status artifact) name)
-   :size_bytes (:size-bytes artifact)
-   :compressed_size_bytes (:compressed-size-bytes artifact)
-   :has_blob   (boolean (:has-blob? artifact))
-   :text_available (boolean (:text-available? artifact))
-   :sha256     (:sha256 artifact)
-   :error      (:error artifact)
-   :meta       (:meta artifact)
-   :text       (:text artifact)
-   :preview    (:preview artifact)
-   :created_at (instant->str (:created-at artifact))
-   :updated_at (instant->str (:updated-at artifact))})
-
-(defn- artifact-metadata->body
-  [artifact]
-  (dissoc (artifact->body artifact) :text :sha256 :meta))
-
-(defn- local-doc-ref->body
-  [doc]
-  {:id     (some-> (:id doc) str)
-   :name   (:name doc)
-   :status (some-> (:status doc) name)})
-
-(defn- artifact-ref->body
-  [artifact]
-  {:id     (some-> (:id artifact) str)
-   :name   (:name artifact)
-   :title  (:title artifact)
-   :status (some-> (:status artifact) name)})
-
-(defn- workspace-item->body
-  [item]
-  (let [item-id (some-> (:id item) str)]
-    {:id           item-id
-     :workspace_id (:workspace-id item)
-     :name         (:name item)
-     :title        (:title item)
-     :source_type  (some-> (:source-type item) name)
-     :source_id    (:source-id item)
-     :media_type   (:media-type item)
-     :size_bytes   (:size-bytes item)
-     :created_at   (instant->str (:created-at item))
-     :download_url (when item-id
-                     (str "/workspace/items/" item-id "/download"))}))
-
-(defn- tool-call->body
-  [tool-call]
-  (cond-> {:id        (get tool-call "id")
-           :name      (or (get-in tool-call ["function" "name"])
-                          (get tool-call "name"))}
-    (or (get-in tool-call ["function" "arguments"])
-        (get tool-call "arguments"))
-    (assoc :arguments (or (get-in tool-call ["function" "arguments"])
-                          (get tool-call "arguments")))))
-
-(defn- session-message->body
-  [{:keys [id role content created-at local-docs artifacts tool-calls llm-call-id provider-id model workload]}]
-  (cond-> {:id         (some-> id str)
-           :role       (name role)
-           :content    content
-           :created_at (instant->str created-at)
-           :local_docs (into [] (map local-doc-ref->body) (or local-docs []))
-           :artifacts  (into [] (map artifact-ref->body) (or artifacts []))}
-    llm-call-id (assoc :llm_call_id (str llm-call-id))
-    provider-id (assoc :provider_id (name provider-id))
-    model (assoc :model model)
-    workload (assoc :workload (name workload))
-    (seq tool-calls) (assoc :tool_calls (mapv tool-call->body tool-calls))))
-
-(defn- audit-event->body
-  [event]
-  (cond-> {:id         (some-> (:id event) str)
-           :session_id (some-> (:session-id event) str)
-           :channel    (some-> (:channel event) name)
-           :actor      (some-> (:actor event) name)
-           :type       (some-> (:type event) name)
-           :created_at (instant->str (:created-at event))}
-    (:message-id event) (assoc :message_id (str (:message-id event)))
-    (:llm-call-id event) (assoc :llm_call_id (str (:llm-call-id event)))
-    (:tool-id event) (assoc :tool_id (:tool-id event))
-    (:tool-call-id event) (assoc :tool_call_id (:tool-call-id event))
-    (:data event) (assoc :data (:data event))))
-
 (defn- named-value->str
   [value]
   (cond
@@ -1228,117 +993,6 @@
   (let [s (some-> value str str/trim)]
     (when (seq s)
       s)))
-
-(defn- normalize-base-url
-  [value]
-  (some-> value nonblank-str (str/replace #"/+$" "")))
-
-(defn- normalize-id-segment
-  [value]
-  (some-> value
-          str
-          str/trim
-          str/lower-case
-          (str/replace #"[^a-z0-9]+" "-")
-          (str/replace #"^-+|-+$" "")
-          not-empty))
-
-(defn- next-available-id
-  [base used-ids]
-  (let [base*    (or (normalize-id-segment base) "item")
-        used-set (set (keep #(when % (name %)) used-ids))]
-    (loop [candidate base*
-           suffix    2]
-      (if (contains? used-set candidate)
-        (recur (str base* "-" suffix) (inc suffix))
-        (keyword candidate)))))
-
-(defn- infer-site-id
-  [data]
-  (let [name-text  (nonblank-str (get data "name"))
-        login-url  (nonblank-str (get data "login_url"))
-        url-base   (when login-url
-                     (try
-                       (let [uri  (URI. login-url)
-                             host (some-> (.getHost uri)
-                                          (str/replace #"^www\." ""))
-                             path (some-> (.getPath uri) nonblank-str)]
-                         (normalize-id-segment
-                           (str/join "-" (filter some? [host path]))))
-                       (catch Exception _
-                         (normalize-id-segment login-url))))
-        base       (or (normalize-id-segment name-text)
-                       url-base
-                       "site")
-        used-ids   (map :site-cred/id (db/list-site-creds))]
-    (next-available-id base used-ids)))
-
-(defn- infer-skill-id
-  [data]
-  (let [name-text (nonblank-str (get data "name"))
-        base      (or (normalize-id-segment name-text)
-                      "skill")
-        used-ids  (map :skill/id (db/list-skills))]
-    (next-available-id base used-ids)))
-
-(defn- infer-schedule-id
-  [data]
-  (let [name-text (nonblank-str (get data "name"))
-        tool-id   (some-> (get data "tool_id") nonblank-str normalize-id-segment)
-        prompt    (some-> (get data "prompt")
-                          nonblank-str
-                          (subs 0 (min 48 (count (nonblank-str (get data "prompt")))))
-                          normalize-id-segment)
-        base      (or (normalize-id-segment name-text)
-                      tool-id
-                      prompt
-                      "schedule")
-        used-ids  (map :id (schedule/list-schedules))]
-    (next-available-id base used-ids)))
-
-(defn- parse-skill-tags
-  [value]
-  (let [parts (cond
-                (string? value) (str/split value #"[,\n]")
-                (sequential? value) value
-                :else nil)]
-    (->> parts
-         (map nonblank-str)
-         (keep normalize-id-segment)
-         (map keyword)
-         set)))
-
-(defn- unique-provider-api-key
-  [providers]
-  (let [api-keys (->> providers
-                      (keep (comp nonblank-str :llm.provider/api-key))
-                      distinct
-                      vec)]
-    (when (= 1 (count api-keys))
-      (first api-keys))))
-
-(defn- infer-reusable-provider-api-key
-  [{:keys [provider-id template-id base-url]}]
-  (let [normalized-base-url (normalize-base-url base-url)
-        providers           (->> (db/list-providers)
-                                 (remove #(= provider-id (:llm.provider/id %)))
-                                 (filter #(= :api-key (llm/provider-credential-source %))))]
-    (or
-      (when (and template-id normalized-base-url)
-        (unique-provider-api-key
-          (filter #(and (= template-id (:llm.provider/template %))
-                        (= normalized-base-url
-                           (normalize-base-url (:llm.provider/base-url %))))
-                  providers)))
-      (when template-id
-        (unique-provider-api-key
-          (filter #(= template-id (:llm.provider/template %))
-                  providers)))
-      (when normalized-base-url
-        (unique-provider-api-key
-          (filter #(= normalized-base-url
-                      (normalize-base-url (:llm.provider/base-url %)))
-                  providers))))))
 
 (defn- parse-keyword-id
   [value field-name]
@@ -1399,1411 +1053,175 @@
                  (conj seen node-eid))))
       acc)))
 
-(defn- parse-provider-workloads
-  [value]
-  (let [entries (cond
-                  (nil? value) []
-                  (sequential? value) value
-                  :else (str/split (str value) #","))]
-    (->> entries
-         (map nonblank-str)
-         (remove nil?)
-         distinct
-         (mapv (fn [entry]
-                 (let [workload (keyword entry)]
-                   (when-not (llm/known-workload? workload)
-                     (throw (ex-info "invalid workload"
-                                     {:field "workloads"
-                                      :value entry})))
-                   workload))))))
-
-(defn- parse-extra-fields
-  [value]
-  (let [text (nonblank-str value)]
-    (when text
-      (try
-        (json/write-json-str (json/read-json text))
-        (catch Exception _
-          (throw (ex-info "extra_fields must be valid JSON"
-                          {:field "extra_fields"})))))))
-
-(defn- parse-json-object-string
-  [value field-name]
-  (let [text (nonblank-str value)]
-    (when text
-      (try
-        (let [parsed (json/read-json text)]
-          (when-not (map? parsed)
-            (throw (ex-info (str field-name " must be a JSON object")
-                            {:field field-name})))
-          (json/write-json-str parsed))
-        (catch clojure.lang.ExceptionInfo e
-          (throw e))
-        (catch Exception _
-          (throw (ex-info (str field-name " must be valid JSON")
-                          {:field field-name})))))))
-
-(defn- parse-json-object-value
-  [value field-name]
-  (cond
-    (nil? value)
-    nil
-
-    (map? value)
-    value
-
-    :else
-    (some-> (parse-json-object-string value field-name)
-            json/read-json)))
-
-(defn- parse-integer-list
-  [value field-name]
-  (cond
-    (nil? value)
-    nil
-
-    (not (sequential? value))
-    (throw (ex-info (str field-name " must be a list of integers")
-                    {:field field-name}))
-
-    :else
-    (mapv (fn [entry]
-            (try
-              (Integer/parseInt (str (or entry "")))
-              (catch Exception _
-                (throw (ex-info (str field-name " must contain only integers")
-                                {:field field-name
-                                 :value entry})))))
-          value)))
-
-(defn- parse-schedule-type
-  [value]
-  (let [schedule-type (some-> value nonblank-str keyword)]
-    (when-not (#{:tool :prompt} schedule-type)
-      (throw (ex-info "invalid schedule type"
-                      {:field "type"
-                       :value value})))
-    schedule-type))
-
-(defn- parse-schedule-spec
-  [data]
-  (let [interval-minutes (parse-optional-positive-long (get data "interval_minutes")
-                                                       "interval_minutes")
-        minute           (parse-integer-list (get data "minute") "minute")
-        hour             (parse-integer-list (get data "hour") "hour")
-        dom              (parse-integer-list (get data "dom") "dom")
-        month            (parse-integer-list (get data "month") "month")
-        dow              (parse-integer-list (get data "dow") "dow")]
-    (cond
-      interval-minutes
-      {:interval-minutes interval-minutes}
-
-      (some identity [minute hour dom month dow])
-      (cond-> {}
-        minute (assoc :minute minute)
-        hour   (assoc :hour hour)
-        dom    (assoc :dom dom)
-        month  (assoc :month month)
-        dow    (assoc :dow dow))
-
-      :else
-      (throw (ex-info "missing schedule timing fields"
-                      {:field "interval_minutes"})))))
-
-(defn- parse-auth-type
-  [value]
-  (let [auth-type (some-> value nonblank-str keyword)]
-    (when-not (contains? service-auth-types auth-type)
-      (throw (ex-info "invalid auth_type"
-                      {:field "auth_type"
-                       :value value})))
-    auth-type))
-
-(defn- parse-provider-access-mode
-  [value]
-  (let [access-mode (some-> value nonblank-str keyword)]
-    (when-not (contains? provider-access-modes access-mode)
-      (throw (ex-info "invalid access_mode"
-                      {:field "access_mode"
-                       :value value})))
-    access-mode))
-
-(defn- parse-provider-credential-source
-  [value]
-  (let [auth-type (some-> value nonblank-str keyword)]
-    (when-not (contains? provider-credential-sources auth-type)
-      (throw (ex-info "invalid credential_source"
-                      {:field "credential_source"
-                       :value value})))
-    auth-type))
-
-(defn- sort-by-name
-  [entries]
-  (->> entries
-       (sort-by (fn [entry]
-                  (str/lower-case (or (:name entry) (:id entry) ""))))
-       vec))
-
-(defn- provider->admin-body
-  [provider]
-  (let [provider-id     (some-> (:llm.provider/id provider) name)
-        access-mode     (llm/provider-access-mode provider)
-        credential-source (llm/provider-credential-source provider)
-        oauth-account   (some-> (:llm.provider/oauth-account provider) db/get-oauth-account)
-        health          (llm/provider-health-summary (:llm.provider/id provider))]
-    {:id                    provider-id
-     :name                  (:llm.provider/name provider)
-     :template              (some-> (:llm.provider/template provider) name)
-     :access_mode           (some-> access-mode name)
-     :credential_source     (some-> credential-source name)
-     :auth_type             (some-> credential-source name)
-     :oauth_account         (some-> (:llm.provider/oauth-account provider) name)
-     :oauth_account_name    (:oauth.account/name oauth-account)
-     :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
-     :base_url              (:llm.provider/base-url provider)
-     :model                 (:llm.provider/model provider)
-     :workloads             (->> (:llm.provider/workloads provider)
-                                 (map name)
-                                 sort
-                                 vec)
-     :vision                (boolean (:llm.provider/vision? provider))
-     :allow_private_network (boolean (:llm.provider/allow-private-network? provider))
-     :system_prompt_budget  (:llm.provider/system-prompt-budget provider)
-     :history_budget        (:llm.provider/history-budget provider)
-     :rate_limit_per_minute (:llm.provider/rate-limit-per-minute provider)
-     :effective_rate_limit_per_minute (llm/effective-rate-limit-per-minute provider)
-     :health_status         (name (:status health))
-     :health_failures       (:consecutive-failures health)
-     :health_cooldown_ms    (:cooldown-remaining-ms health)
-     :health_last_error     (:last-error health)
-     :default               (boolean (:llm.provider/default? provider))
-     :api_key_configured    (boolean (nonblank-str (:llm.provider/api-key provider)))}))
-
-(defn- llm-provider-template->admin-body
-  [template]
-  (let [access-modes (->> (or (:access-modes template) [])
-                          (mapv (fn [mode]
-                                  {:id                 (some-> (:id mode) name)
-                                   :label              (:label mode)
-                                   :description        (:description mode)
-                                   :credential_sources (->> (or (:credential-sources mode) [])
-                                                            (map name)
-                                                            vec)
-                                   :default            (boolean (:default? mode))})))
-        auth-types   (->> access-modes
-                          (mapcat :credential_sources)
-                          distinct
-                          vec)]
-    {:id                (some-> (:id template) name)
-     :name              (:name template)
-     :description       (:description template)
-     :category          (some-> (:category template) name)
-     :base_url          (:base-url template)
-     :model_suggestion  (:model-suggestion template)
-     :account_url       (:account-url template)
-     :api_key_url       (:api-key-url template)
-     :docs_url          (:docs-url template)
-     :install_url       (:install-url template)
-     :account_connector  (some-> (:account-connector template) name)
-     :access_modes      access-modes
-     :auth_types        auth-types
-     :oauth_provider_templates (->> (or (:oauth-provider-templates template) [])
-                                    (map name)
-                                    vec)
-     :oauth_setup_note  (:oauth-setup-note template)
-     :sign_in_options   (->> (or (:sign-in-options template) [])
-                             (map name)
-                             vec)
-     :notes             (:notes template)}))
-
-(defn- memory-retention->admin-body
+(defn- workspace-handler-deps
   []
-  (let [{:keys [full-resolution-ms decay-half-life-ms retained-decayed-count]}
-        (memory/episode-retention-settings)]
-    {:full_resolution_days (long (/ (long full-resolution-ms) (long ms-per-day)))
-     :decay_half_life_days (long (/ (long decay-half-life-ms) (long ms-per-day)))
-     :retained_count       (long retained-decayed-count)}))
+  {:download-response            download-response
+   :exception-response           exception-response
+   :instant->str                 instant->str
+   :json-response                json-response
+   :multipart-form-request?      multipart-form-request?
+   :nonblank-str                 nonblank-str
+   :parse-optional-positive-long parse-optional-positive-long
+   :parse-query-string           parse-query-string
+   :parse-session-id             parse-session-id
+   :read-body                    read-body
+   :read-body-bytes              read-body-bytes
+   :session-exists?              session-exists?
+   :throwable-message            throwable-message
+   :touch-rest-session!          touch-rest-session!})
 
-(defn- knowledge-decay->admin-body
+(defn- session-handler-deps
   []
-  (let [{:keys [grace-period-ms half-life-ms min-confidence maintenance-step-ms archive-after-bottom-ms]}
-        (hippo/knowledge-decay-settings)]
-    {:grace_period_days         (long (/ (long grace-period-ms) (long ms-per-day)))
-     :half_life_days            (long (/ (long half-life-ms) (long ms-per-day)))
-     :min_confidence            min-confidence
-     :maintenance_interval_days (long (/ (long maintenance-step-ms) (long ms-per-day)))
-     :archive_after_bottom_days (long (/ (long archive-after-bottom-ms) (long ms-per-day)))}))
+  {:approval->body               approval->body
+   :cancel-rest-session-finalizer! cancel-rest-session-finalizer!
+   :clear-pending-approval!      clear-pending-approval!
+   :date->millis                 date->millis
+   :exception-response           exception-response
+   :finalize-rest-session!       finalize-rest-session!
+   :instant->str                 instant->str
+   :json-response                json-response
+   :maybe-resume-http-session!   maybe-resume-http-session!
+   :parse-keyword-id             parse-keyword-id
+   :parse-query-string           parse-query-string
+   :parse-session-id             parse-session-id
+   :pending-approvals-atom       pending-approvals
+   :read-body                    read-body
+   :session-accessible?          session-accessible?
+   :session-active?              session-active?
+   :session-busy?                session-busy?
+   :session-statuses-atom        session-statuses
+   :throwable-message            throwable-message
+   :touch-rest-session!          touch-rest-session!
+   :truncate-text                truncate-text})
 
-(defn- conversation-context->admin-body
+(defn- admin-handler-deps
   []
-  {:recent_history_message_limit (context/recent-history-message-limit-config)
-   :history_budget               (context/history-budget-config)})
-
-(defn- local-doc-summarization->admin-body
-  []
-  {:model_summaries_enabled   (boolean (summarizer/enabled?))
-   :model_summary_backend     (some-> (summarizer/summary-backend) name)
-   :model_summary_provider_id (some-> (summarizer/external-provider-id) name)
-   :chunk_summary_max_tokens  (summarizer/chunk-summary-max-tokens)
-   :doc_summary_max_tokens    (summarizer/document-summary-max-tokens)})
-
-(defn- local-doc-ocr->admin-body
-  []
-  (local-ocr/admin-body))
-
-(defn- database-backup->admin-body
-  []
-  (let [settings (backup/admin-body)]
-    {:enabled           (boolean (:enabled settings))
-     :directory         (:directory settings)
-     :interval_hours    (:interval_hours settings)
-     :retain_count      (:retain_count settings)
-     :running           (boolean (:running settings))
-     :started_at        (instant->str (:started_at settings))
-     :last_attempt_at   (instant->str (:last_attempt_at settings))
-     :last_success_at   (instant->str (:last_success_at settings))
-     :last_archive_path (:last_archive_path settings)
-     :last_error        (:last_error settings)
-     :next_due_at       (instant->str (:next_due_at settings))}))
-
-(defn- save-config-override!
-  [config-key value]
-  (if (some? value)
-    (db/set-config! config-key value)
-    (db/delete-config! config-key)))
-
-(defn- service->admin-body
-  [service]
-  (let [oauth-account (some-> (:service/oauth-account service) db/get-oauth-account)]
-    {:id                     (some-> (:service/id service) name)
-     :name                   (:service/name service)
-     :base_url               (:service/base-url service)
-     :auth_type              (some-> (:service/auth-type service) name)
-     :auth_header            (:service/auth-header service)
-     :oauth_account          (some-> (:service/oauth-account service) name)
-     :oauth_account_name     (:oauth.account/name oauth-account)
-     :oauth_account_connected (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
-     :oauth_account_autonomous_approved (boolean (and oauth-account
-                                                     (autonomous/oauth-account-autonomous-approved? oauth-account)))
-     :rate_limit_per_minute  (:service/rate-limit-per-minute service)
-     :allow_private_network  (boolean (:service/allow-private-network? service))
-     :effective_rate_limit_per_minute (service-proxy/effective-rate-limit-per-minute service)
-     :autonomous_approved    (boolean (autonomous/service-autonomous-approved? service))
-     :enabled                (boolean (:service/enabled? service))
-     :auth_key_configured    (boolean (nonblank-str (:service/auth-key service)))}))
-
-(defn- managed-instance->admin-body
-  [instance]
-  {:instance_id       (:instance_id instance)
-   :service_id        (:service_id instance)
-   :service_name      (:service_name instance)
-   :base_url          (:base_url instance)
-   :port              (:port instance)
-   :pid               (:pid instance)
-   :state             (:state instance)
-   :alive             (boolean (:alive instance))
-   :attached          (boolean (:attached instance))
-   :template_instance (:template_instance instance)
-   :log_path          (:log_path instance)
-   :started_at        (instant->str (:started_at instance))
-   :exited_at         (instant->str (:exited_at instance))
-   :exit_code         (:exit_code instance)})
-
-(defn- oauth-account->admin-body
-  [account]
-  {:id                       (some-> (:oauth.account/id account) name)
-   :name                     (:oauth.account/name account)
-   :connection_mode          (some-> (oauth-account-connection-mode account) name)
-   :authorize_url            (:oauth.account/authorize-url account)
-   :token_url                (:oauth.account/token-url account)
-   :client_id                (:oauth.account/client-id account)
-   :provider_template        (some-> (:oauth.account/provider-template account) name)
-   :scopes                   (:oauth.account/scopes account)
-   :redirect_uri             (:oauth.account/redirect-uri account)
-   :auth_params              (:oauth.account/auth-params account)
-   :token_params             (:oauth.account/token-params account)
-   :client_secret_configured (boolean (nonblank-str (:oauth.account/client-secret account)))
-   :access_token_configured  (boolean (nonblank-str (:oauth.account/access-token account)))
-   :refresh_token_configured (boolean (nonblank-str (:oauth.account/refresh-token account)))
-   :token_type               (:oauth.account/token-type account)
-   :autonomous_approved      (boolean (autonomous/oauth-account-autonomous-approved? account))
-   :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
-   :expires_at               (instant->str (:oauth.account/expires-at account))
-   :connected_at             (instant->str (:oauth.account/connected-at account))})
-
-(defn- oauth-template->admin-body
-  [template]
-  {:id            (some-> (:id template) name)
-   :name          (:name template)
-   :description   (:description template)
-   :authorize_url (:authorize-url template)
-   :token_url     (:token-url template)
-   :api_base_url  (:api-base-url template)
-   :service_id    (:service-id template)
-   :service_name  (:service-name template)
-   :scopes        (:scopes template)
-   :auth_params   (json/write-json-str (or (:auth-params template) {}))
-   :token_params  (json/write-json-str (or (:token-params template) {}))
-   :notes         (:notes template)})
-
-(defn- oauth-account-template-service-spec
-  [account]
-  (when-let [template-id (:oauth.account/provider-template account)]
-    (when-let [template (oauth-template/get-template template-id)]
-      (let [service-id   (some-> (:service-id template) nonblank-str keyword)
-            service-name (or (nonblank-str (:service-name template))
-                             (nonblank-str (:name template)))
-            api-base-url (nonblank-str (:api-base-url template))]
-        (when (and service-id api-base-url)
-          {:id       service-id
-           :name     (or service-name (name service-id))
-           :base-url api-base-url})))))
-
-(defn- sync-template-service-for-oauth-account!
-  [account]
-  (when-let [{:keys [id name base-url]} (oauth-account-template-service-spec account)]
-    (let [existing (db/get-service id)]
-      (db/save-service! {:id            id
-                         :name          (or (some-> (:service/name existing) nonblank-str)
-                                            name)
-                         :base-url      base-url
-                         :auth-type     :oauth-account
-                         :oauth-account (:oauth.account/id account)})
-      (db/get-service id))))
-
-(defn- auto-managed-template-service-for-oauth-account
-  [account]
-  (when-let [{:keys [id base-url]} (oauth-account-template-service-spec account)]
-    (let [service (db/get-service id)]
-      (when (and service
-                 (= :oauth-account (:service/auth-type service))
-                 (= (:oauth.account/id account) (:service/oauth-account service))
-                 (= base-url (nonblank-str (:service/base-url service))))
-        service))))
-
-(defn- site->admin-body
-  [site]
-  {:id                  (some-> (:site-cred/id site) name)
-   :name                (:site-cred/name site)
-   :login_url           (:site-cred/login-url site)
-   :username_field      (:site-cred/username-field site)
-   :password_field      (:site-cred/password-field site)
-   :form_selector       (:site-cred/form-selector site)
-   :extra_fields        (:site-cred/extra-fields site)
-   :autonomous_approved (boolean (autonomous/site-autonomous-approved? site))
-   :username_configured (boolean (nonblank-str (:site-cred/username site)))
-   :password_configured (boolean (nonblank-str (:site-cred/password site)))})
-
-(defn- schedule->admin-body
-  [sched]
-  (let [task-state (schedule/task-state (:id sched))
-        latest-run (first (schedule/schedule-history (:id sched) 1))]
-    {:id                  (some-> (:id sched) name)
-     :name                (:name sched)
-     :description         (:description sched)
-     :spec                (:spec sched)
-     :type                (some-> (:type sched) name)
-     :tool_id             (some-> (:tool-id sched) name)
-     :tool_args           (:tool-args sched)
-     :prompt              (:prompt sched)
-     :trusted             (boolean (:trusted? sched))
-     :enabled             (boolean (:enabled? sched))
-     :created_at          (instant->str (:created-at sched))
-     :last_run            (instant->str (:last-run sched))
-     :next_run            (instant->str (:next-run sched))
-     :latest_status       (some-> (:status latest-run) name)
-     :latest_error        (truncate-text (:error latest-run) 160)
-     :task_status         (some-> (:status task-state) name)
-     :task_phase          (some-> (:phase task-state) name)
-     :task_last_error     (:last-error task-state)
-     :task_backoff_until  (instant->str (:backoff-until task-state))
-     :task_checkpoint_at  (instant->str (:checkpoint-at task-state))
-     :task_last_success_at (instant->str (:last-success-at task-state))
-     :task_last_failure_at (instant->str (:last-failure-at task-state))
-     :task_consecutive_failures (or (:consecutive-failures task-state) 0)}))
-
-(defn- tool->admin-body
-  [tool]
-  {:id          (some-> (:tool/id tool) name)
-   :name        (:tool/name tool)
-   :description (:tool/description tool)
-   :approval    (some-> (:tool/approval tool) name)
-   :enabled     (boolean (:tool/enabled? tool))})
-
-(defn- skill->body
-  [skill]
-  {:id          (some-> (:skill/id skill) name)
-   :name        (:skill/name skill)
-   :description (:skill/description skill)
-   :version     (:skill/version skill)
-   :tags        (->> (or (:skill/tags skill) [])
-                     (map name)
-                     sort
-                     vec)
-   :enabled     (boolean (:skill/enabled? skill))
-   :source_format (some-> (:skill/source-format skill) name)
-   :source_path   (:skill/source-path skill)
-   :source_url    (:skill/source-url skill)
-   :source_name   (:skill/source-name skill)
-   :import_warnings (->> (or (:skill/import-warnings skill) [])
-                         sort
-                         vec)
-   :imported_from_openclaw (boolean (:skill/imported-from-openclaw? skill))})
-
-(defn- skill->detail-body
-  [skill]
-  (assoc (skill->body skill)
-         :content (:skill/content skill)))
-
-(defn- skill->admin-body
-  [skill]
-  (skill->body skill))
-
-(defn- remote-bridge->admin-body
-  [bridge]
-  {:id               (some-> (:id bridge) name)
-   :enabled          (boolean (:enabled? bridge))
-   :instance_id      (:instance-id bridge)
-   :instance_label   (:instance-label bridge)
-   :relay_url        (:relay-url bridge)
-   :public_key       (:public-key bridge)
-   :keypair_ready    (boolean (:keypair-ready? bridge))
-   :connected_at     (instant->str (:connected-at bridge))
-   :last_seen_at     (instant->str (:last-seen-at bridge))
-   :connection_state (some-> (:connection-state bridge) name)})
-
-(defn- remote-device->admin-body
-  [device]
-  {:id           (some-> (:id device) str)
-   :name         (:name device)
-   :public_key   (:public-key device)
-   :platform     (some-> (:platform device) name)
-   :status       (some-> (:status device) name)
-   :topics       (->> (or (:topics device) [])
-                      (map name)
-                      sort
-                      vec)
-   :muted        (boolean (:muted? device))
-   :created_at   (instant->str (:created-at device))
-   :last_seen_at (instant->str (:last-seen-at device))})
-
-(defn- remote-event->admin-body
-  [event]
-  {:id           (some-> (:id event) str)
-   :type         (some-> (:type event) name)
-   :topic        (some-> (:topic event) name)
-   :severity     (some-> (:severity event) name)
-   :title        (:title event)
-   :detail       (:detail event)
-   :metadata     (:metadata event)
-   :status       (some-> (:status event) name)
-   :device_id    (some-> (:device-id event) str)
-   :created_at   (instant->str (:created-at event))
-   :delivered_at (instant->str (:delivered-at event))})
-
-(defn- remote-snapshot-run->admin-body
-  [run]
-  {:id            (some-> (:id run) str)
-   :schedule_id   (some-> (:schedule-id run) name)
-   :schedule_name (:schedule-name run)
-   :status        (some-> (:status run) name)
-   :started_at    (instant->str (:started-at run))
-   :finished_at   (instant->str (:finished-at run))
-   :detail        (:detail run)})
-
-(defn- remote-snapshot-attention->admin-body
-  [item]
-  {:type             (some-> (:type item) name)
-   :severity         (some-> (:severity item) name)
-   :title            (:title item)
-   :detail           (:detail item)
-   :schedule_id      (some-> (:schedule-id item) name)
-   :service_id       (some-> (:service-id item) name)
-   :oauth_account_id (some-> (:oauth-account-id item) name)})
-
-(defn- remote-snapshot-running->admin-body
-  [item]
-  {:schedule_id   (some-> (:schedule-id item) name)
-   :schedule_name (:schedule-name item)
-   :phase         (some-> (:phase item) name)
-   :checkpoint_at (instant->str (:checkpoint-at item))})
-
-(defn- remote-snapshot->admin-body
-  [snapshot]
-  {:instance {:id      (get-in snapshot [:instance :id])
-              :label   (get-in snapshot [:instance :label])
-              :version (get-in snapshot [:instance :version])}
-   :connectivity {:enabled          (boolean (get-in snapshot [:connectivity :enabled?]))
-                  :relay_url        (get-in snapshot [:connectivity :relay-url])
-                  :connection_state (some-> (get-in snapshot [:connectivity :connection-state]) name)
-                  :connected_at     (instant->str (get-in snapshot [:connectivity :connected-at]))
-                  :last_seen_at     (instant->str (get-in snapshot [:connectivity :last-seen-at]))}
-   :running (mapv remote-snapshot-running->admin-body (get snapshot :running))
-   :recent_failures (mapv remote-snapshot-run->admin-body (get snapshot :recent-failures))
-   :recent_successes (mapv remote-snapshot-run->admin-body (get snapshot :recent-successes))
-   :attention (mapv remote-snapshot-attention->admin-body (get snapshot :attention))})
-
-(defn- session-scratch-pad
-  [session-id pad-id]
-  (let [pad (scratch/get-pad pad-id)]
-    (when (and pad
-               (= :session (:scope pad))
-               (= session-id (:session-id pad)))
-      pad)))
-
-(defn- session-local-doc
-  [session-id doc-id]
-  (local-doc/get-session-doc session-id doc-id))
-
-(defn- session-artifact
-  [session-id artifact-id]
-  (artifact/get-session-artifact session-id artifact-id))
+  {:exception-response exception-response
+   :instant->str       instant->str
+   :json-response      json-response
+   :read-body          read-body
+   :request-base-url   request-base-url
+   :truncate-text      truncate-text})
 
 (defn- handle-create-session
   ([] (handle-create-session :http))
   ([channel]
-   (let [sid (db/create-session! channel)]
-     (wm/ensure-wm! sid)
-     (touch-rest-session! sid)
-     (json-response 200 {:session_id (str sid)}))))
-
-(defn- internal-server-error-response
-  [^Throwable e]
-  (json-response 500 {:error (or (throwable-message e) "internal server error")}))
-
-(defn- chat-request
-  ([req]
-   (chat-request req :http))
-  ([req channel]
-  (let [data          (read-body req)
-         message       (get data "message")
-         session-id    (get data "session_id")
-         local-doc-ids (when (sequential? (get data "local_doc_ids"))
-                         (vec (keep #(when (some? %) (str %))
-                                    (get data "local_doc_ids"))))
-         artifact-ids  (when (sequential? (get data "artifact_ids"))
-                         (vec (keep #(when (some? %) (str %))
-                                    (get data "artifact_ids"))))]
-     (when (and session-id (= channel :http))
-       (maybe-resume-http-session! session-id channel))
-     (cond
-       (not message)
-       {:response (json-response 400 {:error "missing 'message' field"})}
-
-       (and session-id (not (session-accessible? session-id channel)))
-       {:response (json-response 404 {:error "unknown session id"})}
-
-       (and session-id (not (session-active? session-id)))
-       {:response (json-response 409 {:error "session closed"})}
-
-       :else
-       (let [sid (if session-id
-                   (java.util.UUID/fromString session-id)
-                   (db/create-session! channel))]
-         (wm/ensure-wm! sid)
-         (cancel-rest-session-finalizer! sid)
-         {:session-id    sid
-          :channel       channel
-          :message       message
-          :local-doc-ids local-doc-ids
-          :artifact-ids  artifact-ids})))))
-
-(defn- process-chat!
-  [{:keys [session-id channel message local-doc-ids artifact-ids]}]
-  (try
-    (let [response (agent/process-message session-id
-                                          message
-                                          :channel channel
-                                          :local-doc-ids local-doc-ids
-                                          :artifact-ids artifact-ids)
-          assistant-message (db/latest-session-message session-id #{:assistant})]
-      (json-response 200 {:session_id (str session-id)
-                          :role       "assistant"
-                          :content    response
-                          :message    (some-> assistant-message session-message->body)}))
-    (finally
-      (touch-rest-session! session-id))))
-
-(defn- handle-chat-sync
-  [chat]
-  (process-chat! chat))
-
-(defn- handle-chat-async
-  [req chat]
-  (http/as-channel
-    req
-    {:on-open
-     (fn [ch]
-       (future
-         (let [response (try
-                          (process-chat! chat)
-                          (catch clojure.lang.ExceptionInfo e
-                            (exception-response e))
-                          (catch Exception e
-                            (log/error e "Async HTTP chat request failed")
-                            (internal-server-error-response e)))]
-           (http/send! ch response))))}))
+   (http-session/handle-create-session (session-handler-deps) channel)))
 
 (defn- handle-chat
   ([req]
    (handle-chat req :http))
   ([req channel]
-   (let [{:keys [response] :as chat} (chat-request req channel)]
-     (cond
-       response
-       response
-
-       (:async-channel req)
-       (handle-chat-async req chat)
-
-       :else
-       (handle-chat-sync chat)))))
+   (http-session/handle-chat (session-handler-deps) req channel)))
 
 (defn- handle-get-status
   ([session-id]
    (handle-get-status session-id nil))
   ([session-id expected-channel]
-   (when (and session-id (= expected-channel :http))
-     (maybe-resume-http-session! session-id expected-channel))
-   (cond
-     (nil? (parse-session-id session-id))
-     (json-response 400 {:error "invalid session id"})
-
-     (not (session-accessible? session-id expected-channel))
-     (json-response 404 {:error "session not found"})
-
-     (not (session-active? session-id))
-     (json-response 409 {:error "session closed"})
-
-     :else
-     (do
-       (touch-rest-session! session-id)
-       (json-response 200 {:session_id session-id
-                           :status     (status->body (get @session-statuses session-id))})))))
+   (http-session/handle-get-status (session-handler-deps) session-id expected-channel)))
 
 (defn- handle-get-approval
   ([session-id]
    (handle-get-approval session-id nil))
   ([session-id expected-channel]
-   (when (and session-id (= expected-channel :http))
-     (maybe-resume-http-session! session-id expected-channel))
-   (cond
-     (nil? (parse-session-id session-id))
-     (json-response 400 {:error "invalid session id"})
-
-     (not (session-accessible? session-id expected-channel))
-     (json-response 404 {:error "session not found"})
-
-     (not (session-active? session-id))
-     (json-response 409 {:error "session closed"})
-
-     :else
-     (do
-       (touch-rest-session! session-id)
-       (if-let [approval (get @pending-approvals session-id)]
-         (json-response 200 {:pending true
-                             :approval (approval->body approval)})
-         (json-response 200 {:pending false}))))))
+   (http-session/handle-get-approval (session-handler-deps) session-id expected-channel)))
 
 (defn- handle-submit-approval
   ([session-id req]
    (handle-submit-approval session-id req nil))
   ([session-id req expected-channel]
-   (if-not (parse-session-id session-id)
-     (json-response 400 {:error "invalid session id"})
-     (if-not (session-accessible? session-id expected-channel)
-       (json-response 404 {:error "session not found"})
-       (let [data        (read-body req)
-             approval-id (get data "approval_id")
-             decision    (get data "decision")
-             current     (get @pending-approvals session-id)
-             decision*   (case decision
-                           "allow" :allow
-                           "deny"  :deny
-                           nil)]
-         (cond
-           (nil? current)
-           (json-response 404 {:error "no pending approval"})
-
-           (not= approval-id (:approval-id current))
-           (json-response 409 {:error "stale approval id"})
-
-           (nil? decision*)
-           (json-response 400 {:error "invalid decision"})
-
-           :else
-           (do
-             (deliver (:decision current) decision*)
-             (clear-pending-approval! session-id approval-id)
-             (touch-rest-session! session-id)
-             (json-response 200 {:status "recorded"}))))))))
+   (http-session/handle-submit-approval (session-handler-deps) session-id req expected-channel)))
 
 (defn- handle-session-messages
   ([session-id]
    (handle-session-messages session-id nil))
   ([session-id expected-channel]
-   (try
-     (let [sid (java.util.UUID/fromString session-id)]
-       (if-not (session-accessible? sid expected-channel)
-         (json-response 404 {:error "session not found"})
-         (let [messages (->> (db/session-messages sid)
-                             (into [] (comp
-                                        (filter #(#{:user :assistant} (:role %)))
-                                        (map session-message->body))))]
-           (touch-rest-session! session-id)
-           (json-response 200 {:session_id session-id
-                               :messages   messages}))))
-     (catch IllegalArgumentException _
-       (json-response 400 {:error "invalid session id"})))))
+   (http-session/handle-session-messages (session-handler-deps) session-id expected-channel)))
 
 (defn- handle-close-session
   ([session-id]
    (handle-close-session session-id nil))
   ([session-id expected-channel]
-   (cond
-     (nil? (parse-session-id session-id))
-     (json-response 400 {:error "invalid session id"})
-
-     (not (session-accessible? session-id expected-channel))
-     (json-response 404 {:error "session not found"})
-
-     (session-busy? session-id)
-     (if (agent/cancel-session! (parse-session-id session-id)
-                                "session close requested")
-       (json-response 202 {:session_id (parse-session-id session-id)
-                           :status     "cancelling"
-                           :closing    true})
-       (json-response 409 {:error "session is still processing a request"}))
-
-     :else
-     (let [closed? (finalize-rest-session! session-id :explicit)]
-       (json-response 200 {:session_id      (parse-session-id session-id)
-                           :status          (if closed? "closed" "already_closed")
-                           :already_closed  (not closed?)})))))
+   (http-session/handle-close-session (session-handler-deps) session-id expected-channel)))
 
 (defn- handle-history-sessions []
-  (json-response 200
-                 {:sessions (->> (db/list-sessions)
-                                 (into [] (comp (filter #(contains? history-session-channels (:channel %)))
-                                                (map history-session->body))))}))
+  (http-session/handle-history-sessions (session-handler-deps)))
 
 (defn- handle-history-schedules []
-  (json-response 200
-                 {:schedules (->> (schedule/list-schedules)
-                                  (sort-by (fn [sched]
-                                             (or (date->millis (:last-run sched))
-                                                 (date->millis (:next-run sched))
-                                                 Long/MIN_VALUE))
-                                           >)
-                                  (into [] (map history-schedule->body)))}))
+  (http-session/handle-history-schedules (session-handler-deps)))
 
 (defn- handle-history-schedule-runs
   [schedule-id]
-  (try
-    (let [sid   (parse-keyword-id schedule-id "schedule_id")
-          sched (schedule/get-schedule sid)]
-      (if-not sched
-        (json-response 404 {:error "schedule not found"})
-        (json-response 200
-                       {:schedule (history-schedule->body sched)
-                        :runs     (into [] (map history-run->body)
-                                        (schedule/schedule-history sid 20))})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- llm-call-summary->body [entry]
-  (cond-> {:id          (str (:id entry))
-           :session_id  (some-> (:session-id entry) str)
-           :provider_id (some-> (:provider-id entry) name)
-           :model       (:model entry)
-           :workload    (some-> (:workload entry) name)
-           :status      (some-> (:status entry) name)
-           :duration_ms (:duration-ms entry)
-           :created_at  (instant->str (:created-at entry))}
-    (:prompt-tokens entry)     (assoc :prompt_tokens (:prompt-tokens entry))
-    (:completion-tokens entry) (assoc :completion_tokens (:completion-tokens entry))
-    (:error entry)             (assoc :error (:error entry))))
-
-(defn- llm-call-detail->body [entry]
-  (cond-> (llm-call-summary->body entry)
-    (:messages entry) (assoc :messages (:messages entry))
-    (:tools entry)    (assoc :tools (:tools entry))
-    (:response entry) (assoc :response (:response entry))
-    (seq (:related-messages entry))
-    (assoc :related_messages
-           (mapv (fn [{:keys [id role provider-id model workload created-at]}]
-                   (cond-> {:id         (str id)
-                            :role       (name role)
-                            :created_at (instant->str created-at)}
-                     provider-id (assoc :provider_id (name provider-id))
-                     model (assoc :model model)
-                     workload (assoc :workload (name workload))))
-                 (:related-messages entry)))))
+  (http-session/handle-history-schedule-runs (session-handler-deps) schedule-id))
 
 (defn- handle-list-llm-calls [req]
-  (let [params (parse-query-string (:query-string req))
-        limit  (or (some-> (get params "limit") parse-long) 50)
-        raw-session-id (get params "session_id")
-        session-id (some-> raw-session-id parse-session-id)]
-    (if (and raw-session-id (nil? session-id))
-      (json-response 400 {:error "invalid session id"})
-      (json-response 200
-                     {:calls (into [] (map llm-call-summary->body)
-                                   (db/list-llm-calls (min limit 200) session-id))}))))
+  (http-session/handle-list-llm-calls (session-handler-deps) req))
 
 (defn- handle-get-llm-call [call-id]
-  (try
-    (let [uuid (java.util.UUID/fromString call-id)
-          entry (db/get-llm-call uuid)]
-      (if entry
-        (json-response 200 {:call (llm-call-detail->body entry)})
-        (json-response 404 {:error "call not found"})))
-    (catch IllegalArgumentException _
-      (json-response 400 {:error "invalid call id"}))))
+  (http-session/handle-get-llm-call (session-handler-deps) call-id))
 
 (defn- handle-session-audit
   ([session-id]
    (handle-session-audit session-id nil))
   ([session-id expected-channel]
-   (try
-     (let [sid (java.util.UUID/fromString session-id)]
-       (if-not (session-accessible? sid expected-channel)
-         (json-response 404 {:error "session not found"})
-         (let [events (mapv audit-event->body (db/session-audit-events sid 1000))]
-           (touch-rest-session! session-id)
-           (json-response 200 {:session_id session-id
-                               :events     events}))))
-     (catch IllegalArgumentException _
-       (json-response 400 {:error "invalid session id"})))))
+   (http-session/handle-session-audit (session-handler-deps) session-id expected-channel)))
 
 (defn- handle-list-scratch-pads [session-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (do
-      (touch-rest-session! session-id)
-      (json-response 200
-                     {:session_id session-id
-                      :pads       (into [] (map scratch-metadata->body)
-                                         (scratch/list-pads {:scope :session
-                                                             :session-id session-id}))}))))
+  (http-workspace/handle-list-scratch-pads (workspace-handler-deps) session-id))
 
 (defn- handle-create-scratch-pad [session-id req]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (let [data (or (read-body req) {})
-          pad  (scratch/create-pad! {:scope      :session
-                                     :session-id session-id
-                                     :title      (get data "title")
-                                     :content    (get data "content")
-                                     :mime       (get data "mime")})]
-      (touch-rest-session! session-id)
-      (json-response 201 {:session_id session-id
-                          :pad        (scratch-pad->body pad)}))))
+  (http-workspace/handle-create-scratch-pad (workspace-handler-deps) session-id req))
 
 (defn- handle-get-scratch-pad [session-id pad-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (if-let [pad (session-scratch-pad session-id pad-id)]
-      (do
-        (touch-rest-session! session-id)
-        (json-response 200 {:session_id session-id
-                            :pad        (scratch-pad->body pad)}))
-      (json-response 404 {:error "scratch pad not found"}))))
+  (http-workspace/handle-get-scratch-pad (workspace-handler-deps) session-id pad-id))
 
 (defn- handle-save-scratch-pad [session-id pad-id req]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    (nil? (session-scratch-pad session-id pad-id))
-    (json-response 404 {:error "scratch pad not found"})
-
-    :else
-    (let [data    (or (read-body req) {})
-          updates (cond-> {}
-                    (contains? data "title")            (assoc :title (get data "title"))
-                    (contains? data "content")          (assoc :content (get data "content"))
-                    (contains? data "mime")             (assoc :mime (get data "mime"))
-                    (contains? data "expected_version") (assoc :expected-version
-                                                               (get data "expected_version")))]
-      (try
-        (touch-rest-session! session-id)
-        (json-response 200
-                       {:session_id session-id
-                        :pad        (scratch-pad->body (scratch/save-pad! pad-id updates))})
-        (catch clojure.lang.ExceptionInfo e
-          (let [{:keys [type]} (ex-data e)]
-            (case type
-              :scratch/version-conflict
-              (json-response 409 {:error "scratch pad version conflict"
-                                  :details (select-keys (ex-data e)
-                                                        [:expected-version :actual-version])})
-              :scratch/not-found
-              (json-response 404 {:error "scratch pad not found"})
-              (json-response 400 {:error (.getMessage e)}))))))))
+  (http-workspace/handle-save-scratch-pad (workspace-handler-deps) session-id pad-id req))
 
 (defn- handle-edit-scratch-pad [session-id pad-id req]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    (nil? (session-scratch-pad session-id pad-id))
-    (json-response 404 {:error "scratch pad not found"})
-
-    :else
-    (let [data      (or (read-body req) {})
-          operation (if (map? (get data "operation"))
-                      (get data "operation")
-                      data)
-          edit      (cond-> {:op (get operation "op")}
-                      (contains? operation "text")          (assoc :text (get operation "text"))
-                      (contains? operation "separator")     (assoc :separator (get operation "separator"))
-                      (contains? operation "match")         (assoc :match (get operation "match"))
-                      (contains? operation "replacement")   (assoc :replacement (get operation "replacement"))
-                      (contains? operation "occurrence")    (assoc :occurrence (get operation "occurrence"))
-                      (contains? operation "offset")        (assoc :offset (get operation "offset"))
-                      (contains? operation "start_line")    (assoc :start-line (get operation "start_line"))
-                      (contains? operation "end_line")      (assoc :end-line (get operation "end_line"))
-                      (contains? data "expected_version")   (assoc :expected-version
-                                                                   (get data "expected_version"))
-                      (contains? operation "expected_version") (assoc :expected-version
-                                                                     (get operation "expected_version")))]
-      (try
-        (touch-rest-session! session-id)
-        (json-response 200
-                       {:session_id session-id
-                        :pad        (scratch-pad->body (scratch/edit-pad! pad-id edit))})
-        (catch clojure.lang.ExceptionInfo e
-          (let [{:keys [type]} (ex-data e)]
-            (case type
-              :scratch/version-conflict
-              (json-response 409 {:error "scratch pad version conflict"
-                                  :details (select-keys (ex-data e)
-                                                        [:expected-version :actual-version])})
-              :scratch/not-found
-              (json-response 404 {:error "scratch pad not found"})
-              (json-response 400 {:error (.getMessage e)}))))))))
+  (http-workspace/handle-edit-scratch-pad (workspace-handler-deps) session-id pad-id req))
 
 (defn- handle-delete-scratch-pad [session-id pad-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    (nil? (session-scratch-pad session-id pad-id))
-    (json-response 404 {:error "scratch pad not found"})
-
-    :else
-    (do
-      (scratch/delete-pad! pad-id)
-      (touch-rest-session! session-id)
-      (json-response 200 {:status "deleted"
-                          :session_id session-id
-                          :pad_id pad-id}))))
-
-(defn- parse-local-doc-upload
-  [entry]
-  {:name       (get entry "name")
-   :media-type (get entry "media_type")
-   :size-bytes (get entry "size_bytes")
-   :source     (get entry "source")
-   :bytes-base64 (get entry "bytes_base64")
-   :ocr-mode   (get entry "ocr_mode")
-   :text       (get entry "text")})
-
-(defn- json-local-doc-upload-entries
-  [data]
-  (let [entries (cond
-                  (sequential? (get data "documents"))
-                  (get data "documents")
-
-                  (map? data)
-                  [data]
-
-                  :else
-                  [])]
-    (->> entries
-         (into [] (comp (filter map?)
-                        (map parse-local-doc-upload))))))
-
-(defn- multipart-local-doc-upload?
-  [value]
-  (and (map? value)
-       (or (contains? value :tempfile)
-           (contains? value "tempfile")
-           (contains? value :filename)
-           (contains? value "filename"))))
-
-(defn- local-doc-part-bytes
-  [part]
-  (let [tempfile (or (:tempfile part) (get part "tempfile"))
-        body     (or tempfile
-                     (:bytes part)
-                     (get part "bytes")
-                     (:stream part)
-                     (get part "stream"))]
-    (when-not body
-      (throw (ex-info "missing uploaded file bytes"
-                      {:type :local-doc/missing-file-bytes
-                       :name (or (:filename part) (get part "filename"))})))
-    (try
-      (read-body-bytes body)
-      (finally
-        (when tempfile
-          (.delete ^java.io.File tempfile))))))
-
-(defn- multipart-local-doc-upload-entry
-  [part]
-  {:name       (or (:filename part) (get part "filename"))
-   :media-type (or (:content-type part) (get part "content-type"))
-   :size-bytes (or (:size part) (get part "size"))
-   :source     (get part "source")
-   :bytes      (local-doc-part-bytes part)})
-
-(defn- multipart-local-doc-upload-entries
-  [req]
-  (let [params  (or (:multipart-params req) (:params req))
-        uploads (or (get params "documents")
-                    (get params :documents)
-                    (get params "documents[]")
-                    (get params :documents[]))]
-    (->> (cond
-           (sequential? uploads) uploads
-           (some? uploads)       [uploads]
-           :else                 [])
-         (into [] (comp (filter multipart-local-doc-upload?)
-                        (map multipart-local-doc-upload-entry))))))
-
-(defn- local-doc-upload-entries
-  [req]
-  (if (multipart-form-request? req)
-    (multipart-local-doc-upload-entries req)
-    (json-local-doc-upload-entries (or (read-body req) {}))))
-
-(defn- local-doc-error->body
-  [upload ^Throwable e]
-  {:name  (get upload :name)
-   :error (throwable-message e)
-   :code  (some-> (ex-data e) :type name)})
+  (http-workspace/handle-delete-scratch-pad (workspace-handler-deps) session-id pad-id))
 
 (defn- handle-list-local-docs [session-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (do
-      (touch-rest-session! session-id)
-      (json-response 200
-                     {:session_id session-id
-                      :documents  (into [] (map local-doc-metadata->body)
-                                         (local-doc/list-docs session-id))}))))
+  (http-workspace/handle-list-local-docs (workspace-handler-deps) session-id))
 
 (defn- handle-create-local-docs [session-id req]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (let [uploads (local-doc-upload-entries req)]
-      (if-not (seq uploads)
-        (json-response 400 {:error "missing local documents"})
-        (let [{:keys [documents errors]}
-              (reduce (fn [acc upload]
-                        (try
-                          (update acc :documents conj
-                                  (local-doc-metadata->body
-                                    (local-doc/save-upload!
-                                      {:session-id session-id
-                                      :name       (:name upload)
-                                      :media-type (:media-type upload)
-                                      :size-bytes (:size-bytes upload)
-                                      :source     (:source upload)
-                                      :bytes      (:bytes upload)
-                                      :bytes-base64 (:bytes-base64 upload)
-                                      :ocr-mode   (:ocr-mode upload)
-                                      :text       (:text upload)})))
-                          (catch clojure.lang.ExceptionInfo e
-                            (let [failed-doc (try
-                                               (local-doc/save-failed-upload!
-                                                 {:session-id session-id
-                                                  :name       (:name upload)
-                                                  :media-type (:media-type upload)
-                                                  :size-bytes (:size-bytes upload)
-                                                  :source     (:source upload)
-                                                  :bytes      (:bytes upload)
-                                                  :bytes-base64 (:bytes-base64 upload)
-                                                  :ocr-mode   (:ocr-mode upload)
-                                                  :text       (:text upload)}
-                                                 e)
-                                               (catch Exception _
-                                                 nil))]
-                              (cond-> (update acc :errors conj (local-doc-error->body upload e))
-                                failed-doc
-                                (update :documents conj (local-doc-metadata->body failed-doc)))))))
-                      {:documents [] :errors []}
-                      uploads)
-              status (if (seq documents) 201 400)]
-          (touch-rest-session! session-id)
-          (json-response status
-                         {:session_id session-id
-                          :documents  documents
-                          :errors     errors}))))))
+  (http-workspace/handle-create-local-docs (workspace-handler-deps) session-id req))
 
 (defn- handle-get-local-doc [session-id doc-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (if-let [doc (session-local-doc session-id doc-id)]
-      (do
-        (touch-rest-session! session-id)
-        (json-response 200 {:session_id session-id
-                            :document   (local-doc->body doc)}))
-      (json-response 404 {:error "local document not found"}))))
+  (http-workspace/handle-get-local-doc (workspace-handler-deps) session-id doc-id))
 
 (defn- handle-delete-local-doc [session-id doc-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    (nil? (session-local-doc session-id doc-id))
-    (json-response 404 {:error "local document not found"})
-
-    :else
-    (do
-      (local-doc/delete-doc! session-id doc-id)
-      (touch-rest-session! session-id)
-      (json-response 200 {:status "deleted"
-                          :session_id session-id
-                          :doc_id doc-id}))))
+  (http-workspace/handle-delete-local-doc (workspace-handler-deps) session-id doc-id))
 
 (defn- handle-create-local-doc-scratch-pad [session-id doc-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    (nil? (session-local-doc session-id doc-id))
-    (json-response 404 {:error "local document not found"})
-
-    :else
-    (let [{:keys [pad]} (local-doc/create-scratch-pad-from-doc! session-id doc-id)]
-      (touch-rest-session! session-id)
-      (json-response 201 {:session_id session-id
-                          :pad        (scratch-pad->body pad)}))))
+  (http-workspace/handle-create-local-doc-scratch-pad (workspace-handler-deps) session-id doc-id))
 
 (defn- handle-create-artifact-scratch-pad [session-id artifact-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    (nil? (session-artifact session-id artifact-id))
-    (json-response 404 {:error "artifact not found"})
-
-    :else
-    (let [{:keys [pad]} (artifact/create-scratch-pad-from-artifact! session-id artifact-id)]
-      (touch-rest-session! session-id)
-      (json-response 201 {:session_id session-id
-                          :pad        (scratch-pad->body pad)}))))
-
-(defn- artifact-create-spec
-  [data]
-  (let [payload (if (map? (get data "artifact"))
-                  (get data "artifact")
-                  data)]
-    (cond-> {:source (or (some-> (get payload "source") nonblank-str keyword)
-                         :manual)}
-      (contains? payload "name")
-      (assoc :name (get payload "name"))
-
-      (contains? payload "title")
-      (assoc :title (get payload "title"))
-
-      (or (contains? payload "kind")
-          (contains? payload "format"))
-      (assoc :kind (or (get payload "kind")
-                       (get payload "format")))
-
-      (contains? payload "media_type")
-      (assoc :media-type (get payload "media_type"))
-
-      (contains? payload "content")
-      (assoc :content (get payload "content"))
-
-      (contains? payload "bytes_base64")
-      (assoc :bytes-base64 (get payload "bytes_base64"))
-
-      (contains? payload "preview")
-      (assoc :preview (get payload "preview"))
-
-      (contains? payload "rows")
-      (assoc :rows (get payload "rows"))
-
-      (contains? payload "data")
-      (assoc :data (get payload "data"))
-
-      (contains? payload "meta")
-      (assoc :meta (get payload "meta")))))
+  (http-workspace/handle-create-artifact-scratch-pad (workspace-handler-deps) session-id artifact-id))
 
 (defn- handle-list-artifacts [session-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (do
-      (touch-rest-session! session-id)
-      (json-response 200
-                     {:session_id session-id
-                      :artifacts  (into [] (map artifact-metadata->body)
-                                         (artifact/list-artifacts session-id))}))))
+  (http-workspace/handle-list-artifacts (workspace-handler-deps) session-id))
 
 (defn- handle-create-artifact [session-id req]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (try
-      (let [data    (or (read-body req) {})
-            created (artifact/create-artifact! (assoc (artifact-create-spec data)
-                                                      :session-id session-id))]
-        (touch-rest-session! session-id)
-        (json-response 201 {:session_id session-id
-                            :artifact   (artifact->body created)}))
-      (catch clojure.lang.ExceptionInfo e
-        (json-response (or (:status (ex-data e)) 400)
-                       {:error (.getMessage e)})))))
+  (http-workspace/handle-create-artifact (workspace-handler-deps) session-id req))
 
 (defn- handle-get-artifact [session-id artifact-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (if-let [artifact (session-artifact session-id artifact-id)]
-      (do
-        (touch-rest-session! session-id)
-        (json-response 200 {:session_id session-id
-                            :artifact   (artifact->body artifact)}))
-      (json-response 404 {:error "artifact not found"}))))
+  (http-workspace/handle-get-artifact (workspace-handler-deps) session-id artifact-id))
 
 (defn- handle-download-artifact [session-id artifact-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
-
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
-
-    :else
-    (if-let [{:keys [name media-type bytes]} (artifact/artifact-download-data session-id artifact-id)]
-      (do
-        (touch-rest-session! session-id)
-        (download-response name media-type (or bytes (byte-array 0))))
-      (json-response 404 {:error "artifact not found"}))))
+  (http-workspace/handle-download-artifact (workspace-handler-deps) session-id artifact-id))
 
 (defn- handle-delete-artifact [session-id artifact-id]
-  (cond
-    (nil? (parse-session-id session-id))
-    (json-response 400 {:error "invalid session id"})
+  (http-workspace/handle-delete-artifact (workspace-handler-deps) session-id artifact-id))
 
-    (not (session-exists? session-id))
-    (json-response 404 {:error "session not found"})
+(defn- handle-list-workspace-items [req]
+  (http-workspace/handle-list-workspace-items (workspace-handler-deps) req))
 
-    (nil? (session-artifact session-id artifact-id))
-    (json-response 404 {:error "artifact not found"})
-
-    :else
-    (do
-      (artifact/delete-artifact! session-id artifact-id)
-      (touch-rest-session! session-id)
-      (json-response 200 {:status "deleted"
-                          :session_id session-id
-                          :artifact_id artifact-id}))))
-
-(defn- handle-list-workspace-items
-  [req]
-  (try
-    (let [params       (parse-query-string (:query-string req))
-          workspace-id (nonblank-str (get params "workspace_id"))
-          top          (parse-optional-positive-long (get params "top") "top")
-          items        (workspace/list-items :workspace-id workspace-id :top top)]
-      (json-response 200
-                     {:workspace_id (or workspace-id paths/default-workspace-id)
-                      :items        (into [] (map workspace-item->body) items)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-download-workspace-item
-  [item-id req]
-  (try
-    (let [params       (parse-query-string (:query-string req))
-          workspace-id (nonblank-str (get params "workspace_id"))]
-      (if-let [item (workspace/get-item item-id :workspace-id workspace-id)]
-        (let [payload-file (some-> (:payload-path item) io/file)
-              bytes        (when (and payload-file (.isFile payload-file))
-                             (Files/readAllBytes (.toPath payload-file)))]
-          (if bytes
-            (download-response (:name item) (:media-type item) bytes)
-            (json-response 404 {:error "shared workspace item not found"})))
-        (json-response 404 {:error "shared workspace item not found"})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
+(defn- handle-download-workspace-item [item-id req]
+  (http-workspace/handle-download-workspace-item (workspace-handler-deps) item-id req))
 
 (defn- handle-search-knowledge-nodes [req]
   (let [params (parse-query-string (:query-string req))
@@ -2833,1135 +1251,6 @@
                           :fact   (knowledge-fact->body forgotten)})
       (json-response 404 {:error "fact not found"}))
     (json-response 400 {:error "invalid fact id"})))
-
-(defn- handle-list-managed-instances
-  [_req]
-  (json-response 200
-                 {:instances (mapv managed-instance->admin-body
-                                   (instance-supervisor/list-managed-instances))}))
-
-(defn- handle-stop-managed-instance
-  [instance-id]
-  (let [stopped (instance-supervisor/stop-instance! instance-id)]
-    (json-response 200
-                   {:status "stopped"
-                    :instance (managed-instance->admin-body stopped)})))
-
-(defn- handle-admin-config [_req]
-  (let [providers        (db/list-providers)
-        setup-required?  (or (empty? providers)
-                             (nil? (db/get-default-provider)))
-        storage-layout   (paths/storage-layout (db/current-db-path))]
-  (json-response
-    200
-    {:setup_required setup-required?
-     :identity (let [soul (identity/get-soul)]
-                 {:name        (:name soul "Xia")
-                  :role        (:role soul "")
-                  :description (:description soul "")
-                  :personality (:personality soul "")
-                  :guidelines  (:guidelines soul "")})
-     :instance {:id (or (db/current-instance-id)
-                        paths/default-instance-id)
-                :parent_instance_id (instance-supervisor/parent-instance-id)}
-     :capabilities (instance-supervisor/capabilities)
-     :managed_instances (mapv managed-instance->admin-body
-                              (instance-supervisor/list-managed-instances))
-     :storage {:db_path     (:db-path storage-layout)
-               :support_dir (:support-dir storage-layout)
-               :workspace_root (:workspace-root storage-layout)
-               :embed_dir   (:embed-dir storage-layout)
-               :llm_dir     (:llm-dir storage-layout)
-               :ocr_dir     (:ocr-dir storage-layout)}
-     :providers (->> providers
-                     (into [] (map provider->admin-body))
-                     sort-by-name)
-     :llm_provider_templates (->> (llm-provider-template/list-templates)
-                                  (into [] (map llm-provider-template->admin-body))
-                                  sort-by-name)
-     :web_search {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
-                  :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
-                  :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")}
-     :conversation_context (conversation-context->admin-body)
-     :memory_retention (memory-retention->admin-body)
-     :knowledge_decay (knowledge-decay->admin-body)
-     :local_doc_summarization (local-doc-summarization->admin-body)
-     :local_doc_ocr (local-doc-ocr->admin-body)
-     :database_backup (database-backup->admin-body)
-     :llm_workloads (into [] (map (fn [{:keys [id label description async?]}]
-                                    {:id          (name id)
-                                     :label       label
-                                     :description description
-                                     :async       (boolean async?)}))
-                          (llm/workload-routes))
-     :oauth_provider_templates (->> (oauth-template/list-templates)
-                                    (into [] (map oauth-template->admin-body))
-                                    sort-by-name)
-     :oauth_accounts (->> (db/list-oauth-accounts)
-                          (into [] (map oauth-account->admin-body))
-                          sort-by-name)
-     :services  (->> (db/list-services)
-                     (into [] (map service->admin-body))
-                     sort-by-name)
-     :sites     (->> (db/list-site-creds)
-                     (into [] (map site->admin-body))
-                     sort-by-name)
-     :schedules (->> (schedule/list-schedules)
-                     (into [] (map schedule->admin-body))
-                     sort-by-name)
-     :tools     (->> (db/list-tools)
-                     (into [] (map tool->admin-body))
-                     sort-by-name)
-     :skills    (->> (db/list-skills)
-                     (into [] (map skill->body))
-                     sort-by-name)
-     :remote_bridge   (remote-bridge->admin-body (remote-bridge/bridge-config))
-     :remote_devices  (into [] (map remote-device->admin-body) (remote-bridge/list-devices))
-     :remote_events   (into [] (map remote-event->admin-body) (remote-bridge/list-events 20))
-     :remote_snapshot (remote-snapshot->admin-body (remote-bridge/status-snapshot))})))
-
-(defn- handle-fetch-provider-models [req]
-  (try
-    (let [body     (read-body req)
-          provider-id (when (contains? body "provider_id")
-                        (some-> (get body "provider_id") nonblank-str keyword))
-          provider    (when provider-id
-                        (or (db/get-provider provider-id)
-                            (throw (ex-info "unknown provider_id"
-                                            {:field "provider_id"
-                                             :value (name provider-id)}))))
-          base-url    (or (get body "base_url")
-                          (:llm.provider/base-url provider))
-          api-key     (or (nonblank-str (get body "api_key"))
-                          (nonblank-str (:llm.provider/api-key provider)))
-          auth-header (when (and provider
-                                 (nil? api-key)
-                                 (= :oauth-account (llm/provider-credential-source provider)))
-                        (when-let [account-id (:llm.provider/oauth-account provider)]
-                          (oauth/oauth-header (oauth/ensure-account-ready! account-id))))]
-      (when-not (nonblank-str base-url)
-        (throw (ex-info "base_url is required" {:type :http/bad-request})))
-      (let [models (llm/fetch-provider-models {:base-url base-url
-                                               :api-key  api-key
-                                               :auth-header auth-header})]
-        (json-response 200 {:models (or models [])})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))
-    (catch Exception e
-      (json-response 502 {:error (str "Failed to fetch models: " (.getMessage e))}))))
-
-(defn- handle-fetch-provider-model-metadata [req]
-  (try
-    (let [body     (read-body req)
-          provider-id (when (contains? body "provider_id")
-                        (some-> (get body "provider_id") nonblank-str keyword))
-          provider    (when provider-id
-                        (or (db/get-provider provider-id)
-                            (throw (ex-info "unknown provider_id"
-                                            {:field "provider_id"
-                                             :value (name provider-id)}))))
-          base-url    (or (get body "base_url")
-                          (:llm.provider/base-url provider))
-          api-key     (or (nonblank-str (get body "api_key"))
-                          (nonblank-str (:llm.provider/api-key provider)))
-          auth-header (when (and provider
-                                 (nil? api-key)
-                                 (= :oauth-account (llm/provider-credential-source provider)))
-                        (when-let [account-id (:llm.provider/oauth-account provider)]
-                          (oauth/oauth-header (oauth/ensure-account-ready! account-id))))
-          model-id    (get body "model")]
-      (when-not (nonblank-str base-url)
-        (throw (ex-info "base_url is required" {:type :http/bad-request})))
-      (when-not (nonblank-str model-id)
-        (throw (ex-info "model is required" {:type :http/bad-request})))
-      (let [{:keys [id vision? vision-source
-                    context-window context-window-source
-                    recommended-system-prompt-budget
-                    recommended-history-budget
-                    recommended-input-budget-cap]}
-            (llm/fetch-provider-model-metadata {:base-url base-url
-                                               :api-key  api-key
-                                               :auth-header auth-header
-                                               :model    model-id})]
-        (json-response 200 {:model (cond-> {:id            id
-                                            :vision        (boolean vision?)
-                                            :vision_source (some-> vision-source name)}
-                                     context-window
-                                     (assoc :context_window context-window
-                                            :context_window_source (some-> context-window-source name))
-
-                                     recommended-system-prompt-budget
-                                     (assoc :recommended_system_prompt_budget recommended-system-prompt-budget)
-
-                                     recommended-history-budget
-                                     (assoc :recommended_history_budget recommended-history-budget)
-
-                                     recommended-input-budget-cap
-                                     (assoc :recommended_input_budget_cap recommended-input-budget-cap))})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))
-    (catch Exception e
-      (json-response 502 {:error (str "Failed to fetch model metadata: " (.getMessage e))}))))
-
-(defn- handle-save-provider [req]
-  (try
-    (let [data         (or (read-body req) {})
-          provider-id  (parse-keyword-id (get data "id") "id")
-          existing-provider (db/get-provider provider-id)
-          base-url     (nonblank-str (get data "base_url"))
-          model        (nonblank-str (get data "model"))
-          name         (or (nonblank-str (get data "name"))
-                           (name provider-id))
-          api-key      (nonblank-str (get data "api_key"))
-          reuse-api-key-provider-id (if (contains? data "reuse_api_key_provider_id")
-                                      (some-> (get data "reuse_api_key_provider_id") nonblank-str keyword)
-                                      nil)
-          template-id  (if (contains? data "template")
-                         (some-> (get data "template") nonblank-str keyword)
-                         nil)
-          access-mode  (if (contains? data "access_mode")
-                         (parse-provider-access-mode (get data "access_mode"))
-                         nil)
-          credential-source (cond
-                              (contains? data "credential_source")
-                              (parse-provider-credential-source (get data "credential_source"))
-
-                              (contains? data "auth_type")
-                              (parse-provider-credential-source (get data "auth_type"))
-
-                              :else
-                              nil)
-          oauth-account-id (if (contains? data "oauth_account")
-                             (some-> (get data "oauth_account") nonblank-str keyword)
-                             nil)
-          vision?      (when (contains? data "vision")
-                         (true? (get data "vision")))
-          allow-private-network? (when (contains? data "allow_private_network")
-                                   (true? (get data "allow_private_network")))
-          workloads    (when (contains? data "workloads")
-                         (parse-provider-workloads (get data "workloads")))
-          system-prompt-budget (parse-optional-positive-long (get data "system_prompt_budget")
-                                                             "system_prompt_budget")
-          history-budget (parse-optional-positive-long (get data "history_budget")
-                                                       "history_budget")
-          rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
-                                                              "rate_limit_per_minute")
-          make-default (true? (get data "default"))
-          has-default? (some? (db/get-default-provider))
-          reused-api-key (when reuse-api-key-provider-id
-                           (let [provider (db/get-provider reuse-api-key-provider-id)]
-                             (when-not provider
-                               (throw (ex-info "unknown reuse_api_key_provider_id"
-                                               {:field "reuse_api_key_provider_id"
-                                                :value (name reuse-api-key-provider-id)})))
-                             (or (nonblank-str (:llm.provider/api-key provider))
-                                 (throw (ex-info "reuse_api_key_provider_id does not have a stored API key"
-                                                 {:field "reuse_api_key_provider_id"
-                                                  :value (name reuse-api-key-provider-id)})))))
-          inferred-api-key (when (and (= credential-source :api-key)
-                                      (nil? api-key)
-                                      (nil? reused-api-key)
-                                      (nil? (nonblank-str (:llm.provider/api-key existing-provider))))
-                             (infer-reusable-provider-api-key {:provider-id provider-id
-                                                               :template-id template-id
-                                                               :base-url base-url}))
-          effective-api-key (or api-key reused-api-key inferred-api-key)
-          normalized-access-mode (llm/provider-access-mode {:access-mode access-mode
-                                                            :credential-source credential-source
-                                                            :template template-id
-                                                            :base-url base-url
-                                                            :oauth-account oauth-account-id
-                                                            :api-key effective-api-key})]
-      (when-not base-url
-        (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
-      (when-not model
-        (throw (ex-info "missing 'model' field" {:field "model"})))
-      (when (and template-id
-                 (nil? (llm-provider-template/get-template template-id)))
-        (throw (ex-info "unknown template"
-                        {:field "template"
-                         :value (name template-id)})))
-      (when (and (= credential-source :oauth-account)
-                 (nil? oauth-account-id))
-        (throw (ex-info "oauth_account is required for oauth-account credential_source"
-                        {:field "oauth_account"})))
-      (when (contains? data "browser_session")
-        (throw (ex-info "browser_session is no longer supported; use API key or OAuth API sign-in."
-                        {:field "browser_session"})))
-      (when (and oauth-account-id
-                 (nil? (db/get-oauth-account oauth-account-id)))
-        (throw (ex-info "unknown oauth_account"
-                        {:field "oauth_account"
-                         :value (name oauth-account-id)})))
-      (db/upsert-provider! (cond-> {:id       provider-id
-                                    :name     name
-                                    :base-url base-url
-                                    :model    model
-                                    :system-prompt-budget system-prompt-budget
-                                    :history-budget history-budget
-                                    :rate-limit-per-minute rate-limit-per-minute}
-                             (contains? data "template")
-                             (assoc :template template-id)
-                             (contains? data "access_mode")
-                             (assoc :access-mode normalized-access-mode)
-                             (or (contains? data "credential_source")
-                                 (contains? data "auth_type"))
-                             (assoc :credential-source credential-source
-                                    :auth-type credential-source)
-                             (contains? data "oauth_account")
-                             (assoc :oauth-account oauth-account-id)
-                             (contains? data "vision")
-                             (assoc :vision? vision?)
-                             (contains? data "allow_private_network")
-                             (assoc :allow-private-network? allow-private-network?)
-                             (contains? data "workloads")
-                             (assoc :workloads workloads)
-                             effective-api-key
-                             (assoc :api-key effective-api-key)))
-      (when (or make-default (not has-default?))
-        (db/set-default-provider! provider-id))
-      (when (setup/needs-setup?)
-        (db/set-config! :setup/complete "true"))
-      (json-response 200 {:provider (provider->admin-body (db/get-provider provider-id))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-delete-provider [req]
-  (try
-    (let [data        (or (read-body req) {})
-          provider-id (parse-keyword-id (get data "id") "id")]
-      (when-not (db/get-provider provider-id)
-        (throw (ex-info "provider not found" {:type :http/not-found :field "id"})))
-      (db/delete-provider! provider-id)
-      (json-response 200 {:deleted (name provider-id)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-memory-retention [req]
-  (try
-    (let [data                 (or (read-body req) {})
-          full-resolution-days (when (contains? data "full_resolution_days")
-                                 (parse-optional-positive-long (get data "full_resolution_days")
-                                                               "full_resolution_days"))
-          decay-half-life-days (when (contains? data "decay_half_life_days")
-                                 (parse-optional-positive-long (get data "decay_half_life_days")
-                                                               "decay_half_life_days"))
-          retained-count       (when (contains? data "retained_count")
-                                 (parse-optional-positive-long (get data "retained_count")
-                                                               "retained_count"))]
-      (when (contains? data "full_resolution_days")
-        (save-config-override! :memory/episode-full-resolution-ms
-                               (days->ms full-resolution-days)))
-      (when (contains? data "decay_half_life_days")
-        (save-config-override! :memory/episode-decay-half-life-ms
-                               (days->ms decay-half-life-days)))
-      (when (contains? data "retained_count")
-        (save-config-override! :memory/episode-retained-decayed-count
-                               retained-count))
-      (json-response 200 {:memory_retention (memory-retention->admin-body)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-web-search [req]
-  (try
-    (let [data (or (read-body req) {})]
-      (save-config-override! :web/search-backend
-                             (nonblank-str (get data "backend")))
-      (save-config-override! :web/search-brave-api-key
-                             (nonblank-str (get data "brave_api_key")))
-      (save-config-override! :web/search-searxng-url
-                             (nonblank-str (get data "searxng_url")))
-      (json-response 200 {:web_search
-                           {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
-                            :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
-                            :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")}}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-identity [req]
-  (try
-    (let [data (or (read-body req) {})]
-      (doseq [[json-key soul-key] [["name" :name]
-                                    ["role" :role]
-                                    ["description" :description]
-                                    ["personality" :personality]
-                                    ["guidelines" :guidelines]]]
-        (when (contains? data json-key)
-          (identity/set-soul! soul-key (str (get data json-key "")))))
-      (let [soul (identity/get-soul)]
-        (when (contains? data "controller_enabled")
-          (instance-supervisor/set-instance-management-enabled!
-            (true? (get data "controller_enabled"))))
-        (json-response 200 {:identity {:name        (:name soul "Xia")
-                                       :role        (:role soul "")
-                                       :description (:description soul "")
-                                       :personality (:personality soul "")
-                                       :guidelines  (:guidelines soul "")}
-                            :capabilities (instance-supervisor/capabilities)})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-conversation-context [req]
-  (try
-    (let [data                         (or (read-body req) {})
-          recent-history-message-limit (when (contains? data "recent_history_message_limit")
-                                         (parse-optional-positive-long (get data "recent_history_message_limit")
-                                                                       "recent_history_message_limit"))
-          history-budget               (when (contains? data "history_budget")
-                                         (parse-optional-positive-long (get data "history_budget")
-                                                                       "history_budget"))]
-      (when (contains? data "recent_history_message_limit")
-        (save-config-override! :context/recent-history-message-limit
-                               recent-history-message-limit))
-      (when (contains? data "history_budget")
-        (save-config-override! :context/history-budget
-                               history-budget))
-      (json-response 200 {:conversation_context (conversation-context->admin-body)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- parse-optional-bounded-double
-  [value field-name]
-  (let [text (nonblank-str value)]
-    (when text
-      (try
-        (let [parsed (Double/parseDouble text)]
-          (when-not (<= 0.0 parsed 1.0)
-            (throw (ex-info (str "'" field-name "' must be between 0.0 and 1.0")
-                            {:field field-name
-                             :value value})))
-          parsed)
-        (catch NumberFormatException _
-          (throw (ex-info (str "'" field-name "' must be between 0.0 and 1.0")
-                          {:field field-name
-                           :value value})))))))
-
-(defn- handle-save-knowledge-decay [req]
-  (try
-    (let [data                      (or (read-body req) {})
-          grace-period-days         (when (contains? data "grace_period_days")
-                                      (parse-optional-positive-long (get data "grace_period_days")
-                                                                    "grace_period_days"))
-          half-life-days            (when (contains? data "half_life_days")
-                                      (parse-optional-positive-long (get data "half_life_days")
-                                                                    "half_life_days"))
-          min-confidence            (when (contains? data "min_confidence")
-                                      (parse-optional-bounded-double (get data "min_confidence")
-                                                                     "min_confidence"))
-          maintenance-interval-days (when (contains? data "maintenance_interval_days")
-                                      (parse-optional-positive-long (get data "maintenance_interval_days")
-                                                                    "maintenance_interval_days"))
-          archive-after-bottom-days (when (contains? data "archive_after_bottom_days")
-                                      (parse-optional-positive-long (get data "archive_after_bottom_days")
-                                                                    "archive_after_bottom_days"))]
-      (when (contains? data "grace_period_days")
-        (save-config-override! :memory/knowledge-decay-grace-period-ms
-                               (days->ms grace-period-days)))
-      (when (contains? data "half_life_days")
-        (save-config-override! :memory/knowledge-decay-half-life-ms
-                               (days->ms half-life-days)))
-      (when (contains? data "min_confidence")
-        (save-config-override! :memory/knowledge-decay-min-confidence
-                               min-confidence))
-      (when (contains? data "maintenance_interval_days")
-        (save-config-override! :memory/knowledge-decay-maintenance-step-ms
-                               (days->ms maintenance-interval-days)))
-      (when (contains? data "archive_after_bottom_days")
-        (save-config-override! :memory/knowledge-decay-archive-after-bottom-ms
-                               (days->ms archive-after-bottom-days)))
-      (json-response 200 {:knowledge_decay (knowledge-decay->admin-body)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- parse-summary-backend
-  [value field-name]
-  (let [backend (some-> value nonblank-str keyword)]
-    (when backend
-      (when-not (contains? #{:local :external} backend)
-        (throw (ex-info (str "'" field-name "' must be one of: local, external")
-                        {:field field-name
-                         :value value})))
-      backend)))
-
-(defn- parse-optional-provider-id
-  [value field-name]
-  (when-let [provider-id-str (nonblank-str value)]
-    (let [provider-id (keyword provider-id-str)]
-      (when-not (db/get-provider provider-id)
-        (throw (ex-info (str "'" field-name "' must reference an existing provider")
-                        {:field field-name
-                         :value value})))
-      provider-id)))
-
-(defn- handle-save-local-doc-summarization [req]
-  (try
-    (let [data                     (or (read-body req) {})
-          enabled?                 (when (contains? data "model_summaries_enabled")
-                                     (true? (get data "model_summaries_enabled")))
-          backend                  (when (contains? data "model_summary_backend")
-                                     (parse-summary-backend (get data "model_summary_backend")
-                                                            "model_summary_backend"))
-          provider-id              (when (contains? data "model_summary_provider_id")
-                                     (parse-optional-provider-id (get data "model_summary_provider_id")
-                                                                 "model_summary_provider_id"))
-          chunk-summary-max-tokens (when (contains? data "chunk_summary_max_tokens")
-                                     (parse-optional-positive-long (get data "chunk_summary_max_tokens")
-                                                                   "chunk_summary_max_tokens"))
-          doc-summary-max-tokens   (when (contains? data "doc_summary_max_tokens")
-                                     (parse-optional-positive-long (get data "doc_summary_max_tokens")
-                                                                   "doc_summary_max_tokens"))
-          effective-provider-id    (when (= backend :external) provider-id)]
-      (when (contains? data "model_summaries_enabled")
-        (save-config-override! :local-doc/model-summaries-enabled? enabled?))
-      (when (contains? data "model_summary_backend")
-        (save-config-override! :local-doc/model-summary-backend
-                               (some-> backend name)))
-      (when (contains? data "model_summary_provider_id")
-        (save-config-override! :local-doc/model-summary-provider-id
-                               (some-> effective-provider-id name)))
-      (when (contains? data "chunk_summary_max_tokens")
-        (save-config-override! :local-doc/chunk-summary-max-tokens
-                               chunk-summary-max-tokens))
-      (when (contains? data "doc_summary_max_tokens")
-        (save-config-override! :local-doc/doc-summary-max-tokens
-                               doc-summary-max-tokens))
-      (json-response 200 {:local_doc_summarization (local-doc-summarization->admin-body)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-local-doc-ocr [req]
-  (try
-    (let [data                 (or (read-body req) {})
-          enabled?             (when (contains? data "enabled")
-                                 (true? (get data "enabled")))
-          model-backend        (when (contains? data "model_backend")
-                                 (parse-summary-backend (get data "model_backend")
-                                                        "model_backend"))
-          provider-id          (when (contains? data "external_provider_id")
-                                 (parse-optional-provider-id (get data "external_provider_id")
-                                                             "external_provider_id"))
-          timeout-ms           (when (contains? data "timeout_ms")
-                                 (parse-optional-positive-long (get data "timeout_ms")
-                                                               "timeout_ms"))
-          max-tokens           (when (contains? data "max_tokens")
-                                 (parse-optional-positive-long (get data "max_tokens")
-                                                               "max_tokens"))
-          _                    (when (and provider-id
-                                          (not (llm/vision-capable? provider-id)))
-                                 (throw (ex-info "'external_provider_id' must reference a vision-capable provider"
-                                                 {:field "external_provider_id"
-                                                  :value (name provider-id)})))]
-      (when (contains? data "enabled")
-        (save-config-override! :local-doc/ocr-enabled? enabled?))
-      (when (contains? data "model_backend")
-        (save-config-override! :local-doc/ocr-backend
-                               (some-> model-backend name)))
-      (when (contains? data "external_provider_id")
-        (save-config-override! :local-doc/ocr-provider-id
-                               (some-> provider-id name)))
-      (save-config-override! :local-doc/ocr-command nil)
-      (save-config-override! :local-doc/ocr-model-path nil)
-      (save-config-override! :local-doc/ocr-mmproj-path nil)
-      (save-config-override! :local-doc/ocr-spotting-mmproj-path nil)
-      (when (contains? data "timeout_ms")
-        (save-config-override! :local-doc/ocr-timeout-ms timeout-ms))
-      (when (contains? data "max_tokens")
-        (save-config-override! :local-doc/ocr-max-tokens max-tokens))
-      (json-response 200 {:local_doc_ocr (local-doc-ocr->admin-body)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-database-backup [req]
-  (try
-    (let [data           (or (read-body req) {})
-          enabled?       (when (contains? data "enabled")
-                           (true? (get data "enabled")))
-          directory      (when (contains? data "directory")
-                           (nonblank-str (get data "directory")))
-          interval-hours (when (contains? data "interval_hours")
-                           (parse-optional-positive-long (get data "interval_hours")
-                                                         "interval_hours"))
-          retain-count   (when (contains? data "retain_count")
-                           (parse-optional-positive-long (get data "retain_count")
-                                                         "retain_count"))]
-      (when (contains? data "enabled")
-        (save-config-override! :backup/enabled? enabled?))
-      (when (contains? data "directory")
-        (save-config-override! :backup/directory directory))
-      (when (contains? data "interval_hours")
-        (save-config-override! :backup/interval-hours interval-hours))
-      (when (contains? data "retain_count")
-        (save-config-override! :backup/retain-count retain-count))
-      (json-response 200 {:database_backup (database-backup->admin-body)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-remote-bridge [req]
-  (try
-    (let [data          (or (read-body req) {})
-          enabled?      (if (contains? data "enabled")
-                          (true? (get data "enabled"))
-                          false)
-          instance-label (nonblank-str (get data "instance_label"))
-          relay-url     (get data "relay_url")
-          bridge        (remote-bridge/save-bridge-config!
-                          {:enabled? enabled?
-                           :instance-label instance-label
-                           :relay-url relay-url})]
-      (json-response 200 {:remote_bridge (remote-bridge->admin-body bridge)
-                          :remote_snapshot (remote-snapshot->admin-body
-                                             (remote-bridge/status-snapshot))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-pair-remote-device [req]
-  (try
-    (let [data          (or (read-body req) {})
-          pairing-token (nonblank-str (get data "pairing_token"))]
-      (when-not pairing-token
-        (throw (ex-info "missing 'pairing_token' field"
-                        {:field "pairing_token"})))
-      (let [device (remote-bridge/pair-device! pairing-token)]
-        (json-response 200 {:device (remote-device->admin-body device)
-                            :remote_devices (mapv remote-device->admin-body
-                                                  (remote-bridge/list-devices))})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-revoke-remote-device [device-id]
-  (try
-    (let [device (remote-bridge/revoke-device! device-id)]
-      (json-response 200 {:device (remote-device->admin-body device)
-                          :remote_devices (mapv remote-device->admin-body
-                                                (remote-bridge/list-devices))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-service [req]
-  (try
-    (let [data              (or (read-body req) {})
-          service-id        (parse-keyword-id (get data "id") "id")
-          existing          (db/get-service service-id)
-          base-url          (nonblank-str (get data "base_url"))
-          name              (or (nonblank-str (get data "name"))
-                                (name service-id))
-          auth-type         (parse-auth-type (get data "auth_type"))
-          entered-auth-key  (nonblank-str (get data "auth_key"))
-          rate-limit-per-minute (parse-optional-positive-long (get data "rate_limit_per_minute")
-                                                              "rate_limit_per_minute")
-          allow-private-network? (when (contains? data "allow_private_network")
-                                   (true? (get data "allow_private_network")))
-          autonomous-approved? (when (contains? data "autonomous_approved")
-                                 (true? (get data "autonomous_approved")))
-          enabled?          (if (contains? data "enabled")
-                              (true? (get data "enabled"))
-                              true)
-          oauth-account-id  (when (= :oauth-account auth-type)
-                              (let [value (or (nonblank-str (get data "oauth_account"))
-                                              (some-> (:service/oauth-account existing) name))]
-                                (when-not value
-                                  (throw (ex-info "oauth_account is required for oauth-account auth_type"
-                                                  {:field "oauth_account"})))
-                                (let [account-id (keyword value)]
-                                  (when-not (db/get-oauth-account account-id)
-                                    (throw (ex-info "unknown oauth_account"
-                                                    {:field "oauth_account"
-                                                     :value value})))
-                                  account-id)))
-          entered-header    (nonblank-str (get data "auth_header"))
-          auth-header       (when (#{:api-key-header :query-param} auth-type)
-                              (or entered-header
-                                  (:service/auth-header existing)))
-          auth-key          (when-not (= :oauth-account auth-type)
-                              (or entered-auth-key
-                                  (:service/auth-key existing)
-                                  ""))]
-      (when-not base-url
-        (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
-      (when (and (#{:api-key-header :query-param} auth-type)
-                 (nil? auth-header))
-        (throw (ex-info "auth_header is required for the selected auth_type"
-                        {:field "auth_header"})))
-      (db/save-service! {:id          service-id
-                         :name        name
-                         :base-url    base-url
-                         :auth-type   auth-type
-                         :auth-key    (or auth-key "")
-                         :auth-header auth-header
-                         :oauth-account oauth-account-id
-                         :rate-limit-per-minute rate-limit-per-minute
-                         :allow-private-network? allow-private-network?
-                         :autonomous-approved? autonomous-approved?
-                         :enabled?    enabled?})
-      (json-response 200 {:service (service->admin-body (db/get-service service-id))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-oauth-account [req]
-  (try
-    (let [data           (or (read-body req) {})
-          account-id     (parse-keyword-id (get data "id") "id")
-          existing       (db/get-oauth-account account-id)
-          name           (or (nonblank-str (get data "name"))
-                             (name account-id))
-          connection-mode (let [parsed (if (contains? data "connection_mode")
-                                         (some-> (get data "connection_mode") nonblank-str keyword)
-                                         (when existing
-                                           (oauth-account-connection-mode existing)))]
-                            (when (and parsed
-                                       (not (oauth-account-connection-modes parsed)))
-                              (throw (ex-info "unknown connection_mode"
-                                              {:field "connection_mode"
-                                               :value (name parsed)})))
-                            (or parsed :oauth-flow))
-          authorize-url  (nonblank-str (get data "authorize_url"))
-          token-url      (nonblank-str (get data "token_url"))
-          client-id      (nonblank-str (get data "client_id"))
-          client-secret  (or (nonblank-str (get data "client_secret"))
-                             (:oauth.account/client-secret existing)
-                             "")
-          access-token   (or (nonblank-str (get data "access_token"))
-                             (:oauth.account/access-token existing))
-          refresh-token  (or (nonblank-str (get data "refresh_token"))
-                             (:oauth.account/refresh-token existing))
-          token-type     (or (nonblank-str (get data "token_type"))
-                             (:oauth.account/token-type existing)
-                             "Bearer")
-          expires-at     (if (contains? data "expires_at")
-                           (parse-iso-instant (get data "expires_at") "expires_at")
-                           (:oauth.account/expires-at existing))
-          connected-at   (cond
-                           (nonblank-str (get data "access_token")) (Date.)
-                           access-token (:oauth.account/connected-at existing)
-                           :else nil)
-          provider-template-id (if (contains? data "provider_template")
-                                 (some-> (get data "provider_template") nonblank-str keyword)
-                                 (:oauth.account/provider-template existing))
-          scopes         (or (nonblank-str (get data "scopes")) "")
-          redirect-uri   (nonblank-str (get data "redirect_uri"))
-          auth-params    (parse-json-object-string (get data "auth_params") "auth_params")
-          token-params   (parse-json-object-string (get data "token_params") "token_params")
-          autonomous-approved? (when (contains? data "autonomous_approved")
-                                 (true? (get data "autonomous_approved")))]
-      (when (= connection-mode :oauth-flow)
-        (when-not authorize-url
-          (throw (ex-info "missing 'authorize_url' field" {:field "authorize_url"})))
-        (when-not token-url
-          (throw (ex-info "missing 'token_url' field" {:field "token_url"})))
-        (when-not client-id
-          (throw (ex-info "missing 'client_id' field" {:field "client_id"}))))
-      (when (= connection-mode :manual-token)
-        (when-not access-token
-          (throw (ex-info "missing 'access_token' field"
-                          {:field "access_token"}))))
-      (when (and provider-template-id
-                 (nil? (oauth-template/get-template provider-template-id)))
-        (throw (ex-info "unknown provider_template"
-                        {:field "provider_template"
-                         :value (name provider-template-id)})))
-      (db/save-oauth-account! {:id            account-id
-                               :name          name
-                               :connection-mode connection-mode
-                               :authorize-url (when (= connection-mode :oauth-flow) authorize-url)
-                               :token-url     (when (= connection-mode :oauth-flow) token-url)
-                               :client-id     (when (= connection-mode :oauth-flow) client-id)
-                               :client-secret client-secret
-                               :provider-template provider-template-id
-                               :scopes        scopes
-                               :redirect-uri  redirect-uri
-                               :auth-params   auth-params
-                               :token-params  token-params
-                               :autonomous-approved? autonomous-approved?
-                               :access-token  access-token
-                               :refresh-token refresh-token
-                               :token-type    token-type
-                               :expires-at    expires-at
-                               :connected-at  connected-at})
-      (let [saved-account (db/get-oauth-account account-id)]
-        (sync-template-service-for-oauth-account! saved-account)
-        (json-response 200 {:oauth_account (oauth-account->admin-body saved-account)})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-delete-oauth-account [account-id]
-  (try
-    (let [oauth-id             (parse-keyword-id account-id "oauth_account_id")
-          account              (db/get-oauth-account oauth-id)
-          linked-providers     (into []
-                                     (filter #(= oauth-id (:llm.provider/oauth-account %)))
-                                     (db/list-providers))
-          linked-services      (into []
-                                     (filter #(= oauth-id (:service/oauth-account %)))
-                                     (db/list-services))
-          auto-managed-service (some-> account auto-managed-template-service-for-oauth-account)
-          auto-managed-only?   (and (empty? linked-providers)
-                                    (= 1 (count linked-services))
-                                    auto-managed-service
-                                    (= (:service/id auto-managed-service)
-                                       (:service/id (first linked-services))))]
-      (cond
-        (nil? account)
-        (json-response 404 {:error "oauth account not found"})
-
-        auto-managed-only?
-        (do
-          (db/remove-service! (:service/id auto-managed-service))
-          (db/remove-oauth-account! oauth-id)
-          (json-response 200 {:status "deleted"
-                              :oauth_account_id (name oauth-id)}))
-
-        (or (seq linked-providers) (seq linked-services))
-        (json-response 409 {:error "oauth account is still referenced by a provider or service"})
-
-        :else
-        (do
-          (db/remove-oauth-account! oauth-id)
-          (json-response 200 {:status "deleted"
-                              :oauth_account_id (name oauth-id)}))))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-start-oauth-connect [account-id req]
-  (try
-    (let [oauth-id    (parse-keyword-id account-id "oauth_account_id")
-          account     (or (db/get-oauth-account oauth-id)
-                          (throw (ex-info "unknown oauth_account"
-                                          {:field "oauth_account_id"
-                                           :value (name oauth-id)})))
-          callback-url (str (or (request-base-url req)
-                                (throw (ex-info "cannot determine callback base URL"
-                                                {:field "host"})))
-                            "/oauth/callback")
-          _           (when (= :manual-token (oauth-account-connection-mode account))
-                        (throw (ex-info "manual-token connections do not support Connect Now"
-                                        {:field "connection_mode"})))
-          started     (oauth/start-authorization! oauth-id callback-url)]
-      (json-response 200 {:oauth_account_id (name oauth-id)
-                          :authorization_url (:authorization-url started)
-                          :redirect_uri (:redirect-uri started)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-refresh-oauth-account [account-id]
-  (try
-    (let [oauth-id       (parse-keyword-id account-id "oauth_account_id")
-          current-account (or (db/get-oauth-account oauth-id)
-                              (throw (ex-info "unknown oauth_account"
-                                              {:field "oauth_account_id"
-                                               :value (name oauth-id)})))
-          _             (when-not (nonblank-str (:oauth.account/refresh-token current-account))
-                     (throw (ex-info "refresh token is not configured for this connection"
-                                     {:field "refresh_token"})))
-          _             (when (= :manual-token (oauth-account-connection-mode current-account))
-                     (throw (ex-info "manual-token connections do not support Refresh"
-                                     {:field "connection_mode"})))
-          refreshed-account (oauth/refresh-account! oauth-id)]
-      (json-response 200 {:oauth_account (oauth-account->admin-body refreshed-account)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- oauth-callback-page
-  [status title message account-id]
-  (let [title*   (escape-html title)
-        message* (escape-html message)
-        account* (some-> account-id name escape-html)]
-    (str "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-       "<title>Xia OAuth</title>"
-       "<style>body{margin:0;font-family:\"Avenir Next\",\"Segoe UI\",sans-serif;background:#f5efe3;color:#172119;display:grid;place-items:center;min-height:100vh;padding:24px;}main{max-width:36rem;background:rgba(255,252,246,.96);border:1px solid rgba(23,33,25,.12);border-radius:24px;padding:28px;box-shadow:0 20px 50px rgba(23,33,25,.12);}h1{margin:0 0 12px;font-size:2rem;}p{line-height:1.6;margin:0 0 10px;}code{font-family:\"SFMono-Regular\",Consolas,monospace;background:rgba(23,33,25,.06);padding:2px 6px;border-radius:8px;}</style>"
-       "</head><body><main><h1>" title* "</h1><p>" message* "</p>"
-       (when account*
-         (str "<p>OAuth account: <code>" account* "</code></p>"))
-       "<p>You can close this window and return to Xia.</p>"
-       "<script>"
-       "try {"
-       "  if (window.opener && window.opener !== window) {"
-       "    window.opener.postMessage({type:'xia-oauth-complete', status:" (json/write-json-str (name status)) ", account_id:" (json/write-json-str (some-> account-id name)) "}, window.location.origin);"
-       "  }"
-       "} catch (_err) {}"
-       "setTimeout(() => { try { window.close(); } catch (_err) {} }, 1200);"
-       "</script></main></body></html>")))
-
-(defn- handle-oauth-callback [req]
-  (let [params            (parse-query-string (:query-string req))
-        state             (get params "state")
-        pending-account-id (some-> (and (seq state) (oauth/callback-account-id state)) name)
-        code              (get params "code")
-        error-code        (get params "error")
-        error-description (or (get params "error_description") error-code)]
-    (cond
-      (not (seq state))
-      (html-response (oauth-callback-page "error"
-                                          "OAuth failed"
-                                          "Missing authorization state."
-                                          nil))
-
-      (seq error-code)
-      (html-response (oauth-callback-page "error"
-                                          "OAuth was not completed"
-                                          (str "Provider returned: " error-description)
-                                          pending-account-id))
-
-      (not (seq code))
-      (html-response (oauth-callback-page "error"
-                                          "OAuth failed"
-                                          "Missing authorization code."
-                                          pending-account-id))
-
-      :else
-      (try
-        (let [account (oauth/complete-authorization! state code)]
-          (sync-template-service-for-oauth-account! account)
-          (html-response (oauth-callback-page "ok"
-                                              "OAuth connected"
-                                              "Xia stored the new access token and can now use this account for online work."
-                                              (some-> (:oauth.account/id account) name))))
-        (catch clojure.lang.ExceptionInfo e
-          (html-response (oauth-callback-page "error"
-                                              "OAuth failed"
-                                              (.getMessage e)
-                                              pending-account-id)))))))
-
-(defn- handle-save-site [req]
-  (try
-    (let [data            (or (read-body req) {})
-          site-id         (if-let [id-text (nonblank-str (get data "id"))]
-                            (parse-keyword-id id-text "id")
-                            (infer-site-id data))
-          existing        (db/get-site-cred site-id)
-          login-url       (nonblank-str (get data "login_url"))
-          name            (or (nonblank-str (get data "name"))
-                              (name site-id))
-          username-field  (or (nonblank-str (get data "username_field"))
-                              "username")
-          password-field  (or (nonblank-str (get data "password_field"))
-                              "password")
-          username        (or (nonblank-str (get data "username"))
-                              (:site-cred/username existing)
-                              "")
-          password        (or (nonblank-str (get data "password"))
-                              (:site-cred/password existing)
-                              "")
-          form-selector   (nonblank-str (get data "form_selector"))
-          extra-fields    (parse-extra-fields (get data "extra_fields"))
-          autonomous-approved? (when (contains? data "autonomous_approved")
-                                 (true? (get data "autonomous_approved")))]
-      (when-not login-url
-        (throw (ex-info "missing 'login_url' field" {:field "login_url"})))
-      (db/save-site-cred! {:id             site-id
-                           :name           name
-                           :login-url      login-url
-                           :username-field username-field
-                           :password-field password-field
-                           :username       username
-                           :password       password
-                           :form-selector  form-selector
-                           :extra-fields   extra-fields
-                           :autonomous-approved? autonomous-approved?})
-      (json-response 200 {:site (site->admin-body (db/get-site-cred site-id))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-delete-site [site-id]
-  (try
-    (let [site-key (parse-keyword-id site-id "site_id")]
-      (if (db/get-site-cred site-key)
-        (do
-          (db/remove-site-cred! site-key)
-          (json-response 200 {:status "deleted"
-                              :site_id (name site-key)}))
-        (json-response 404 {:error "site credential not found"})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-schedule [req]
-  (try
-    (let [data          (or (read-body req) {})
-          schedule-id   (if-let [id-text (nonblank-str (get data "id"))]
-                          (parse-keyword-id id-text "id")
-                          (infer-schedule-id data))
-          existing      (schedule/get-schedule schedule-id)
-          schedule-type (parse-schedule-type (get data "type"))
-          name          (or (nonblank-str (get data "name"))
-                            (some-> existing :name)
-                            (name schedule-id))
-          description   (if (contains? data "description")
-                          (or (nonblank-str (get data "description")) "")
-                          (:description existing))
-          spec          (parse-schedule-spec data)
-          tool-id       (when (= schedule-type :tool)
-                          (parse-keyword-id (get data "tool_id") "tool_id"))
-          tool-args     (when (= schedule-type :tool)
-                          (parse-json-object-value (get data "tool_args") "tool_args"))
-          prompt        (when (= schedule-type :prompt)
-                          (nonblank-str (get data "prompt")))
-          trusted?      (if (contains? data "trusted")
-                          (true? (get data "trusted"))
-                          (if existing
-                            (boolean (:trusted? existing))
-                            true))
-          enabled?      (if (contains? data "enabled")
-                          (true? (get data "enabled"))
-                          (if existing
-                            (boolean (:enabled? existing))
-                            true))
-          saved         (if existing
-                          (schedule/update-schedule!
-                            schedule-id
-                            (cond-> {:name        name
-                                     :description description
-                                     :spec        spec
-                                     :type        schedule-type
-                                     :trusted?    trusted?
-                                     :enabled?    enabled?}
-                              (= schedule-type :tool)
-                              (assoc :tool-id tool-id
-                                     :tool-args tool-args)
-                              (= schedule-type :prompt)
-                              (assoc :prompt prompt)))
-                          (do
-                            (schedule/create-schedule!
-                              (cond-> {:id          schedule-id
-                                       :name        name
-                                       :description description
-                                       :spec        spec
-                                       :type        schedule-type
-                                       :trusted?    trusted?}
-                                (= schedule-type :tool)
-                                (assoc :tool-id tool-id
-                                       :tool-args tool-args)
-                                (= schedule-type :prompt)
-                                (assoc :prompt prompt)))
-                            (if enabled?
-                              (schedule/get-schedule schedule-id)
-                              (schedule/pause-schedule! schedule-id))))]
-      (json-response 200 {:schedule (schedule->admin-body saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-delete-schedule [schedule-id]
-  (try
-    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")]
-      (if (schedule/get-schedule schedule-key)
-        (do
-          (schedule/remove-schedule! schedule-key)
-          (json-response 200 {:status "deleted"
-                              :schedule_id (name schedule-key)}))
-        (json-response 404 {:error "schedule not found"})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-pause-schedule [schedule-id]
-  (try
-    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")
-          saved        (schedule/pause-schedule! schedule-key)]
-      (json-response 200 {:schedule (schedule->admin-body saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-resume-schedule [schedule-id]
-  (try
-    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")
-          saved        (schedule/resume-schedule! schedule-key)]
-      (json-response 200 {:schedule (schedule->admin-body saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-save-skill [req]
-  (try
-    (let [data        (or (read-body req) {})
-          skill-id    (if-let [id-text (nonblank-str (get data "id"))]
-                        (parse-keyword-id id-text "id")
-                        (infer-skill-id data))
-          existing    (db/get-skill skill-id)
-          skill-name  (or (nonblank-str (get data "name"))
-                          (:skill/name existing)
-                          (name skill-id))
-          description (if (contains? data "description")
-                        (or (nonblank-str (get data "description")) "")
-                        (:skill/description existing))
-          content     (if (contains? data "content")
-                        (str (or (get data "content") ""))
-                        (or (:skill/content existing) ""))
-          version     (if (contains? data "version")
-                        (nonblank-str (get data "version"))
-                        (:skill/version existing))
-          enabled?    (if (contains? data "enabled")
-                        (true? (get data "enabled"))
-                        (when (contains? existing :skill/enabled?)
-                          (:skill/enabled? existing)))
-          tags        (if (contains? data "tags")
-                        (parse-skill-tags (get data "tags"))
-                        nil)
-          saved       (skill/save-skill! {:id          skill-id
-                                          :name        skill-name
-                                          :description description
-                                          :content     content
-                                          :version     version
-                                          :tags        tags
-                                          :enabled?    enabled?})]
-      (json-response 200 {:skill (skill->detail-body saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-get-skill [skill-id]
-  (try
-    (let [skill-key (parse-keyword-id skill-id "skill_id")
-          saved     (db/get-skill skill-key)]
-      (if saved
-        (json-response 200 {:skill (skill->detail-body saved)})
-        (json-response 404 {:error "skill not found"})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-delete-skill [skill-id]
-  (try
-    (let [skill-key (parse-keyword-id skill-id "skill_id")]
-      (if (db/get-skill skill-key)
-        (do
-          (db/remove-skill! skill-key)
-          (json-response 200 {:status "deleted"
-                              :skill_id (name skill-key)}))
-        (json-response 404 {:error "skill not found"})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-import-openclaw-skill [req]
-  (try
-    (let [data    (or (read-body req) {})
-          source  (nonblank-str (get data "source"))
-          strict? (if (contains? data "strict")
-                    (true? (get data "strict"))
-                    true)]
-      (when-not source
-        (throw (ex-info "missing 'source' field" {:field "source"})))
-      (let [report (openclaw-skill/import-openclaw-source! source :strict? strict?)
-            skill  (db/get-skill (:skill-id report))]
-        (json-response 200
-                       {:import {:status         (some-> (:status report) name)
-                                 :skill_id       (some-> (:skill-id report) name)
-                                 :name           (:name report)
-                                 :warnings       (vec (:warnings report))
-                                 :ignored_fields (vec (:ignored-fields report))
-                                 :resources      (mapv (fn [{:keys [path size-bytes]}]
-                                                         {:path path
-                                                          :size_bytes size-bytes})
-                                                       (:resources report))
-                                 :tool_aliases   (mapv (fn [{:keys [id from to]}]
-                                                         {:id   (some-> id name)
-                                                          :from from
-                                                          :to   to})
-                                                       (:tool-aliases report))
-                                 :source         {:format (some-> (get-in report [:source :format]) name)
-                                                  :path   (get-in report [:source :path])
-                                                  :url    (get-in report [:source :url])
-                                                  :name   (get-in report [:source :name])}}
-                        :skill  (skill->body skill)})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))))
-
-(defn- handle-skills [_req]
-  (json-response 200 {:skills (mapv skill->body (db/list-skills))}))
 
 (defn- handle-health [_req]
   (json-response 200 {:status "ok" :version "0.1.0"}))
@@ -4038,7 +1327,7 @@
         (handle-web-dev-reload req)
 
         (and (= method :get) (= uri "/oauth/callback"))
-        (handle-oauth-callback req)
+        (http-admin/handle-oauth-callback (admin-handler-deps) req)
 
         ;; WebSocket upgrade
         (and (= uri "/ws") (http/websocket-handshake-check req))
@@ -4196,106 +1485,118 @@
                                          (second knowledge-fact-match)))
 
         (and (= method :get) (= uri "/admin/config"))
-        (protected-route-response req #(handle-admin-config req))
+        (protected-route-response req #(http-admin/handle-admin-config (admin-handler-deps) req))
 
         (and (= method :get) (= uri "/admin/managed-instances"))
-        (protected-route-response req #(handle-list-managed-instances req))
+        (protected-route-response req #(http-admin/handle-list-managed-instances (admin-handler-deps) req))
 
         (and (= method :post) admin-managed-instance-stop-match)
-        (protected-route-response req #(handle-stop-managed-instance (second admin-managed-instance-stop-match)))
+        (protected-route-response req #(http-admin/handle-stop-managed-instance (admin-handler-deps)
+                                                                                (second admin-managed-instance-stop-match)))
 
         (and (= method :post) (= uri "/admin/providers"))
-        (protected-route-response req #(handle-save-provider req))
+        (protected-route-response req #(http-admin/handle-save-provider (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/provider-models"))
-        (protected-route-response req #(handle-fetch-provider-models req))
+        (protected-route-response req #(http-admin/handle-fetch-provider-models (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/provider-model-metadata"))
-        (protected-route-response req #(handle-fetch-provider-model-metadata req))
+        (protected-route-response req #(http-admin/handle-fetch-provider-model-metadata (admin-handler-deps) req))
 
         (and (= method :delete) (= uri "/admin/providers"))
-        (protected-route-response req #(handle-delete-provider req))
+        (protected-route-response req #(http-admin/handle-delete-provider (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/memory-retention"))
-        (protected-route-response req #(handle-save-memory-retention req))
+        (protected-route-response req #(http-admin/handle-save-memory-retention (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/identity"))
-        (protected-route-response req #(handle-save-identity req))
+        (protected-route-response req #(http-admin/handle-save-identity (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/web-search"))
-        (protected-route-response req #(handle-save-web-search req))
+        (protected-route-response req #(http-admin/handle-save-web-search (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/context"))
-        (protected-route-response req #(handle-save-conversation-context req))
+        (protected-route-response req #(http-admin/handle-save-conversation-context (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/knowledge-decay"))
-        (protected-route-response req #(handle-save-knowledge-decay req))
+        (protected-route-response req #(http-admin/handle-save-knowledge-decay (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/local-doc-summarization"))
-        (protected-route-response req #(handle-save-local-doc-summarization req))
+        (protected-route-response req #(http-admin/handle-save-local-doc-summarization (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/local-doc-ocr"))
-        (protected-route-response req #(handle-save-local-doc-ocr req))
+        (protected-route-response req #(http-admin/handle-save-local-doc-ocr (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/database-backup"))
-        (protected-route-response req #(handle-save-database-backup req))
+        (protected-route-response req #(http-admin/handle-save-database-backup (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/remote-bridge"))
-        (protected-route-response req #(handle-save-remote-bridge req))
+        (protected-route-response req #(http-admin/handle-save-remote-bridge (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/remote-bridge/pair"))
-        (protected-route-response req #(handle-pair-remote-device req))
+        (protected-route-response req #(http-admin/handle-pair-remote-device (admin-handler-deps) req))
 
         (and (= method :delete) admin-remote-device-match)
-        (protected-route-response req #(handle-revoke-remote-device (second admin-remote-device-match)))
+        (protected-route-response req #(http-admin/handle-revoke-remote-device (admin-handler-deps)
+                                                                               (second admin-remote-device-match)))
 
         (and (= method :post) (= uri "/admin/oauth-accounts"))
-        (protected-route-response req #(handle-save-oauth-account req))
+        (protected-route-response req #(http-admin/handle-save-oauth-account (admin-handler-deps) req))
 
         (and (= method :post) admin-oauth-connect-match)
-        (protected-route-response req #(handle-start-oauth-connect (second admin-oauth-connect-match) req))
+        (protected-route-response req #(http-admin/handle-start-oauth-connect (admin-handler-deps)
+                                                                              (second admin-oauth-connect-match)
+                                                                              req))
 
         (and (= method :post) admin-oauth-refresh-match)
-        (protected-route-response req #(handle-refresh-oauth-account (second admin-oauth-refresh-match)))
+        (protected-route-response req #(http-admin/handle-refresh-oauth-account (admin-handler-deps)
+                                                                                (second admin-oauth-refresh-match)))
 
         (and (= method :delete) admin-oauth-match)
-        (protected-route-response req #(handle-delete-oauth-account (second admin-oauth-match)))
+        (protected-route-response req #(http-admin/handle-delete-oauth-account (admin-handler-deps)
+                                                                               (second admin-oauth-match)))
 
         (and (= method :post) (= uri "/admin/services"))
-        (protected-route-response req #(handle-save-service req))
+        (protected-route-response req #(http-admin/handle-save-service (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/sites"))
-        (protected-route-response req #(handle-save-site req))
+        (protected-route-response req #(http-admin/handle-save-site (admin-handler-deps) req))
 
         (and (= method :post) (= uri "/admin/schedules"))
-        (protected-route-response req #(handle-save-schedule req))
+        (protected-route-response req #(http-admin/handle-save-schedule (admin-handler-deps) req))
 
         (and (= method :post) admin-schedule-pause-match)
-        (protected-route-response req #(handle-pause-schedule (second admin-schedule-pause-match)))
+        (protected-route-response req #(http-admin/handle-pause-schedule (admin-handler-deps)
+                                                                         (second admin-schedule-pause-match)))
 
         (and (= method :post) admin-schedule-resume-match)
-        (protected-route-response req #(handle-resume-schedule (second admin-schedule-resume-match)))
+        (protected-route-response req #(http-admin/handle-resume-schedule (admin-handler-deps)
+                                                                          (second admin-schedule-resume-match)))
 
         (and (= method :post) (= uri "/admin/skills"))
-        (protected-route-response req #(handle-save-skill req))
+        (protected-route-response req #(http-admin/handle-save-skill (admin-handler-deps) req))
 
 	        (and (= method :post) (= uri "/admin/skills/import-openclaw"))
-	        (protected-route-response req #(handle-import-openclaw-skill req))
+	        (protected-route-response req #(http-admin/handle-import-openclaw-skill (admin-handler-deps) req))
 
 	        (and (= method :delete) admin-site-match)
-	        (protected-route-response req #(handle-delete-site (second admin-site-match)))
+	        (protected-route-response req #(http-admin/handle-delete-site (admin-handler-deps)
+                                                                             (second admin-site-match)))
 
         (and (= method :delete) admin-schedule-match)
-        (protected-route-response req #(handle-delete-schedule (second admin-schedule-match)))
+        (protected-route-response req #(http-admin/handle-delete-schedule (admin-handler-deps)
+                                                                          (second admin-schedule-match)))
 
         (and (= method :get) admin-skill-match)
-        (protected-route-response req #(handle-get-skill (second admin-skill-match)))
+        (protected-route-response req #(http-admin/handle-get-skill (admin-handler-deps)
+                                                                    (second admin-skill-match)))
 
         (and (= method :delete) admin-skill-match)
-        (protected-route-response req #(handle-delete-skill (second admin-skill-match)))
+        (protected-route-response req #(http-admin/handle-delete-skill (admin-handler-deps)
+                                                                       (second admin-skill-match)))
 
         (and (= method :get) (= uri "/skills"))
-        (protected-route-response req #(handle-skills req))
+        (protected-route-response req #(http-admin/handle-skills (admin-handler-deps) req))
 
         (and (= method :get) (= uri "/health"))
         (handle-health req)

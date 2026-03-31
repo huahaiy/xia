@@ -7,6 +7,7 @@
             [xia.artifact :as artifact]
             [xia.backup :as backup]
             [xia.channel.http :as http]
+            [xia.channel.http.admin]
             [xia.db :as db]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.local-doc :as local-doc]
@@ -1911,12 +1912,12 @@
       (runtime-state/mark-running!))))
 
 (deftest admin-local-doc-summarization-route-returns-503-when-disconnect-is-wrapped
-  (with-redefs [xia.channel.http/runtime-available? (constantly true)
-                xia.channel.http/save-config-override! (fn [& _]
-                                                         (throw (ex-info "save failed"
-                                                                         {}
-                                                                         (ex-info "Database not connected. Call (xia.db/connect!) first."
-                                                                                  {}))))]
+(with-redefs [xia.channel.http/runtime-available? (constantly true)
+                xia.channel.http.admin/save-config-override! (fn [& _]
+                                                               (throw (ex-info "save failed"
+                                                                               {}
+                                                                               (ex-info "Database not connected. Call (xia.db/connect!) first."
+                                                                                        {}))))]
     (let [response (#'http/router {:uri            "/admin/local-doc-summarization"
                                    :request-method :post
                                    :headers        (ui-headers)
