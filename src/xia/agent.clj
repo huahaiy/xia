@@ -1577,14 +1577,18 @@
         {:keys [embedding-cache same-semantic? semantic-similarity semantic-match-source]}
         (if (and signature
                  same-stall-state?
-                 (not progressed?)
-                 (not repeated-tool-failure?))
+                 (not progressed?))
           (semantic-loop-equivalent? (or embedding-cache {}) signature next-signature)
           {:embedding-cache (or embedding-cache {})
-           :same-semantic? repeated-tool-failure?
+           :same-semantic? false
            :semantic-similarity nil
-           :semantic-match-source (when repeated-tool-failure?
-                                    :tool-failure)})]
+           :semantic-match-source nil})
+        semantic-match-source (cond
+                                (and repeated-tool-failure? same-semantic?)
+                                :tool-failure
+
+                                :else
+                                semantic-match-source)]
     (if (and same-stall-state? same-semantic? (not progressed?))
       {:signature next-signature
        :stall-key next-stall-key
