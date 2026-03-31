@@ -141,7 +141,11 @@
     (is (str/includes? content
                        "If you request any tool calls in a response, do not append AUTONOMOUS_STATUS_JSON: yet."))
     (is (str/includes? content
-                       "Append AUTONOMOUS_STATUS_JSON: only on the final assistant response of the iteration"))))
+                       "Append AUTONOMOUS_STATUS_JSON: only on the final assistant response of the iteration"))
+    (is (str/includes? content
+                       "Raw JSON is preferred; fenced ```json blocks are also accepted."))
+    (is (not (str/includes? content
+                            "with no markdown fencing")))))
 
 (deftest initial-state-preserves-a-long-goal
   (let [goal  (str "Handle the multi-account billing remediation workflow for the March support backlog, including invoice verification, refund eligibility review, payment retry checks, customer reply drafting, and the follow-up notes needed for finance escalation when ownership records disagree across systems.")
@@ -214,6 +218,31 @@
            (get-in popped [:stack 0 :next-step])))
     (is (= [{:item "Find invoice ids" :status :completed}
             {:item "Draft billing reply" :status :pending}]
+           (get-in popped [:stack 0 :agenda])))))
+
+(deftest apply-control-pop-does-not-complete-a-similarly-named-sibling-agenda-item
+  (let [state {:stack [{:title "Handle billing emails"
+                        :summary "Need the draft and the follow-up"
+                        :next-step "Draft billing reply"
+                        :reason "Working through similar subtasks"
+                        :progress-status :resumable
+                        :agenda [{:item "Draft billing reply follow up" :status :pending}
+                                 {:item "Draft billing reply" :status :resumable}]}
+                       {:title "Draft billing reply"
+                        :summary "Writing the reply"
+                        :next-step "Return to parent task"
+                        :reason "This child subtask is almost done"
+                        :progress-status :in-progress
+                        :agenda [{:item "Write the reply" :status :completed}]}]}
+        popped (autonomous/apply-control
+                state
+                {:status :continue
+                 :summary "Reply drafted"
+                 :reason "Return to parent task"
+                 :current-focus "Handle billing emails"
+                 :stack-action :pop})]
+    (is (= [{:item "Draft billing reply follow up" :status :pending}
+            {:item "Draft billing reply" :status :completed}]
            (get-in popped [:stack 0 :agenda])))))
 
 (deftest apply-control-stay-preserves-existing-frame-fields

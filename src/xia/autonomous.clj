@@ -443,24 +443,23 @@
                         "next_step"
                         "next-step"])))
 
-(defn- normalize-match-text
+(defn- normalize-match-tokens
   [value]
-  (some-> value
-          str
-          str/lower-case
-          (str/replace #"[^a-z0-9]+" " ")
-          str/trim
-          not-empty))
+  (some->> value
+           str
+           str/lower-case
+           (re-seq #"[a-z0-9]+")
+           vec
+           not-empty))
 
 (defn- matching-task?
   [left right]
-  (let [left*  (normalize-match-text left)
-        right* (normalize-match-text right)]
+  (let [left*  (normalize-match-tokens left)
+        right* (normalize-match-tokens right)]
     (and left*
          right*
          (or (= left* right*)
-             (str/includes? left* right*)
-             (str/includes? right* left*)))))
+             (= (set left*) (set right*))))))
 
 (def ^:private actionable-agenda-statuses
   #{:pending :in-progress :paused :resumable :diverged :blocked})
@@ -864,7 +863,7 @@
                             "- Use paused when work should stop for now. Use resumable when it is paused but has a clear restart path. Use diverged when the work has meaningfully branched away from the original plan.\n"
                             (when direct-user?
                               "- For direct user-facing turns, use continue only when another internal iteration can make more progress without waiting on the user.\n")
-                            "- Return JSON only after the marker, with no markdown fencing.")}]
+                            "- Return JSON only after the marker. Raw JSON is preferred; fenced ```json blocks are also accepted.")}]
           (or (get (swap! controller-system-message-cache assoc mode message) mode)
               message)))))
 
