@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [charred.api :as json]
             [clojure.string :as str]
+            [datalevin.embedding :as emb]
             [xia.agent :as agent]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
@@ -13,6 +14,34 @@
             [xia.working-memory :as wm]))
 
 (use-fixtures :each with-test-db)
+
+(defn- semantic-loop-test-provider
+  []
+  (reify emb/IEmbeddingProvider
+    (embedding [_ items _opts]
+      (mapv (fn [item]
+              (let [text (-> item str str/lower-case)]
+                (cond
+                  (or (str/includes? text "inspect config file")
+                      (str/includes? text "review configuration document"))
+                  [1.0 0.0 0.0]
+
+                  (or (str/includes? text "message billing customer")
+                      (str/includes? text "follow up with the billing customer"))
+                  [0.0 1.0 0.0]
+
+                  :else
+                  [0.0 0.0 1.0])))
+            items))
+    (embedding-metadata [_]
+      {:provider :semantic-loop-test})
+    (embedding-dimensions [_]
+      3)
+    (close-provider [_]
+      nil)
+    java.lang.AutoCloseable
+    (close [_]
+      nil)))
 
 (deftest process-message-reports-progress
   (let [session-id (db/create-session! :terminal)
@@ -1281,7 +1310,7 @@
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
 
-(deftest process-message-does-not-treat-different-tool-activity-as-identical-iterations
+(deftest process-message-detects-stalled-loops-even-when-tool-choices-vary
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom 0)]
     (db/set-config! :agent/supervisor-max-identical-iterations 2)
@@ -1332,10 +1361,132 @@
                                                                          "AUTONOMOUS_STATUS_JSON:"
                                                                          "{\"status\":\"continue\",\"summary\":\"Still working\",\"next_step\":\"Keep going\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Retry task\",\"status\":\"blocked\"}]}")}))
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
-      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
-        (is (str/includes? result "Still working."))
-        (is (str/includes? result "Note: I stopped after reaching the autonomous iteration limit for this turn (3)."))))
-    (is (= 6 @llm-calls))))
+      (let [err (try
+                  (agent/process-message session-id "keep going" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-loop-stalled
+               (:type (ex-data err)))))
+      (is (= 4 @llm-calls)))))
+
+(deftest process-message-treats-semantic-focus-rephrasing-as-the-same-stall
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Reading the file.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Reading the file\",\"next_step\":\"Read config file\",\"reason\":\"Need more details\",\"goal_complete\":false,\"current_focus\":\"Read config file\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Read config file\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" (str "Opening the file.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"continue\",\"summary\":\"Opening the file\",\"next_step\":\"Open config file\",\"reason\":\"Need more details\",\"goal_complete\":false,\"current_focus\":\"Open config file\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Open config file\",\"status\":\"in_progress\"}]}")}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "inspect config file" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-loop-stalled
+               (:type (ex-data err)))))
+      (is (= 2 @llm-calls)))))
+
+(deftest process-message-uses-embeddings-to-detect-semantic-looping
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.db/current-embedding-provider  (constantly (semantic-loop-test-provider))
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Inspecting the config file.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Inspecting the config file\",\"next_step\":\"Inspect config file\",\"reason\":\"Need more details\",\"goal_complete\":false,\"current_focus\":\"Inspect config file\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Inspect config file\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" (str "Reviewing the configuration document.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"continue\",\"summary\":\"Reviewing the configuration document\",\"next_step\":\"Review configuration document\",\"reason\":\"Need more details\",\"goal_complete\":false,\"current_focus\":\"Review configuration document\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Review configuration document\",\"status\":\"in_progress\"}]}")}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id "inspect config file" :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (= :autonomous-loop-stalled
+               (:type (ex-data err))))
+        (is (= :embedding
+               (:semantic-match-source (ex-data err))))))
+    (is (= 2 @llm-calls))))
+
+(deftest process-message-resets-the-stall-counter-when-embedding-focus-shifts
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.db/current-embedding-provider  (constantly (semantic-loop-test-provider))
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Inspecting the config file.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Inspecting the config file\",\"next_step\":\"Inspect config file\",\"reason\":\"Need more details\",\"goal_complete\":false,\"current_focus\":\"Inspect config file\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Inspect config file\",\"status\":\"in_progress\"}]}")}
+                                                         2 {"content" (str "Following up with the billing customer.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Following up with the billing customer\",\"next_step\":\"Follow up with the billing customer\",\"reason\":\"Need more details\",\"goal_complete\":false,\"current_focus\":\"Follow up with the billing customer\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Follow up with the billing customer\",\"status\":\"in_progress\"}]}")}
+                                                         {"content" "Finished.\n\nAUTONOMOUS_STATUS_JSON:{\"status\":\"complete\",\"summary\":\"Finished\",\"next_step\":\"\",\"reason\":\"Done\",\"goal_complete\":true,\"current_focus\":\"Follow up with the billing customer\",\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Follow up with the billing customer\",\"status\":\"completed\"}]}"}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Finished."
+             (agent/process-message session-id "inspect config file" :channel :terminal))))
+    (is (= 3 @llm-calls))))
+
+(deftest process-message-does-not-stall-when-agenda-completion-advances
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/supervisor-max-identical-iterations 2)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 3)
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "Checked inbox.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Checked inbox\",\"next_step\":\"Draft reply\",\"reason\":\"Need to draft\",\"goal_complete\":false,\"current_focus\":\"Handle billing\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"pending\"}]}")}
+                                                         2 {"content" (str "Drafted reply.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:"
+                                                                           "{\"status\":\"continue\",\"summary\":\"Drafted reply\",\"next_step\":\"Send reply\",\"reason\":\"Need to send\",\"goal_complete\":false,\"current_focus\":\"Handle billing\",\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"completed\"},{\"item\":\"Send reply\",\"status\":\"pending\"}]}")}
+                                                         {"content" (str "Sent reply.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:"
+                                                                         "{\"status\":\"complete\",\"summary\":\"Sent reply\",\"next_step\":\"\",\"reason\":\"Done\",\"goal_complete\":true,\"current_focus\":\"Handle billing\",\"progress_status\":\"complete\",\"agenda\":[{\"item\":\"Check inbox\",\"status\":\"completed\"},{\"item\":\"Draft reply\",\"status\":\"completed\"},{\"item\":\"Send reply\",\"status\":\"completed\"}]}")}))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (is (= "Sent reply."
+             (agent/process-message session-id "handle billing" :channel :terminal))))
+    (is (= 3 @llm-calls))))
 
 (deftest process-message-allows-final-llm-call-after-last-tool-round
   (let [session-id (db/create-session! :terminal)
