@@ -1,7 +1,11 @@
 (ns xia.autonomous-test
   (:require [clojure.string :as str]
             [clojure.test :refer :all]
-            [xia.autonomous :as autonomous]))
+            [xia.autonomous :as autonomous]
+            [xia.db :as db]
+            [xia.test-helpers :refer [with-test-db]]))
+
+(use-fixtures :each with-test-db)
 
 (deftest parse-controller-response-normalizes-progress-and-agenda
   (let [{:keys [assistant-text intent control]}
@@ -267,6 +271,28 @@
     (is (= "Task 11" (get-in state [:stack 2 :title])))
     (is (= "Task 40" (get-in state [:stack 31 :title])))
     (is (= "Task 0" (autonomous/root-goal state)))))
+
+(deftest apply-control-respects-configured-max-stack-depth
+  (db/set-config! :autonomous/max-stack-depth 4)
+  (let [state (reduce (fn [current idx]
+                        (autonomous/apply-control
+                         current
+                         {:status :continue
+                          :summary (str "Working task " idx)
+                          :next-step (str "Continue task " idx)
+                          :reason "Descending into a subtask"
+                          :current-focus (str "Task " idx)
+                          :stack-action :push
+                          :progress-status :pending
+                          :agenda [{:item (str "Task " idx) :status :pending}]}))
+                      (autonomous/initial-state "Task 0")
+                      (range 1 7))]
+    (is (= 4 (count (:stack state))))
+    (is (= "Task 0" (get-in state [:stack 0 :title])))
+    (is (true? (get-in state [:stack 1 :compressed?])))
+    (is (= 4 (get-in state [:stack 1 :compressed-count])))
+    (is (= "Task 5" (get-in state [:stack 2 :title])))
+    (is (= "Task 6" (get-in state [:stack 3 :title])))))
 
 (deftest apply-control-stay-preserves-existing-frame-fields
   (let [initial {:stack [{:title "Handle billing emails"

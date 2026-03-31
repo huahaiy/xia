@@ -15,7 +15,7 @@
 (def ^:private default-reason-chars 600)
 (def ^:private max-agenda-items 8)
 (def ^:private max-agenda-item-chars 160)
-(def ^:private max-stack-depth 32)
+(def ^:private default-max-stack-depth 32)
 (def ^:private compressed-frame-preview-limit 6)
 (def ^:private compressed-frame-reason
   "Older suspended stack frames were compressed to stay within the depth limit.")
@@ -120,6 +120,11 @@
   []
   (cfg/positive-long :autonomous/max-iterations
                      default-max-iterations))
+
+(defn- max-stack-depth
+  []
+  (cfg/positive-long :autonomous/max-stack-depth
+                     default-max-stack-depth))
 
 (defn control-marker-text
   []
@@ -616,11 +621,12 @@
 
 (defn- compress-stack
   [stack]
-  (let [stack* (vec stack)]
-    (if (<= (count stack*) max-stack-depth)
+  (let [stack* (vec stack)
+        limit  (long (max-stack-depth))]
+    (if (<= (count stack*) limit)
       stack*
       (let [root          (first stack*)
-            tail-count    (max 0 (- max-stack-depth 2))
+            tail-count    (max 0 (- limit 2))
             descendants   (subvec stack* 1)
             kept-tail     (vec (take-last tail-count descendants))
             compressed    (vec (drop-last tail-count descendants))
@@ -669,13 +675,16 @@
     []
 
     :else
-    (let [default-title (default-frame-title goal)
+    (let [limit         (long (max-stack-depth))
+          default-title (default-frame-title goal)
           stack*        (->> (or stack [])
                              (keep #(when (map? %)
                                       (normalize-frame % default-title)))
                              vec)]
       (if (seq stack*)
-        (compress-stack stack*)
+        (if (<= (count stack*) limit)
+          stack*
+          (compress-stack stack*))
         [(normalize-frame {:title default-title
                            :progress-status :pending}
                           default-title)]))))
