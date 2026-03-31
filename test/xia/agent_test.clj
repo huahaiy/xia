@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [datalevin.embedding :as emb]
             [xia.agent :as agent]
+            [xia.agent.tools :as agent-tools]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
@@ -99,6 +100,30 @@
       (is (= [:user-message :llm-response]
              (mapv :type events)))
       (is (= call-id (:llm-call-id (last events)))))))
+
+(deftest tool-round-signature-preserves-sanitized-result-details
+  (let [signature (agent-tools/tool-round-signature
+                   [{"id" "call-1"
+                     "function" {"name" "workspace-read"
+                                 "arguments" "{\"path\":\"notes/billing.md\"}"}}]
+                   [{:tool_call_id "call-1"
+                     :tool_name "workspace-read"
+                     :result {:summary "Read the billing note"
+                              :path "notes/billing.md"
+                              :line-count 42
+                              :image_data_url "data:image/png;base64,xxx"}
+                     :content "Read the billing note"}])]
+    (is (= [{:name "workspace-read"
+             :arguments "{\"path\":\"notes/billing.md\"}"}]
+           (:calls signature)))
+    (is (= [{:tool-name "workspace-read"
+             :status "success"
+             :summary "Read the billing note"
+             :result {:summary "Read the billing note"
+                      :path "notes/billing.md"
+                      :line-count 42}
+             :content "Read the billing note"}]
+           (:results signature)))))
 
 (deftest process-message-audits-tool-result-completions
   (let [session-id     (db/create-session! :terminal)

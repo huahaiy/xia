@@ -117,6 +117,20 @@
       summary (assoc :summary (truncate-summary summary 240))
       error (assoc :error (truncate-summary error 500)))))
 
+(defn tool-result-signature-data
+  [tool-result]
+  (let [result  (some-> (:result tool-result) sanitized-tool-result)
+        error   (tool-result-error result)
+        summary (tool-result-summary result)
+        content (some-> (:content tool-result) str/trim not-empty)
+        status  (tool-result-status tool-result)]
+    (cond-> {:tool-name (:tool_name tool-result)
+             :status    (name status)}
+      summary (assoc :summary summary)
+      error (assoc :error error)
+      (some? result) (assoc :result result)
+      content (assoc :content content))))
+
 (defn tool-call-names
   [tool-calls]
   (->> tool-calls
@@ -158,7 +172,7 @@
 (defn tool-round-signature
   [tool-calls tool-results]
   {:calls (tool-call-signature tool-calls)
-   :results (mapv tool-result-audit-data tool-results)})
+   :results (mapv tool-result-signature-data tool-results)})
 
 (defn sanitized-tool-result
   [result]
