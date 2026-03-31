@@ -9,6 +9,9 @@
             [datalevin.llm :as llm]
             [taoensso.timbre :as log]
             [xia.crypto :as crypto]
+            [xia.db.catalog :as db-catalog]
+            [xia.db.provider :as db-provider]
+            [xia.db.session :as db-session]
             [xia.paths :as paths]
             [xia.runtime-state :as runtime-state]
             [xia.sensitive :as sensitive])
@@ -1516,210 +1519,31 @@
          :site-count (count (:sites snapshot))
          :skipped-secret-count @skipped-secret-count}))))
 
+(declare provider-deps)
+
 ;; ---------------------------------------------------------------------------
 ;; LLM Providers
 ;; ---------------------------------------------------------------------------
 
 (defn upsert-provider! [{:keys [id] :as provider}]
-  (let [provider-id                  (or id (:llm.provider/id provider))
-        provider-eid                 (ffirst (q '[:find ?e :in $ ?id
-                                                  :where [?e :llm.provider/id ?id]]
-                                                provider-id))
-        template-id                  (or (:llm.provider/template provider)
-                                         (:template provider))
-        access-mode                  (or (:llm.provider/access-mode provider)
-                                         (:access-mode provider))
-        credential-source            (or (:llm.provider/credential-source provider)
-                                         (:credential-source provider)
-                                         (:llm.provider/auth-type provider)
-                                         (:auth-type provider))
-        auth-type                    (or (:llm.provider/auth-type provider)
-                                         (:auth-type provider))
-        oauth-account                (or (:llm.provider/oauth-account provider)
-                                         (:oauth-account provider))
-        browser-session              (or (:llm.provider/browser-session provider)
-                                         (:browser-session provider))
-        workloads                    (some-> (or (:llm.provider/workloads provider)
-                                                (:workloads provider))
-                                             set)
-        system-prompt-budget         (or (:llm.provider/system-prompt-budget provider)
-                                         (:system-prompt-budget provider))
-        history-budget               (or (:llm.provider/history-budget provider)
-                                         (:history-budget provider))
-        rate-limit-per-minute        (or (:llm.provider/rate-limit-per-minute provider)
-                                         (:rate-limit-per-minute provider))
-        vision?                      (or (:llm.provider/vision? provider)
-                                         (:vision? provider))
-        allow-private-network?       (or (:llm.provider/allow-private-network? provider)
-                                         (:allow-private-network? provider))
-        has-workloads?               (or (contains? provider :llm.provider/workloads)
-                                         (contains? provider :workloads))
-        has-template?                (or (contains? provider :llm.provider/template)
-                                         (contains? provider :template))
-        has-access-mode?             (or (contains? provider :llm.provider/access-mode)
-                                         (contains? provider :access-mode))
-        has-credential-source?       (or (contains? provider :llm.provider/credential-source)
-                                         (contains? provider :credential-source)
-                                         (contains? provider :llm.provider/auth-type)
-                                         (contains? provider :auth-type))
-        has-oauth-account?           (or (contains? provider :llm.provider/oauth-account)
-                                         (contains? provider :oauth-account))
-        has-browser-session?         (or (contains? provider :llm.provider/browser-session)
-                                         (contains? provider :browser-session))
-        has-vision?                  (or (contains? provider :llm.provider/vision?)
-                                         (contains? provider :vision?))
-        has-allow-private-network?   (or (contains? provider :llm.provider/allow-private-network?)
-                                         (contains? provider :allow-private-network?))
-        has-system-prompt-budget?    (or (contains? provider :llm.provider/system-prompt-budget)
-                                         (contains? provider :system-prompt-budget))
-        has-history-budget?          (or (contains? provider :llm.provider/history-budget)
-                                         (contains? provider :history-budget))
-        has-rate-limit?              (or (contains? provider :llm.provider/rate-limit-per-minute)
-                                         (contains? provider :rate-limit-per-minute))
-        provider-tx                  (cond-> {:llm.provider/id provider-id}
-                                       (contains? provider :llm.provider/name)
-                                       (assoc :llm.provider/name (:llm.provider/name provider))
-                                       (contains? provider :name)
-                                       (assoc :llm.provider/name (:name provider))
-                                       (contains? provider :llm.provider/base-url)
-                                       (assoc :llm.provider/base-url (:llm.provider/base-url provider))
-                                       (contains? provider :base-url)
-                                       (assoc :llm.provider/base-url (:base-url provider))
-                                       (contains? provider :llm.provider/api-key)
-                                       (assoc :llm.provider/api-key (:llm.provider/api-key provider))
-                                       (contains? provider :api-key)
-                                       (assoc :llm.provider/api-key (:api-key provider))
-                                       (and has-template?
-                                            (some? template-id))
-                                       (assoc :llm.provider/template template-id)
-                                       (and has-access-mode?
-                                            (some? access-mode))
-                                       (assoc :llm.provider/access-mode access-mode)
-                                       (and has-credential-source?
-                                            (some? credential-source))
-                                       (assoc :llm.provider/credential-source credential-source)
-                                       (and has-credential-source?
-                                            (some? credential-source))
-                                       (assoc :llm.provider/auth-type credential-source)
-                                       (and has-oauth-account?
-                                            (some? oauth-account))
-                                       (assoc :llm.provider/oauth-account oauth-account)
-                                       (and has-browser-session?
-                                            (some? browser-session))
-                                       (assoc :llm.provider/browser-session browser-session)
-                                       (contains? provider :llm.provider/model)
-                                       (assoc :llm.provider/model (:llm.provider/model provider))
-                                       (contains? provider :model)
-                                       (assoc :llm.provider/model (:model provider))
-                                       (and has-workloads?
-                                            (seq workloads))
-                                       (assoc :llm.provider/workloads workloads)
-                                       has-vision?
-                                       (assoc :llm.provider/vision? (boolean vision?))
-                                       has-allow-private-network?
-                                       (assoc :llm.provider/allow-private-network? (boolean allow-private-network?))
-                                       (and has-system-prompt-budget?
-                                            (some? system-prompt-budget))
-                                       (assoc :llm.provider/system-prompt-budget system-prompt-budget)
-                                       (and has-history-budget?
-                                            (some? history-budget))
-                                       (assoc :llm.provider/history-budget history-budget)
-                                       (and has-rate-limit?
-                                            (some? rate-limit-per-minute))
-                                       (assoc :llm.provider/rate-limit-per-minute rate-limit-per-minute)
-                                       (contains? provider :llm.provider/default?)
-                                       (assoc :llm.provider/default? (:llm.provider/default? provider))
-                                       (contains? provider :default?)
-                                       (assoc :llm.provider/default? (:default? provider)))
-        retracts                     (cond-> []
-                                       (and provider-eid
-                                            has-workloads?)
-                                       (into (mapv (fn [workload]
-                                                     [:db/retract provider-eid
-                                                      :llm.provider/workloads
-                                                      workload])
-                                                   (or (:llm.provider/workloads (raw-entity provider-eid))
-                                                       [])))
-                                       (and provider-eid
-                                            has-template?
-                                            (nil? template-id))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/template])
-                                       (and provider-eid
-                                            has-access-mode?
-                                            (nil? access-mode))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/access-mode])
-                                       (and provider-eid
-                                            has-credential-source?
-                                            (nil? credential-source))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/credential-source])
-                                       (and provider-eid
-                                            has-credential-source?
-                                            (nil? credential-source))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/auth-type])
-                                       (and provider-eid
-                                            has-oauth-account?
-                                            (nil? oauth-account))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/oauth-account])
-                                       (and provider-eid
-                                            has-browser-session?
-                                            (nil? browser-session))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/browser-session])
-                                       (and provider-eid
-                                            has-system-prompt-budget?
-                                            (nil? system-prompt-budget))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/system-prompt-budget])
-                                       (and provider-eid
-                                            has-history-budget?
-                                            (nil? history-budget))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/history-budget])
-                                       (and provider-eid
-                                            has-rate-limit?
-                                            (nil? rate-limit-per-minute))
-                                       (conj [:db/retract provider-eid
-                                              :llm.provider/rate-limit-per-minute]))]
-    (transact! (conj retracts provider-tx))))
+  (db-provider/upsert-provider! (provider-deps) provider))
 
 (defn delete-provider! [provider-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.provider/id ?id]]
-                             provider-id))]
-    (transact! [[:db/retractEntity eid]])))
+  (db-provider/delete-provider! (provider-deps) provider-id))
 
 (defn get-default-provider []
-  (let [results (q '[:find ?e :where
-                     [?e :llm.provider/default? true]])]
-    (when-let [eid (ffirst results)]
-      (decrypt-entity (raw-entity eid)))))
+  (db-provider/get-default-provider (provider-deps)))
 
 (defn get-provider [provider-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.provider/id ?id]]
-                       provider-id))]
-    (when eid
-      (decrypt-entity (raw-entity eid)))))
+  (db-provider/get-provider (provider-deps) provider-id))
 
 (defn list-providers []
-  (let [eids (q '[:find ?e :where [?e :llm.provider/id _]])]
-    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
+  (db-provider/list-providers (provider-deps)))
 
 (defn set-default-provider!
   "Mark exactly one provider as the default."
   [provider-id]
-  (let [providers (list-providers)
-        tx-data   (mapv (fn [provider]
-                          {:llm.provider/id       (:llm.provider/id provider)
-                           :llm.provider/default? (= provider-id
-                                                     (:llm.provider/id provider))})
-                        providers)]
-    (when (seq tx-data)
-      (transact! tx-data))
-    provider-id))
+  (db-provider/set-default-provider! (provider-deps) provider-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Memory — episodic and knowledge graph operations are in xia.memory
@@ -1730,95 +1554,46 @@
 ;; Working Memory snapshots (crash-recovery)
 ;; ---------------------------------------------------------------------------
 
+(defn- session-deps
+  []
+  {:conn                conn
+   :decrypt-entity      decrypt-entity
+   :decrypt-secret-attr decrypt-secret-attr
+   :entity-created-at   entity-created-at
+   :entity-updated-at   entity-updated-at
+   :epoch-millis->date  epoch-millis->date
+   :q                   q
+   :raw-entity          raw-entity
+   :transact!           transact!})
+
+(defn- catalog-deps
+  []
+  {:decrypt-entity decrypt-entity
+   :q              q
+   :raw-entity     raw-entity
+   :transact!      transact!})
+
+(defn- provider-deps
+  []
+  {:decrypt-entity decrypt-entity
+   :q              q
+   :raw-entity     raw-entity
+   :transact!      transact!})
+
 (defn save-wm-snapshot!
   "Persist working memory state to DB for crash recovery."
-  [{:keys [session-id topics slots episode-refs local-doc-refs autonomy-state]}]
-  (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
-                                  :where [?e :session/id ?sid]]
-                                session-id))]
-    (when-not session-eid
-      (throw (ex-info "Cannot save WM snapshot: session not found"
-                      {:session-id session-id})))
-    (let [wm-id       (random-uuid)
-          wm-tx       (cond-> {:wm/id         wm-id
-                               :wm/session    session-eid
-                               :wm/topics     (or topics "")
-                               :wm/updated-at (java.util.Date.)}
-                        (some? autonomy-state)
-                        (assoc :wm/autonomy-state (json/write-json-str autonomy-state)))
-          ;; Delete old snapshot for this session
-          old-wm-eids (mapv first (q '[:find ?e :in $ ?s
-                                       :where [?e :wm/session ?s]]
-                                     session-eid))
-          retracts    (mapv (fn [eid] [:db/retractEntity eid]) old-wm-eids)]
-      (transact! (into retracts [wm-tx]))
-      ;; Now add slots and episode-refs pointing to the new WM entity
-      (let [wm-eid (ffirst (q '[:find ?e :in $ ?id :where [?e :wm/id ?id]] wm-id))]
-        (when (seq slots)
-          (transact!
-            (mapv (fn [[_node-eid slot]]
-                    {:wm.slot/id        (random-uuid)
-                     :wm.slot/wm        wm-eid
-                     :wm.slot/node      (:node-eid slot)
-                     :wm.slot/relevance (float (:relevance slot))
-                     :wm.slot/pinned?   (boolean (:pinned? slot))
-                     :wm.slot/added-at  (java.util.Date.)})
-                  slots)))
-        (when (seq episode-refs)
-          (transact!
-            (mapv (fn [eref]
-                    {:wm.episode-ref/id        (random-uuid)
-                     :wm.episode-ref/wm        wm-eid
-                     :wm.episode-ref/episode   (:episode-eid eref)
-                     :wm.episode-ref/relevance (float (:relevance eref))})
-                  episode-refs)))
-        (when (seq local-doc-refs)
-          (transact!
-            (keep (fn [dref]
-                    (when-let [doc-eid (ffirst
-                                         (q '[:find ?e :in $ ?id
-                                              :where [?e :local.doc/id ?id]]
-                                            (:doc-id dref)))]
-                      {:wm.local-doc-ref/id        (random-uuid)
-                       :wm.local-doc-ref/wm        wm-eid
-                       :wm.local-doc-ref/doc       doc-eid
-                       :wm.local-doc-ref/relevance (float (:relevance dref))}))
-                  local-doc-refs))))
-      wm-id)))
+  [snapshot]
+  (db-session/save-wm-snapshot! (session-deps) snapshot))
 
 (defn load-wm-snapshot
   "Load the most recent WM snapshot for a session."
   [session-id]
-  (let [session-eid (ffirst (q '[:find ?e :in $ ?sid
-                                  :where [?e :session/id ?sid]]
-                                session-id))]
-    (when session-eid
-      (when-let [wm-eid (ffirst (q '[:find ?e :in $ ?s
-                                      :where [?e :wm/session ?s]]
-                                    session-eid))]
-        (let [wm-entity (into {} (d/entity (d/db (conn)) wm-eid))]
-          {:topics (:wm/topics wm-entity)
-           :autonomy-state (when-let [text (:wm/autonomy-state wm-entity)]
-                             (try
-                               (json/read-json text)
-                               (catch Exception _
-                                 nil)))
-           :updated-at (entity-updated-at wm-entity)})))))
+  (db-session/load-wm-snapshot (session-deps) session-id))
 
 (defn latest-session-episode
   "Get the most recent episode summary for any session."
   []
-  (first
-    (sort-by :timestamp #(compare %2 %1)
-             (map (fn [[summary ctx ts]]
-                    {:summary summary
-                     :context (when-not (= "" ctx) ctx)
-                     :timestamp ts})
-                  (q '[:find ?summary ?ctx ?ts
-                       :where
-                       [?e :episode/summary ?summary]
-                       [?e :episode/timestamp ?ts]
-                       [(get-else $ ?e :episode/context "") ?ctx]])))))
+  (db-session/latest-session-episode (session-deps)))
 
 ;; ---------------------------------------------------------------------------
 ;; Sessions & Messages
@@ -1827,299 +1602,60 @@
 (defn create-session!
   ([channel]
    (create-session! channel nil))
-  ([channel {:keys [parent-session-id worker? label active?]
-             :or   {worker? false
-                    active? true}}]
-   (let [id (random-uuid)]
-     (transact!
-       [(cond-> {:session/id      id
-                 :session/channel channel
-                 :session/worker? worker?
-                 :session/active? active?}
-          parent-session-id (assoc :session/parent-id parent-session-id)
-          (some? label) (assoc :session/label label))])
-     id)))
+  ([channel opts]
+   (db-session/create-session! (session-deps) channel opts)))
 
 (defn list-sessions
   "List all sessions with basic metadata, newest first."
   ([] (list-sessions nil))
   ([{:keys [include-workers?] :or {include-workers? false}}]
-   (->> (q '[:find ?s ?sid ?channel
-             :where
-             [?s :session/id ?sid]
-             [?s :session/channel ?channel]])
-        (map (fn [[eid sid channel]]
-               (let [entity-map (raw-entity eid)]
-                 {:id         sid
-                  :channel    channel
-                  :created-at (entity-created-at entity-map)
-                  :active?    (boolean (:session/active? entity-map))
-                  :worker?    (boolean (:session/worker? entity-map))
-                  :parent-id  (:session/parent-id entity-map)
-                  :label      (:session/label entity-map)})))
-        (remove (fn [{:keys [worker?]}]
-                  (and worker? (not include-workers?))))
-        (sort-by :created-at #(compare %2 %1))
-        vec)))
+   (db-session/list-sessions (session-deps)
+                             {:include-workers? include-workers?})))
 
 (defn set-session-active!
   [session-id active?]
-  (when-let [session-eid (ffirst (q '[:find ?e :in $ ?sid
-                                      :where [?e :session/id ?sid]]
-                                    session-id))]
-    (transact! [{:db/id            session-eid
-                 :session/active? (boolean active?)}])
-    true))
-
-(defn- session-eid
-  [session-id]
-  (ffirst (q '[:find ?e :in $ ?sid
-               :where [?e :session/id ?sid]]
-             session-id)))
-
-(defn- tool-calls-doc
-  [tool-calls]
-  {:calls (vec tool-calls)})
-
-(defn- read-tool-calls-doc
-  [value]
-  (cond
-    (map? value)        (vec (or (:calls value) []))
-    (sequential? value) (vec value)
-    (= "" value)        nil
-    :else               value))
-
-(defn- tool-result-doc
-  [tool-result]
-  {:result tool-result})
-
-(defn- read-tool-result-doc
-  [value]
-  (cond
-    (map? value)        (if (contains? value :result) (:result value) value)
-    (= "" value)        nil
-    :else               value))
-
-(defn- json-doc
-  [value]
-  (json/write-json-str value))
-
-(defn- read-json-doc
-  [value]
-  (when (string? value)
-    (json/read-json value)))
-
-(declare empty->nil session-messages)
-
-(defn- normalize-message-local-doc-id
-  [value]
-  (cond
-    (instance? UUID value) value
-    (string? value)        (try
-                             (UUID/fromString (str/trim value))
-                             (catch Exception _
-                               nil))
-    :else                  nil))
-
-(defn- valid-session-local-doc-ids
-  [session-id local-doc-ids]
-  (let [doc-ids (->> local-doc-ids
-                     (keep normalize-message-local-doc-id)
-                     distinct
-                     vec)]
-    (if-not (seq doc-ids)
-      []
-      (let [valid-ids (->> (q '[:find ?doc-id
-                                :in $ ?sid [?doc-id ...]
-                                :where
-                                [?session :session/id ?sid]
-                                [?doc :local.doc/session ?session]
-                                [?doc :local.doc/id ?doc-id]]
-                              session-id
-                              doc-ids)
-                           (map first)
-                           set)]
-        (filterv valid-ids doc-ids)))))
-
-(defn- valid-session-artifact-ids
-  [session-id artifact-ids]
-  (let [artifact-ids* (->> artifact-ids
-                           (keep normalize-message-local-doc-id)
-                           distinct
-                           vec)]
-    (if-not (seq artifact-ids*)
-      []
-      (let [valid-ids (->> (q '[:find ?artifact-id
-                                :in $ ?sid [?artifact-id ...]
-                                :where
-                                [?session :session/id ?sid]
-                                [?artifact :artifact/session ?session]
-                                [?artifact :artifact/id ?artifact-id]]
-                              session-id
-                              artifact-ids*)
-                           (map first)
-                           set)]
-        (filterv valid-ids artifact-ids*)))))
-
-(defn- message-local-docs
-  [message-eid]
-  (->> (q '[:find ?doc-id ?name ?status
-            :in $ ?message
-            :where
-            [?ref :message.local-doc-ref/message ?message]
-            [?ref :message.local-doc-ref/doc ?doc]
-            [?doc :local.doc/id ?doc-id]
-            [(get-else $ ?doc :local.doc/name "") ?name]
-            [(get-else $ ?doc :local.doc/status :ready) ?status]]
-          message-eid)
-       (mapv (fn [[doc-id name status]]
-               {:id     doc-id
-                :name   (empty->nil name)
-                :status status}))))
-
-(defn- message-artifacts
-  [message-eid]
-  (->> (q '[:find ?artifact-id ?name ?title ?status
-            :in $ ?message
-            :where
-            [?ref :message.artifact-ref/message ?message]
-            [?ref :message.artifact-ref/artifact ?artifact]
-            [?artifact :artifact/id ?artifact-id]
-            [(get-else $ ?artifact :artifact/name "") ?name]
-            [(get-else $ ?artifact :artifact/title "") ?title]
-            [(get-else $ ?artifact :artifact/status :ready) ?status]]
-          message-eid)
-       (mapv (fn [[artifact-id name title status]]
-               {:id     artifact-id
-                :name   (empty->nil name)
-                :title  (empty->nil title)
-                :status status}))))
-
-(defn- message-token-estimate
-  [{:keys [role content tool-result]}]
-  (let [payload (cond
-                  (string? tool-result) tool-result
-                  (some? tool-result)   (pr-str tool-result)
-                  :else                 (or content ""))
-        role-overhead (case role
-                        :tool 16
-                        :assistant 8
-                        :user 8
-                        :system 8
-                        8)]
-    (+ role-overhead
-       (max 1 (quot (count payload) 4)))))
+  (db-session/set-session-active! (session-deps) session-id active?))
 
 (defn add-message!
   [session-id role content & {:keys [tool-calls tool-id tool-call-id tool-name tool-result
                                      llm-call-id provider-id model workload
                                      local-doc-ids artifact-ids]}]
-  (let [session-eid    (session-eid session-id)
-        message-id     (random-uuid)
-        doc-ids        (valid-session-local-doc-ids session-id local-doc-ids)
-        artifact-ids* (valid-session-artifact-ids session-id artifact-ids)]
-    (transact!
-      (into
-        [(cond-> {:message/id         message-id
-                  :message/session    session-eid
-                  :message/role       role
-                  :message/content    (or content "")
-                  :message/token-estimate (message-token-estimate {:role role
-                                                                   :content content
-                                                                   :tool-result tool-result})}
-           tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
-           (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
-           tool-id    (assoc :message/tool-id tool-id)
-           tool-call-id (assoc :message/tool-call-id tool-call-id)
-           tool-name  (assoc :message/tool-name tool-name)
-           llm-call-id (assoc :message/llm-call-id llm-call-id)
-           provider-id (assoc :message/provider-id provider-id)
-           model      (assoc :message/model model)
-           workload   (assoc :message/workload workload))]
-        (concat
-          (map (fn [doc-id]
-                 {:message.local-doc-ref/id      (random-uuid)
-                  :message.local-doc-ref/message [:message/id message-id]
-                  :message.local-doc-ref/doc     [:local.doc/id doc-id]})
-               doc-ids)
-          (map (fn [artifact-id]
-                 {:message.artifact-ref/id       (random-uuid)
-                  :message.artifact-ref/message  [:message/id message-id]
-                  :message.artifact-ref/artifact [:artifact/id artifact-id]})
-              artifact-ids*))))
-    message-id))
-
-(defn- empty->nil [s] (when-not (= "" s) s))
+  (apply db-session/add-message! (session-deps) session-id role content
+         (concat [:tool-calls tool-calls
+                  :tool-id tool-id
+                  :tool-call-id tool-call-id
+                  :tool-name tool-name
+                  :tool-result tool-result
+                  :llm-call-id llm-call-id
+                  :provider-id provider-id
+                  :model model
+                  :workload workload
+                  :local-doc-ids local-doc-ids
+                  :artifact-ids artifact-ids])))
 
 (defn session-history-recap
   [session-id]
-  (when-let [eid (session-eid session-id)]
-    (let [entity-map (decrypt-entity (raw-entity eid))
-          recap      (empty->nil (:session/history-recap entity-map))]
-      (when recap
-        {:content       recap
-         :message-count (long (or (:session/history-recap-count entity-map) 0))
-         :updated-at    (or (:session/history-recap-updated-at entity-map)
-                            (entity-updated-at entity-map))}))))
+  (db-session/session-history-recap (session-deps) session-id))
 
 (defn save-session-history-recap!
   [session-id content message-count]
-  (when-let [eid (session-eid session-id)]
-    (transact! [{:db/id eid
-                 :session/history-recap content
-                 :session/history-recap-count (long message-count)
-                 :session/history-recap-updated-at (java.util.Date.)}])
-    true))
+  (db-session/save-session-history-recap! (session-deps) session-id content message-count))
 
 (defn session-tool-recap
   [session-id]
-  (when-let [eid (session-eid session-id)]
-    (let [entity-map (decrypt-entity (raw-entity eid))
-          recap      (empty->nil (:session/tool-recap entity-map))]
-      (when recap
-        {:content       recap
-         :message-count (long (or (:session/tool-recap-count entity-map) 0))
-         :updated-at    (or (:session/tool-recap-updated-at entity-map)
-                            (entity-updated-at entity-map))}))))
+  (db-session/session-tool-recap (session-deps) session-id))
 
 (defn save-session-tool-recap!
   [session-id content message-count]
-  (when-let [eid (session-eid session-id)]
-    (transact! [{:db/id eid
-                 :session/tool-recap content
-                 :session/tool-recap-count (long message-count)
-                 :session/tool-recap-updated-at (java.util.Date.)}])
-    true))
+  (db-session/save-session-tool-recap! (session-deps) session-id content message-count))
 
 (defn session-message-metadata
   [session-id]
-  (->> (q '[:find ?m ?mid ?dca ?tokens
-            :in $ ?sid
-            :where
-            [?s :session/id ?sid]
-            [?m :message/session ?s]
-            [?m :message/id ?mid]
-            [(get-else $ ?m :db/created-at 0) ?dca]
-            [(get-else $ ?m :message/token-estimate 0) ?tokens]]
-          session-id)
-       (map (fn [[eid mid created-at token-estimate]]
-              {:eid eid
-               :id mid
-               :created-at (epoch-millis->date created-at)
-               :token-estimate (long token-estimate)}))
-       (sort-by (juxt :created-at :eid))
-       vec))
+  (db-session/session-message-metadata (session-deps) session-id))
 
 (defn session-message-count
   [session-id]
-  (if-let [count* (ffirst (q '[:find (count ?m)
-                              :in $ ?sid
-                              :where
-                              [?s :session/id ?sid]
-                              [?m :message/session ?s]]
-                            session-id))]
-    (long count*)
-    0))
+  (db-session/session-message-count (session-deps) session-id))
 
 (defn session-message-eids-range
   "Return message entity ids for a session in stable oldest->newest order for
@@ -2128,27 +1664,7 @@
   ([session-id start end]
    (session-message-eids-range session-id start end nil))
   ([session-id start end total-count]
-   (let [start* (max 0 (long (or start 0)))
-         end0   (max 0 (long (or end 0)))]
-     (if-let [sid-eid (session-eid session-id)]
-       (let [db*          (d/db (conn))
-             total*       (long (or total-count (session-message-count session-id)))
-             end*         (max start* (min total* end0))
-             count-needed (- end* start*)]
-         (if (<= count-needed 0)
-           []
-           (if (<= start* (- total* end*))
-             (->> (d/datoms db* :ave :message/session sid-eid)
-                  (drop start*)
-                  (take count-needed)
-                  (mapv :e))
-             (->> (d/rseek-datoms db* :ave :message/session sid-eid)
-                  (drop (- total* end*))
-                  (take count-needed)
-                  (map :e)
-                  reverse
-                  vec))))
-       []))))
+   (db-session/session-message-eids-range (session-deps) session-id start end total-count)))
 
 (defn session-message-metadata-range
   "Return message metadata for a session in stable oldest->newest order for the
@@ -2156,805 +1672,167 @@
   ([session-id start end]
    (session-message-metadata-range session-id start end nil))
   ([session-id start end total-count]
-   (let [message-eids (session-message-eids-range session-id start end total-count)
-         message-eids* (vec message-eids)]
-     (if-not (seq message-eids*)
-       []
-       (let [by-eid
-             (into {}
-                   (map (fn [[eid mid created-at token-estimate]]
-                          [eid
-                           {:eid eid
-                            :id mid
-                            :created-at (epoch-millis->date created-at)
-                            :token-estimate (long token-estimate)}]))
-                   (q '[:find ?m ?mid ?dca ?tokens
-                        :in $ [?m ...]
-                        :where
-                        [?m :message/id ?mid]
-                        [(get-else $ ?m :db/created-at 0) ?dca]
-                        [(get-else $ ?m :message/token-estimate 0) ?tokens]]
-                      message-eids*))]
-         (->> message-eids*
-              (keep by-eid)
-              vec))))))
+   (db-session/session-message-metadata-range (session-deps) session-id start end total-count)))
 
 (defn session-messages-by-eids
   [message-eids]
-  (let [message-eids* (vec message-eids)]
-    (if-not (seq message-eids*)
-      []
-      (let [by-eid
-            (into {}
-                  (map (fn [[eid mid content role tool-calls tool-result tool-id]]
-                         [eid
-                          (let [tool-result* (read-tool-result-doc tool-result)
-                                entity-map    (raw-entity eid)]
-                            {:id          mid
-                             :role        role
-                             :content     (when-not (and (= role :tool) (some? tool-result*))
-                                            (decrypt-secret-attr :message/content content))
-                             :created-at  (entity-created-at entity-map)
-                             :local-docs  (not-empty (message-local-docs eid))
-                             :artifacts   (not-empty (message-artifacts eid))
-                             :tool-calls  (read-tool-calls-doc tool-calls)
-                             :tool-result tool-result*
-                             :tool-id     (empty->nil tool-id)
-                             :tool-call-id (empty->nil (:message/tool-call-id entity-map))
-                             :tool-name   (empty->nil (:message/tool-name entity-map))
-                             :llm-call-id (:message/llm-call-id entity-map)
-                             :provider-id (:message/provider-id entity-map)
-                             :model       (empty->nil (:message/model entity-map))
-                             :workload    (:message/workload entity-map)})])
-                       (q '[:find ?m ?mid ?content ?role ?tc ?tr ?tid
-                            :in $ [?m ...]
-                            :where
-                            [?m :message/id ?mid]
-                            [?m :message/role ?role]
-                            [?m :message/content ?content]
-                            [(get-else $ ?m :message/tool-calls "") ?tc]
-                            [(get-else $ ?m :message/tool-result "") ?tr]
-                            [(get-else $ ?m :message/tool-id "") ?tid]]
-                          message-eids*)))]
-        (->> message-eids*
-             (keep by-eid)
-             vec)))))
+  (db-session/session-messages-by-eids (session-deps) message-eids))
 
 (defn latest-session-message
   ([session-id]
    (latest-session-message session-id nil))
   ([session-id roles]
-   (let [roles* (some->> roles set)]
-     (->> (session-messages session-id)
-          (filter #(or (nil? roles*)
-                       (contains? roles* (:role %))))
-          last))))
+   (db-session/latest-session-message (session-deps) session-id roles)))
 
 (defn session-messages
   "Get all messages for a session, ordered by creation time."
   [session-id]
-  (->> (session-message-metadata session-id)
-       (mapv :eid)
-       session-messages-by-eids))
+  (db-session/session-messages (session-deps) session-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Skills (markdown instructions)
 ;; ---------------------------------------------------------------------------
 
 (defn install-skill!
-  [{:keys [id name description content doc version tags
-           source-format source-path source-url source-name
-           import-warnings
-           imported-from-openclaw?]}]
-  (transact! [(cond-> {:skill/id           id
-                        :skill/name         (or name (clojure.core/name id))
-                        :skill/description  (or description "")
-                        :skill/content      (or content "")
-                        :skill/version      (or version "0.1.0")
-                        :skill/tags         (or tags #{})
-                        :skill/enabled?     true
-                        :skill/installed-at (java.util.Date.)}
-                source-format (assoc :skill/source-format source-format)
-                source-path (assoc :skill/source-path source-path)
-                source-url (assoc :skill/source-url source-url)
-                source-name (assoc :skill/source-name source-name)
-                (seq import-warnings) (assoc :skill/import-warnings import-warnings)
-                (some? imported-from-openclaw?) (assoc :skill/imported-from-openclaw? imported-from-openclaw?)
-                doc (assoc :skill/doc doc))]))
+  [skill]
+  (db-catalog/install-skill! (catalog-deps) skill))
 
 (defn save-skill!
-  [{:keys [id name description content doc version tags enabled? installed-at
-           source-format source-path source-url source-name
-           import-warnings imported-from-openclaw?
-           clear-doc?]}]
-  (let [eid      (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] id))
-        existing (when eid (raw-entity eid))
-        new-tags (if (some? tags) tags (or (:skill/tags existing) #{}))
-        base-map  (cond-> {:skill/id           id
-                           :skill/name         (or name
-                                                   (:skill/name existing)
-                                                   (clojure.core/name id))
-                           :skill/description  (or description
-                                                   (:skill/description existing)
-                                                   "")
-                           :skill/content      (or content
-                                                   (:skill/content existing)
-                                                   "")
-                           :skill/version      (or version
-                                                   (:skill/version existing)
-                                                   "0.1.0")
-                           :skill/tags         new-tags
-                           :skill/enabled?     (if (some? enabled?)
-                                                 enabled?
-                                                 (if (contains? existing :skill/enabled?)
-                                                   (:skill/enabled? existing)
-                                                   true))
-                           :skill/installed-at (or installed-at
-                                                   (:skill/installed-at existing)
-                                                   (java.util.Date.))}
-                    (or source-format
-                        (:skill/source-format existing))
-                    (assoc :skill/source-format (or source-format
-                                                    (:skill/source-format existing)))
-                    (or source-path
-                        (:skill/source-path existing))
-                    (assoc :skill/source-path (or source-path
-                                                  (:skill/source-path existing)))
-                    (or source-url
-                        (:skill/source-url existing))
-                    (assoc :skill/source-url (or source-url
-                                                 (:skill/source-url existing)))
-                    (or source-name
-                        (:skill/source-name existing))
-                    (assoc :skill/source-name (or source-name
-                                                  (:skill/source-name existing)))
-                    (or (seq import-warnings)
-                        (seq (:skill/import-warnings existing)))
-                    (assoc :skill/import-warnings (or import-warnings
-                                                      (:skill/import-warnings existing)))
-                    (or (some? imported-from-openclaw?)
-                        (contains? existing :skill/imported-from-openclaw?))
-                    (assoc :skill/imported-from-openclaw? (if (some? imported-from-openclaw?)
-                                                            imported-from-openclaw?
-                                                            (:skill/imported-from-openclaw? existing)))
-                    doc
-                    (assoc :skill/doc doc))
-        tx-data   (vec
-                    (concat
-                      (for [tag (:skill/tags existing)
-                            :when (not (contains? new-tags tag))]
-                        [:db/retract eid :skill/tags tag])
-                      (when (and clear-doc? eid (contains? existing :skill/doc))
-                        [[:db/retract eid :skill/doc (:skill/doc existing)]])
-                      [base-map]))]
-    (transact! tx-data)))
+  [skill]
+  (db-catalog/save-skill! (catalog-deps) skill))
 
 (defn get-skill [skill-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
-    (when eid (raw-entity eid))))
+  (db-catalog/get-skill (catalog-deps) skill-id))
 
 (defn list-skills []
-  (let [eids (q '[:find ?e :where [?e :skill/id _]])]
-    (mapv #(raw-entity (first %)) eids)))
+  (db-catalog/list-skills (catalog-deps)))
 
 (defn remove-skill! [skill-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
-    (transact! [[:db/retractEntity eid]])))
+  (db-catalog/remove-skill! (catalog-deps) skill-id))
 
 (defn enable-skill! [skill-id enabled?]
-  (transact! [{:skill/id skill-id :skill/enabled? enabled?}]))
+  (db-catalog/enable-skill! (catalog-deps) skill-id enabled?))
 
 (defn find-skills-by-tags
   "Find skills matching any of the given tags."
   [tags]
-  (let [eids (q '[:find ?e
-                  :in $ [?tag ...]
-                  :where
-                  [?e :skill/tags ?tag]
-                  [?e :skill/enabled? true]]
-                tags)]
-    (mapv #(into {} (d/entity (d/db (conn)) (first %))) eids)))
+  (db-catalog/find-skills-by-tags (catalog-deps) tags))
 
 ;; ---------------------------------------------------------------------------
 ;; Site Credentials (website login credentials)
 ;; ---------------------------------------------------------------------------
 
 (defn save-site-cred!
-  [{:keys [id name login-url username-field password-field
-           username password form-selector extra-fields autonomous-approved?]}]
-  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] id))
-        current (when eid (raw-entity eid))
-        tx-data (cond-> [{:site-cred/id             id
-                          :site-cred/name           (or name (clojure.core/name id))
-                          :site-cred/login-url      login-url
-                          :site-cred/username-field (or username-field "username")
-                          :site-cred/password-field (or password-field "password")
-                          :site-cred/username       (or username "")
-                          :site-cred/password       (or password "")
-                          :site-cred/autonomous-approved? (if (some? autonomous-approved?)
-                                                            autonomous-approved?
-                                                            (if (contains? current :site-cred/autonomous-approved?)
-                                                              (:site-cred/autonomous-approved? current)
-                                                              true))}]
-                  form-selector
-                  (update 0 assoc :site-cred/form-selector form-selector)
-
-                  extra-fields
-                  (update 0 assoc :site-cred/extra-fields extra-fields)
-
-                  (and eid
-                       (nil? form-selector)
-                       (contains? current :site-cred/form-selector))
-                  (conj [:db/retract eid
-                         :site-cred/form-selector
-                         (:site-cred/form-selector current)])
-
-                  (and eid
-                       (nil? extra-fields)
-                       (contains? current :site-cred/extra-fields))
-                  (conj [:db/retract eid
-                         :site-cred/extra-fields
-                         (:site-cred/extra-fields current)]))]
-    (transact! tx-data)))
+  [site-cred]
+  (db-catalog/save-site-cred! (catalog-deps) site-cred))
 
 (defn register-site-cred!
   [site-cred]
-  (save-site-cred! site-cred))
+  (db-catalog/register-site-cred! (catalog-deps) site-cred))
 
 (defn get-site-cred [site-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
-    (when eid (decrypt-entity (raw-entity eid)))))
+  (db-catalog/get-site-cred (catalog-deps) site-id))
 
 (defn list-site-creds []
-  (let [eids (q '[:find ?e :where [?e :site-cred/id _]])]
-    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
+  (db-catalog/list-site-creds (catalog-deps)))
 
 (defn remove-site-cred! [site-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :site-cred/id ?id]] site-id))]
-    (transact! [[:db/retractEntity eid]])))
+  (db-catalog/remove-site-cred! (catalog-deps) site-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Services (external service registrations)
 ;; ---------------------------------------------------------------------------
 
-(def ^:private service-loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
-
-(defn- loopback-service-base-url?
-  [base-url]
-  (try
-    (let [uri    (URI. (or base-url ""))
-          scheme (some-> (.getScheme uri) str/lower-case)
-          host   (some-> (.getHost uri) str/lower-case)]
-      (and (= "http" scheme)
-           (contains? service-loopback-hosts host)))
-    (catch Exception _
-      false)))
-
-(defn- validate-service-base-url!
-  [base-url allow-private-network?]
-  (when (str/blank? (or base-url ""))
-    (throw (ex-info "Service base URL is required"
-                    {:field "base_url"})))
-  (let [uri (try
-              (URI. base-url)
-              (catch Exception e
-                (throw (ex-info "Service base URL must be a valid absolute URL"
-                                {:field "base_url"
-                                 :value base-url}
-                                e))))
-        scheme (some-> (.getScheme uri) str/lower-case)
-        host   (.getHost uri)]
-    (when-not (and (some? host)
-                   (or (= "https" scheme)
-                       (and allow-private-network?
-                            (loopback-service-base-url? base-url))))
-      (throw (ex-info "Service base URL must use HTTPS (loopback HTTP is allowed only when private-network access is enabled)"
-                      {:field "base_url"
-                       :value base-url
-                       :allow-private-network? (boolean allow-private-network?)})))
-    base-url))
-
 (defn save-service!
-  [{:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?
-           autonomous-approved?] :as service}]
-  (let [allow-private-network? (or (:service/allow-private-network? service)
-                                   (:allow-private-network? service))
-        base-url (validate-service-base-url! base-url allow-private-network?)
-        eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
-        current (when eid (raw-entity eid))
-        rate-limit-per-minute (or (:service/rate-limit-per-minute service)
-                                  (:rate-limit-per-minute service))
-        has-rate-limit? (or (contains? service :service/rate-limit-per-minute)
-                            (contains? service :rate-limit-per-minute))
-        has-allow-private-network? (or (contains? service :service/allow-private-network?)
-                                       (contains? service :allow-private-network?))
-        tx-data (cond-> [{:service/id        id
-                          :service/name      (or name (clojure.core/name id))
-                          :service/base-url  base-url
-                          :service/auth-type (or auth-type :bearer)
-                          :service/auth-key  (or auth-key "")
-                          :service/autonomous-approved? (if (some? autonomous-approved?)
-                                                           autonomous-approved?
-                                                           (if (contains? current :service/autonomous-approved?)
-                                                             (:service/autonomous-approved? current)
-                                                             true))
-                          :service/enabled?  (if (nil? enabled?) true enabled?)}]
-                  auth-header
-                  (update 0 assoc :service/auth-header auth-header)
-
-                  oauth-account
-                  (update 0 assoc :service/oauth-account oauth-account)
-
-                  (and has-rate-limit?
-                       (some? rate-limit-per-minute))
-                  (update 0 assoc :service/rate-limit-per-minute rate-limit-per-minute)
-
-                  has-allow-private-network?
-                  (update 0 assoc :service/allow-private-network? (boolean allow-private-network?))
-
-                  (and eid
-                       (nil? auth-header)
-                       (contains? current :service/auth-header))
-                  (conj [:db/retract eid
-                         :service/auth-header
-                         (:service/auth-header current)])
-
-                  (and eid
-                       (nil? oauth-account)
-                       (contains? current :service/oauth-account))
-                  (conj [:db/retract eid
-                         :service/oauth-account
-                         (:service/oauth-account current)])
-
-                  (and eid
-                       has-rate-limit?
-                       (nil? rate-limit-per-minute)
-                       (contains? current :service/rate-limit-per-minute))
-                  (conj [:db/retract eid
-                         :service/rate-limit-per-minute
-                         (:service/rate-limit-per-minute current)]))]
-    (transact! tx-data)))
+  [service]
+  (db-catalog/save-service! (catalog-deps) service))
 
 (defn register-service! [service]
-  (save-service! service))
+  (db-catalog/register-service! (catalog-deps) service))
 
 (defn get-service [service-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] service-id))]
-    (when eid (decrypt-entity (raw-entity eid)))))
+  (db-catalog/get-service (catalog-deps) service-id))
 
 (defn list-services []
-  (let [eids (q '[:find ?e :where [?e :service/id _]])]
-    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
+  (db-catalog/list-services (catalog-deps)))
 
 (defn remove-service! [service-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :service/id ?id]] service-id))]
-    (transact! [[:db/retractEntity eid]])))
+  (db-catalog/remove-service! (catalog-deps) service-id))
 
 (defn enable-service! [service-id enabled?]
-  (transact! [{:service/id service-id :service/enabled? enabled?}]))
+  (db-catalog/enable-service! (catalog-deps) service-id enabled?))
 
 ;; ---------------------------------------------------------------------------
 ;; Managed child Xia instances (durable controller-side records)
 ;; ---------------------------------------------------------------------------
 
 (defn save-managed-child!
-  [{:keys [id name service-id service-name base-url template-instance state pid
-           log-path started-at exited-at exit-code]}]
-  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :managed.child/id ?id]] id))
-        current (when eid (raw-entity eid))
-        now     (java.util.Date.)
-        tx-data (cond-> [{:managed.child/id         id
-                          :managed.child/name       (or name
-                                                        (:managed.child/name current)
-                                                        (clojure.core/name id))
-                          :managed.child/created-at (or (:managed.child/created-at current)
-                                                        now)
-                          :managed.child/updated-at now}]
-                  service-id
-                  (update 0 assoc :managed.child/service-id service-id)
-
-                  service-name
-                  (update 0 assoc :managed.child/service-name service-name)
-
-                  base-url
-                  (update 0 assoc :managed.child/base-url base-url)
-
-                  template-instance
-                  (update 0 assoc :managed.child/template-instance template-instance)
-
-                  state
-                  (update 0 assoc :managed.child/state state)
-
-                  (some? pid)
-                  (update 0 assoc :managed.child/pid (long pid))
-
-                  log-path
-                  (update 0 assoc :managed.child/log-path log-path)
-
-                  started-at
-                  (update 0 assoc :managed.child/started-at started-at)
-
-                  exited-at
-                  (update 0 assoc :managed.child/exited-at exited-at)
-
-                  (some? exit-code)
-                  (update 0 assoc :managed.child/exit-code (long exit-code))
-
-                  (and eid
-                       (nil? service-id)
-                       (contains? current :managed.child/service-id))
-                  (conj [:db/retract eid
-                         :managed.child/service-id
-                         (:managed.child/service-id current)])
-
-                  (and eid
-                       (nil? service-name)
-                       (contains? current :managed.child/service-name))
-                  (conj [:db/retract eid
-                         :managed.child/service-name
-                         (:managed.child/service-name current)])
-
-                  (and eid
-                       (nil? base-url)
-                       (contains? current :managed.child/base-url))
-                  (conj [:db/retract eid
-                         :managed.child/base-url
-                         (:managed.child/base-url current)])
-
-                  (and eid
-                       (nil? template-instance)
-                       (contains? current :managed.child/template-instance))
-                  (conj [:db/retract eid
-                         :managed.child/template-instance
-                         (:managed.child/template-instance current)])
-
-                  (and eid
-                       (nil? state)
-                       (contains? current :managed.child/state))
-                  (conj [:db/retract eid
-                         :managed.child/state
-                         (:managed.child/state current)])
-
-                  (and eid
-                       (nil? pid)
-                       (contains? current :managed.child/pid))
-                  (conj [:db/retract eid
-                         :managed.child/pid
-                         (:managed.child/pid current)])
-
-                  (and eid
-                       (nil? log-path)
-                       (contains? current :managed.child/log-path))
-                  (conj [:db/retract eid
-                         :managed.child/log-path
-                         (:managed.child/log-path current)])
-
-                  (and eid
-                       (nil? started-at)
-                       (contains? current :managed.child/started-at))
-                  (conj [:db/retract eid
-                         :managed.child/started-at
-                         (:managed.child/started-at current)])
-
-                  (and eid
-                       (nil? exited-at)
-                       (contains? current :managed.child/exited-at))
-                  (conj [:db/retract eid
-                         :managed.child/exited-at
-                         (:managed.child/exited-at current)])
-
-                  (and eid
-                       (nil? exit-code)
-                       (contains? current :managed.child/exit-code))
-                  (conj [:db/retract eid
-                         :managed.child/exit-code
-                         (:managed.child/exit-code current)]))]
-    (transact! tx-data)))
+  [child]
+  (db-catalog/save-managed-child! (catalog-deps) child))
 
 (defn get-managed-child
   [instance-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :managed.child/id ?id]] instance-id))]
-    (when eid
-      (raw-entity eid))))
+  (db-catalog/get-managed-child (catalog-deps) instance-id))
 
 (defn list-managed-children
   []
-  (let [eids (q '[:find ?e :where [?e :managed.child/id _]])]
-    (mapv #(raw-entity (first %)) eids)))
+  (db-catalog/list-managed-children (catalog-deps)))
 
 (defn remove-managed-child!
   [instance-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :managed.child/id ?id]] instance-id))]
-    (transact! [[:db/retractEntity eid]])))
+  (db-catalog/remove-managed-child! (catalog-deps) instance-id))
 
 ;; ---------------------------------------------------------------------------
 ;; OAuth accounts
 ;; ---------------------------------------------------------------------------
 
 (defn save-oauth-account!
-  [{:keys [id name connection-mode authorize-url token-url client-id client-secret scopes
-           provider-template redirect-uri auth-params token-params access-token refresh-token
-           token-type expires-at connected-at autonomous-approved?]}]
-  (let [eid     (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] id))
-        current (when eid (raw-entity eid))
-        now     (java.util.Date.)
-        tx-data (cond-> [{:oauth.account/id            id
-                          :oauth.account/name          (or name (clojure.core/name id))
-                          :oauth.account/scopes        (or scopes "")
-                          :oauth.account/autonomous-approved? (if (some? autonomous-approved?)
-                                                                autonomous-approved?
-                                                                (if (contains? current :oauth.account/autonomous-approved?)
-                                                                  (:oauth.account/autonomous-approved? current)
-                                                                  true))
-                          :oauth.account/updated-at    now}]
-                  connection-mode
-                  (update 0 assoc :oauth.account/connection-mode connection-mode)
-
-                  authorize-url
-                  (update 0 assoc :oauth.account/authorize-url authorize-url)
-
-                  token-url
-                  (update 0 assoc :oauth.account/token-url token-url)
-
-                  client-id
-                  (update 0 assoc :oauth.account/client-id client-id)
-
-                  (some? client-secret)
-                  (update 0 assoc :oauth.account/client-secret (or client-secret ""))
-
-                  provider-template
-                  (update 0 assoc :oauth.account/provider-template provider-template)
-
-                  redirect-uri
-                  (update 0 assoc :oauth.account/redirect-uri redirect-uri)
-
-                  auth-params
-                  (update 0 assoc :oauth.account/auth-params auth-params)
-
-                  token-params
-                  (update 0 assoc :oauth.account/token-params token-params)
-
-                  access-token
-                  (update 0 assoc :oauth.account/access-token access-token)
-
-                  refresh-token
-                  (update 0 assoc :oauth.account/refresh-token refresh-token)
-
-                  token-type
-                  (update 0 assoc :oauth.account/token-type token-type)
-
-                  expires-at
-                  (update 0 assoc :oauth.account/expires-at expires-at)
-
-                  connected-at
-                  (update 0 assoc :oauth.account/connected-at connected-at)
-
-                  (and eid
-                       (nil? connection-mode)
-                       (contains? current :oauth.account/connection-mode))
-                  (conj [:db/retract eid
-                         :oauth.account/connection-mode
-                         (:oauth.account/connection-mode current)])
-
-                  (and eid
-                       (nil? authorize-url)
-                       (contains? current :oauth.account/authorize-url))
-                  (conj [:db/retract eid
-                         :oauth.account/authorize-url
-                         (:oauth.account/authorize-url current)])
-
-                  (and eid
-                       (nil? token-url)
-                       (contains? current :oauth.account/token-url))
-                  (conj [:db/retract eid
-                         :oauth.account/token-url
-                         (:oauth.account/token-url current)])
-
-                  (and eid
-                       (nil? client-id)
-                       (contains? current :oauth.account/client-id))
-                  (conj [:db/retract eid
-                         :oauth.account/client-id
-                         (:oauth.account/client-id current)])
-
-                  (and eid
-                       (nil? provider-template)
-                       (contains? current :oauth.account/provider-template))
-                  (conj [:db/retract eid
-                         :oauth.account/provider-template
-                         (:oauth.account/provider-template current)])
-
-                  (and eid
-                       (nil? redirect-uri)
-                       (contains? current :oauth.account/redirect-uri))
-                  (conj [:db/retract eid
-                         :oauth.account/redirect-uri
-                         (:oauth.account/redirect-uri current)])
-
-                  (and eid
-                       (nil? auth-params)
-                       (contains? current :oauth.account/auth-params))
-                  (conj [:db/retract eid
-                         :oauth.account/auth-params
-                         (:oauth.account/auth-params current)])
-
-                  (and eid
-                       (nil? token-params)
-                       (contains? current :oauth.account/token-params))
-                  (conj [:db/retract eid
-                         :oauth.account/token-params
-                         (:oauth.account/token-params current)])
-
-                  (and eid
-                       (nil? access-token)
-                       (contains? current :oauth.account/access-token))
-                  (conj [:db/retract eid
-                         :oauth.account/access-token
-                         (:oauth.account/access-token current)])
-
-                  (and eid
-                       (nil? refresh-token)
-                       (contains? current :oauth.account/refresh-token))
-                  (conj [:db/retract eid
-                         :oauth.account/refresh-token
-                         (:oauth.account/refresh-token current)])
-
-                  (and eid
-                       (nil? token-type)
-                       (contains? current :oauth.account/token-type))
-                  (conj [:db/retract eid
-                         :oauth.account/token-type
-                         (:oauth.account/token-type current)])
-
-                  (and eid
-                       (nil? expires-at)
-                       (contains? current :oauth.account/expires-at))
-                  (conj [:db/retract eid
-                         :oauth.account/expires-at
-                         (:oauth.account/expires-at current)])
-
-                  (and eid
-                       (nil? connected-at)
-                       (contains? current :oauth.account/connected-at))
-                  (conj [:db/retract eid
-                         :oauth.account/connected-at
-                         (:oauth.account/connected-at current)]))]
-    (transact! tx-data)))
+  [oauth-account]
+  (db-catalog/save-oauth-account! (catalog-deps) oauth-account))
 
 (defn register-oauth-account!
   [oauth-account]
-  (save-oauth-account! oauth-account))
+  (db-catalog/register-oauth-account! (catalog-deps) oauth-account))
 
 (defn get-oauth-account [account-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] account-id))]
-    (when eid (decrypt-entity (raw-entity eid)))))
+  (db-catalog/get-oauth-account (catalog-deps) account-id))
 
 (defn list-oauth-accounts []
-  (let [eids (q '[:find ?e :where [?e :oauth.account/id _]])]
-    (mapv #(decrypt-entity (raw-entity (first %))) eids)))
+  (db-catalog/list-oauth-accounts (catalog-deps)))
 
 (defn remove-oauth-account! [account-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :oauth.account/id ?id]] account-id))]
-    (transact! [[:db/retractEntity eid]])))
+  (db-catalog/remove-oauth-account! (catalog-deps) account-id))
 
 (defn oauth-account-in-use?
   [account-id]
-  (boolean
-    (ffirst
-      (q '[:find ?e :in $ ?id
-           :where
-           (or [?e :service/oauth-account ?id]
-               [?e :llm.provider/oauth-account ?id])]
-         account-id))))
+  (db-catalog/oauth-account-in-use? (catalog-deps) account-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Tools (executable code)
 ;; ---------------------------------------------------------------------------
 
-(declare get-tool)
-
 (defn install-tool!
-  [{:keys [id name description tags parameters handler approval execution-mode enabled? installed-at]}]
-  (let [existing (when id (get-tool id))]
-    (transact! [(cond-> {:tool/id           id
-                         :tool/name         (or name
-                                                (:tool/name existing)
-                                                (clojure.core/name id))
-                         :tool/description  (or description
-                                                (:tool/description existing)
-                                                "")
-                         :tool/tags         (or tags
-                                                (:tool/tags existing)
-                                                #{})
-                         :tool/parameters   (or parameters
-                                                (:tool/parameters existing)
-                                                {})
-                         :tool/handler      (or handler
-                                                (:tool/handler existing)
-                                                "")
-                         :tool/approval     (or approval
-                                                (:tool/approval existing)
-                                                :auto)
-                         :tool/enabled?     (if (some? enabled?)
-                                              enabled?
-                                              (if (contains? existing :tool/enabled?)
-                                                (:tool/enabled? existing)
-                                                true))
-                         :tool/installed-at (or installed-at
-                                                (:tool/installed-at existing)
-                                                (java.util.Date.))}
-                  (some? execution-mode)
-                  (assoc :tool/execution-mode execution-mode))])))
+  [tool]
+  (db-catalog/install-tool! (catalog-deps) tool))
 
 (defn get-tool [tool-id]
-  (let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :tool/id ?id]] tool-id))]
-    (when eid (raw-entity eid))))
+  (db-catalog/get-tool (catalog-deps) tool-id))
 
 (defn list-tools []
-  (let [eids (q '[:find ?e :where [?e :tool/id _]])]
-    (mapv #(raw-entity (first %)) eids)))
+  (db-catalog/list-tools (catalog-deps)))
 
 (defn enable-tool! [tool-id enabled?]
-  (transact! [{:tool/id tool-id :tool/enabled? enabled?}]))
+  (db-catalog/enable-tool! (catalog-deps) tool-id enabled?))
 
 ;; ---------------------------------------------------------------------------
 ;; LLM Call Log
 ;; ---------------------------------------------------------------------------
 
-(def ^:private llm-log-retention-ms (* 30 24 60 60 1000)) ; 30 days
-
-(defn- prune-llm-log!
-  "Delete entries older than 30 days."
-  []
-  (let [cutoff (java.util.Date. (- (.getTime (java.util.Date.)) llm-log-retention-ms))
-        old    (q '[:find ?e :in $ ?cutoff
-                    :where
-                    [?e :llm.log/id _]
-                    [?e :llm.log/created-at ?t]
-                    [(< ?t ?cutoff)]]
-                  cutoff)]
-    (when (seq old)
-      (transact! (mapv (fn [[eid]] [:db/retractEntity eid]) old)))))
-
 (defn log-llm-call!
   "Write an LLM call log entry. `entry` is a map with keys matching :llm.log/* attrs.
    Automatically prunes entries beyond the retention limit."
   [entry]
-  (transact! [(merge {:llm.log/id         (or (:id entry) (random-uuid))
-                      :llm.log/created-at (or (:created-at entry) (java.util.Date.))}
-                     (when-let [v (:session-id entry)]  {:llm.log/session-id v})
-                     (when-let [v (:provider-id entry)] {:llm.log/provider-id v})
-                     (when-let [v (:model entry)]       {:llm.log/model v})
-                     (when-let [v (:workload entry)]    {:llm.log/workload v})
-                     (when-let [v (:messages entry)]    {:llm.log/messages v})
-                     (when-let [v (:tools entry)]       {:llm.log/tools v})
-                     (when-let [v (:response entry)]    {:llm.log/response v})
-                     (when-let [v (:status entry)]      {:llm.log/status v})
-                     (when-let [v (:error entry)]       {:llm.log/error v})
-                     (when-let [v (:duration-ms entry)] {:llm.log/duration-ms v})
-                     (when-let [v (:prompt-tokens entry)]     {:llm.log/prompt-tokens v})
-                     (when-let [v (:completion-tokens entry)] {:llm.log/completion-tokens v}))])
-  (prune-llm-log!))
-
-(defn- llm-call-related-messages
-  [call-id]
-  (->> (q '[:find ?m ?mid ?role ?created-at
-            :in $ ?call-id
-            :where
-            [?m :message/llm-call-id ?call-id]
-            [?m :message/id ?mid]
-            [?m :message/role ?role]
-            [(get-else $ ?m :db/created-at 0) ?created-at]]
-          call-id)
-       (sort-by (juxt #(nth % 3) first))
-       (mapv (fn [[eid message-id role created-at]]
-               (let [entity-map (raw-entity eid)]
-                 {:id          message-id
-                  :role        role
-                  :provider-id (:message/provider-id entity-map)
-                  :model       (empty->nil (:message/model entity-map))
-                  :workload    (:message/workload entity-map)
-                  :created-at  (epoch-millis->date created-at)})))))
+  (db-session/log-llm-call! (session-deps) entry))
 
 (defn list-llm-calls
   "Return recent LLM call log entries, newest first. `limit` defaults to 50."
@@ -2962,91 +1840,19 @@
   ([limit]
    (list-llm-calls limit nil))
   ([limit session-id]
-   (->> (if session-id
-          (q '[:find ?e ?t
-               :in $ ?sid
-               :where
-               [?e :llm.log/id _]
-               [?e :llm.log/session-id ?sid]
-               [?e :llm.log/created-at ?t]]
-             session-id)
-          (q '[:find ?e ?t
-               :where
-               [?e :llm.log/id _]
-               [?e :llm.log/created-at ?t]]))
-        (sort-by second #(compare %2 %1))
-        (take limit)
-        (mapv (fn [[eid _]]
-                (let [e (decrypt-entity (raw-entity eid))]
-                  {:id               (:llm.log/id e)
-                   :session-id       (:llm.log/session-id e)
-                   :provider-id      (:llm.log/provider-id e)
-                   :model            (:llm.log/model e)
-                   :workload         (:llm.log/workload e)
-                   :status           (:llm.log/status e)
-                   :error            (:llm.log/error e)
-                   :duration-ms      (:llm.log/duration-ms e)
-                   :prompt-tokens    (:llm.log/prompt-tokens e)
-                   :completion-tokens (:llm.log/completion-tokens e)
-                   :created-at       (:llm.log/created-at e)}))))))
+   (db-session/list-llm-calls (session-deps) limit session-id)))
 
 (defn get-llm-call
   "Return a single LLM call log entry with full messages/response."
   [call-id]
-  (when-let [eid (ffirst (q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))]
-    (let [e (decrypt-entity (raw-entity eid))]
-      {:id               (:llm.log/id e)
-       :session-id       (:llm.log/session-id e)
-       :provider-id      (:llm.log/provider-id e)
-       :model            (:llm.log/model e)
-       :workload         (:llm.log/workload e)
-       :messages         (:llm.log/messages e)
-       :tools            (:llm.log/tools e)
-       :response         (:llm.log/response e)
-       :status           (:llm.log/status e)
-       :error            (:llm.log/error e)
-       :duration-ms      (:llm.log/duration-ms e)
-       :prompt-tokens    (:llm.log/prompt-tokens e)
-       :completion-tokens (:llm.log/completion-tokens e)
-       :related-messages (llm-call-related-messages call-id)
-       :created-at       (:llm.log/created-at e)})))
+  (db-session/get-llm-call (session-deps) call-id))
 
 (defn log-audit-event!
   [entry]
-  (transact! [(merge {:audit.event/id         (or (:id entry) (random-uuid))
-                      :audit.event/created-at (or (:created-at entry) (java.util.Date.))}
-                     (when-let [v (:session-id entry)]  {:audit.event/session-id v})
-                     (when-let [v (:channel entry)]     {:audit.event/channel v})
-                     (when-let [v (:actor entry)]       {:audit.event/actor v})
-                     (when-let [v (:type entry)]        {:audit.event/type v})
-                     (when-let [v (:message-id entry)]  {:audit.event/message-id v})
-                     (when-let [v (:llm-call-id entry)] {:audit.event/llm-call-id v})
-                     (when-let [v (:tool-id entry)]     {:audit.event/tool-id v})
-                     (when-let [v (:tool-call-id entry)] {:audit.event/tool-call-id v})
-                     (when-let [v (:data entry)]        {:audit.event/data (json-doc v)}))]))
+  (db-session/log-audit-event! (session-deps) entry))
 
 (defn session-audit-events
   ([session-id]
    (session-audit-events session-id 500))
   ([session-id limit]
-   (->> (q '[:find ?e ?created-at
-             :in $ ?sid
-             :where
-             [?e :audit.event/session-id ?sid]
-             [?e :audit.event/created-at ?created-at]]
-           session-id)
-        (sort-by (juxt second first))
-        (take-last limit)
-        (mapv (fn [[eid _]]
-                (let [e (decrypt-entity (raw-entity eid))]
-                  {:id           (:audit.event/id e)
-                   :session-id   (:audit.event/session-id e)
-                   :channel      (:audit.event/channel e)
-                   :actor        (:audit.event/actor e)
-                   :type         (:audit.event/type e)
-                   :message-id   (:audit.event/message-id e)
-                   :llm-call-id  (:audit.event/llm-call-id e)
-                   :tool-id      (empty->nil (:audit.event/tool-id e))
-                   :tool-call-id (empty->nil (:audit.event/tool-call-id e))
-                   :data         (read-json-doc (:audit.event/data e))
-                   :created-at   (:audit.event/created-at e)}))))))
+   (db-session/session-audit-events (session-deps) session-id limit)))
