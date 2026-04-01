@@ -247,6 +247,32 @@
       (is (= session-id (:session-id result)))
       (is (= [[session-id "task pause requested"]] @cancel-calls)))))
 
+(deftest pause-task-ignores-unrelated-live-session-task
+  (let [session-id    (db/create-session! :terminal)
+        active-task-id (random-uuid)
+        task-id       (db/create-task! {:session-id session-id
+                                        :channel :terminal
+                                        :type :interactive
+                                        :state :running
+                                        :title "Review the invoice"})
+        cancel-calls  (atom [])]
+    (let [result (task-runtime/pause-task! {:task-run-entry (constantly nil)
+                                            :session-run-entry (fn [sid]
+                                                                 (when (= session-id sid)
+                                                                   {:task-id active-task-id
+                                                                    :session-id session-id}))
+                                            :cancel-session! (fn [sid reason]
+                                                               (swap! cancel-calls conj [sid reason])
+                                                               true)}
+                                           task-id)
+          task   (db/get-task task-id)]
+      (is (= :paused (:status result)))
+      (is (= task-id (:task-id result)))
+      (is (= session-id (:session-id result)))
+      (is (empty? @cancel-calls))
+      (is (= :paused (:state task)))
+      (is (= :paused (:stop-reason task))))))
+
 (deftest resume-task-restarts-a-paused-task
   (let [session-id     (db/create-session! :terminal)
         task-id        (db/create-task! {:session-id session-id

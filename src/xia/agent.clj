@@ -409,10 +409,8 @@
       (swap! active-session-runs assoc session-id
              {:run-id run-id
               :supervisor-thread (Thread/currentThread)
-              :worker-token nil
-              :worker-thread nil
-              :worker-future nil
-              :parallel-tool-futures []
+              :task-id nil
+              :task-turn-id nil
               :child-session-ids #{}
               :cancelled? false
               :cancel-reason nil})
@@ -505,10 +503,6 @@
                         :session-id session-id
                         :run-id run-id
                         :supervisor-thread (:supervisor-thread entry)
-                        :worker-token (:worker-token entry)
-                        :worker-thread (:worker-thread entry)
-                        :worker-future (:worker-future entry)
-                        :parallel-tool-futures (:parallel-tool-futures entry)
                         :cancelled? (:cancelled? entry)
                         :cancel-reason (:cancel-reason entry)}]
         (swap! active-task-runs assoc task-id task-entry)

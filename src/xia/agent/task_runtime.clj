@@ -184,7 +184,10 @@
   (boolean
    (or (live-task-run deps (:id task))
        (when-let [f (:session-run-entry deps)]
-         (some-> task :session-id f)))))
+         (let [entry (some-> task :session-id f)]
+           (and (or (nil? (:task-id entry))
+                    (= (:id task) (:task-id entry)))
+                entry))))))
 
 (defn- active-task-turn-id
   [deps task-id]
