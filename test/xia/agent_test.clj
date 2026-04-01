@@ -92,6 +92,7 @@
       (is (= :completed (:state task)))
       (is (= :interactive (:type task)))
       (is (= session-id (:session-id task)))
+      (is (nil? (:current-turn-id task)))
       (is (= 1 (count turns)))
       (is (= :completed (:state (first turns))))
       (is (= :start (:operation (first turns))))
@@ -340,6 +341,56 @@
                     :interrupting-turn-id current-turn-id}}]
            @process-calls))))
 
+(deftest steer-task-prefers-task-current-turn-id-over-latest-turn
+  (let [session-id      (db/create-session! :terminal)
+        task-id         (db/create-task! {:session-id session-id
+                                          :channel :terminal
+                                          :type :interactive
+                                          :state :running
+                                          :title "Reply to the billing emails"})
+        current-turn-id (db/start-task-turn! task-id
+                                             {:operation :start
+                                              :state :running
+                                              :input "reply to the billing emails"
+                                              :summary "Working on the first draft"})
+        _               (db/start-task-turn! task-id
+                                             {:operation :resume
+                                              :state :completed
+                                              :input "old follow up"
+                                              :summary "Completed a stale resume"})
+        _               (db/update-task! task-id {:current-turn-id current-turn-id})
+        submitted-work  (atom nil)
+        cancelled       (atom [])
+        process-calls   (atom [])]
+    (#'xia.agent/with-session-run
+     session-id
+     (fn []
+       (with-redefs [xia.agent/cancel-session!         (fn [sid reason]
+                                                         (swap! cancelled conj [sid reason])
+                                                         true)
+                     xia.async/submit-background!      (fn [_label f]
+                                                         (reset! submitted-work f)
+                                                         ::submitted)
+                     xia.agent/wait-for-session-idle!  (fn [_sid _timeout-ms]
+                                                         true)
+                     xia.agent/process-message         (fn [sid message & {:as opts}]
+                                                         (swap! process-calls conj {:session-id sid
+                                                                                    :message message
+                                                                                    :opts opts})
+                                                         "ok")]
+         (let [result (agent/steer-task! task-id "Switch to the escalated billing thread")]
+           (is (= :steering (:status result)))
+           (is (= [[session-id "task steer requested"]] @cancelled))
+           (is (fn? @submitted-work))
+           (@submitted-work)))))
+    (is (= [{:session-id session-id
+             :message "Switch to the escalated billing thread"
+             :opts {:channel :terminal
+                    :task-id task-id
+                    :runtime-op :steer
+                    :interrupting-turn-id current-turn-id}}]
+           @process-calls))))
+
 (deftest fork-task-creates-a-child-task-and-starts-it-in-a-worker-session
   (let [parent-session-id (db/create-session! :terminal)
         parent-task-id    (db/create-task! {:session-id parent-session-id
@@ -508,6 +559,10 @@
                 turn    (first (db/task-turns task-id))
                 items   (db/turn-items (:id turn))]
             (is (= :waiting_input (:state task)))
+            (is (= (:id turn) (:current-turn-id task)))
+            (is (= :waiting_input (get-in task [:meta :runtime :state])))
+            (is (= :waiting_input (get-in task [:meta :runtime :phase])))
+            (is (= "Waiting for input: OTP Code" (get-in task [:meta :runtime :message])))
             (is (= :waiting_input (:state turn)))
             (is (some #(and (= :input-request (:type %))
                             (= :waiting (:status %))
@@ -515,7 +570,9 @@
                       items)))
           (deliver prompt-response "123456")
           (is (= "Captured the OTP."
-                 (deref result 3000 ::timeout)))))
+                 (deref result 3000 ::timeout)))
+          (let [task-id (:id (first (db/list-tasks {:session-id session-id})))]
+            (is (nil? (:current-turn-id (db/get-task task-id)))))))
       (finally
         (prompt/register-prompt! :terminal nil)))))
 
@@ -579,6 +636,10 @@
                 turn    (first (db/task-turns task-id))
                 items   (db/turn-items (:id turn))]
             (is (= :waiting_approval (:state task)))
+            (is (= (:id turn) (:current-turn-id task)))
+            (is (= :waiting_approval (get-in task [:meta :runtime :state])))
+            (is (= :waiting_approval (get-in task [:meta :runtime :phase])))
+            (is (= "Waiting for approval for email-send" (get-in task [:meta :runtime :message])))
             (is (= :waiting_approval (:state turn)))
             (is (some #(and (= :approval-request (:type %))
                             (= :waiting (:status %))
@@ -586,7 +647,9 @@
                       items)))
           (deliver approval-decision true)
           (is (= "Approval was handled."
-                 (deref result 3000 ::timeout)))))
+                 (deref result 3000 ::timeout)))
+          (let [task-id (:id (first (db/list-tasks {:session-id session-id})))]
+            (is (nil? (:current-turn-id (db/get-task task-id)))))))
       (finally
         (prompt/register-approval! :terminal nil)))))
 

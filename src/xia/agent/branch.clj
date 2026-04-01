@@ -84,6 +84,7 @@
         child-session-id (db/create-session! :branch
                                              {:parent-session-id parent-session-id
                                               :worker? true
+                                              :active? false
                                               :label task})]
     ((:register-child-session! deps) parent-session-id child-session-id)
     (try

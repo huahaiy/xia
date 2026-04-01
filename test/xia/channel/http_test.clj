@@ -877,7 +877,10 @@
                                   :type :interactive
                                   :state :resumable
                                   :title "Reply to the billing emails"
-                                  :summary "Waiting on the next follow up"})
+                                  :summary "Waiting on the next follow up"
+                                  :meta {:runtime {:state :running
+                                                   :phase :planning
+                                                   :message "Planning the next reply"}}})
         turn-id  (db/start-task-turn! task-id
                                       {:operation :start
                                        :state :completed
@@ -900,6 +903,12 @@
       (is (= "http" (get task "channel")))
       (is (= "interactive" (get task "type")))
       (is (= "running" (get task "state")))
+      (is (= (str turn-id) (get task "current_turn_id")))
+      (is (= {"state" "running"
+              "phase" "planning"
+              "message" "Planning the next reply"}
+             (some-> (get task "runtime")
+                     (select-keys ["state" "phase" "message"]))))
       (is (= "Reply to the billing emails" (get task "title")))
       (is (= "Waiting on the next follow up" (get task "summary")))
       (is (= 1 (get task "turn_count")))
@@ -911,7 +920,10 @@
                                    :channel :http
                                    :type :interactive
                                    :state :running
-                                   :title "Review the invoice"})
+                                   :title "Review the invoice"
+                                   :meta {:runtime {:state :running
+                                                    :phase :understanding
+                                                    :message "Understanding the goal"}}})
         turn-id   (db/start-task-turn! task-id
                                        {:operation :start
                                         :state :running
@@ -934,6 +946,12 @@
       (is (= 200 (:status response)))
       (is (= (str task-id) (get task "id")))
       (is (= "running" (get task "state")))
+      (is (= (str turn-id) (get task "current_turn_id")))
+      (is (= {"state" "running"
+              "phase" "understanding"
+              "message" "Understanding the goal"}
+             (some-> (get task "runtime")
+                     (select-keys ["state" "phase" "message"]))))
       (is (= "Review the invoice" (get task "title")))
       (is (= 1 (count turns)))
       (is (= (str turn-id) (get turn "id")))

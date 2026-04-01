@@ -159,6 +159,7 @@
    :task/error         {:db/valueType :db.type/string}
    :task/meta          {:db/valueType :db.type/idoc :db/domain "task-meta"}
    :task/autonomy-state {:db/valueType :db.type/idoc :db/domain "task-autonomy-state"}
+   :task/current-turn-id {:db/valueType :db.type/uuid}
    :task/created-at    {:db/valueType :db.type/instant}
    :task/updated-at    {:db/valueType :db.type/instant}
    :task/started-at    {:db/valueType :db.type/instant}

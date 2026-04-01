@@ -95,7 +95,7 @@
 
 (defn create-task!
   [deps {:keys [id session-id parent-id channel type state title summary stop-reason
-                error meta autonomy-state started-at finished-at]}]
+                error meta autonomy-state current-turn-id started-at finished-at]}]
   (let [task-id      (or id (random-uuid))
         created-at   (now)
         session-eid* (when session-id
@@ -118,13 +118,14 @@
         (some? error) (assoc :task/error error)
         (some? meta) (assoc :task/meta meta)
         (some? autonomy-state) (assoc :task/autonomy-state autonomy-state)
+        current-turn-id (assoc :task/current-turn-id current-turn-id)
         (some? started-at) (assoc :task/started-at started-at)
         (some? finished-at) (assoc :task/finished-at finished-at))])
     task-id))
 
 (defn update-task!
   [deps task-id {:keys [parent-id channel type state title summary stop-reason error
-                        meta autonomy-state started-at finished-at]
+                        meta autonomy-state current-turn-id started-at finished-at]
                  :as attrs}]
   (when-let [eid (task-eid deps task-id)]
     (let [entity-map (raw-entity* deps eid)
@@ -145,6 +146,10 @@
                             (nil? autonomy-state)
                             (contains? entity-map :task/autonomy-state))
                        (conj [:db/retract eid :task/autonomy-state (:task/autonomy-state entity-map)])
+                       (and (contains? attrs :current-turn-id)
+                            (nil? current-turn-id)
+                            (contains? entity-map :task/current-turn-id))
+                       (conj [:db/retract eid :task/current-turn-id (:task/current-turn-id entity-map)])
                        (and (contains? attrs :finished-at)
                             (nil? finished-at)
                             (contains? entity-map :task/finished-at))
@@ -164,6 +169,7 @@
                 (some? error) (assoc :task/error error)
                 (some? meta) (assoc :task/meta meta)
                 (some? autonomy-state) (assoc :task/autonomy-state autonomy-state)
+                current-turn-id (assoc :task/current-turn-id current-turn-id)
                 (some? started-at) (assoc :task/started-at started-at)
                 (some? finished-at) (assoc :task/finished-at finished-at))])))
     true))
@@ -184,6 +190,7 @@
        :error          (empty->nil (:task/error entity-map))
        :meta           (:task/meta entity-map)
        :autonomy-state (:task/autonomy-state entity-map)
+       :current-turn-id (:task/current-turn-id entity-map)
        :created-at     (or (:task/created-at entity-map)
                            (entity-created-at* deps entity-map))
        :updated-at     (or (:task/updated-at entity-map)
@@ -236,6 +243,7 @@
         interrupting-turn-id (assoc :task.turn/interrupting-turn-id interrupting-turn-id))
       {:db/id task-eid*
        :task/state :running
+       :task/current-turn-id turn-id
        :task/updated-at created-at
        :task/started-at (or (:task/started-at (raw-entity* deps task-eid*))
                             created-at)}])
@@ -246,19 +254,24 @@
   (when-let [eid (turn-eid deps turn-id)]
     (let [task-id    (turn-task-id deps eid)
           task-eid*  (task-eid deps task-id)
+          task-entity (raw-entity* deps task-eid*)
           finished-at* (or finished-at
                            (when (#{:completed :failed :cancelled} state)
-                             (now)))]
+                             (now)))
+          clear-current-turn? (and (#{:completed :failed :cancelled} state)
+                                   (= turn-id (:task/current-turn-id task-entity)))]
       (transact!*
        deps
-       [(cond-> {:db/id eid
-                 :task.turn/updated-at (now)}
-          state (assoc :task.turn/state state)
-          (some? input) (assoc :task.turn/input input)
-          (some? summary) (assoc :task.turn/summary summary)
-          (some? error) (assoc :task.turn/error error)
-          (some? meta) (assoc :task.turn/meta meta)
-          (some? finished-at*) (assoc :task.turn/finished-at finished-at*))])
+       (cond-> [(cond-> {:db/id eid
+                         :task.turn/updated-at (now)}
+                  state (assoc :task.turn/state state)
+                  (some? input) (assoc :task.turn/input input)
+                  (some? summary) (assoc :task.turn/summary summary)
+                  (some? error) (assoc :task.turn/error error)
+                  (some? meta) (assoc :task.turn/meta meta)
+                  (some? finished-at*) (assoc :task.turn/finished-at finished-at*))]
+         clear-current-turn?
+         (conj [:db/retract task-eid* :task/current-turn-id turn-id])))
       (touch-task! deps task-eid*)
       true)))
 
