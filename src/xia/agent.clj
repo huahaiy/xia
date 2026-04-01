@@ -55,6 +55,7 @@
 (def ^:private default-max-turn-wall-clock-ms 21600000)
 (defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
+(defonce ^:private active-task-runs (atom {}))
 (def ^:dynamic *turn-llm-budget-state* nil)
 
 (def ^:private trace-context-keys
@@ -429,12 +430,33 @@
   (when session-id
     (get @active-session-runs session-id)))
 
+(defn- task-run-entry
+  [task-id]
+  (when task-id
+    (get @active-task-runs task-id)))
+
 (defn- wait-for-session-idle!
   [session-id timeout-ms]
   (let [deadline (+ (current-time-ms) (long timeout-ms))]
     (loop []
       (cond
         (nil? (session-run-entry session-id))
+        true
+
+        (>= (current-time-ms) deadline)
+        false
+
+        :else
+        (do
+          (Thread/sleep 50)
+          (recur))))))
+
+(defn- wait-for-task-idle!
+  [task-id timeout-ms]
+  (let [deadline (+ (current-time-ms) (long timeout-ms))]
+    (loop []
+      (cond
+        (nil? (task-run-entry task-id))
         true
 
         (>= (current-time-ms) deadline)
@@ -453,6 +475,53 @@
              (if-let [entry (get runs session-id)]
                (assoc runs session-id (f entry))
                runs)))))
+
+(defn- register-task-run!
+  [session-id task-id task-turn-id]
+  (when (and session-id task-id task-turn-id)
+    (when-let [entry (session-run-entry session-id)]
+      (let [run-id (:run-id entry)
+            task-entry {:task-id task-id
+                        :task-turn-id task-turn-id
+                        :session-id session-id
+                        :run-id run-id}]
+        (swap! active-task-runs assoc task-id task-entry)
+        (update-session-run-entry! session-id
+                                   (fn [run]
+                                     (if (= run-id (:run-id run))
+                                       (assoc run
+                                              :task-id task-id
+                                              :task-turn-id task-turn-id)
+                                       run)))
+        task-entry))))
+
+(defn- clear-task-run!
+  [session-id task-id task-turn-id]
+  (when task-id
+    (let [expected-run-id (or (some-> (session-run-entry session-id) :run-id)
+                              (some-> (task-run-entry task-id) :run-id))]
+      (swap! active-task-runs
+             (fn [runs]
+               (if-let [entry (get runs task-id)]
+                 (if (and (or (nil? expected-run-id)
+                              (= expected-run-id (:run-id entry)))
+                          (or (nil? session-id)
+                              (= session-id (:session-id entry)))
+                          (or (nil? task-turn-id)
+                              (= task-turn-id (:task-turn-id entry))))
+                   (dissoc runs task-id)
+                   runs)
+                 runs)))
+      (when session-id
+        (update-session-run-entry! session-id
+                                   (fn [entry]
+                                     (if (and (= task-id (:task-id entry))
+                                              (or (nil? task-turn-id)
+                                                  (= task-turn-id (:task-turn-id entry))))
+                                       (assoc entry
+                                              :task-id nil
+                                              :task-turn-id nil)
+                                       entry)))))))
 
 (defn- register-child-session!
   [parent-session-id child-session-id]
@@ -474,9 +543,9 @@
   [session-id worker-token]
   (update-session-run-entry! session-id
                              #(assoc % :worker-token worker-token
-                                       :worker-thread nil
-                                       :worker-future nil
-                                       :parallel-tool-futures [])))
+                                     :worker-thread nil
+                                     :worker-future nil
+                                     :parallel-tool-futures [])))
 
 (defn- register-worker-thread!
   [session-id worker-token]
@@ -714,12 +783,12 @@
   (when turn-budget-state
     (swap! turn-budget-state
            (fn [budget]
-             (let [prompt-tokens     (or (usage-value usage "prompt_tokens") 0)
+             (let [prompt-tokens (or (usage-value usage "prompt_tokens") 0)
                    completion-tokens (or (usage-value usage "completion_tokens")
                                          (usage-value usage "output_tokens")
                                          0)
-                   total-tokens      (or (usage-value usage "total_tokens")
-                                         (+ prompt-tokens completion-tokens))]
+                   total-tokens (or (usage-value usage "total_tokens")
+                                    (+ prompt-tokens completion-tokens))]
                (cond-> (-> budget
                            (update :llm-call-count (fnil inc 0))
                            (update :llm-total-duration-ms (fnil + 0) (long (or duration-ms 0)))
@@ -737,16 +806,16 @@
 (defn- turn-llm-budget-status*
   [budget]
   (let [elapsed-ms (- (current-time-ms) (long (:started-at-ms budget 0)))
-        status     {:session-id (:session-id budget)
-                    :channel (:channel budget)
-                    :llm-call-count (long (:llm-call-count budget 0))
-                    :total-tokens (long (:total-tokens budget 0))
-                    :prompt-tokens (long (:prompt-tokens budget 0))
-                    :completion-tokens (long (:completion-tokens budget 0))
-                    :elapsed-ms elapsed-ms
-                    :max-llm-calls (long (:max-llm-calls budget 0))
-                    :max-total-tokens (long (:max-total-tokens budget 0))
-                    :max-wall-clock-ms (long (:max-wall-clock-ms budget 0))}]
+        status {:session-id (:session-id budget)
+                :channel (:channel budget)
+                :llm-call-count (long (:llm-call-count budget 0))
+                :total-tokens (long (:total-tokens budget 0))
+                :prompt-tokens (long (:prompt-tokens budget 0))
+                :completion-tokens (long (:completion-tokens budget 0))
+                :elapsed-ms elapsed-ms
+                :max-llm-calls (long (:max-llm-calls budget 0))
+                :max-total-tokens (long (:max-total-tokens budget 0))
+                :max-wall-clock-ms (long (:max-wall-clock-ms budget 0))}]
     (cond
       (>= (:llm-call-count status) (:max-llm-calls status))
       (assoc status :kind :llm-calls)
@@ -1007,16 +1076,16 @@
         system-transient (->> transient*
                               (filter #(= "system" (:role %)))
                               vec)
-        other-transient  (->> transient*
-                              (remove #(= "system" (:role %)))
-                              vec)
-        join-content     (fn [parts]
-                           (->> parts
-                                (keep :content)
-                                (map str)
-                                (map str/trim)
-                                (remove str/blank?)
-                                (str/join "\n\n")))]
+        other-transient (->> transient*
+                             (remove #(= "system" (:role %)))
+                             vec)
+        join-content (fn [parts]
+                       (->> parts
+                            (keep :content)
+                            (map str)
+                            (map str/trim)
+                            (remove str/blank?)
+                            (str/join "\n\n")))]
     (cond
       (empty? transient*)
       messages
@@ -1259,15 +1328,15 @@
   [autonomy-state control]
   (let [tip (autonomous/current-frame autonomy-state)]
     {:root-goal-terms (loop-text-signature (autonomous/root-goal autonomy-state))
-     :title-terms     (loop-text-signature (:title tip))
+     :title-terms (loop-text-signature (:title tip))
      :next-step-terms (loop-text-signature (:next-step control))
-     :agenda          (loop-agenda-signature (:agenda tip))
-     :stack           (loop-stack-signature (:stack autonomy-state))}))
+     :agenda (loop-agenda-signature (:agenda tip))
+     :stack (loop-stack-signature (:stack autonomy-state))}))
 
 (defn- semantic-loop-text
   [autonomy-state control]
-  (let [tip   (autonomous/current-frame autonomy-state)
-        goal  (some-> (autonomous/root-goal autonomy-state) str not-empty)
+  (let [tip (autonomous/current-frame autonomy-state)
+        goal (some-> (autonomous/root-goal autonomy-state) str not-empty)
         focus (some-> (:title tip) str not-empty)
         next-step (some-> (:next-step control) str not-empty)
         stack (->> (:stack autonomy-state)
@@ -1304,7 +1373,7 @@
              (pos? (count left)))
     (let [[dot norm-left norm-right]
           (reduce (fn [[dot* norm-left* norm-right*] [left-value right-value]]
-                    (let [left*  (double left-value)
+                    (let [left* (double left-value)
                           right* (double right-value)]
                       [(+ dot* (* left* right*))
                        (+ norm-left* (* left* left*))
@@ -1340,7 +1409,7 @@
 (defn- semantic-loop-equivalent?
   [embedding-cache previous-signature next-signature]
   (let [previous-fallback (:semantic-fallback previous-signature)
-        next-fallback     (:semantic-fallback next-signature)]
+        next-fallback (:semantic-fallback next-signature)]
     (if (and previous-fallback
              next-fallback
              (= previous-fallback next-fallback))
@@ -1366,21 +1435,21 @@
 
 (defn- iteration-progress-marker
   [autonomy-state control]
-  (let [tip            (autonomous/current-frame autonomy-state)
-        stack          (vec (:stack autonomy-state))
-        agenda         (vec (:agenda tip))
+  (let [tip (autonomous/current-frame autonomy-state)
+        stack (vec (:stack autonomy-state))
+        agenda (vec (:agenda tip))
         stack-statuses (frequencies (keep :progress-status stack))
         agenda-statuses (frequencies (keep :status agenda))]
-    {:goal-complete?  (true? (:goal-complete? control))
-     :stack-depth     (count stack)
-     :stack-complete  (long (get stack-statuses :complete 0))
-     :tip-status      (:progress-status tip)
-     :agenda-total    (count agenda)
+    {:goal-complete? (true? (:goal-complete? control))
+     :stack-depth (count stack)
+     :stack-complete (long (get stack-statuses :complete 0))
+     :tip-status (:progress-status tip)
+     :agenda-total (count agenda)
      :agenda-complete (long (+ (get agenda-statuses :completed 0)
                                (get agenda-statuses :skipped 0)))
-     :agenda-active   (long (get agenda-statuses :in-progress 0))
+     :agenda-active (long (get agenda-statuses :in-progress 0))
      :agenda-statuses agenda-statuses
-     :stack-statuses  stack-statuses}))
+     :stack-statuses stack-statuses}))
 
 (defn- iteration-progress-score
   [{:keys [goal-complete? stack-complete tip-status agenda-complete agenda-active]}]
@@ -1392,32 +1461,32 @@
 
 (defn- iteration-tool-marker
   [tool-activity]
-  (let [results        (->> tool-activity
-                            (mapcat :results)
-                            vec)
-        statuses       (frequencies (keep :status results))
-        failure-count  (long (get statuses "error" 0))
-        success-count  (long (get statuses "success" 0))
-        total-count    (+ failure-count success-count)
-        error-terms    (->> results
-                            (keep (fn [{:keys [error summary status]}]
-                                    (when (= status "error")
-                                      (or (loop-text-signature error)
-                                          (loop-text-signature summary)))))
-                            vec
-                            not-empty)]
-    {:round-count      (count tool-activity)
-     :total-count      total-count
-     :failure-count    failure-count
-     :success-count    success-count
-     :only-failures?   (and (pos? total-count)
-                            (zero? success-count))
-     :error-signature  error-terms}))
+  (let [results (->> tool-activity
+                     (mapcat :results)
+                     vec)
+        statuses (frequencies (keep :status results))
+        failure-count (long (get statuses "error" 0))
+        success-count (long (get statuses "success" 0))
+        total-count (+ failure-count success-count)
+        error-terms (->> results
+                         (keep (fn [{:keys [error summary status]}]
+                                 (when (= status "error")
+                                   (or (loop-text-signature error)
+                                       (loop-text-signature summary)))))
+                         vec
+                         not-empty)]
+    {:round-count (count tool-activity)
+     :total-count total-count
+     :failure-count failure-count
+     :success-count success-count
+     :only-failures? (and (pos? total-count)
+                          (zero? success-count))
+     :error-signature error-terms}))
 
 (defn- repeated-tool-failure-loop?
   [previous-signature next-signature]
   (let [previous-tool-marker (:tool-marker previous-signature)
-        next-tool-marker     (:tool-marker next-signature)]
+        next-tool-marker (:tool-marker next-signature)]
     (and (:only-failures? previous-tool-marker)
          (:only-failures? next-tool-marker))))
 
@@ -1859,23 +1928,23 @@
 
 (defn- iteration-signature
   [autonomy-state control tool-activity]
-  (let [tip             (autonomous/current-frame autonomy-state)
+  (let [tip (autonomous/current-frame autonomy-state)
         progress-marker (iteration-progress-marker autonomy-state control)]
-    {:progress-status   (:progress-status tip)
-     :stack-action      (:stack-action control)
-     :tool-activity     tool-activity
-     :tool-marker       (iteration-tool-marker tool-activity)
-     :progress-marker   progress-marker
-     :semantic-text     (semantic-loop-text autonomy-state control)
+    {:progress-status (:progress-status tip)
+     :stack-action (:stack-action control)
+     :tool-activity tool-activity
+     :tool-marker (iteration-tool-marker tool-activity)
+     :progress-marker progress-marker
+     :semantic-text (semantic-loop-text autonomy-state control)
      :semantic-fallback (semantic-loop-fallback-signature autonomy-state control)}))
 
 (defn- update-iteration-loop-state
   [{:keys [signature stall-key progress-score count embedding-cache]} next-signature]
-  (let [next-stall-key      (iteration-stall-key next-signature)
+  (let [next-stall-key (iteration-stall-key next-signature)
         next-progress-score (iteration-progress-score (:progress-marker next-signature))
-        same-stall-state?   (= stall-key next-stall-key)
-        progressed?         (> next-progress-score
-                               (long (or progress-score Long/MIN_VALUE)))
+        same-stall-state? (= stall-key next-stall-key)
+        progressed? (> next-progress-score
+                       (long (or progress-score Long/MIN_VALUE)))
         repeated-tool-failure? (and signature
                                     same-stall-state?
                                     (not progressed?)
@@ -1974,8 +2043,8 @@
 (defn- validate-goal-complete
   [control autonomy-state]
   (let [claimed? (true? (:goal-complete? control))
-        valid?   (or (not claimed?)
-                     (autonomous/structurally-complete? autonomy-state))]
+        valid? (or (not claimed?)
+                   (autonomous/structurally-complete? autonomy-state))]
     {:goal-complete-valid? valid?
      :control (if valid?
                 control
@@ -2019,31 +2088,31 @@
 
 (defn- persist-tool-result-message!
   [session-id execution-context llm-call-id provider-id model workload tool-result]
-  (let [tool-name        (:tool_name tool-result)
-        tool-call-id     (:tool_call_id tool-result)
-        tool-message-id  (db/add-message! session-id :tool
-                                          nil
-                                          :tool-result (:result tool-result)
-                                          :tool-id tool-name
-                                          :tool-call-id tool-call-id
-                                          :tool-name tool-name
-                                          :llm-call-id llm-call-id
-                                          :provider-id provider-id
-                                          :model model
-                                          :workload workload)]
+  (let [tool-name (:tool_name tool-result)
+        tool-call-id (:tool_call_id tool-result)
+        tool-message-id (db/add-message! session-id :tool
+                                         nil
+                                         :tool-result (:result tool-result)
+                                         :tool-id tool-name
+                                         :tool-call-id tool-call-id
+                                         :tool-name tool-name
+                                         :llm-call-id llm-call-id
+                                         :provider-id provider-id
+                                         :model model
+                                         :workload workload)]
     (task-runtime/record-task-tool-result-item! (task-runtime-deps)
                                                 (:task-turn-id execution-context)
                                                 tool-message-id
                                                 llm-call-id
                                                 tool-result)
     (audit/log! execution-context
-                {:actor        :assistant
-                 :type         :tool-result
-                 :message-id   tool-message-id
-                 :llm-call-id  llm-call-id
-                 :tool-id      tool-name
+                {:actor :assistant
+                 :type :tool-result
+                 :message-id tool-message-id
+                 :llm-call-id llm-call-id
+                 :tool-id tool-name
                  :tool-call-id tool-call-id
-                 :data         (tool-result-audit-data tool-result)})
+                 :data (tool-result-audit-data tool-result)})
     tool-message-id))
 
 (defn- run-agent-iteration
@@ -2118,7 +2187,7 @@
                   (emit-intent-event! emit-event!
                                       execution-context
                                       parsed-response))
-          has-tools? (and (map? response) (seq (get response "tool_calls")))]
+              has-tools? (and (map? response) (seq (get response "tool_calls")))]
           (if has-tools?
             (if budget-status
               (do
@@ -2131,16 +2200,16 @@
                  :used-fact-eids used-fact-eids
                  :tool-activity tool-activity
                  :refresh-needed? (retrieval-state/changed? retrieval-version-before
-                                                           retrieval-session-id)
+                                                            retrieval-session-id)
                  :budget-exhausted? true
                  :budget-status budget-status
                  :budget-before-tools? true
                  :system-prompt-cache-entry system-prompt-cache-entry})
               (do
               (validate-tool-round-protocol! session-id
-                                            execution-context
-                                            round
-                                            parsed-response)
+                                             execution-context
+                                             round
+                                             parsed-response)
               (when (>= (long round) (long max-tool-rounds))
                 (throw (ex-info "Too many tool-calling rounds"
                                 {:type :tool-round-limit-exceeded
@@ -2252,14 +2321,14 @@
             (do
               (throw-if-cancelled! session-id)
               (emit-event! {:phase :finalizing
-                           :message "Preparing response"
-                           :iteration (:iteration execution-context)})
+                            :message "Preparing response"
+                            :iteration (:iteration execution-context)})
               {:response response
                :parsed-response parsed-response
                :used-fact-eids used-fact-eids
                :tool-activity tool-activity
                :refresh-needed? (retrieval-state/changed? retrieval-version-before
-                                                         retrieval-session-id)
+                                                          retrieval-session-id)
                :budget-exhausted? (boolean budget-status)
                :budget-status budget-status
                :system-prompt-cache-entry system-prompt-cache-entry})))))))
@@ -2287,10 +2356,10 @@
         session-id
         (fn []
           (let [request-context (derive-request-context session-id channel tool-context)
-                runtime-task    (atom nil)]
+                runtime-task (atom nil)]
             (binding [prompt/*interaction-context* (merge request-context
-                                                         (task-runtime/task-runtime-callbacks (task-runtime-deps)
-                                                                                              runtime-task))]
+                                                          (task-runtime/task-runtime-callbacks (task-runtime-deps)
+                                                                                               runtime-task))]
               (try
                 (throw-if-cancelled! session-id)
                 (validate-user-message! user-message)
@@ -2309,6 +2378,7 @@
                                                                                          interrupting-turn-id)
                       _ (reset! runtime-task {:task-id task-id
                                               :task-turn-id task-turn-id})
+                      _ (register-task-run! session-id task-id task-turn-id)
                       user-message-id (when persist-message?
                                         (db/add-message! session-id :user user-message
                                                          :local-doc-ids local-doc-ids
@@ -2821,7 +2891,10 @@
                       (prompt/status! {:state :error
                                        :phase :error
                                        :message (str "Request failed: " (.getMessage e))})
-                      (throw e))))))))))))
+                      (throw e))))
+                (finally
+                  (when-let [{:keys [task-id task-turn-id]} @runtime-task]
+                    (clear-task-run! session-id task-id task-turn-id)))))))))))
 
 (defn- task-control-deps
   []
@@ -2830,8 +2903,10 @@
           :process-message process-message
           :register-child-session! register-child-session!
           :session-run-entry session-run-entry
+          :task-run-entry task-run-entry
           :task-control-wait-ms task-control-wait-ms
           :unregister-child-session! unregister-child-session!
+          :wait-for-task-idle! wait-for-task-idle!
           :wait-for-session-idle! wait-for-session-idle!}))
 
 (defn pause-task!

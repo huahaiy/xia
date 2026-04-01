@@ -165,13 +165,23 @@
   (when task-turn-id
     (db/update-task-turn! task-turn-id attrs)))
 
+(defn- live-task-run
+  [deps task-id]
+  (when-let [f (:task-run-entry deps)]
+    (when task-id
+      (f task-id))))
+
 (defn- task-active?
   [deps task]
-  (boolean (some-> task :session-id ((:session-run-entry deps)))))
+  (boolean
+   (or (live-task-run deps (:id task))
+       (when-let [f (:session-run-entry deps)]
+         (some-> task :session-id f)))))
 
 (defn- active-task-turn-id
-  [task-id]
-  (or (some-> task-id db/get-task :current-turn-id)
+  [deps task-id]
+  (or (some-> (live-task-run deps task-id) :task-turn-id)
+      (some-> task-id db/get-task :current-turn-id)
       (some->> (db/task-turns task-id) last :id)))
 
 (defn- record-task-control-turn!
@@ -323,7 +333,8 @@
 (defn pause-task!
   [deps task-id]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (:session-id task)]
+    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
+                         (:session-id task))]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -359,7 +370,8 @@
 (defn stop-task!
   [deps task-id]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (:session-id task)]
+    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
+                         (:session-id task))]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -396,7 +408,8 @@
 (defn resume-task!
   [deps task-id & {:keys [message]}]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (:session-id task)
+    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
+                         (:session-id task))
           channel    (or (:channel task) :terminal)
           message*   (or (some-> message str str/trim not-empty)
                          "Continue from the current agenda.")]
@@ -446,7 +459,8 @@
 (defn interrupt-task!
   [deps task-id]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (:session-id task)]
+    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
+                         (:session-id task))]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -482,17 +496,27 @@
 (defn steer-task!
   [deps task-id message]
   (if-let [task (db/get-task task-id)]
-    (let [session-id            (:session-id task)
+    (let [live-run              (live-task-run deps task-id)
+          session-id            (or (:session-id live-run)
+                                    (:session-id task))
           channel               (or (:channel task) :terminal)
           message*              (some-> message str str/trim not-empty)
-          interrupted-turn-id   (active-task-turn-id task-id)
+          interrupted-turn-id   (or (:task-turn-id live-run)
+                                    (active-task-turn-id deps task-id))
           submit-steer!
           (fn [interrupting-turn-id]
             (async/submit-background!
              (str "task-steer:" task-id)
              #(do
                 (when interrupting-turn-id
-                  (when-not ((:wait-for-session-idle! deps) session-id ((:task-control-wait-ms deps)))
+                  (let [timeout-ms ((:task-control-wait-ms deps))
+                        task-wait-fn (:wait-for-task-idle! deps)
+                        idle? (cond
+                                task-wait-fn (task-wait-fn task-id timeout-ms)
+                                (:wait-for-session-idle! deps)
+                                ((:wait-for-session-idle! deps) session-id timeout-ms)
+                                :else true)]
+                    (when-not idle?
                     (db/update-task! task-id
                                      {:state :paused
                                       :stop-reason :interrupted
@@ -502,7 +526,7 @@
                                     {:type :task-steer-timeout
                                      :task-id task-id
                                      :session-id session-id
-                                     :timeout-ms ((:task-control-wait-ms deps))}))))
+                                     :timeout-ms timeout-ms})))))
                 ((:process-message deps) session-id
                  message*
                  :channel channel

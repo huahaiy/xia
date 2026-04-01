@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [datalevin.embedding :as emb]
             [xia.agent :as agent]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
@@ -223,6 +224,29 @@
       (is (= [:system-note] (mapv :type items)))
       (is (= "Task interrupted by user" (:summary (first items)))))))
 
+(deftest pause-task-prefers-live-task-run-over-session-lookup
+  (let [session-id   (db/create-session! :terminal)
+        task-id      (db/create-task! {:session-id session-id
+                                       :channel :terminal
+                                       :type :interactive
+                                       :state :running
+                                       :title "Review the invoice"})
+        cancel-calls (atom [])]
+    (let [result (task-runtime/pause-task! {:task-run-entry (fn [id]
+                                                              (when (= task-id id)
+                                                                {:task-id task-id
+                                                                 :session-id session-id
+                                                                 :task-turn-id (random-uuid)}))
+                                            :session-run-entry (constantly nil)
+                                            :cancel-session! (fn [sid reason]
+                                                               (swap! cancel-calls conj [sid reason])
+                                                               true)}
+                                           task-id)]
+      (is (= :pausing (:status result)))
+      (is (= task-id (:task-id result)))
+      (is (= session-id (:session-id result)))
+      (is (= [[session-id "task pause requested"]] @cancel-calls)))))
+
 (deftest resume-task-restarts-a-paused-task
   (let [session-id     (db/create-session! :terminal)
         task-id        (db/create-task! {:session-id session-id
@@ -295,6 +319,66 @@
                         :task-id task-id
                         :runtime-op :steer
                         :interrupting-turn-id nil}}]
+               @process-calls))))))
+
+(deftest steer-task-prefers-live-task-turn-and-task-idle-wait
+  (let [session-id     (db/create-session! :terminal)
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :running
+                                         :title "Reply to the billing emails"})
+        persisted-turn (db/start-task-turn! task-id
+                                            {:operation :start
+                                             :state :running
+                                             :input "reply to the billing emails"
+                                             :summary "Persisted turn"})
+        live-turn      (random-uuid)
+        submitted-work (atom nil)
+        process-calls  (atom [])
+        cancel-calls   (atom [])
+        idle-waits     (atom [])]
+    (db/update-task! task-id {:current-turn-id persisted-turn})
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)]
+      (let [result (task-runtime/steer-task!
+                    {:task-run-entry (fn [id]
+                                       (when (= task-id id)
+                                         {:task-id task-id
+                                          :task-turn-id live-turn
+                                          :session-id session-id}))
+                     :session-run-entry (constantly nil)
+                     :cancel-session! (fn [sid reason]
+                                        (swap! cancel-calls conj [sid reason])
+                                        true)
+                     :process-message (fn [sid message & {:as opts}]
+                                        (swap! process-calls conj {:session-id sid
+                                                                   :message message
+                                                                   :opts opts})
+                                        "ok")
+                     :task-control-wait-ms (constantly 1234)
+                     :truncate-summary (fn [text max-chars]
+                                         (subs text 0 (min (count text) (int max-chars))))
+                     :wait-for-task-idle! (fn [id timeout-ms]
+                                            (swap! idle-waits conj [id timeout-ms])
+                                            true)
+                     :wait-for-session-idle! (fn [& _]
+                                               (throw (ex-info "session wait should not be used"
+                                                               {:type ::unexpected-session-wait})))}
+                    task-id
+                    "Switch to the escalated billing thread")]
+        (is (= :steering (:status result)))
+        (is (= [[session-id "task steer requested"]] @cancel-calls))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [[task-id 1234]] @idle-waits))
+        (is (= [{:session-id session-id
+                 :message "Switch to the escalated billing thread"
+                 :opts {:channel :terminal
+                        :task-id task-id
+                        :runtime-op :steer
+                        :interrupting-turn-id live-turn}}]
                @process-calls))))))
 
 (deftest steer-task-cancels-an-active-run-before-restarting
