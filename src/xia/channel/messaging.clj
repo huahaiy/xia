@@ -519,18 +519,31 @@
   [session-id channel user-message]
   (when-let [intent (prompt/parse-control-intent user-message)]
     (let [task   (db/current-session-task session-id)
-          result (prompt/apply-task-control-intent!
-                  {:pause-task! agent/pause-task!
-                   :resume-task! agent/resume-task!
-                   :stop-task! agent/stop-task!
-                   :interrupt-task! agent/interrupt-task!
-                   :steer-task! agent/steer-task!
-                   :fork-task! agent/fork-task!}
-                  (some-> task :id)
-                  intent)]
+          result (if task
+                   (prompt/apply-task-control-intent!
+                    {:pause-task! agent/pause-task!
+                     :resume-task! agent/resume-task!
+                     :stop-task! agent/stop-task!
+                     :interrupt-task! agent/interrupt-task!
+                     :steer-task! agent/steer-task!
+                     :fork-task! agent/fork-task!}
+                    (some-> task :id)
+                    intent)
+                   (if (= :interrupt intent)
+                     (prompt/apply-session-control-intent!
+                      {:cancel-session! agent/cancel-session!}
+                      session-id
+                      :interrupt
+                      :reason "session cancel requested")
+                     {:status :missing}))
+          text   (if task
+                   (prompt/control-result-text intent result)
+                   (if (= :interrupt intent)
+                     (prompt/session-control-result-text :interrupt result)
+                     (prompt/control-result-text intent result)))]
       (send-session-message! channel
                              session-id
-                             (prompt/control-result-text intent result))
+                             text)
       true)))
 
 (defn- handle-external-message!

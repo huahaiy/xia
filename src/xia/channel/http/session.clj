@@ -865,19 +865,34 @@
      (not (session-accessible?* deps session-id expected-channel))
      (json-response* deps 404 {:error "session not found"})
 
-     (session-busy?* deps session-id)
-     (if (agent/cancel-session! (parse-session-id* deps session-id)
-                                "session close requested")
-       (json-response* deps 202 {:session_id (parse-session-id* deps session-id)
-                                 :status     "cancelling"
-                                 :closing    true})
-       (json-response* deps 409 {:error "session is still processing a request"}))
-
      :else
-     (let [closed? (finalize-rest-session!* deps session-id :explicit)]
-       (json-response* deps 200 {:session_id     (parse-session-id* deps session-id)
-                                 :status         (if closed? "closed" "already_closed")
-                                 :already_closed (not closed?)})))))
+     (let [sid    (parse-session-id* deps session-id)
+           result (prompt/apply-session-control-intent!
+                   {:busy? (fn [session-id]
+                             (session-busy?* deps session-id))
+                    :cancel-session! (fn [session-id reason]
+                                       (agent/cancel-session! session-id reason))
+                    :finalize-session! (fn [session-id]
+                                         (finalize-rest-session!* deps session-id :explicit))}
+                   sid
+                   :close
+                   :reason "session close requested")
+           {:keys [response-kind status status-key message]} (prompt/session-control-result-view :close result)]
+       (case response-kind
+         :accepted
+         (json-response* deps 202 {:session_id sid
+                                   :status status-key
+                                   :closing true})
+
+         :completed
+         (json-response* deps 200 {:session_id sid
+                                   :status status-key
+                                   :already_closed (= :already-closed status)})
+
+         :conflict
+         (json-response* deps 409 {:error message})
+
+         (json-response* deps 500 {:error "unknown session control result"}))))))
 
 (defn handle-history-sessions
   [deps]

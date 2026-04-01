@@ -351,6 +351,84 @@
                       :unknown)
      :message (control-result-text intent result)}))
 
+(defn session-control-result-text
+  "Render a user-facing acknowledgement for a session-level control result."
+  [intent result]
+  (case (:status result)
+    :cancelling (case intent
+                  :close "Closing the current session."
+                  "Cancelling the current session.")
+    :closed "Session closed."
+    :already-closed "Session is already closed."
+    :busy (or (:error result) "The current session is still processing a request.")
+    :missing "No current session to control."
+    :invalid (or (:error result) "That session control request is not valid.")
+    (or (:error result) "I couldn't apply that session control request.")))
+
+(defn session-control-result-view
+  "Return a normalized presentation for a session control result."
+  [intent result]
+  (let [status (:status result)]
+    {:status status
+     :status-key (case status
+                   :already-closed "already_closed"
+                   (when (keyword? status)
+                     (name status)))
+     :response-kind (case status
+                      :missing :missing
+                      :busy :conflict
+                      :cancelling :accepted
+                      (:closed :already-closed) :completed
+                      :invalid :conflict
+                      :unknown)
+     :message (session-control-result-text intent result)}))
+
+(defn apply-session-control-intent!
+  "Dispatch a session-level control intent to the supplied handlers.
+
+   `handlers` may provide:
+   - `:cancel-session!`
+   - `:busy?`
+   - `:finalize-session!`"
+  [handlers session-id intent & {:keys [reason]}]
+  (if-not session-id
+    {:status :missing}
+    (case intent
+      :interrupt
+      (if ((:cancel-session! handlers) session-id (or reason "session cancel requested"))
+        {:status :cancelling
+         :session-id session-id}
+        {:status :busy
+         :session-id session-id
+         :error "session is still processing a request"})
+
+      :close
+      (let [busy? (boolean (when-let [f (:busy? handlers)]
+                             (f session-id)))
+            finalize! (:finalize-session! handlers)]
+        (cond
+          busy?
+          (if ((:cancel-session! handlers) session-id (or reason "session close requested"))
+            {:status :cancelling
+             :session-id session-id
+             :closing true}
+            {:status :busy
+             :session-id session-id
+             :error "session is still processing a request"})
+
+          (nil? finalize!)
+          {:status :invalid
+           :session-id session-id
+           :error "Session finalization is unavailable"}
+
+          :else
+          {:status (if (finalize! session-id) :closed :already-closed)
+           :session-id session-id}))
+
+      {:status :invalid
+       :session-id session-id
+       :error (str "Unsupported session control intent: " intent)})))
+
 (defn apply-task-control-intent!
   "Dispatch a control intent to the supplied task-control handlers.
 

@@ -305,3 +305,43 @@
                @delivered))
         (finally
           (messaging/stop!))))))
+
+(deftest messaging-control-intent-cancels-the-current-session-when-no-task-exists
+  (let [session-id      (db/create-session! :telegram {:external-key "telegram:1001:main"
+                                                       :external-meta {:chat-id 1001}})
+        delivered       (atom [])
+        process-calls   (atom 0)
+        cancel-calls    (atom [])]
+    (with-redefs [xia.channel.messaging/telegram-enabled? (constantly true)
+                  xia.async/submit-background! (fn [_description f]
+                                                 (f))
+                  agent/process-message (fn [& _]
+                                          (swap! process-calls inc)
+                                          "unexpected")
+                  agent/cancel-session! (fn [sid reason]
+                                          (swap! cancel-calls conj [sid reason])
+                                          true)
+                  messaging/send-session-message! (fn [channel sid text]
+                                                    (swap! delivered conj {:channel channel
+                                                                           :session-id sid
+                                                                           :text text})
+                                                    true)]
+      (messaging/start!)
+      (try
+        (messaging/handle-telegram-update!
+         {"update_id" 102
+          "message" {"message_id" 19
+                      "text" "cancel"
+                      "chat" {"id" 1001}
+                      "from" {"id" 55
+                              "is_bot" false
+                              "first_name" "Alex"}}})
+        (is (= 0 @process-calls))
+        (is (= [[session-id "session cancel requested"]] @cancel-calls))
+        (is (= [] (db/session-messages session-id)))
+        (is (= [{:channel :telegram
+                 :session-id session-id
+                 :text "Cancelling the current session."}]
+               @delivered))
+        (finally
+          (messaging/stop!))))))

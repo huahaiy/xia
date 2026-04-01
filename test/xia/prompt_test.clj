@@ -203,6 +203,22 @@
              (prompt/control-result-text :interrupt {:status :interrupting})))
       (is (= "No current task to control."
              (prompt/control-result-text :pause {:status :missing})))
+      (is (= "Closing the current session."
+             (prompt/session-control-result-text :close {:status :cancelling})))
+      (is (= {:status :closed
+              :response-kind :completed}
+             (select-keys (prompt/session-control-result-view :close {:status :closed})
+                          [:status :response-kind])))
+      (is (= {:status :cancelling
+              :session-id session-id}
+             (select-keys (prompt/apply-session-control-intent!
+                           {:cancel-session! (fn [sid reason]
+                                               (is (= session-id sid))
+                                               (is (= "session cancel requested" reason))
+                                               true)}
+                           session-id
+                           :interrupt)
+                          [:status :session-id])))
       (finally
         (prompt/clear-pending-interaction! {:task-id (:task-id prompt-a)})
         (prompt/clear-pending-interaction! {:task-id (:task-id prompt-b)})))))
