@@ -30,6 +30,14 @@
     (or (get m channel)
         (get m :default))))
 
+(defn- invoke-runtime-hook!
+  [hook-key payload]
+  (when-let [f (get *interaction-context* hook-key)]
+    (try
+      (f payload)
+      (catch Throwable _
+        nil))))
+
 (defn- register-handler!
   [handlers channel f]
   (swap! handlers
@@ -56,12 +64,19 @@
     (when-not f
       (throw (ex-info "No interactive prompt available for current channel"
                       {:label label :channel (current-channel)})))
+    (invoke-runtime-hook! :task-runtime/on-input-request
+                          {:label label
+                           :mask? (boolean mask?)})
     (audit/log! *interaction-context*
                 {:actor :user
                  :type  :input-request
                  :data  {:label label
                          :masked (boolean mask?)}})
     (let [value (f label :mask? mask?)]
+      (invoke-runtime-hook! :task-runtime/on-input-response
+                            {:label label
+                             :mask? (boolean mask?)
+                             :provided (not (clojure.string/blank? value))})
       (audit/log! *interaction-context*
                   {:actor :user
                    :type  :input-response
@@ -93,6 +108,7 @@
       (throw (ex-info "No approval handler available for current channel"
                       {:channel (current-channel)
                        :tool-id (:tool-id request)})))
+    (invoke-runtime-hook! :task-runtime/on-approval-request req)
     (audit/log! *interaction-context*
                 {:actor :user
                  :type  :approval-request
@@ -103,6 +119,8 @@
                          :policy      (some-> (:policy req) name)
                          :reason      (:reason req)}})
     (let [approved? (boolean (f req))]
+      (invoke-runtime-hook! :task-runtime/on-approval-decision
+                            (assoc req :approved? approved?))
       (audit/log! *interaction-context*
                   {:actor :user
                    :type  :approval-decision
@@ -129,6 +147,7 @@
   "Report an execution status update for the current interaction context.
    Returns nil if no status handler is registered for the current channel."
   [status]
+  (invoke-runtime-hook! :task-runtime/on-status status)
   (when-let [f (resolve-handler status-handlers)]
     (f (merge {:channel (current-channel)} *interaction-context* status))))
 

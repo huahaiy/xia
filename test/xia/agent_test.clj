@@ -86,7 +86,8 @@
           task-id (:id (first tasks))
           task (db/get-task task-id)
           turns (db/task-turns task-id)
-          items (db/turn-items (:id (first turns)))]
+          items (db/turn-items (:id (first turns)))
+          item-types (set (map :type items))]
       (is (= 1 (count tasks)))
       (is (= :completed (:state task)))
       (is (= :interactive (:type task)))
@@ -94,10 +95,12 @@
       (is (= 1 (count turns)))
       (is (= :completed (:state (first turns))))
       (is (= :start (:operation (first turns))))
-      (is (= [:user-message :assistant-message]
-             (mapv :type items)))
-      (is (= [:user :assistant]
-             (mapv :role items))))))
+      (is (contains? item-types :user-message))
+      (is (contains? item-types :assistant-message))
+      (is (contains? item-types :status))
+      (is (contains? item-types :checkpoint))
+      (is (= :user (:role (first (filter #(= :user-message (:type %)) items)))))
+      (is (= :assistant (:role (first (filter #(= :assistant-message (:type %)) items))))))))
 
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
@@ -120,6 +123,40 @@
           (is (= 1 (count tasks)))
           (is (= 2 (count turns)))
           (is (= [:start :resume] turn-ops)))))))
+
+(deftest process-message-prefers-task-autonomy-state-when-attaching
+  (let [session-id           (db/create-session! :terminal)
+        task-autonomy-state  (autonomous/initial-state "Investigate the billing discrepancy")
+        wm-autonomy-state    (autonomous/initial-state "Stale working memory goal")
+        task-id              (db/create-task! {:session-id session-id
+                                               :channel :terminal
+                                               :type :interactive
+                                               :state :paused
+                                               :title "Investigate the billing discrepancy"
+                                               :summary "Waiting for the next pass"
+                                               :stop-reason :paused
+                                               :autonomy-state task-autonomy-state})
+        seen-messages        (atom nil)]
+    (wm/create-wm! session-id)
+    (wm/set-autonomy-state! session-id wm-autonomy-state)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "base"}]
+                                                        :used-fact-eids []})
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.llm/chat-message               (fn [messages & _opts]
+                                                       (reset! seen-messages messages)
+                                                       {"content" "Continuing.\nAUTONOMOUS_STATUS_JSON:{\"status\":\"complete\",\"summary\":\"done\",\"goal_complete\":false}"})]
+      (is (= "Continuing."
+             (agent/process-message session-id
+                                    "Continue the investigation"
+                                    :channel :terminal
+                                    :task-id task-id))))
+    (let [system-content (some-> @seen-messages first :content)]
+      (is (str/includes? system-content "Investigate the billing discrepancy"))
+      (is (not (str/includes? system-content "Stale working memory goal"))))))
 
 (deftest pause-task-updates-task-and-records-a-control-turn
   (let [session-id (db/create-session! :terminal)
@@ -164,6 +201,27 @@
       (is (= [:system-note] (mapv :type items)))
       (is (= "Task stopped by user" (:summary (first items)))))))
 
+(deftest interrupt-task-updates-task-and-records-a-control-turn
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :interactive
+                                     :state :running
+                                     :title "Reply to the billing emails"})]
+    (let [result       (agent/interrupt-task! task-id)
+          task         (db/get-task task-id)
+          turns        (db/task-turns task-id)
+          control-turn (last turns)
+          items        (db/turn-items (:id control-turn))]
+      (is (= :paused (:status result)))
+      (is (= :paused (:state task)))
+      (is (= :interrupted (:stop-reason task)))
+      (is (= "Task interrupted by user" (:summary task)))
+      (is (= :interrupt (:operation control-turn)))
+      (is (= :completed (:state control-turn)))
+      (is (= [:system-note] (mapv :type items)))
+      (is (= "Task interrupted by user" (:summary (first items)))))))
+
 (deftest resume-task-restarts-a-paused-task
   (let [session-id     (db/create-session! :terminal)
         task-id        (db/create-task! {:session-id session-id
@@ -200,6 +258,337 @@
                         :runtime-op :resume
                         :persist-message? false}}]
                @process-calls))))))
+
+(deftest steer-task-restarts-a-task-with-a-new-instruction
+  (let [session-id     (db/create-session! :terminal)
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :paused
+                                         :title "Review the invoice"
+                                         :summary "Waiting for the next pass"
+                                         :stop-reason :paused
+                                         :finished-at (java.util.Date.)})
+        submitted-work (atom nil)
+        process-calls  (atom [])]
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [sid message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id sid
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")]
+      (let [result (agent/steer-task! task-id "Focus on the disputed invoice line item")
+            task   (db/get-task task-id)]
+        (is (= :steering (:status result)))
+        (is (= :running (:state task)))
+        (is (nil? (:stop-reason task)))
+        (is (nil? (:finished-at task)))
+        (is (= "Focus on the disputed invoice line item" (:summary task)))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id session-id
+                 :message "Focus on the disputed invoice line item"
+                 :opts {:channel :terminal
+                        :task-id task-id
+                        :runtime-op :steer
+                        :interrupting-turn-id nil}}]
+               @process-calls))))))
+
+(deftest steer-task-cancels-an-active-run-before-restarting
+  (let [session-id     (db/create-session! :terminal)
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :running
+                                         :title "Reply to the billing emails"})
+        current-turn-id (db/start-task-turn! task-id
+                                             {:operation :start
+                                              :state :running
+                                              :input "reply to the billing emails"
+                                              :summary "Working on the draft"})
+        submitted-work (atom nil)
+        cancelled      (atom [])
+        process-calls  (atom [])]
+    (#'xia.agent/with-session-run
+     session-id
+     (fn []
+       (with-redefs [xia.agent/cancel-session!         (fn [sid reason]
+                                                         (swap! cancelled conj [sid reason])
+                                                         true)
+                     xia.async/submit-background!      (fn [_label f]
+                                                         (reset! submitted-work f)
+                                                         ::submitted)
+                     xia.agent/wait-for-session-idle! (fn [_sid _timeout-ms]
+                                                        true)
+                     xia.agent/process-message        (fn [sid message & {:as opts}]
+                                                        (swap! process-calls conj {:session-id sid
+                                                                                   :message message
+                                                                                   :opts opts})
+                                                        "ok")]
+         (let [result (agent/steer-task! task-id "Switch to the escalated billing thread")]
+           (is (= :steering (:status result)))
+           (is (= [[session-id "task steer requested"]] @cancelled))
+           (is (fn? @submitted-work))
+           (@submitted-work)))))
+    (is (= [{:session-id session-id
+             :message "Switch to the escalated billing thread"
+             :opts {:channel :terminal
+                    :task-id task-id
+                    :runtime-op :steer
+                    :interrupting-turn-id current-turn-id}}]
+           @process-calls))))
+
+(deftest fork-task-creates-a-child-task-and-starts-it-in-a-worker-session
+  (let [parent-session-id (db/create-session! :terminal)
+        parent-task-id    (db/create-task! {:session-id parent-session-id
+                                            :channel :terminal
+                                            :type :interactive
+                                            :state :running
+                                            :title "Review the invoice"})
+        submitted-work    (atom nil)
+        process-calls     (atom [])
+        deactivated       (atom [])
+        cleared           (atom [])]
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [sid message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id sid
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")
+                  xia.db/set-session-active!    (fn [sid active?]
+                                                 (swap! deactivated conj [sid active?])
+                                                 true)
+                  xia.working-memory/clear-wm!  (fn [sid]
+                                                 (swap! cleared conj sid)
+                                                 true)]
+      (let [result       (agent/fork-task! parent-task-id "Investigate the disputed invoice line item")
+            child-task   (:task result)
+            child-task-id (:id child-task)
+            child-turns  (db/task-turns child-task-id)
+            parent-turns (db/task-turns parent-task-id)]
+        (is (= :forking (:status result)))
+        (is (= parent-task-id (:parent-id child-task)))
+        (is (= :branch (:channel child-task)))
+        (is (= :branch (:type child-task)))
+        (is (= :running (:state child-task)))
+        (is (= "Investigate the disputed invoice line item" (:title child-task)))
+        (is (uuid? (:session-id child-task)))
+        (is (empty? child-turns))
+        (is (= :fork (:operation (last parent-turns))))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id (:session-id child-task)
+                 :message "Investigate the disputed invoice line item"
+                 :opts {:channel :branch
+                        :task-id child-task-id
+                        :runtime-op :fork
+                        :resource-session-id parent-session-id
+                        :tool-context {:branch-worker? true
+                                       :parent-session-id parent-session-id
+                                       :resource-session-id parent-session-id}}}]
+               @process-calls))
+        (is (= [[(:session-id child-task) false]] @deactivated))
+        (is (= [(:session-id child-task)] @cleared))))))
+
+(deftest process-message-records-tool-call-items
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "workspace-read"
+                                                                              :parameters {}}}])
+                  xia.tool/parallel-safe?            (constantly false)
+                  xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                       {:summary "Read the billing note"
+                                                        :path "notes/billing.md"})
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"content" (str "ACTION_INTENT_JSON:{"
+                                                                           "\"focus\":\"Review the billing note\","
+                                                                           "\"agenda_item\":\"Read the note\","
+                                                                           "\"plan_step\":\"Use workspace-read\","
+                                                                           "\"why\":\"Need the file contents first\","
+                                                                           "\"tool\":\"workspace-read\","
+                                                                           "\"tool_args_summary\":\"{\\\"path\\\":\\\"notes/billing.md\\\"}\""
+                                                                           "}\n\nReading the note.")
+                                                            "tool_calls" [{"id" "call-1"
+                                                                           "function" {"name" "workspace-read"
+                                                                                       "arguments" "{\"path\":\"notes/billing.md\"}"}}]}
+                                                         {"content" (str "Finished reviewing the note.\n\n"
+                                                                         "AUTONOMOUS_STATUS_JSON:{"
+                                                                         "\"status\":\"complete\","
+                                                                         "\"summary\":\"Reviewed the billing note\","
+                                                                         "\"next_step\":\"\","
+                                                                         "\"reason\":\"The note has been read\","
+                                                                         "\"goal_complete\":true,"
+                                                                         "\"current_focus\":\"Review the billing note\","
+                                                                         "\"stack_action\":\"stay\","
+                                                                         "\"progress_status\":\"complete\","
+                                                                         "\"agenda\":[{\"item\":\"Read the note\",\"status\":\"completed\"}]"
+                                                                         "}")}))]
+      (is (= "Finished reviewing the note."
+             (agent/process-message session-id "Review the billing note" :channel :terminal))))
+    (let [task-id    (:id (first (db/list-tasks {:session-id session-id})))
+          turn-id    (:id (first (db/task-turns task-id)))
+          items      (db/turn-items turn-id)
+          tool-call  (first (filter #(= :tool-call (:type %)) items))
+          tool-result (first (filter #(= :tool-result (:type %)) items))]
+      (is tool-call)
+      (is (= :requested (:status tool-call)))
+      (is (= "workspace-read" (:tool-id tool-call)))
+      (is (= "call-1" (:tool-call-id tool-call)))
+      (is (= "{\"path\":\"notes/billing.md\"}"
+             (get-in tool-call [:data :arguments])))
+      (is tool-result)
+      (is (= :success (:status tool-result)))
+      (is (= "workspace-read" (:tool-id tool-result))))))
+
+(deftest process-message-records-input-request-items-and-waiting-state
+  (let [session-id      (db/create-session! :terminal)
+        llm-calls       (atom 0)
+        prompt-started  (promise)
+        prompt-response (promise)]
+    (prompt/register-prompt! :terminal
+                             (fn [label & _]
+                               (deliver prompt-started label)
+                               (deref prompt-response 3000 "123456")))
+    (try
+      (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                     :function {:name "ask-user"
+                                                                                :parameters {}}}])
+                    xia.tool/parallel-safe?            (constantly false)
+                    xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                         {:summary (str "Captured code "
+                                                                        (prompt/prompt! "OTP Code" :mask? true))})
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         (case (swap! llm-calls inc)
+                                                           1 {"content" (str "ACTION_INTENT_JSON:{"
+                                                                             "\"focus\":\"Complete the login\","
+                                                                             "\"agenda_item\":\"Collect OTP\","
+                                                                             "\"plan_step\":\"Ask for the OTP code\","
+                                                                             "\"why\":\"The tool needs the user code before continuing\","
+                                                                             "\"tool\":\"ask-user\","
+                                                                             "\"tool_args_summary\":\"{}\""
+                                                                             "}\n\nRequesting the OTP.")
+                                                              "tool_calls" [{"id" "call-1"
+                                                                             "function" {"name" "ask-user"
+                                                                                         "arguments" "{}"}}]}
+                                                           {"content" (str "Captured the OTP.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:{"
+                                                                           "\"status\":\"complete\","
+                                                                           "\"summary\":\"Captured the OTP\","
+                                                                           "\"next_step\":\"\","
+                                                                           "\"reason\":\"The login code is available\","
+                                                                           "\"goal_complete\":true,"
+                                                                           "\"current_focus\":\"Complete the login\","
+                                                                           "\"stack_action\":\"stay\","
+                                                                           "\"progress_status\":\"complete\","
+                                                                           "\"agenda\":[{\"item\":\"Collect OTP\",\"status\":\"completed\"}]"
+                                                                           "}")}))]
+        (let [result (future
+                       (agent/process-message session-id "Complete the login" :channel :terminal))]
+          (is (= "OTP Code" (deref prompt-started 3000 ::timeout)))
+          (let [task-id (:id (first (db/list-tasks {:session-id session-id})))
+                task    (db/get-task task-id)
+                turn    (first (db/task-turns task-id))
+                items   (db/turn-items (:id turn))]
+            (is (= :waiting_input (:state task)))
+            (is (= :waiting_input (:state turn)))
+            (is (some #(and (= :input-request (:type %))
+                            (= :waiting (:status %))
+                            (= "OTP Code" (get-in % [:data :label])))
+                      items)))
+          (deliver prompt-response "123456")
+          (is (= "Captured the OTP."
+                 (deref result 3000 ::timeout)))))
+      (finally
+        (prompt/register-prompt! :terminal nil)))))
+
+(deftest process-message-records-approval-request-items-and-waiting-state
+  (let [session-id         (db/create-session! :terminal)
+        llm-calls          (atom 0)
+        approval-started   (promise)
+        approval-decision  (promise)]
+    (prompt/register-approval! :terminal
+                               (fn [request]
+                                 (deliver approval-started (:tool-name request))
+                                 (deref approval-decision 3000 true)))
+    (try
+      (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                     :function {:name "send-email"
+                                                                                :parameters {}}}])
+                    xia.tool/parallel-safe?            (constantly false)
+                    xia.tool/execute-tool              (fn [_tool-id _args _context]
+                                                         {:approved? (prompt/approve! {:tool-id :email-send
+                                                                                       :tool-name "email-send"
+                                                                                       :description "Send the billing reply"
+                                                                                       :arguments {:to "billing@example.com"}
+                                                                                       :policy :always})
+                                                          :summary "Approval decision captured"})
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         (case (swap! llm-calls inc)
+                                                           1 {"content" (str "ACTION_INTENT_JSON:{"
+                                                                             "\"focus\":\"Send the billing reply\","
+                                                                             "\"agenda_item\":\"Get approval\","
+                                                                             "\"plan_step\":\"Ask for approval before sending\","
+                                                                             "\"why\":\"The email tool is privileged\","
+                                                                             "\"tool\":\"send-email\","
+                                                                             "\"tool_args_summary\":\"{\\\"to\\\":\\\"billing@example.com\\\"}\""
+                                                                             "}\n\nRequesting approval.")
+                                                              "tool_calls" [{"id" "call-1"
+                                                                             "function" {"name" "send-email"
+                                                                                         "arguments" "{\"to\":\"billing@example.com\"}"}}]}
+                                                           {"content" (str "Approval was handled.\n\n"
+                                                                           "AUTONOMOUS_STATUS_JSON:{"
+                                                                           "\"status\":\"complete\","
+                                                                           "\"summary\":\"Handled the approval\","
+                                                                           "\"next_step\":\"\","
+                                                                           "\"reason\":\"The approval flow finished\","
+                                                                           "\"goal_complete\":true,"
+                                                                           "\"current_focus\":\"Send the billing reply\","
+                                                                           "\"stack_action\":\"stay\","
+                                                                           "\"progress_status\":\"complete\","
+                                                                           "\"agenda\":[{\"item\":\"Get approval\",\"status\":\"completed\"}]"
+                                                                           "}")}))]
+        (let [result (future
+                       (agent/process-message session-id "Send the billing reply" :channel :terminal))]
+          (is (= "email-send" (deref approval-started 3000 ::timeout)))
+          (let [task-id (:id (first (db/list-tasks {:session-id session-id})))
+                task    (db/get-task task-id)
+                turn    (first (db/task-turns task-id))
+                items   (db/turn-items (:id turn))]
+            (is (= :waiting_approval (:state task)))
+            (is (= :waiting_approval (:state turn)))
+            (is (some #(and (= :approval-request (:type %))
+                            (= :waiting (:status %))
+                            (= "email-send" (get-in % [:data :tool-name])))
+                      items)))
+          (deliver approval-decision true)
+          (is (= "Approval was handled."
+                 (deref result 3000 ::timeout)))))
+      (finally
+        (prompt/register-approval! :terminal nil)))))
 
 (deftest process-message-persists-llm-provenance-and-audit-events
   (let [session-id (db/create-session! :terminal)

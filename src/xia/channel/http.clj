@@ -1162,6 +1162,15 @@
 (defn- handle-stop-task [task-id]
   (http-session/handle-stop-task (session-handler-deps) task-id))
 
+(defn- handle-interrupt-task [task-id]
+  (http-session/handle-interrupt-task (session-handler-deps) task-id))
+
+(defn- handle-steer-task [task-id req]
+  (http-session/handle-steer-task (session-handler-deps) task-id req))
+
+(defn- handle-fork-task [task-id req]
+  (http-session/handle-fork-task (session-handler-deps) task-id req))
+
 (defn- handle-resume-task [task-id req]
   (http-session/handle-resume-task (session-handler-deps) task-id req))
 
@@ -1308,6 +1317,9 @@
           task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
           task-pause-match   (re-matches #"/tasks/([0-9a-fA-F-]+)/pause" uri)
           task-stop-match    (re-matches #"/tasks/([0-9a-fA-F-]+)/stop" uri)
+          task-interrupt-match (re-matches #"/tasks/([0-9a-fA-F-]+)/interrupt" uri)
+          task-steer-match   (re-matches #"/tasks/([0-9a-fA-F-]+)/steer" uri)
+          task-fork-match    (re-matches #"/tasks/([0-9a-fA-F-]+)/fork" uri)
           task-resume-match  (re-matches #"/tasks/([0-9a-fA-F-]+)/resume" uri)
           history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
           scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
@@ -1434,6 +1446,15 @@
 
         (and (= method :post) task-stop-match)
         (protected-route-response req #(handle-stop-task (second task-stop-match)))
+
+        (and (= method :post) task-interrupt-match)
+        (protected-route-response req #(handle-interrupt-task (second task-interrupt-match)))
+
+        (and (= method :post) task-steer-match)
+        (protected-route-response req #(handle-steer-task (second task-steer-match) req))
+
+        (and (= method :post) task-fork-match)
+        (protected-route-response req #(handle-fork-task (second task-fork-match) req))
 
         (and (= method :post) task-resume-match)
         (protected-route-response req #(handle-resume-task (second task-resume-match) req))

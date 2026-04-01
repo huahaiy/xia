@@ -608,6 +608,23 @@
                                 :task_id (some-> (:task-id result) str)
                                 :session_id (some-> (:session-id result) str)})
 
+      :interrupting
+      (json-response* deps 202 {:status "interrupting"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :steering
+      (json-response* deps 202 {:status "steering"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :forking
+      (json-response* deps 202 {:status "forking"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)
+                                :task (when-let [task (:task result)]
+                                        (task->body deps task))})
+
       :running
       (json-response* deps 202 {:status "running"
                                 :task_id (some-> (:task-id result) str)
@@ -650,6 +667,36 @@
   (try
     (task-control-response deps
                            (agent/stop-task! (java.util.UUID/fromString task-id)))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn handle-interrupt-task
+  [deps task-id]
+  (try
+    (task-control-response deps
+                           (agent/interrupt-task! (java.util.UUID/fromString task-id)))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn handle-steer-task
+  [deps task-id req]
+  (try
+    (let [data    (read-body* deps req)
+          message (get data "message")]
+      (task-control-response deps
+                             (agent/steer-task! (java.util.UUID/fromString task-id)
+                                                message)))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn handle-fork-task
+  [deps task-id req]
+  (try
+    (let [data    (read-body* deps req)
+          message (get data "message")]
+      (task-control-response deps
+                             (agent/fork-task! (java.util.UUID/fromString task-id)
+                                               message)))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 

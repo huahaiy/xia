@@ -985,6 +985,120 @@
       (is (= :cancelled (:state task)))
       (is (= :stop (:operation (last turns)))))))
 
+(deftest interrupt-task-route-updates-task
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :running
+                                  :title "Reply to the billing emails"})]
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/interrupt")
+                                   :request-method :post
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (db/get-task task-id)
+          turns    (db/task-turns task-id)]
+      (is (= 200 (:status response)))
+      (is (= "paused" (get body "status")))
+      (is (= "paused" (get-in body ["task" "state"])))
+      (is (= "interrupted" (get-in body ["task" "stop_reason"])))
+      (is (= :paused (:state task)))
+      (is (= :interrupt (:operation (last turns)))))))
+
+(deftest steer-task-route-starts-a-new-steered-turn
+  (let [sid            (db/create-session! :http)
+        task-id        (db/create-task! {:session-id sid
+                                         :channel :http
+                                         :type :interactive
+                                         :state :paused
+                                         :title "Review the invoice"
+                                         :stop-reason :paused
+                                         :finished-at (java.util.Date.)})
+        submitted-work (atom nil)
+        process-calls  (atom [])]
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [session-id message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id session-id
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")]
+      (let [response (#'http/router {:uri            (str "/tasks/" task-id "/steer")
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "Focus on the disputed invoice line item"})})
+            body     (response-json response)
+            task     (db/get-task task-id)]
+        (is (= 202 (:status response)))
+        (is (= "steering" (get body "status")))
+        (is (= (str task-id) (get body "task_id")))
+        (is (= :running (:state task)))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id sid
+                 :message "Focus on the disputed invoice line item"
+                 :opts {:channel :http
+                        :task-id task-id
+                        :runtime-op :steer
+                        :interrupting-turn-id nil}}]
+               @process-calls))))))
+
+(deftest fork-task-route-creates-a-child-task
+  (let [sid            (db/create-session! :http)
+        task-id        (db/create-task! {:session-id sid
+                                         :channel :http
+                                         :type :interactive
+                                         :state :running
+                                         :title "Review the invoice"})
+        submitted-work (atom nil)
+        process-calls  (atom [])
+        deactivated    (atom [])
+        cleared        (atom [])]
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [session-id message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id session-id
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")
+                  xia.db/set-session-active!    (fn [session-id active?]
+                                                 (swap! deactivated conj [session-id active?])
+                                                 true)
+                  xia.working-memory/clear-wm!  (fn [session-id]
+                                                 (swap! cleared conj session-id)
+                                                 true)]
+      (let [response (#'http/router {:uri            (str "/tasks/" task-id "/fork")
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "Investigate the disputed invoice line item"})})
+            body      (response-json response)
+            child-id  (java.util.UUID/fromString (get-in body ["task" "id"]))
+            child     (db/get-task child-id)]
+        (is (= 202 (:status response)))
+        (is (= "forking" (get body "status")))
+        (is (= (str child-id) (get body "task_id")))
+        (is (= (str task-id) (get-in body ["task" "parent_id"])))
+        (is (= "branch" (get-in body ["task" "channel"])))
+        (is (= "branch" (get-in body ["task" "type"])))
+        (is (= :branch (:channel child)))
+        (is (= :branch (:type child)))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id (:session-id child)
+                 :message "Investigate the disputed invoice line item"
+                 :opts {:channel :branch
+                        :task-id child-id
+                        :runtime-op :fork
+                        :resource-session-id sid
+                        :tool-context {:branch-worker? true
+                                       :parent-session-id sid
+                                       :resource-session-id sid}}}]
+               @process-calls))
+        (is (= [[(:session-id child) false]] @deactivated))
+        (is (= [(:session-id child)] @cleared))))))
+
 (deftest resume-task-route-starts-task-again
   (let [sid            (db/create-session! :http)
         task-id        (db/create-task! {:session-id sid
