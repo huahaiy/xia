@@ -410,7 +410,6 @@
              {:run-id run-id
               :supervisor-thread (Thread/currentThread)
               :task-id nil
-              :task-turn-id nil
               :child-session-ids #{}
               :cancelled? false
               :cancel-reason nil})
@@ -497,34 +496,37 @@
   [session-id task-id task-turn-id]
   (when (and session-id task-id task-turn-id)
     (when-let [entry (session-run-entry session-id)]
-      (let [run-id (:run-id entry)
+      (let [session-run-id (:run-id entry)
+            task-run-id (Object.)
             task-entry {:task-id task-id
                         :task-turn-id task-turn-id
                         :session-id session-id
-                        :run-id run-id
+                        :task-run-id task-run-id
+                        :session-run-id session-run-id
                         :supervisor-thread (:supervisor-thread entry)
+                        :child-session-ids (:child-session-ids entry)
                         :cancelled? (:cancelled? entry)
                         :cancel-reason (:cancel-reason entry)}]
         (swap! active-task-runs assoc task-id task-entry)
         (update-session-run-entry! session-id
                                    (fn [run]
-                                     (if (= run-id (:run-id run))
+                                     (if (= session-run-id (:run-id run))
                                        (assoc run
                                               :task-id task-id
-                                              :task-turn-id task-turn-id)
-                                       run)))
+                                              :child-session-ids #{})
+                                        run)))
         task-entry))))
 
 (defn- clear-task-run!
-  [session-id task-id task-turn-id]
+  [session-id task-id task-turn-id task-run-id]
   (when task-id
-    (let [expected-run-id (or (some-> (session-run-entry session-id) :run-id)
-                              (some-> (task-run-entry task-id) :run-id))]
+    (let [expected-task-run-id (or task-run-id
+                                   (some-> (task-run-entry task-id) :task-run-id))]
       (swap! active-task-runs
              (fn [runs]
                (if-let [entry (get runs task-id)]
-                 (if (and (or (nil? expected-run-id)
-                              (= expected-run-id (:run-id entry)))
+                 (if (and (or (nil? expected-task-run-id)
+                              (= expected-task-run-id (:task-run-id entry)))
                           (or (nil? session-id)
                               (= session-id (:session-id entry)))
                           (or (nil? task-turn-id)
@@ -535,12 +537,9 @@
       (when session-id
         (update-session-run-entry! session-id
                                    (fn [entry]
-                                     (if (and (= task-id (:task-id entry))
-                                              (or (nil? task-turn-id)
-                                                  (= task-turn-id (:task-turn-id entry))))
+                                     (if (= task-id (:task-id entry))
                                        (assoc entry
-                                              :task-id nil
-                                              :task-turn-id nil)
+                                              :task-id nil)
                                        entry)))))))
 
 (defn- register-child-session!
@@ -548,16 +547,22 @@
   (when (and parent-session-id
              child-session-id
              (not= parent-session-id child-session-id))
-    (update-session-run-entry! parent-session-id
-                               #(update % :child-session-ids (fnil conj #{}) child-session-id))))
+    (if-let [task-id (session-bound-task-id parent-session-id)]
+      (update-task-run-entry! task-id
+                              #(update % :child-session-ids (fnil conj #{}) child-session-id))
+      (update-session-run-entry! parent-session-id
+                                 #(update % :child-session-ids (fnil conj #{}) child-session-id)))))
 
 (defn- unregister-child-session!
   [parent-session-id child-session-id]
   (when (and parent-session-id
              child-session-id
              (not= parent-session-id child-session-id))
-    (update-session-run-entry! parent-session-id
-                               #(update % :child-session-ids disj child-session-id))))
+    (if-let [task-id (session-bound-task-id parent-session-id)]
+      (update-task-run-entry! task-id
+                              #(update % :child-session-ids disj child-session-id))
+      (update-session-run-entry! parent-session-id
+                                 #(update % :child-session-ids disj child-session-id)))))
 
 (defn- begin-worker-run!
   [session-id worker-token]
@@ -732,7 +737,8 @@
           (cancel-futures! parallel-tool-futures))
         (when-let [^Future worker-future (:worker-future entry)]
           (future-cancel worker-future))
-        (doseq [child-session-id (:child-session-ids @session-entry*)]
+        (doseq [child-session-id (or (:child-session-ids @task-entry*)
+                                     (:child-session-ids @session-entry*))]
           (when (not= child-session-id session-id)
             (request-session-cancel! child-session-id
                                      reason
@@ -2476,9 +2482,10 @@
                                                                                          task-id
                                                                                          runtime-op
                                                                                          interrupting-turn-id)
+                      task-run (register-task-run! session-id task-id task-turn-id)
                       _ (reset! runtime-task {:task-id task-id
-                                              :task-turn-id task-turn-id})
-                      _ (register-task-run! session-id task-id task-turn-id)
+                                              :task-turn-id task-turn-id
+                                              :task-run-id (:task-run-id task-run)})
                       user-message-id (when persist-message?
                                         (db/add-message! session-id :user user-message
                                                          :local-doc-ids local-doc-ids
@@ -2993,8 +3000,8 @@
                                        :message (str "Request failed: " (.getMessage e))})
                       (throw e))))
                 (finally
-                  (when-let [{:keys [task-id task-turn-id]} @runtime-task]
-                    (clear-task-run! session-id task-id task-turn-id)))))))))))
+                  (when-let [{:keys [task-id task-turn-id task-run-id]} @runtime-task]
+                    (clear-task-run! session-id task-id task-turn-id task-run-id)))))))))))
 
 (defn- task-control-deps
   []

@@ -310,6 +310,45 @@
                         :persist-message? false}}]
                @process-calls))))))
 
+(deftest resume-task-recovers-from-persisted-task-state-when-wm-is-missing
+  (let [session-id          (db/create-session! :terminal)
+        task-autonomy-state (autonomous/initial-state "Investigate the billing discrepancy")
+        task-id             (db/create-task! {:session-id session-id
+                                              :channel :terminal
+                                              :type :interactive
+                                              :state :paused
+                                              :title "Investigate the billing discrepancy"
+                                              :summary "Waiting for the next pass"
+                                              :stop-reason :paused
+                                              :autonomy-state task-autonomy-state})
+        submitted-work      (atom nil)
+        seen-messages       (atom nil)]
+    (wm/clear-wm! session-id)
+    (with-redefs [xia.async/submit-background!          (fn [_label f]
+                                                          (reset! submitted-work f)
+                                                          ::submitted)
+                  xia.tool/tool-definitions             (constantly [])
+                  xia.working-memory/update-wm!         (fn [& _] nil)
+                  xia.context/build-messages-data       (fn [_session-id _opts]
+                                                          {:messages [{:role "system" :content "base"}]
+                                                           :used-fact-eids []})
+                  xia.llm/resolve-provider-selection    (constantly {:provider {:llm.provider/id :default}
+                                                                     :provider-id :default})
+                  xia.llm/chat-message                  (fn [messages & _opts]
+                                                          (reset! seen-messages messages)
+                                                          {"content" "Continuing.\nAUTONOMOUS_STATUS_JSON:{\"status\":\"complete\",\"summary\":\"done\",\"goal_complete\":false}"})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [result (agent/resume-task! task-id :message "Continue the investigation")]
+        (is (= :running (:status result)))
+        (is (fn? @submitted-work))
+        (@submitted-work)))
+    (let [system-content (some-> @seen-messages first :content)
+          turns          (db/task-turns task-id)]
+      (is (str/includes? system-content "Investigate the billing discrepancy"))
+      (is (= "Investigate the billing discrepancy"
+             (autonomous/root-goal (wm/autonomy-state session-id))))
+      (is (= :resume (:operation (last turns)))))))
+
 (deftest steer-task-restarts-a-task-with-a-new-instruction
   (let [session-id     (db/create-session! :terminal)
         task-id        (db/create-task! {:session-id session-id
@@ -3133,6 +3172,15 @@
 
 (deftest cancel-session-cancels-active-branch-child-sessions
   (let [parent-session-id (db/create-session! :terminal)
+        parent-task-id    (db/create-task! {:session-id parent-session-id
+                                            :channel :terminal
+                                            :type :interactive
+                                            :state :running
+                                            :title "Parent task"})
+        parent-turn-id    (db/start-task-turn! parent-task-id
+                                               {:operation :start
+                                                :state :running
+                                                :summary "Running parent task"})
         child-started     (promise)
         child-cancelled   (promise)
         child-stopped     (promise)]
@@ -3166,15 +3214,17 @@
                          (#'xia.agent/with-session-run
                           parent-session-id
                           (fn []
+                            (#'xia.agent/register-task-run! parent-session-id parent-task-id parent-turn-id)
                             (agent/run-branch-tasks
                              [{:task "slow" :prompt "slow branch"}]
                              :session-id parent-session-id
                              :max-parallel 1)))
-                         (catch Throwable t
-                           t)))
+                        (catch Throwable t
+                          t)))
               child-session-id (deref child-started 1000 ::timeout)]
           (is (not= ::timeout child-session-id))
-          (is (contains? (:child-session-ids (#'xia.agent/session-run-entry parent-session-id))
+          (is (empty? (:child-session-ids (#'xia.agent/session-run-entry parent-session-id))))
+          (is (contains? (:child-session-ids (#'xia.agent/task-run-entry parent-task-id))
                          child-session-id))
           (is (true? (agent/cancel-session! parent-session-id "user requested cancel")))
           (is (= child-session-id (deref child-cancelled 1000 ::timeout)))
