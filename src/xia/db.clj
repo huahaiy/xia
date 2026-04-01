@@ -12,6 +12,7 @@
             [xia.db.catalog :as db-catalog]
             [xia.db.provider :as db-provider]
             [xia.db.session :as db-session]
+            [xia.db.task :as db-task]
             [xia.paths :as paths]
             [xia.runtime-state :as runtime-state]
             [xia.sensitive :as sensitive])
@@ -144,6 +145,53 @@
    :session/tool-recap-updated-at {:db/valueType :db.type/instant}
    :session/created-at {:db/valueType :db.type/instant}
    :session/active?    {:db/valueType :db.type/boolean}
+
+   ;; --- Task Runtime ---
+   :task/id            {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :task/session       {:db/valueType :db.type/ref}
+   :task/parent-id     {:db/valueType :db.type/uuid}
+   :task/channel       {:db/valueType :db.type/keyword}
+   :task/type          {:db/valueType :db.type/keyword}
+   :task/state         {:db/valueType :db.type/keyword}
+   :task/title         {:db/valueType :db.type/string}
+   :task/summary       {:db/valueType :db.type/string}
+   :task/stop-reason   {:db/valueType :db.type/keyword}
+   :task/error         {:db/valueType :db.type/string}
+   :task/meta          {:db/valueType :db.type/idoc :db/domain "task-meta"}
+   :task/autonomy-state {:db/valueType :db.type/idoc :db/domain "task-autonomy-state"}
+   :task/created-at    {:db/valueType :db.type/instant}
+   :task/updated-at    {:db/valueType :db.type/instant}
+   :task/started-at    {:db/valueType :db.type/instant}
+   :task/finished-at   {:db/valueType :db.type/instant}
+
+   :task.turn/id                   {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :task.turn/task                 {:db/valueType :db.type/ref}
+   :task.turn/index                {:db/valueType :db.type/long}
+   :task.turn/operation            {:db/valueType :db.type/keyword}
+   :task.turn/state                {:db/valueType :db.type/keyword}
+   :task.turn/input                {:db/valueType :db.type/string}
+   :task.turn/summary              {:db/valueType :db.type/string}
+   :task.turn/error                {:db/valueType :db.type/string}
+   :task.turn/meta                 {:db/valueType :db.type/idoc :db/domain "task-turn-meta"}
+   :task.turn/interrupting-turn-id {:db/valueType :db.type/uuid}
+   :task.turn/created-at           {:db/valueType :db.type/instant}
+   :task.turn/updated-at           {:db/valueType :db.type/instant}
+   :task.turn/started-at           {:db/valueType :db.type/instant}
+   :task.turn/finished-at          {:db/valueType :db.type/instant}
+
+   :task.item/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :task.item/turn        {:db/valueType :db.type/ref}
+   :task.item/index       {:db/valueType :db.type/long}
+   :task.item/type        {:db/valueType :db.type/keyword}
+   :task.item/status      {:db/valueType :db.type/keyword}
+   :task.item/role        {:db/valueType :db.type/keyword}
+   :task.item/summary     {:db/valueType :db.type/string}
+   :task.item/message-id  {:db/valueType :db.type/uuid}
+   :task.item/llm-call-id {:db/valueType :db.type/uuid}
+   :task.item/tool-id     {:db/valueType :db.type/string}
+   :task.item/tool-call-id {:db/valueType :db.type/string}
+   :task.item/data        {:db/valueType :db.type/idoc :db/domain "task-item-data"}
+   :task.item/created-at  {:db/valueType :db.type/instant}
 
    ;; --- Message ---
    :message/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
@@ -1582,6 +1630,15 @@
    :raw-entity     raw-entity
    :transact!      transact!})
 
+(defn- task-deps
+  []
+  {:decrypt-entity    decrypt-entity
+   :entity-created-at entity-created-at
+   :entity-updated-at entity-updated-at
+   :q                 q
+   :raw-entity        raw-entity
+   :transact!         transact!})
+
 (defn save-wm-snapshot!
   "Persist working memory state to DB for crash recovery."
   [snapshot]
@@ -1702,6 +1759,47 @@
   "Get all messages for a session, ordered by creation time."
   [session-id]
   (db-session/session-messages (session-deps) session-id))
+
+;; ---------------------------------------------------------------------------
+;; Tasks
+;; ---------------------------------------------------------------------------
+
+(defn create-task!
+  [task]
+  (db-task/create-task! (task-deps) task))
+
+(defn update-task!
+  [task-id attrs]
+  (db-task/update-task! (task-deps) task-id attrs))
+
+(defn get-task
+  [task-id]
+  (db-task/get-task (task-deps) task-id))
+
+(defn list-tasks
+  ([] (list-tasks nil))
+  ([opts]
+   (db-task/list-tasks (task-deps) opts)))
+
+(defn start-task-turn!
+  [task-id opts]
+  (db-task/start-task-turn! (task-deps) task-id opts))
+
+(defn update-task-turn!
+  [turn-id attrs]
+  (db-task/update-task-turn! (task-deps) turn-id attrs))
+
+(defn task-turns
+  [task-id]
+  (db-task/task-turns (task-deps) task-id))
+
+(defn add-task-item!
+  [turn-id item]
+  (db-task/add-task-item! (task-deps) turn-id item))
+
+(defn turn-items
+  [turn-id]
+  (db-task/turn-items (task-deps) turn-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Skills (markdown instructions)

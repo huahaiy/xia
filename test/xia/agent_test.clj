@@ -8,6 +8,7 @@
             [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.tool :as tool]
@@ -71,6 +72,134 @@
              (last @statuses)))
       (finally
         (prompt/register-status! :terminal nil)))))
+
+(deftest process-message-creates-task-turn-and-items
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" "All set."})]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (let [tasks (db/list-tasks {:session-id session-id})
+          task-id (:id (first tasks))
+          task (db/get-task task-id)
+          turns (db/task-turns task-id)
+          items (db/turn-items (:id (first turns)))]
+      (is (= 1 (count tasks)))
+      (is (= :completed (:state task)))
+      (is (= :interactive (:type task)))
+      (is (= session-id (:session-id task)))
+      (is (= 1 (count turns)))
+      (is (= :completed (:state (first turns))))
+      (is (= :start (:operation (first turns))))
+      (is (= [:user-message :assistant-message]
+             (mapv :type items)))
+      (is (= [:user :assistant]
+             (mapv :role items))))))
+
+(deftest process-message-attaches-to-an-existing-task
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" "All set."})]
+      (is (= "All set."
+             (agent/process-message session-id "first pass" :channel :terminal)))
+      (let [task-id (:id (first (db/list-tasks {:session-id session-id})))]
+        (is (= "All set."
+               (agent/process-message session-id
+                                      "follow up"
+                                      :channel :terminal
+                                      :task-id task-id)))
+        (let [tasks (db/list-tasks {:session-id session-id})
+              turns (db/task-turns task-id)
+              turn-ops (mapv :operation turns)]
+          (is (= 1 (count tasks)))
+          (is (= 2 (count turns)))
+          (is (= [:start :resume] turn-ops)))))))
+
+(deftest pause-task-updates-task-and-records-a-control-turn
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :interactive
+                                     :state :running
+                                     :title "Reply to the billing emails"})]
+    (let [result       (agent/pause-task! task-id)
+          task         (db/get-task task-id)
+          turns        (db/task-turns task-id)
+          control-turn (last turns)
+          items        (db/turn-items (:id control-turn))]
+      (is (= :paused (:status result)))
+      (is (= :paused (:state task)))
+      (is (= :paused (:stop-reason task)))
+      (is (= "Task paused by user" (:summary task)))
+      (is (= :pause (:operation control-turn)))
+      (is (= :completed (:state control-turn)))
+      (is (= [:system-note] (mapv :type items)))
+      (is (= "Task paused by user" (:summary (first items)))))))
+
+(deftest stop-task-updates-task-and-records-a-control-turn
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :interactive
+                                     :state :paused
+                                     :title "Reply to the billing emails"})]
+    (let [result       (agent/stop-task! task-id)
+          task         (db/get-task task-id)
+          turns        (db/task-turns task-id)
+          control-turn (last turns)
+          items        (db/turn-items (:id control-turn))]
+      (is (= :stopped (:status result)))
+      (is (= :cancelled (:state task)))
+      (is (= :stopped (:stop-reason task)))
+      (is (= "Task stopped by user" (:summary task)))
+      (is (instance? java.util.Date (:finished-at task)))
+      (is (= :stop (:operation control-turn)))
+      (is (= :completed (:state control-turn)))
+      (is (= [:system-note] (mapv :type items)))
+      (is (= "Task stopped by user" (:summary (first items)))))))
+
+(deftest resume-task-restarts-a-paused-task
+  (let [session-id     (db/create-session! :terminal)
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :paused
+                                         :title "Review the invoice"
+                                         :summary "Waiting for the next pass"
+                                         :stop-reason :paused
+                                         :finished-at (java.util.Date.)})
+        submitted-work (atom nil)
+        process-calls  (atom [])]
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [sid message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id sid
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")]
+      (let [result (agent/resume-task! task-id :message "Continue reviewing the invoice")
+            task   (db/get-task task-id)]
+        (is (= :running (:status result)))
+        (is (= :running (:state task)))
+        (is (nil? (:stop-reason task)))
+        (is (nil? (:finished-at task)))
+        (is (= "Task resumed" (:summary task)))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id session-id
+                 :message "Continue reviewing the invoice"
+                 :opts {:channel :terminal
+                        :task-id task-id
+                        :runtime-op :resume
+                        :persist-message? false}}]
+               @process-calls))))))
 
 (deftest process-message-persists-llm-provenance-and-audit-events
   (let [session-id (db/create-session! :terminal)
@@ -1169,6 +1298,112 @@
     (is (= :blocked (some-> (wm/autonomy-state session-id)
                             autonomous/current-frame
                             :progress-status)))))
+
+(deftest process-message-stops-when-turn-llm-call-budget-is-reached
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/max-turn-llm-calls 2)
+    (db/set-config! :agent/max-turn-total-tokens 100000)
+    (db/set-config! :agent/max-turn-wall-clock-ms 300000)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat                       (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"choices" [{"message" {"content" (str "First step done.\n\n"
+                                                                                                   "AUTONOMOUS_STATUS_JSON:"
+                                                                                                   "{\"status\":\"continue\",\"summary\":\"First step done\",\"next_step\":\"Take the second step\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Take the second step\",\"status\":\"in_progress\"}]}")}}]
+                                                            "usage" {"prompt_tokens" 3
+                                                                     "completion_tokens" 4
+                                                                     "total_tokens" 7}}
+                                                         2 {"choices" [{"message" {"content" (str "Second step done.\n\n"
+                                                                                                   "AUTONOMOUS_STATUS_JSON:"
+                                                                                                   "{\"status\":\"continue\",\"summary\":\"Second step done\",\"next_step\":\"Take the third step\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Take the third step\",\"status\":\"pending\"}]}")}}]
+                                                            "usage" {"prompt_tokens" 3
+                                                                     "completion_tokens" 4
+                                                                     "total_tokens" 7}}
+                                                         (throw (ex-info "unexpected third LLM call" {}))))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
+        (is (str/includes? result "Second step done."))
+        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative LLM call budget (2/2)."))
+        (is (str/includes? result "Suggested next step: Take the third step"))))
+    (is (= 2 @llm-calls))
+    (is (= [[:user "keep going"]
+            [:assistant "First step done."]
+            [:assistant (str "Second step done.\n\n"
+                             "Note: I stopped this turn after reaching the cumulative LLM call budget (2/2). Suggested next step: Take the third step Reply to continue from the current agenda.")]]
+           (->> (db/session-messages session-id)
+                (filter #(contains? #{:user :assistant} (:role %)))
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
+
+(deftest process-message-stops-when-turn-token-budget-is-reached
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/max-turn-llm-calls 10)
+    (db/set-config! :agent/max-turn-total-tokens 10)
+    (db/set-config! :agent/max-turn-wall-clock-ms 300000)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat                       (fn [_messages & _opts]
+                                                       (swap! llm-calls inc)
+                                                       {"choices" [{"message" {"content" (str "Spent the budget.\n\n"
+                                                                                              "AUTONOMOUS_STATUS_JSON:"
+                                                                                              "{\"status\":\"continue\",\"summary\":\"Spent the budget\",\"next_step\":\"Resume once more tokens are available\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"blocked\",\"agenda\":[{\"item\":\"Resume once more tokens are available\",\"status\":\"blocked\"}]}")}}]
+                                                        "usage" {"prompt_tokens" 4
+                                                                 "completion_tokens" 6
+                                                                 "total_tokens" 10}})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
+        (is (str/includes? result "Spent the budget."))
+        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative token budget (10/10)."))))
+    (is (= 1 @llm-calls))))
+
+(deftest process-message-counts-context-llm-calls-against-the-turn-budget
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/max-turn-llm-calls 1)
+    (db/set-config! :agent/max-turn-total-tokens 100000)
+    (db/set-config! :agent/max-turn-wall-clock-ms 300000)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       (llm/chat-simple [{"role" "user"
+                                                                          "content" "summarize the earlier history"}])
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat                       (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"choices" [{"message" {"content" "history recap"}}]
+                                                            "usage" {"prompt_tokens" 2
+                                                                     "completion_tokens" 3
+                                                                     "total_tokens" 5}}
+                                                         (throw (ex-info "unexpected assistant LLM call" {}))))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [result (agent/process-message session-id "keep going" :channel :terminal)]
+        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative LLM call budget (1/1)."))))
+    (is (= 1 @llm-calls))
+    (is (= [[:user "keep going"]
+            [:assistant "Note: I stopped this turn after reaching the cumulative LLM call budget (1/1). Reply to continue from the current agenda."]]
+           (->> (db/session-messages session-id)
+                (filter #(contains? #{:user :assistant} (:role %)))
+                (mapv (fn [{:keys [role content]}]
+                        [role content])))))))
 
 (deftest process-message-supervisor-stops-a-stalled-llm-worker
   (let [session-id (db/create-session! :terminal)
@@ -2279,20 +2514,14 @@
         started           (promise)
         stopped           (promise)]
     (db/set-config! :agent/branch-task-timeout-ms 50)
-    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
-                  xia.tool/tool-definitions          (constantly [])
-                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
-                                                                  :provider-id :default})
-                  xia.context/build-messages-data    (fn [_session-id _opts]
-                                                       {:messages [{:role "system" :content "test"}]
-                                                        :used-fact-eids []})
-                  xia.llm/chat-message               (fn [_messages & _opts]
-                                                       (deliver started true)
-                                                       (try
-                                                         (Thread/sleep 10000)
-                                                         {"content" "done"}
-                                                         (finally
-                                                           (deliver stopped true))))]
+    (with-redefs [xia.agent/process-message
+                  (fn [_child-session-id _message & _opts]
+                    (deliver started true)
+                    (try
+                      (Thread/sleep 10000)
+                      "done"
+                      (finally
+                        (deliver stopped true))))]
       (let [result (future
                      (try
                        (agent/run-branch-tasks
@@ -2301,8 +2530,8 @@
                         :max-parallel 1)
                        (catch Exception e
                          e)))]
-        (is (= true (deref started 1000 ::timeout)))
-        (let [err (deref result 1000 ::timeout)]
+        (is (= true (deref started 3000 ::timeout)))
+        (let [err (deref result 3000 ::timeout)]
           (is (instance? clojure.lang.ExceptionInfo err))
           (is (re-find #"Branch task timed out: slow"
                        (.getMessage ^Exception err)))
@@ -2311,7 +2540,7 @@
                   :task "slow"}
                  (select-keys (ex-data err)
                               [:type :timeout-ms :task]))))
-        (is (= true (deref stopped 1000 ::timeout)))))))
+        (is (= true (deref stopped 3000 ::timeout)))))))
 
 (deftest cancel-session-cancels-active-branch-child-sessions
   (let [parent-session-id (db/create-session! :terminal)

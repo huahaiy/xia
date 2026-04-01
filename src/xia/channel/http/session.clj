@@ -208,6 +208,78 @@
      :last_message_at (instant->str* deps (:created-at last-message))
      :preview         (truncate-text* deps (:content last-message) 160)}))
 
+(defn- task-item->body
+  [deps item]
+  (cond-> {:id         (some-> (:id item) str)
+           :turn_id    (some-> (:turn-id item) str)
+           :index      (:index item)
+           :type       (some-> (:type item) name)
+           :created_at (instant->str* deps (:created-at item))}
+    (:status item) (assoc :status (name (:status item)))
+    (:role item) (assoc :role (name (:role item)))
+    (:summary item) (assoc :summary (:summary item))
+    (:data item) (assoc :data (:data item))
+    (:message-id item) (assoc :message_id (str (:message-id item)))
+    (:llm-call-id item) (assoc :llm_call_id (str (:llm-call-id item)))
+    (:tool-id item) (assoc :tool_id (:tool-id item))
+    (:tool-call-id item) (assoc :tool_call_id (:tool-call-id item))))
+
+(defn- task-turn->body
+  [deps turn items]
+  (cond-> {:id         (some-> (:id turn) str)
+           :task_id    (some-> (:task-id turn) str)
+           :index      (:index turn)
+           :operation  (some-> (:operation turn) name)
+           :state      (some-> (:state turn) name)
+           :created_at (instant->str* deps (:created-at turn))
+           :updated_at (instant->str* deps (:updated-at turn))
+           :items      (mapv #(task-item->body deps %) items)}
+    (:input turn) (assoc :input (:input turn))
+    (:summary turn) (assoc :summary (:summary turn))
+    (:error turn) (assoc :error (:error turn))
+    (:meta turn) (assoc :meta (:meta turn))
+    (:interrupting-turn-id turn) (assoc :interrupting_turn_id (str (:interrupting-turn-id turn)))
+    (:started-at turn) (assoc :started_at (instant->str* deps (:started-at turn)))
+    (:finished-at turn) (assoc :finished_at (instant->str* deps (:finished-at turn)))))
+
+(defn- task->body
+  [deps task]
+  (cond-> {:id         (some-> (:id task) str)
+           :session_id (some-> (:session-id task) str)
+           :channel    (some-> (:channel task) name)
+           :type       (some-> (:type task) name)
+           :state      (some-> (:state task) name)
+           :created_at (instant->str* deps (:created-at task))
+           :updated_at (instant->str* deps (:updated-at task))}
+    (:parent-id task) (assoc :parent_id (str (:parent-id task)))
+    (:title task) (assoc :title (:title task))
+    (:summary task) (assoc :summary (:summary task))
+    (:stop-reason task) (assoc :stop_reason (name (:stop-reason task)))
+    (:error task) (assoc :error (:error task))
+    (:meta task) (assoc :meta (:meta task))
+    (:autonomy-state task) (assoc :autonomy_state (:autonomy-state task))
+    (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
+    (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task)))))
+
+(defn- history-task->body
+  [deps task]
+  (let [turns      (db/task-turns (:id task))
+        latest-turn (last turns)]
+    (cond-> {:id          (some-> (:id task) str)
+             :session_id  (some-> (:session-id task) str)
+             :channel     (some-> (:channel task) name)
+             :type        (some-> (:type task) name)
+             :state       (some-> (:state task) name)
+             :turn_count  (count turns)
+             :created_at  (instant->str* deps (:created-at task))
+             :updated_at  (instant->str* deps (:updated-at task))}
+      (:title task) (assoc :title (:title task))
+      (:summary task) (assoc :summary (:summary task))
+      latest-turn (assoc :latest_turn_state (some-> (:state latest-turn) name))
+      latest-turn (assoc :latest_turn_summary (truncate-text* deps (:summary latest-turn) 160))
+      (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
+      (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task))))))
+
 (defn- llm-call-summary->body
   [deps entry]
   (cond-> {:id          (str (:id entry))
@@ -473,6 +545,124 @@
                                   (into [] (comp (filter #(contains? history-session-channels
                                                                     (:channel %)))
                                                  (map #(history-session->body deps %)))))}))
+
+(defn handle-history-tasks
+  [deps]
+  (json-response* deps 200
+                  {:tasks (->> (db/list-tasks)
+                               (into [] (map #(history-task->body deps %))))}))
+
+(defn handle-get-task
+  [deps task-id]
+  (try
+    (let [uuid (java.util.UUID/fromString task-id)
+          task (db/get-task uuid)]
+      (if-not task
+        (json-response* deps 404 {:error "task not found"})
+        (let [turns (db/task-turns uuid)]
+          (json-response* deps 200
+                          {:task  (task->body deps task)
+                           :turns (mapv (fn [turn]
+                                          (task-turn->body deps
+                                                           turn
+                                                           (db/turn-items (:id turn))))
+                                        turns)}))))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn- task-control-response
+  [deps result]
+  (let [status (:status result)]
+    (case status
+      :not-found
+      (json-response* deps 404 {:error "task not found"})
+
+      :invalid
+      (json-response* deps 409 {:error (:error result)})
+
+      :busy
+      (json-response* deps 409 {:error (:error result)})
+
+      :already-running
+      (json-response* deps 409 {:error "task already running"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :not-resumable
+      (json-response* deps 409 {:error (:error result)
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :unavailable
+      (json-response* deps 503 {:error (:error result)
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :pausing
+      (json-response* deps 202 {:status "pausing"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :stopping
+      (json-response* deps 202 {:status "stopping"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :running
+      (json-response* deps 202 {:status "running"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :already-paused
+      (json-response* deps 200 {:status "already_paused"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :already-stopped
+      (json-response* deps 200 {:status "already_stopped"
+                                :task_id (some-> (:task-id result) str)
+                                :session_id (some-> (:session-id result) str)})
+
+      :paused
+      (json-response* deps 200
+                      {:status "paused"
+                       :task (when-let [task (:task result)]
+                               (task->body deps task))})
+
+      :stopped
+      (json-response* deps 200
+                      {:status "stopped"
+                       :task (when-let [task (:task result)]
+                               (task->body deps task))})
+
+      (json-response* deps 500 {:error "unknown task control result"}))))
+
+(defn handle-pause-task
+  [deps task-id]
+  (try
+    (task-control-response deps
+                           (agent/pause-task! (java.util.UUID/fromString task-id)))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn handle-stop-task
+  [deps task-id]
+  (try
+    (task-control-response deps
+                           (agent/stop-task! (java.util.UUID/fromString task-id)))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn handle-resume-task
+  [deps task-id req]
+  (try
+    (let [data    (read-body* deps req)
+          message (get data "message")]
+      (task-control-response deps
+                             (agent/resume-task! (java.util.UUID/fromString task-id)
+                                                 :message message)))
+    (catch IllegalArgumentException _
+      (json-response* deps 400 {:error "invalid task id"}))))
 
 (defn handle-history-schedules
   [deps]

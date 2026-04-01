@@ -870,6 +870,160 @@
       (is (contains? channels "imessage"))
       (is (not (contains? channels "command"))))))
 
+(deftest history-tasks-route-returns-task-summaries
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :resumable
+                                  :title "Reply to the billing emails"
+                                  :summary "Waiting on the next follow up"})
+        turn-id  (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :completed
+                                       :input "reply to the billing emails"
+                                       :summary "Drafted the first reply"})]
+    (db/add-task-item! turn-id
+                       {:type :assistant-message
+                        :role :assistant
+                        :summary "Drafted the first reply"})
+    (let [response (#'http/router {:uri            "/history/tasks"
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          tasks    (get body "tasks")
+          task     (first tasks)]
+      (is (= 200 (:status response)))
+      (is (= 1 (count tasks)))
+      (is (= (str task-id) (get task "id")))
+      (is (= (str sid) (get task "session_id")))
+      (is (= "http" (get task "channel")))
+      (is (= "interactive" (get task "type")))
+      (is (= "running" (get task "state")))
+      (is (= "Reply to the billing emails" (get task "title")))
+      (is (= "Waiting on the next follow up" (get task "summary")))
+      (is (= 1 (get task "turn_count")))
+      (is (= "completed" (get task "latest_turn_state"))))))
+
+(deftest task-detail-route-returns-turns-and-items
+  (let [sid      (db/create-session! :http)
+        task-id  (db/create-task! {:session-id sid
+                                   :channel :http
+                                   :type :interactive
+                                   :state :running
+                                   :title "Review the invoice"})
+        turn-id   (db/start-task-turn! task-id
+                                       {:operation :start
+                                        :state :running
+                                        :input "review the invoice"
+                                        :summary "Started invoice review"})
+        item-id   (db/add-task-item! turn-id
+                                     {:type :user-message
+                                      :role :user
+                                      :summary "review the invoice"
+                                      :data {:text "review the invoice"}})]
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (get body "task")
+          turns    (get body "turns")
+          turn     (first turns)
+          items    (get turn "items")
+          item     (first items)]
+      (is (= 200 (:status response)))
+      (is (= (str task-id) (get task "id")))
+      (is (= "running" (get task "state")))
+      (is (= "Review the invoice" (get task "title")))
+      (is (= 1 (count turns)))
+      (is (= (str turn-id) (get turn "id")))
+      (is (= "start" (get turn "operation")))
+      (is (= "running" (get turn "state")))
+      (is (= 1 (count items)))
+      (is (= (str item-id) (get item "id")))
+      (is (= "user-message" (get item "type")))
+      (is (= "user" (get item "role")))
+      (is (= {"text" "review the invoice"} (get item "data"))))))
+
+(deftest pause-task-route-updates-task
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :running
+                                  :title "Reply to the billing emails"})]
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/pause")
+                                   :request-method :post
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (db/get-task task-id)
+          turns    (db/task-turns task-id)]
+      (is (= 200 (:status response)))
+      (is (= "paused" (get body "status")))
+      (is (= "paused" (get-in body ["task" "state"])))
+      (is (= "paused" (get-in body ["task" "stop_reason"])))
+      (is (= :paused (:state task)))
+      (is (= :pause (:operation (last turns)))))))
+
+(deftest stop-task-route-updates-task
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :paused
+                                  :title "Reply to the billing emails"})]
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/stop")
+                                   :request-method :post
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (db/get-task task-id)
+          turns    (db/task-turns task-id)]
+      (is (= 200 (:status response)))
+      (is (= "stopped" (get body "status")))
+      (is (= "cancelled" (get-in body ["task" "state"])))
+      (is (= "stopped" (get-in body ["task" "stop_reason"])))
+      (is (= :cancelled (:state task)))
+      (is (= :stop (:operation (last turns)))))))
+
+(deftest resume-task-route-starts-task-again
+  (let [sid            (db/create-session! :http)
+        task-id        (db/create-task! {:session-id sid
+                                         :channel :http
+                                         :type :interactive
+                                         :state :paused
+                                         :title "Review the invoice"
+                                         :stop-reason :paused
+                                         :finished-at (java.util.Date.)})
+        submitted-work (atom nil)
+        process-calls  (atom [])]
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [session-id message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id session-id
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")]
+      (let [response (#'http/router {:uri            (str "/tasks/" task-id "/resume")
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "Continue reviewing the invoice"})})
+            body     (response-json response)
+            task     (db/get-task task-id)]
+        (is (= 202 (:status response)))
+        (is (= "running" (get body "status")))
+        (is (= (str task-id) (get body "task_id")))
+        (is (= :running (:state task)))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id sid
+                 :message "Continue reviewing the invoice"
+                 :opts {:channel :http
+                        :task-id task-id
+                        :runtime-op :resume
+                        :persist-message? false}}]
+               @process-calls))))))
+
 (deftest history-schedules-route-returns-schedule-summaries
   (schedule/create-schedule!
     {:id :daily-brief

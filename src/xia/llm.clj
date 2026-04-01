@@ -69,6 +69,8 @@
 (def ^:private rate-limit-window-ms 60000)
 (def ^:private anthropic-api-version "2023-06-01")
 (def ^:private default-anthropic-max-tokens 4096)
+(def ^:dynamic *request-budget-guard* nil)
+(def ^:dynamic *request-observer* nil)
 
 (defn- long-max
   ^long [^long a ^long b]
@@ -503,11 +505,50 @@
   (merge request-info
          (select-keys (meta response) [:provider-id :model :workload :llm-call-id])))
 
+(defn- maybe-call-budget-guard!
+  [request]
+  (when *request-budget-guard*
+    (*request-budget-guard* request)))
+
+(defn- maybe-observe-request!
+  [request]
+  (when *request-observer*
+    (*request-observer* request)))
+
+(defn- budgeted-chat-request
+  [kind messages opts chat-fn]
+  (maybe-call-budget-guard! {:kind kind
+                             :messages messages
+                             :opts opts})
+  (let [started-at (now-ms)]
+    (try
+      (let [response (chat-fn)
+            duration-ms (- (now-ms) started-at)]
+        (maybe-observe-request! {:kind kind
+                                 :messages messages
+                                 :opts opts
+                                 :response response
+                                 :duration-ms duration-ms
+                                 :usage (when (map? response)
+                                          (get response "usage"))})
+        response)
+      (catch Exception e
+        (maybe-observe-request! {:kind kind
+                                 :messages messages
+                                 :opts opts
+                                 :error e
+                                 :duration-ms (- (now-ms) started-at)})
+        (throw e)))))
+
 (defn chat-message
   "Send messages and return the normalized assistant message map.
    Preserves provider/model/workload/call provenance in metadata."
   [messages & {:keys [tools] :as opts}]
-  (let [resp         (apply chat messages (mapcat identity opts))
+  (let [resp         (budgeted-chat-request :chat-message
+                                            messages
+                                            opts
+                                            #(apply chat messages
+                                                    (mapcat identity opts)))
         request-info (response-metadata resp (dissoc opts :on-delta))
         message      (if (seq tools)
                        (tool-message! resp request-info)
@@ -1794,7 +1835,11 @@
 (defn chat-simple
   "Convenience: send messages, return the assistant's text content."
   [messages & opts]
-  (let [resp         (apply chat messages opts)
+  (let [opts-map      (apply hash-map opts)
+        resp          (budgeted-chat-request :chat-simple
+                                             messages
+                                             opts-map
+                                             #(apply chat messages opts))
         request-info (merge (apply hash-map opts)
                             (select-keys (meta resp) [:provider-id :workload]))]
     (simple-message-content! resp request-info)))
@@ -1802,7 +1847,12 @@
 (defn chat-with-tools
   "Send messages with tools. Returns the full message (may contain tool_calls)."
   [messages tools & opts]
-  (let [resp         (apply chat messages (concat [:tools tools] opts))
+  (let [opts-map      (apply hash-map (concat [:tools tools] opts))
+        resp          (budgeted-chat-request :chat-with-tools
+                                             messages
+                                             opts-map
+                                             #(apply chat messages
+                                                     (concat [:tools tools] opts)))
         request-info (merge (apply hash-map opts)
                             (select-keys (meta resp) [:provider-id :workload]))]
     (tool-message! resp request-info)))

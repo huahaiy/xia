@@ -1150,6 +1150,21 @@
 (defn- handle-history-sessions []
   (http-session/handle-history-sessions (session-handler-deps)))
 
+(defn- handle-history-tasks []
+  (http-session/handle-history-tasks (session-handler-deps)))
+
+(defn- handle-get-task [task-id]
+  (http-session/handle-get-task (session-handler-deps) task-id))
+
+(defn- handle-pause-task [task-id]
+  (http-session/handle-pause-task (session-handler-deps) task-id))
+
+(defn- handle-stop-task [task-id]
+  (http-session/handle-stop-task (session-handler-deps) task-id))
+
+(defn- handle-resume-task [task-id req]
+  (http-session/handle-resume-task (session-handler-deps) task-id req))
+
 (defn- handle-history-schedules []
   (http-session/handle-history-schedules (session-handler-deps)))
 
@@ -1290,6 +1305,10 @@
           command-session-audit-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/audit" uri)
           command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
+          task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
+          task-pause-match   (re-matches #"/tasks/([0-9a-fA-F-]+)/pause" uri)
+          task-stop-match    (re-matches #"/tasks/([0-9a-fA-F-]+)/stop" uri)
+          task-resume-match  (re-matches #"/tasks/([0-9a-fA-F-]+)/resume" uri)
           history-schedule-match (re-matches #"/history/schedules/([^/]+)/runs" uri)
           scratch-list-match (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads" uri)
           scratch-pad-match  (re-matches #"/sessions/([0-9a-fA-F-]+)/scratch-pads/([^/]+)" uri)
@@ -1398,11 +1417,26 @@
         (and (= method :get) (= uri "/history/sessions"))
         (protected-route-response req handle-history-sessions)
 
+        (and (= method :get) (= uri "/history/tasks"))
+        (protected-route-response req handle-history-tasks)
+
         (and (= method :get) (= uri "/history/schedules"))
         (protected-route-response req handle-history-schedules)
 
         (and (= method :get) history-schedule-match)
         (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
+
+        (and (= method :get) task-match)
+        (protected-route-response req #(handle-get-task (second task-match)))
+
+        (and (= method :post) task-pause-match)
+        (protected-route-response req #(handle-pause-task (second task-pause-match)))
+
+        (and (= method :post) task-stop-match)
+        (protected-route-response req #(handle-stop-task (second task-stop-match)))
+
+        (and (= method :post) task-resume-match)
+        (protected-route-response req #(handle-resume-task (second task-resume-match) req))
 
         (and (= method :get) (= uri "/llm-calls"))
         (protected-route-response req #(handle-list-llm-calls req))

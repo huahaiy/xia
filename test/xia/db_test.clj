@@ -70,10 +70,52 @@
     (is (true? (db/save-session-external-meta! sid {:team-id "T1"
                                                     :channel-id "C1"
                                                     :thread-ts "1710.1"})))
-    (is (= {:team-id "T1"
+      (is (= {:team-id "T1"
             :channel-id "C1"
             :thread-ts "1710.1"}
            (db/session-external-meta sid)))))
+
+(deftest tasks-persist-turns-and-items
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :interactive
+                                     :state :running
+                                     :title "Reply to the billing emails"
+                                     :summary "Working the billing inbox"
+                                     :autonomy-state {:stack [{:title "Reply to the billing emails"
+                                                               :progress-status :in-progress}]}})
+        turn-id    (db/start-task-turn! task-id
+                                        {:operation :start
+                                         :state :running
+                                         :input "reply to the billing emails"
+                                         :summary "Started working the inbox"})
+        item-id    (db/add-task-item! turn-id
+                                      {:type :user-message
+                                       :role :user
+                                       :summary "reply to the billing emails"
+                                       :data {:text "reply to the billing emails"}})]
+    (db/update-task-turn! turn-id {:state :completed
+                                   :summary "Replied to the billing thread"})
+    (db/update-task! task-id {:state :completed
+                              :summary "Done"
+                              :finished-at (java.util.Date.)})
+    (let [task   (db/get-task task-id)
+          tasks  (db/list-tasks {:session-id session-id})
+          turns  (db/task-turns task-id)
+          items  (db/turn-items turn-id)]
+      (is (= task-id (:id task)))
+      (is (= session-id (:session-id task)))
+      (is (= :completed (:state task)))
+      (is (= "Reply to the billing emails" (:title task)))
+      (is (= 1 (count tasks)))
+      (is (= [turn-id] (mapv :id turns)))
+      (is (= [:completed] (mapv :state turns)))
+      (is (= [:start] (mapv :operation turns)))
+      (is (= [item-id] (mapv :id items)))
+      (is (= [:user-message] (mapv :type items)))
+      (is (= [{:text "reply to the billing emails"}]
+             (mapv :data items))))))
 
 (deftest close-records-debug-event-when-runtime-is-running
   (runtime-state/mark-running!)
