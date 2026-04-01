@@ -4,6 +4,7 @@
             [clojure.test :refer :all]
             [clojure.string :as str]
             [xia.agent]
+            [xia.autonomous :as autonomous]
             [xia.artifact :as artifact]
             [xia.backup :as backup]
             [xia.channel.http :as http]
@@ -878,6 +879,7 @@
                                   :state :resumable
                                   :title "Reply to the billing emails"
                                   :summary "Waiting on the next follow up"
+                                  :autonomy-state (autonomous/initial-state "Reply to the billing emails")
                                   :meta {:runtime {:state :running
                                                    :phase :planning
                                                    :message "Planning the next reply"}}})
@@ -911,6 +913,11 @@
                      (select-keys ["state" "phase" "message"]))))
       (is (= "Reply to the billing emails" (get task "title")))
       (is (= "Waiting on the next follow up" (get task "summary")))
+      (is (= {"depth" 1
+              "current_focus" "Reply to the billing emails"
+              "root_goal" "Reply to the billing emails"}
+             (some-> (get task "stack")
+                     (select-keys ["depth" "current_focus" "root_goal"]))))
       (is (= 1 (get task "turn_count")))
       (is (= "completed" (get task "latest_turn_state"))))))
 
@@ -921,6 +928,7 @@
                                    :type :interactive
                                    :state :running
                                    :title "Review the invoice"
+                                   :autonomy-state (autonomous/initial-state "Review the invoice")
                                    :meta {:runtime {:state :running
                                                     :phase :understanding
                                                     :message "Understanding the goal"}}})
@@ -953,6 +961,16 @@
              (some-> (get task "runtime")
                      (select-keys ["state" "phase" "message"]))))
       (is (= "Review the invoice" (get task "title")))
+      (is (= {"depth" 1
+              "current_focus" "Review the invoice"
+              "root_goal" "Review the invoice"}
+             (some-> (get task "stack")
+                     (select-keys ["depth" "current_focus" "root_goal"]))))
+      (is (= "Review the invoice"
+             (some-> (get task "autonomy_state")
+                     (get "stack")
+                     first
+                     (get "title"))))
       (is (= 1 (count turns)))
       (is (= (str turn-id) (get turn "id")))
       (is (= "start" (get turn "operation")))
@@ -962,6 +980,46 @@
       (is (= "user-message" (get item "type")))
       (is (= "user" (get item "role")))
       (is (= {"text" "review the invoice"} (get item "data"))))))
+
+(deftest task-detail-route-reconciles-terminal-child-task-tip
+  (let [sid           (db/create-session! :http)
+        child-task-id (db/create-task! {:session-id sid
+                                        :channel :http
+                                        :type :branch
+                                        :state :completed
+                                        :title "Investigate the invoice attachments"
+                                        :summary "Found the attachment mismatch"})
+        parent-state   (autonomous/attach-child-task
+                        (autonomous/initial-state "Review the invoice")
+                        child-task-id
+                        "Investigate the invoice attachments")
+        parent-task-id (db/create-task! {:session-id sid
+                                         :channel :http
+                                         :type :interactive
+                                         :state :running
+                                         :title "Review the invoice"
+                                         :autonomy-state parent-state})]
+    (let [response (#'http/router {:uri            (str "/tasks/" parent-task-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (get body "task")
+          stack    (get task "stack")
+          frames   (get stack "frames")]
+      (is (= 200 (:status response)))
+      (is (= {"depth" 1
+              "current_focus" "Review the invoice"
+              "root_goal" "Review the invoice"}
+             (select-keys stack ["depth" "current_focus" "root_goal"])))
+      (is (= 1 (count frames)))
+      (is (= "Review the invoice"
+             (some-> frames first (get "title"))))
+      (is (nil? (some-> frames first (get "kind"))))
+      (is (= 1 (count (get-in task ["autonomy_state" "stack"]))))
+      (is (= "Review the invoice"
+             (get-in task ["autonomy_state" "stack" 0 "title"])))
+      (is (= "Child task completed: Investigate the invoice attachments. Found the attachment mismatch"
+             (get-in task ["autonomy_state" "stack" 0 "summary"]))))))
 
 (deftest pause-task-route-updates-task
   (let [sid     (db/create-session! :http)

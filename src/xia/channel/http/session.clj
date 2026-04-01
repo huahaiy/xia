@@ -3,6 +3,8 @@
   (:require [org.httpkit.server :as http]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.agent.task-runtime :as task-runtime]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.schedule :as schedule]
             [xia.working-memory :as wm]))
@@ -242,49 +244,85 @@
     (:started-at turn) (assoc :started_at (instant->str* deps (:started-at turn)))
     (:finished-at turn) (assoc :finished_at (instant->str* deps (:finished-at turn)))))
 
+(declare stack->body)
+
 (defn- task->body
-  [deps task]
-  (let [runtime (get-in task [:meta :runtime])]
-    (cond-> {:id         (some-> (:id task) str)
-             :session_id (some-> (:session-id task) str)
-             :channel    (some-> (:channel task) name)
-             :type       (some-> (:type task) name)
-             :state      (some-> (:state task) name)
-             :created_at (instant->str* deps (:created-at task))
-             :updated_at (instant->str* deps (:updated-at task))}
-    (:parent-id task) (assoc :parent_id (str (:parent-id task)))
-    (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
-    (:title task) (assoc :title (:title task))
-    (:summary task) (assoc :summary (:summary task))
-    (:stop-reason task) (assoc :stop_reason (name (:stop-reason task)))
-    (:error task) (assoc :error (:error task))
-    runtime (assoc :runtime runtime)
-    (:meta task) (assoc :meta (:meta task))
-    (:autonomy-state task) (assoc :autonomy_state (:autonomy-state task))
-    (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
-    (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task))))))
+  ([deps task]
+   (task->body deps
+               task
+               (task-runtime/runtime-autonomy-state (:session-id task) (:id task))))
+  ([deps task autonomy-state]
+   (let [runtime (get-in task [:meta :runtime])
+         stack   (stack->body deps autonomy-state)]
+     (cond-> {:id         (some-> (:id task) str)
+              :session_id (some-> (:session-id task) str)
+              :channel    (some-> (:channel task) name)
+              :type       (some-> (:type task) name)
+              :state      (some-> (:state task) name)
+              :created_at (instant->str* deps (:created-at task))
+              :updated_at (instant->str* deps (:updated-at task))}
+       (:parent-id task) (assoc :parent_id (str (:parent-id task)))
+       (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
+       (:title task) (assoc :title (:title task))
+       (:summary task) (assoc :summary (:summary task))
+       (:stop-reason task) (assoc :stop_reason (name (:stop-reason task)))
+       (:error task) (assoc :error (:error task))
+       runtime (assoc :runtime runtime)
+       (:meta task) (assoc :meta (:meta task))
+       autonomy-state (assoc :autonomy_state autonomy-state)
+       stack (assoc :stack stack)
+       (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
+       (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task)))))))
+
+(defn- stack-frame->body
+  [deps frame]
+  (cond-> {:title (:title frame)}
+    (:kind frame) (assoc :kind (name (:kind frame)))
+    (:child-task-id frame) (assoc :child_task_id (str (:child-task-id frame)))
+    (:progress-status frame) (assoc :progress_status (name (:progress-status frame)))
+    (:summary frame) (assoc :summary (truncate-text* deps (:summary frame) 240))
+    (:next-step frame) (assoc :next_step (truncate-text* deps (:next-step frame) 160))
+    (:compressed? frame) (assoc :compressed true)
+    (:compressed-count frame) (assoc :compressed_count (:compressed-count frame))))
+
+(defn- stack->body
+  [deps autonomy-state]
+  (when autonomy-state
+    (let [stack* (vec (:stack (autonomous/normalize-state autonomy-state)))
+          tip    (peek stack*)
+          root   (first stack*)]
+      {:depth (count stack*)
+       :current_focus (:title tip)
+       :root_goal (:title root)
+       :frames (mapv #(stack-frame->body deps %) stack*)})))
 
 (defn- history-task->body
-  [deps task]
-  (let [turns       (db/task-turns (:id task))
-        latest-turn (last turns)
-        runtime     (get-in task [:meta :runtime])]
-    (cond-> {:id          (some-> (:id task) str)
-             :session_id  (some-> (:session-id task) str)
-             :channel     (some-> (:channel task) name)
-             :type        (some-> (:type task) name)
-             :state       (some-> (:state task) name)
-             :turn_count  (count turns)
-             :created_at  (instant->str* deps (:created-at task))
-             :updated_at  (instant->str* deps (:updated-at task))}
-      (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
-      (:title task) (assoc :title (:title task))
-      (:summary task) (assoc :summary (:summary task))
-      runtime (assoc :runtime runtime)
-      latest-turn (assoc :latest_turn_state (some-> (:state latest-turn) name))
-      latest-turn (assoc :latest_turn_summary (truncate-text* deps (:summary latest-turn) 160))
-      (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
-      (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task))))))
+  ([deps task]
+   (history-task->body deps
+                       task
+                       (task-runtime/runtime-autonomy-state (:session-id task) (:id task))))
+  ([deps task autonomy-state]
+   (let [turns       (db/task-turns (:id task))
+         latest-turn (last turns)
+         runtime     (get-in task [:meta :runtime])
+         stack       (stack->body deps autonomy-state)]
+     (cond-> {:id          (some-> (:id task) str)
+              :session_id  (some-> (:session-id task) str)
+              :channel     (some-> (:channel task) name)
+              :type        (some-> (:type task) name)
+              :state       (some-> (:state task) name)
+              :turn_count  (count turns)
+              :created_at  (instant->str* deps (:created-at task))
+              :updated_at  (instant->str* deps (:updated-at task))}
+       (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
+       (:title task) (assoc :title (:title task))
+       (:summary task) (assoc :summary (:summary task))
+       runtime (assoc :runtime runtime)
+       stack (assoc :stack stack)
+       latest-turn (assoc :latest_turn_state (some-> (:state latest-turn) name))
+       latest-turn (assoc :latest_turn_summary (truncate-text* deps (:summary latest-turn) 160))
+       (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
+       (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task)))))))
 
 (defn- llm-call-summary->body
   [deps entry]

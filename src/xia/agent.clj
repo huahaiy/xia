@@ -72,6 +72,7 @@
          sanitized-tool-result
          cancel-futures!
          request-session-cancel!
+         live-run-entry-for-session
          current-time-ms)
 
 ;; build-messages is now in xia.context
@@ -382,11 +383,11 @@
   [session-id]
   (boolean
    (or (.isInterrupted (Thread/currentThread))
-       (some-> (get @active-session-runs session-id) :cancelled?))))
+       (some-> (live-run-entry-for-session session-id) :cancelled?))))
 
 (defn- cancellation-reason
   [session-id]
-  (or (some-> (get @active-session-runs session-id) :cancel-reason)
+  (or (some-> (live-run-entry-for-session session-id) :cancel-reason)
       (when (.isInterrupted (Thread/currentThread))
         "thread interrupted")))
 
@@ -435,6 +436,15 @@
   (when task-id
     (get @active-task-runs task-id)))
 
+(defn- session-bound-task-id
+  [session-id]
+  (some-> (session-run-entry session-id) :task-id))
+
+(defn- live-run-entry-for-session
+  [session-id]
+  (or (some-> session-id session-bound-task-id task-run-entry)
+      (session-run-entry session-id)))
+
 (defn- wait-for-session-idle!
   [session-id timeout-ms]
   (let [deadline (+ (current-time-ms) (long timeout-ms))]
@@ -476,6 +486,15 @@
                (assoc runs session-id (f entry))
                runs)))))
 
+(defn- update-task-run-entry!
+  [task-id f]
+  (when task-id
+    (swap! active-task-runs
+           (fn [runs]
+             (if-let [entry (get runs task-id)]
+               (assoc runs task-id (f entry))
+               runs)))))
+
 (defn- register-task-run!
   [session-id task-id task-turn-id]
   (when (and session-id task-id task-turn-id)
@@ -484,7 +503,14 @@
             task-entry {:task-id task-id
                         :task-turn-id task-turn-id
                         :session-id session-id
-                        :run-id run-id}]
+                        :run-id run-id
+                        :supervisor-thread (:supervisor-thread entry)
+                        :worker-token (:worker-token entry)
+                        :worker-thread (:worker-thread entry)
+                        :worker-future (:worker-future entry)
+                        :parallel-tool-futures (:parallel-tool-futures entry)
+                        :cancelled? (:cancelled? entry)
+                        :cancel-reason (:cancel-reason entry)}]
         (swap! active-task-runs assoc task-id task-entry)
         (update-session-run-entry! session-id
                                    (fn [run]
@@ -541,78 +567,135 @@
 
 (defn- begin-worker-run!
   [session-id worker-token]
-  (update-session-run-entry! session-id
-                             #(assoc % :worker-token worker-token
-                                     :worker-thread nil
-                                     :worker-future nil
-                                     :parallel-tool-futures [])))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            #(assoc % :worker-token worker-token
+                                    :worker-thread nil
+                                    :worker-future nil
+                                    :parallel-tool-futures []))
+    (update-session-run-entry! session-id
+                               #(assoc % :worker-token worker-token
+                                       :worker-thread nil
+                                       :worker-future nil
+                                       :parallel-tool-futures []))))
 
 (defn- register-worker-thread!
   [session-id worker-token]
-  (update-session-run-entry! session-id
-                             (fn [entry]
-                               (if (= worker-token (:worker-token entry))
-                                 (assoc entry :worker-thread (Thread/currentThread))
-                                 entry))))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            (fn [entry]
+                              (if (= worker-token (:worker-token entry))
+                                (assoc entry :worker-thread (Thread/currentThread))
+                                entry)))
+    (update-session-run-entry! session-id
+                               (fn [entry]
+                                 (if (= worker-token (:worker-token entry))
+                                   (assoc entry :worker-thread (Thread/currentThread))
+                                   entry)))))
 
 (defn- clear-worker-thread!
   [session-id worker-token]
-  (update-session-run-entry! session-id
-                             (fn [entry]
-                               (if (= worker-token (:worker-token entry))
-                                 (assoc entry :worker-thread nil)
-                                 entry))))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            (fn [entry]
+                              (if (= worker-token (:worker-token entry))
+                                (assoc entry :worker-thread nil)
+                                entry)))
+    (update-session-run-entry! session-id
+                               (fn [entry]
+                                 (if (= worker-token (:worker-token entry))
+                                   (assoc entry :worker-thread nil)
+                                   entry)))))
 
 (defn- register-worker-future!
   [session-id worker-token worker]
-  (update-session-run-entry! session-id
-                             (fn [entry]
-                               (if (= worker-token (:worker-token entry))
-                                 (assoc entry :worker-future worker)
-                                 entry))))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            (fn [entry]
+                              (if (= worker-token (:worker-token entry))
+                                (assoc entry :worker-future worker)
+                                entry)))
+    (update-session-run-entry! session-id
+                               (fn [entry]
+                                 (if (= worker-token (:worker-token entry))
+                                   (assoc entry :worker-future worker)
+                                   entry)))))
 
 (defn- clear-worker-run!
   [session-id worker-token]
-  (update-session-run-entry! session-id
-                             (fn [entry]
-                               (if (= worker-token (:worker-token entry))
-                                 (assoc entry
-                                        :worker-token nil
-                                        :worker-thread nil
-                                        :worker-future nil
-                                        :parallel-tool-futures [])
-                                 entry))))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            (fn [entry]
+                              (if (= worker-token (:worker-token entry))
+                                (assoc entry
+                                       :worker-token nil
+                                       :worker-thread nil
+                                       :worker-future nil
+                                       :parallel-tool-futures [])
+                                entry)))
+    (update-session-run-entry! session-id
+                               (fn [entry]
+                                 (if (= worker-token (:worker-token entry))
+                                   (assoc entry
+                                          :worker-token nil
+                                          :worker-thread nil
+                                          :worker-future nil
+                                          :parallel-tool-futures [])
+                                   entry)))))
 
 (defn- register-parallel-tool-futures!
   [session-id worker-token futures]
-  (update-session-run-entry! session-id
-                             (fn [entry]
-                               (if (= worker-token (:worker-token entry))
-                                 (update entry
-                                         :parallel-tool-futures
-                                         (fn [existing]
-                                           (->> (concat (or existing []) futures)
-                                                distinct
-                                                vec)))
-                                 entry))))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            (fn [entry]
+                              (if (= worker-token (:worker-token entry))
+                                (update entry
+                                        :parallel-tool-futures
+                                        (fn [existing]
+                                          (->> (concat (or existing []) futures)
+                                               distinct
+                                               vec)))
+                                entry)))
+    (update-session-run-entry! session-id
+                               (fn [entry]
+                                 (if (= worker-token (:worker-token entry))
+                                   (update entry
+                                           :parallel-tool-futures
+                                           (fn [existing]
+                                             (->> (concat (or existing []) futures)
+                                                  distinct
+                                                  vec)))
+                                   entry)))))
 
 (defn- clear-parallel-tool-futures!
   [session-id worker-token futures]
-  (update-session-run-entry! session-id
-                             (fn [entry]
-                               (if (= worker-token (:worker-token entry))
-                                 (update entry
-                                         :parallel-tool-futures
-                                         (fn [existing]
-                                           (let [to-clear (set futures)]
-                                             (->> (or existing [])
-                                                  (remove to-clear)
-                                                  vec))))
-                                 entry))))
+  (if-let [task-id (session-bound-task-id session-id)]
+    (update-task-run-entry! task-id
+                            (fn [entry]
+                              (if (= worker-token (:worker-token entry))
+                                (update entry
+                                        :parallel-tool-futures
+                                        (fn [existing]
+                                          (let [to-clear (set futures)]
+                                            (->> (or existing [])
+                                                 (remove to-clear)
+                                                 vec))))
+                                entry)))
+    (update-session-run-entry! session-id
+                               (fn [entry]
+                                 (if (= worker-token (:worker-token entry))
+                                   (update entry
+                                           :parallel-tool-futures
+                                           (fn [existing]
+                                             (let [to-clear (set futures)]
+                                               (->> (or existing [])
+                                                    (remove to-clear)
+                                                    vec))))
+                                   entry)))))
 
 (defn- interrupt-worker-thread!
   [session-id]
-  (when-let [^Thread worker-thread (:worker-thread (session-run-entry session-id))]
+  (when-let [^Thread worker-thread (:worker-thread (live-run-entry-for-session session-id))]
     (when (not= (Thread/currentThread) worker-thread)
       (.interrupt worker-thread))
     true))
@@ -620,7 +703,8 @@
 (defn- request-session-cancel!
   [session-id reason & {:keys [interrupt-supervisor?]
                         :or {interrupt-supervisor? false}}]
-  (let [entry* (atom nil)]
+  (let [session-entry* (atom nil)
+        task-entry*    (atom nil)]
     (when session-id
       (swap! active-session-runs
              (fn [runs]
@@ -629,10 +713,21 @@
                                       :cancelled? true
                                       :cancel-reason (or (:cancel-reason entry)
                                                          reason))]
-                   (reset! entry* updated)
+                   (reset! session-entry* updated)
                    (assoc runs session-id updated))
                  runs)))
-      (when-let [entry @entry*]
+      (when-let [task-id (:task-id @session-entry*)]
+        (swap! active-task-runs
+               (fn [runs]
+                 (if-let [entry (get runs task-id)]
+                   (let [updated (assoc entry
+                                        :cancelled? true
+                                        :cancel-reason (or (:cancel-reason entry)
+                                                           reason))]
+                     (reset! task-entry* updated)
+                     (assoc runs task-id updated))
+                   runs))))
+      (when-let [entry (or @task-entry* @session-entry*)]
         (when (and interrupt-supervisor?
                    (not= (Thread/currentThread) ^Thread (:supervisor-thread entry)))
           (.interrupt ^Thread (:supervisor-thread entry)))
@@ -643,7 +738,7 @@
           (cancel-futures! parallel-tool-futures))
         (when-let [^Future worker-future (:worker-future entry)]
           (future-cancel worker-future))
-        (doseq [child-session-id (:child-session-ids entry)]
+        (doseq [child-session-id (:child-session-ids @session-entry*)]
           (when (not= child-session-id session-id)
             (request-session-cancel! child-session-id
                                      reason
@@ -1639,8 +1734,8 @@
    (stop-worker! session-id nil))
   ([session-id worker]
    (let [worker* (or worker
-                     (:worker-future (session-run-entry session-id)))
-         parallel-tool-futures (some-> (session-run-entry session-id)
+                     (:worker-future (live-run-entry-for-session session-id)))
+         parallel-tool-futures (some-> (live-run-entry-for-session session-id)
                                        :parallel-tool-futures
                                        seq)
          interrupted? (volatile! (Thread/interrupted))]
