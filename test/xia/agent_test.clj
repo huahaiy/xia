@@ -2074,6 +2074,21 @@
                      :message "Restarting iteration after Agent supervisor stopped a stalled worker during llm phase (attempt 1/1)"}
                     %)
                 @statuses))
+      (let [task-id          (:id (first (db/list-tasks {:session-id session-id})))
+            turn-id          (:id (first (db/task-turns task-id)))
+            status-items     (filter #(= :status (:type %)) (db/turn-items turn-id))
+            restarting-item  (some #(when (= "Restarting iteration after Agent supervisor stopped a stalled worker during llm phase (attempt 1/1)"
+                                               (:summary %))
+                                      %)
+                                   status-items)]
+        (is (some? restarting-item))
+        (is (= {:attempt 1
+                :max-restarts 1
+                :failure-phase "llm"
+                :worker-phase "llm"}
+               (some-> restarting-item
+                       :data
+                       (select-keys [:attempt :max-restarts :failure-phase :worker-phase])))))
       (is (= {:state :done
               :phase :complete
               :message "Ready"}

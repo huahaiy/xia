@@ -1862,6 +1862,7 @@
                                                       autonomy-state
                                                       iteration
                                                       max-iterations
+                                                      :worker-phase (:phase event)
                                                       :round (:round event)
                                                       :partial-content (:partial-content event)
                                                       :tool-count (:tool-count event)
@@ -1882,11 +1883,13 @@
                                                  autonomy-state
                                                  iteration
                                                  max-iterations
+                                                 :worker-phase (:phase snapshot)
                                                  :round (:round snapshot)
                                                  :tool-count (:tool-count snapshot)
                                                  :tool-id (:tool-id snapshot)
                                                  :tool-name (:tool-name snapshot)
-                                                 :parallel (:parallel snapshot))
+                                                 :parallel (:parallel snapshot)
+                                                 :cancel-reason (cancellation-reason session-id))
                       (throw (if (stop-worker! session-id worker)
                                (request-cancelled-ex session-id
                                                      (cancellation-reason session-id))
@@ -2004,7 +2007,13 @@
                                            autonomy-state
                                            (:iteration execution-context)
                                            max-iterations
-                                           :attempt attempt*)
+                                           :attempt attempt*
+                                           :max-restarts max-restarts
+                                           :failure-phase (some-> t ex-data :phase)
+                                           :worker-phase (:phase worker-snapshot)
+                                           :round (:round worker-snapshot)
+                                           :tool-id (:tool-id worker-snapshot)
+                                           :tool-name (:tool-name worker-snapshot))
                 (save-schedule-checkpoint! execution-context
                                            {:phase :restarting
                                             :iteration (:iteration execution-context)
