@@ -1794,6 +1794,10 @@
   [task-id]
   (db-task/task-turns (task-deps) task-id))
 
+(defn get-task-turn
+  [turn-id]
+  (db-task/get-task-turn (task-deps) turn-id))
+
 (defn add-task-item!
   [turn-id item]
   (db-task/add-task-item! (task-deps) turn-id item))
@@ -1801,6 +1805,10 @@
 (defn turn-items
   [turn-id]
   (db-task/turn-items (task-deps) turn-id))
+
+(defn get-task-item
+  [item-id]
+  (db-task/get-task-item (task-deps) item-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Skills (markdown instructions)

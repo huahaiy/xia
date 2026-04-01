@@ -3,9 +3,14 @@ const storageKeys = {
 };
 const state = {
   sessionId: sessionStorage.getItem(storageKeys.sessionId) || '',
+  currentTaskId: '',
+  liveEventAfter: 0,
+  liveEventReceivedAt: 0,
   messages: [],
+  pendingInput: null,
   pendingApproval: null,
   sending: false,
+  inputSubmitting: false,
   approvalSubmitting: false,
   localDocs: [],
   activeLocalDocId: '',
@@ -124,11 +129,20 @@ const state = {
   openclawImportReport: null,
   baseStatus: 'Ready',
   liveStatus: null,
+  lastStatusPollAt: 0,
+  lastTaskSnapshotAt: 0,
   sendStartedAt: 0
 };
+let taskEventSource = null;
+let taskEventSourceTaskId = '';
 const statusEl = document.getElementById('status');
 const activityStatusEl = document.getElementById('activity-status');
 const sessionLabelEl = document.getElementById('session-label');
+const inputPanelEl = document.getElementById('input-panel');
+const inputLabelEl = document.getElementById('input-label');
+const inputValueEl = document.getElementById('input-value');
+const inputNoteEl = document.getElementById('input-note');
+const submitInputEl = document.getElementById('submit-input');
 const approvalPanelEl = document.getElementById('approval-panel');
 const approvalToolEl = document.getElementById('approval-tool');
 const approvalReasonEl = document.getElementById('approval-reason');
@@ -552,12 +566,20 @@ function isClosedSessionResponse(response, data) {
 }
 
 function resetCurrentSession(statusText) {
+  closeTaskEventStream();
   state.sessionId = '';
+  state.currentTaskId = '';
+  state.liveEventAfter = 0;
+  state.liveEventReceivedAt = 0;
   state.messages = [];
+  state.pendingInput = null;
   state.pendingApproval = null;
   state.sending = false;
+  state.inputSubmitting = false;
   state.approvalSubmitting = false;
   state.liveStatus = null;
+  state.lastStatusPollAt = 0;
+  state.lastTaskSnapshotAt = 0;
   state.sendStartedAt = 0;
   state.localDocs = [];
   state.activeLocalDocId = '';
@@ -574,6 +596,7 @@ function resetCurrentSession(statusText) {
   state.scratchDirty = false;
   _pollFailures = 0;
   persistSession();
+  renderInputRequest();
   renderApproval();
   renderMessages();
   syncLocalDocPanel('No local document selected.');
@@ -585,6 +608,9 @@ function resetCurrentSession(statusText) {
 }
 
 function currentActivityText() {
+  if (state.pendingInput) {
+    return 'Waiting for requested input...';
+  }
   if (state.pendingApproval) {
     return 'Waiting for your approval...';
   }
@@ -619,6 +645,7 @@ function currentActivityText() {
 }
 
 function currentPillText() {
+  if (state.pendingInput) return 'Input needed';
   if (state.pendingApproval) return 'Approval needed';
   if (state.sending) return 'Working...';
   return state.baseStatus || 'Ready';
@@ -650,12 +677,14 @@ function statusToneFromText(text) {
 }
 
 function currentPillTone() {
+  if (state.pendingInput) return 'approval';
   if (state.pendingApproval) return 'approval';
   if (state.sending) return 'working';
   return statusToneFromText(state.baseStatus);
 }
 
 function currentActivityTone() {
+  if (state.pendingInput) return 'approval';
   if (state.pendingApproval) return 'approval';
   if (state.sending && state.liveStatus) {
     switch (state.liveStatus.phase) {
@@ -693,6 +722,193 @@ function syncStatus() {
 function setStatus(text) {
   state.baseStatus = text || 'Ready';
   syncStatus();
+}
+
+function normalizeRuntimeEventStatus(event) {
+  const data = event && event.data ? event.data : {};
+  return {
+    state: firstNonEmpty(data.state, event.status, state.liveStatus && state.liveStatus.state, ''),
+    phase: firstNonEmpty(data.phase, state.liveStatus && state.liveStatus.phase, ''),
+    message: firstNonEmpty(data.message, event.summary, state.liveStatus && state.liveStatus.message, ''),
+    partial_content: firstNonEmpty(data.partial_content, state.liveStatus && state.liveStatus.partial_content, ''),
+    tool_id: firstNonEmpty(data.tool_id, state.liveStatus && state.liveStatus.tool_id, ''),
+    tool_name: firstNonEmpty(data.tool_name, state.liveStatus && state.liveStatus.tool_name, ''),
+    iteration: typeof data.iteration === 'number' ? data.iteration : (state.liveStatus && state.liveStatus.iteration) || null,
+    max_iterations: typeof data.max_iterations === 'number' ? data.max_iterations : (state.liveStatus && state.liveStatus.max_iterations) || null,
+    current_focus: firstNonEmpty(data.current_focus, state.liveStatus && state.liveStatus.current_focus, ''),
+    progress_status: firstNonEmpty(data.progress_status, state.liveStatus && state.liveStatus.progress_status, ''),
+    stack_depth: typeof data.stack_depth === 'number' ? data.stack_depth : (state.liveStatus && state.liveStatus.stack_depth) || null,
+    agenda: Array.isArray(data.agenda) ? data.agenda : (state.liveStatus && state.liveStatus.agenda) || [],
+    stack: Array.isArray(data.stack) ? data.stack : (state.liveStatus && state.liveStatus.stack) || []
+  };
+}
+
+function runtimeValueFromObject(data, key) {
+  if (!data) return undefined;
+  if (Object.prototype.hasOwnProperty.call(data, key)) return data[key];
+  const alt = key.indexOf('_') >= 0 ? key.replace(/_/g, '-') : key.replace(/-/g, '_');
+  if (Object.prototype.hasOwnProperty.call(data, alt)) return data[alt];
+  return undefined;
+}
+
+function normalizeTaskRuntimeStatus(runtime) {
+  if (!runtime || typeof runtime !== 'object') return null;
+  return {
+    state: firstNonEmpty(runtimeValueFromObject(runtime, 'state'), ''),
+    phase: firstNonEmpty(runtimeValueFromObject(runtime, 'phase'), ''),
+    message: firstNonEmpty(runtimeValueFromObject(runtime, 'message'), ''),
+    partial_content: firstNonEmpty(runtimeValueFromObject(runtime, 'partial_content'), ''),
+    tool_id: firstNonEmpty(runtimeValueFromObject(runtime, 'tool_id'), ''),
+    tool_name: firstNonEmpty(runtimeValueFromObject(runtime, 'tool_name'), ''),
+    iteration: runtimeValueFromObject(runtime, 'iteration'),
+    max_iterations: runtimeValueFromObject(runtime, 'max_iterations'),
+    current_focus: firstNonEmpty(runtimeValueFromObject(runtime, 'current_focus'), ''),
+    progress_status: firstNonEmpty(runtimeValueFromObject(runtime, 'progress_status'), ''),
+    stack_depth: runtimeValueFromObject(runtime, 'stack_depth'),
+    agenda: Array.isArray(runtimeValueFromObject(runtime, 'agenda')) ? runtimeValueFromObject(runtime, 'agenda') : [],
+    stack: Array.isArray(runtimeValueFromObject(runtime, 'stack')) ? runtimeValueFromObject(runtime, 'stack') : []
+  };
+}
+
+function taskIsLive(task) {
+  const taskState = firstNonEmpty(task && task.state, '');
+  return ['running', 'waiting_input', 'waiting_approval'].includes(taskState);
+}
+
+function applyTaskSnapshot(task, options) {
+  if (!task || typeof task !== 'object') return null;
+  const opts = options || {};
+  if (task.id) {
+    setCurrentTaskId(task.id);
+  }
+  const runtime = normalizeTaskRuntimeStatus(task.runtime);
+  if (runtime) {
+    state.liveStatus = runtime;
+  } else if (!taskIsLive(task)) {
+    state.liveStatus = null;
+  }
+  state.lastTaskSnapshotAt = Date.now();
+  if (taskIsLive(task) && opts.markSending !== false) {
+    state.sending = true;
+    if (!state.sendStartedAt) {
+      const startedAt = Date.parse(firstNonEmpty(task.started_at, task.created_at, ''));
+      state.sendStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now();
+    }
+  }
+  updateComposerState();
+  syncStatus();
+  return task;
+}
+
+function applyRuntimeEvent(event) {
+  if (!event || !event.type) return;
+  if (event.task_id) {
+    setCurrentTaskId(event.task_id);
+  }
+  if (typeof event.stream_index === 'number') {
+    state.liveEventAfter = Math.max(state.liveEventAfter, event.stream_index);
+    state.liveEventReceivedAt = Date.now();
+  }
+  switch (event.type) {
+    case 'task.status':
+      state.liveStatus = normalizeRuntimeEventStatus(event);
+      syncStatus();
+      break;
+    case 'input.requested': {
+      const data = event.data || {};
+      state.pendingInput = Object.assign({}, state.pendingInput || {}, {
+        prompt_id: firstNonEmpty(state.pendingInput && state.pendingInput.prompt_id, ''),
+        label: firstNonEmpty(data.label, ''),
+        masked: !!data.masked,
+        created_at: firstNonEmpty(event.created_at, '')
+      });
+      renderInputRequest();
+      syncStatus();
+      if (!state.pendingInput.prompt_id && state.sessionId) {
+        window.setTimeout(() => {
+          pollPrompt();
+        }, 0);
+      }
+      break;
+    }
+    case 'input.received':
+      state.pendingInput = null;
+      renderInputRequest();
+      syncStatus();
+      break;
+    case 'approval.requested': {
+      const data = event.data || {};
+      state.pendingApproval = Object.assign({}, state.pendingApproval || {}, {
+        approval_id: firstNonEmpty(state.pendingApproval && state.pendingApproval.approval_id, ''),
+        tool_id: firstNonEmpty(data.tool_id, event.tool_id, ''),
+        tool_name: firstNonEmpty(data.tool_name, ''),
+        description: firstNonEmpty(data.description, ''),
+        arguments: data.arguments || {},
+        reason: firstNonEmpty(data.reason, data.description, event.summary, ''),
+        policy: firstNonEmpty(data.policy, ''),
+        created_at: firstNonEmpty(event.created_at, '')
+      });
+      renderApproval();
+      syncStatus();
+      if (!state.pendingApproval.approval_id && state.sessionId) {
+        window.setTimeout(() => {
+          pollApproval();
+        }, 0);
+      }
+      break;
+    }
+    case 'approval.decided':
+      state.pendingApproval = null;
+      renderApproval();
+      syncStatus();
+      break;
+    case 'message.assistant': {
+      const text = firstNonEmpty(event.data && event.data.text, event.summary, '');
+      if (text) {
+        addMessage('assistant', text, normalizeMessage({
+          id: firstNonEmpty(event.message_id, event.item_id, event.id),
+          role: 'assistant',
+          content: text,
+          created_at: event.created_at,
+          provider_id: event.data && event.data.provider_id,
+          model: event.data && event.data.model,
+          workload: event.data && event.data.workload
+        }));
+      }
+      break;
+    }
+    case 'turn.completed':
+    case 'turn.failed':
+    case 'turn.cancelled':
+    case 'task.completed':
+    case 'task.failed':
+    case 'task.cancelled':
+    case 'task.paused':
+    case 'task.stopped':
+      closeTaskEventStream();
+      state.pendingInput = null;
+      renderInputRequest();
+      state.pendingApproval = null;
+      renderApproval();
+      state.liveStatus = null;
+      syncStatus();
+      break;
+    case 'task.updated': {
+      const taskState = firstNonEmpty(event.data && event.data.state, '');
+      if (['completed', 'cancelled', 'failed', 'paused', 'resumable'].includes(taskState)) {
+        closeTaskEventStream();
+        state.pendingInput = null;
+        renderInputRequest();
+        state.pendingApproval = null;
+        renderApproval();
+        state.liveStatus = null;
+        syncStatus();
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 async function isLocalSessionSecretResponse(response) {
@@ -5952,12 +6168,30 @@ async function deleteSkill() {
 function renderApproval() {
   const approval = state.pendingApproval;
   approvalPanelEl.hidden = !approval;
-  allowApprovalEl.disabled = !approval || state.approvalSubmitting;
-  denyApprovalEl.disabled = !approval || state.approvalSubmitting;
+  const actionable = approval && approval.approval_id;
+  allowApprovalEl.disabled = !actionable || state.approvalSubmitting;
+  denyApprovalEl.disabled = !actionable || state.approvalSubmitting;
   if (!approval) return;
   approvalToolEl.textContent = approval.tool_name || approval.tool_id || 'Privileged tool';
   approvalReasonEl.textContent = approval.reason || 'Needs confirmation.';
   approvalArgsEl.textContent = prettyJson(approval.arguments || {});
+}
+
+function renderInputRequest() {
+  const request = state.pendingInput;
+  inputPanelEl.hidden = !request;
+  const actionable = request && request.prompt_id;
+  submitInputEl.disabled = !actionable || state.inputSubmitting;
+  inputValueEl.disabled = !request || state.inputSubmitting;
+  inputValueEl.type = request && request.masked ? 'password' : 'text';
+  if (!request) {
+    inputValueEl.value = '';
+    return;
+  }
+  inputLabelEl.textContent = request.label || 'Requested value';
+  inputNoteEl.textContent = request.masked
+    ? 'This value is hidden while you type.'
+    : 'Enter the requested value and submit it to resume the task.';
 }
 
 function formatDateTime(value) {
@@ -5997,6 +6231,57 @@ function normalizeMessage(message) {
       ? message.artifacts
       : (Array.isArray(message.artifact_refs) ? message.artifact_refs : [])
   });
+}
+
+function setCurrentTaskId(taskId) {
+  const next = typeof taskId === 'string' ? taskId : '';
+  if (state.currentTaskId !== next) {
+    if (taskEventSource && taskEventSourceTaskId && taskEventSourceTaskId !== next) {
+      closeTaskEventStream();
+    }
+    state.currentTaskId = next;
+    state.liveEventAfter = 0;
+    state.liveEventReceivedAt = 0;
+  }
+}
+
+function supportsTaskEventStream() {
+  return typeof window !== 'undefined' && typeof window.EventSource === 'function';
+}
+
+function closeTaskEventStream() {
+  if (taskEventSource) {
+    taskEventSource.close();
+    taskEventSource = null;
+  }
+  taskEventSourceTaskId = '';
+}
+
+function openTaskEventStream() {
+  if (!supportsTaskEventStream() || !state.sending || !state.currentTaskId) return false;
+  if (taskEventSource && taskEventSourceTaskId === state.currentTaskId) return true;
+  closeTaskEventStream();
+  const taskId = state.currentTaskId;
+  try {
+    const source = new window.EventSource('/tasks/' + encodeURIComponent(taskId)
+      + '/stream?after=' + encodeURIComponent(String(state.liveEventAfter || 0)));
+    source.onmessage = (messageEvent) => {
+      try {
+        applyRuntimeEvent(JSON.parse(messageEvent.data));
+      } catch (_err) {}
+    };
+    source.onerror = () => {
+      if (taskEventSource === source) {
+        closeTaskEventStream();
+      }
+    };
+    taskEventSource = source;
+    taskEventSourceTaskId = taskId;
+    return true;
+  } catch (_err) {
+    closeTaskEventStream();
+    return false;
+  }
 }
 
 function messageProvenanceText(message) {
@@ -6089,6 +6374,14 @@ function addMessage(role, content, extra) {
     content: content,
     createdAt: new Date().toISOString()
   }, extra || {});
+  if (message.id) {
+    const existingIndex = state.messages.findIndex((entry) => entry && entry.id === message.id);
+    if (existingIndex >= 0) {
+      state.messages[existingIndex] = Object.assign({}, state.messages[existingIndex], message);
+      renderMessages();
+      return;
+    }
+  }
   state.messages.push(message);
   if (state.messages.length === 1) {
     messagesEl.replaceChildren();
@@ -6118,6 +6411,9 @@ function updateComposerState() {
     state.pendingLocalDocIds = [];
     state.pendingArtifactIds = [];
   }
+  composerEl.placeholder = state.pendingInput
+    ? 'Enter the requested value in the input panel above.'
+    : 'Paste context or type a message... (Cmd+Enter to send)';
   sendEl.disabled = state.sending || empty;
   clearInputEl.disabled = state.sending || !composerEl.value.length;
 }
@@ -7043,15 +7339,46 @@ async function deleteArtifact() {
 
 let _pollFailures = 0;
 
+async function pollPrompt() {
+  const target = state.currentTaskId
+    ? ('/tasks/' + encodeURIComponent(state.currentTaskId) + '/prompt')
+    : (state.sessionId ? ('/sessions/' + encodeURIComponent(state.sessionId) + '/prompt') : '');
+  if (!target) {
+    state.pendingInput = null;
+    renderInputRequest();
+    syncStatus();
+    return;
+  }
+  try {
+    const response = await safeFetch(target);
+    const data = await response.json();
+    if (!response.ok) {
+      if (isClosedSessionResponse(response, data)) {
+        resetCurrentSession(response.status === 409
+          ? 'Session closed. Start a new session.'
+          : 'Session expired. Start a new session.');
+        return;
+      }
+      throw new Error(data.error || 'Failed to load');
+    }
+    state.pendingInput = data.pending ? (data.prompt || null) : null;
+    renderInputRequest();
+    syncStatus();
+  } catch (_err) {}
+}
+
 async function pollApproval() {
-  if (!state.sessionId) {
+  const target = state.currentTaskId
+    ? ('/tasks/' + encodeURIComponent(state.currentTaskId) + '/approval')
+    : (state.sessionId ? ('/sessions/' + encodeURIComponent(state.sessionId) + '/approval') : '');
+  if (!target) {
     state.pendingApproval = null;
     renderApproval();
     syncStatus();
     return;
   }
   try {
-    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval');
+    const response = await safeFetch(target);
     const data = await response.json();
     if (!response.ok) {
       if (isClosedSessionResponse(response, data)) {
@@ -7077,6 +7404,7 @@ async function pollApproval() {
 async function pollStatus() {
   if (!state.sessionId) {
     state.liveStatus = null;
+    state.lastStatusPollAt = 0;
     syncStatus();
     return;
   }
@@ -7093,6 +7421,26 @@ async function pollStatus() {
       throw new Error(data.error || 'Failed to load');
     }
     state.liveStatus = data.status || null;
+    setCurrentTaskId(data.task_id || '');
+    if (!state.pendingInput
+        && state.sessionId
+        && state.liveStatus
+        && (state.liveStatus.state === 'waiting_input'
+          || state.liveStatus.phase === 'waiting_input')) {
+      window.setTimeout(() => {
+        pollPrompt();
+      }, 0);
+    }
+    if (!state.pendingApproval
+        && state.sessionId
+        && state.liveStatus
+        && (state.liveStatus.state === 'waiting_approval'
+          || state.liveStatus.phase === 'waiting_approval')) {
+      window.setTimeout(() => {
+        pollApproval();
+      }, 0);
+    }
+    state.lastStatusPollAt = Date.now();
     if (_pollFailures >= 5) {
       _pollFailures = 0;
       setStatus('Reconnected');
@@ -7101,12 +7449,107 @@ async function pollStatus() {
   } catch (_err) {}
 }
 
+async function pollCurrentTask() {
+  if (!state.sessionId) {
+    setCurrentTaskId('');
+    return null;
+  }
+  try {
+    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/task');
+    const data = await response.json();
+    if (!response.ok) {
+      if (isClosedSessionResponse(response, data)) {
+        resetCurrentSession(response.status === 409
+          ? 'Session closed. Start a new session.'
+          : 'Session expired. Start a new session.');
+        return null;
+      }
+      throw new Error(data.error || 'Failed to load');
+    }
+    const task = data.task || null;
+    if (task) {
+      applyTaskSnapshot(task);
+    } else {
+      setCurrentTaskId(data.task_id || '');
+    }
+    return task;
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function pollTaskSnapshot() {
+  if (!state.currentTaskId) return pollCurrentTask();
+  try {
+    const response = await safeFetch('/tasks/' + encodeURIComponent(state.currentTaskId));
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to load task');
+    }
+    return applyTaskSnapshot(data, { markSending: state.sending });
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function pollLiveTaskEvents() {
+  if (!state.sending || !state.currentTaskId) return;
+  try {
+    const response = await safeFetch('/tasks/' + encodeURIComponent(state.currentTaskId)
+      + '/live-events?after=' + encodeURIComponent(String(state.liveEventAfter || 0)));
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to load task events');
+    }
+    const events = Array.isArray(data.events) ? data.events : [];
+    events.forEach((event) => applyRuntimeEvent(event));
+  } catch (_err) {}
+}
+
+const liveEventFallbackStatusPollMs = 10000;
+
+async function pollTaskRuntime() {
+  if (!state.sessionId) return;
+  if (!state.currentTaskId) {
+    const task = await pollCurrentTask();
+    if (state.currentTaskId) {
+      if (!openTaskEventStream()) {
+        await pollLiveTaskEvents();
+      }
+      return;
+    }
+    if (!task && state.sending) {
+      await pollStatus();
+    }
+    return;
+  }
+  const usingStream = openTaskEventStream();
+  if (!usingStream) {
+    await pollLiveTaskEvents();
+  }
+  const now = Date.now();
+  const liveEventsStale = !state.liveEventReceivedAt
+    || (now - state.liveEventReceivedAt) >= liveEventFallbackStatusPollMs;
+  const taskSnapshotStale = !state.lastTaskSnapshotAt
+    || (now - state.lastTaskSnapshotAt) >= liveEventFallbackStatusPollMs;
+  if (!state.liveStatus || (liveEventsStale && taskSnapshotStale)) {
+    const task = await pollTaskSnapshot();
+    if (!task && state.sending) {
+      await pollStatus();
+    }
+  }
+}
+
 async function submitApproval(decision) {
-  if (!state.sessionId || !state.pendingApproval || state.approvalSubmitting) return;
+  if (!state.pendingApproval || state.approvalSubmitting) return;
+  const target = state.currentTaskId
+    ? ('/tasks/' + encodeURIComponent(state.currentTaskId) + '/approval')
+    : (state.sessionId ? ('/sessions/' + encodeURIComponent(state.sessionId) + '/approval') : '');
+  if (!target) return;
   state.approvalSubmitting = true;
   renderApproval();
   try {
-    const response = await safeFetch('/sessions/' + encodeURIComponent(state.sessionId) + '/approval', {
+    const response = await safeFetch(target, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -7125,6 +7568,39 @@ async function submitApproval(decision) {
   } finally {
     state.approvalSubmitting = false;
     renderApproval();
+  }
+}
+
+async function submitPromptInput() {
+  if (!state.pendingInput || state.inputSubmitting) return;
+  const target = state.currentTaskId
+    ? ('/tasks/' + encodeURIComponent(state.currentTaskId) + '/prompt')
+    : (state.sessionId ? ('/sessions/' + encodeURIComponent(state.sessionId) + '/prompt') : '');
+  if (!target) return;
+  const value = inputValueEl.value;
+  if (!state.pendingInput.prompt_id) return;
+  state.inputSubmitting = true;
+  renderInputRequest();
+  try {
+    const response = await safeFetch(target, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt_id: state.pendingInput.prompt_id,
+        value: value
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Failed to submit');
+    inputValueEl.value = '';
+    state.pendingInput = null;
+    renderInputRequest();
+    setStatus('Input submitted');
+  } catch (err) {
+    setStatus(err.message || 'Failed to submit');
+  } finally {
+    state.inputSubmitting = false;
+    renderInputRequest();
   }
 }
 
@@ -7157,7 +7633,7 @@ async function sendMessage(text, options) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    await pollStatus();
+    await pollTaskRuntime();
     const response = await responsePromise;
     const data = await response.json();
     if (!response.ok) {
@@ -7173,6 +7649,11 @@ async function sendMessage(text, options) {
       state.sessionId = data.session_id;
       persistSession();
     }
+    if (data.task) {
+      applyTaskSnapshot(data.task, { markSending: true });
+    } else if (data.task_id) {
+      setCurrentTaskId(data.task_id);
+    }
     const assistantMessage = normalizeMessage(data.message || {
       role: 'assistant',
       content: data.content || '',
@@ -7184,13 +7665,13 @@ async function sendMessage(text, options) {
     await loadArtifacts();
     await loadSharedWorkspaceItems();
     await loadManagedInstances();
-    state.liveStatus = null;
     setStatus('Ready');
   } catch (err) {
     addMessage('error', err.message || 'Request failed');
     state.liveStatus = null;
     setStatus('Failed');
   } finally {
+    closeTaskEventStream();
     state.sending = false;
     state.sendStartedAt = 0;
     syncStatus();
@@ -7277,6 +7758,13 @@ scratchEditorEl.addEventListener('keydown', (event) => {
 
 allowApprovalEl.addEventListener('click', () => submitApproval('allow'));
 denyApprovalEl.addEventListener('click', () => submitApproval('deny'));
+submitInputEl.addEventListener('click', () => submitPromptInput());
+inputValueEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    submitPromptInput();
+  }
+});
 
 saveScratchEl.addEventListener('click', () => saveScratchPad());
 deleteScratchEl.addEventListener('click', () => deleteScratchPad());
@@ -7548,6 +8036,7 @@ window.addEventListener('message', (event) => {
 });
 
 persistSession();
+renderInputRequest();
 renderApproval();
 renderMessages();
 syncLocalDocPanel('No local document selected.');
@@ -7589,13 +8078,27 @@ Promise.all([
   setStatus('Some data failed to load — check your connection');
 });
 if (state.sessionId) {
-  pollApproval();
-  if (state.sending) pollStatus();
+  pollCurrentTask().then(() => {
+    if (state.pendingInput && !state.pendingInput.prompt_id) {
+      pollPrompt();
+    }
+    if (state.pendingApproval && !state.pendingApproval.approval_id) {
+      pollApproval();
+    }
+  });
+  if (state.sending) {
+    pollTaskRuntime();
+  }
 }
 let _pollIntervalId = window.setInterval(() => {
   if (state.sessionId) {
-    pollApproval();
-    if (state.sending) pollStatus();
+    if (state.sending || !state.currentTaskId) {
+      pollTaskRuntime();
+    } else if (state.pendingInput && !state.pendingInput.prompt_id) {
+      pollPrompt();
+    } else if (state.pendingApproval && !state.pendingApproval.approval_id) {
+      pollApproval();
+    }
   }
 }, 1000);
 
@@ -7609,14 +8112,26 @@ document.addEventListener('visibilitychange', () => {
     if (!_pollIntervalId) {
       _pollIntervalId = window.setInterval(() => {
         if (state.sessionId) {
-          pollApproval();
-          if (state.sending) pollStatus();
+          if (state.sending) {
+            pollTaskRuntime();
+          } else if (state.pendingApproval && !state.pendingApproval.approval_id) {
+            pollApproval();
+          }
         }
       }, 1000);
     }
     if (state.sessionId) {
-      pollApproval();
-      if (state.sending) pollStatus();
+      pollCurrentTask().then(() => {
+        if (state.pendingInput && !state.pendingInput.prompt_id) {
+          pollPrompt();
+        }
+        if (state.pendingApproval && !state.pendingApproval.approval_id) {
+          pollApproval();
+        }
+      });
+      if (state.sending) {
+        pollTaskRuntime();
+      }
     }
   }
 });

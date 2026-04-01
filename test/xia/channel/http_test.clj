@@ -14,6 +14,7 @@
             [xia.local-doc :as local-doc]
             [xia.local-ocr :as local-ocr]
             [xia.paths :as paths]
+            [xia.prompt :as prompt]
             [xia.remote-bridge :as remote-bridge]
             [xia.runtime-state :as runtime-state]
             [xia.runtime :as runtime]
@@ -310,6 +311,37 @@
         (is (= 200 (:status response)))
         (is (= (str sid) (get body "session_id")))
         (is (= sid @seen-session))))))
+
+(deftest chat-route-includes-current-task-body
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :waiting_input
+                                  :title "Capture OTP"
+                                  :meta {:runtime {:state :waiting_input
+                                                   :phase :waiting_input
+                                                   :message "Waiting for input: OTP Code"}}})
+        turn-id (db/start-task-turn! task-id
+                                     {:operation :start
+                                      :state :waiting_input
+                                      :input "Capture OTP"
+                                      :summary "Waiting for OTP"})]
+    (with-redefs [xia.agent/process-message (fn [session-id _user-message & _]
+                                              (is (= sid session-id))
+                                              "ok")]
+      (let [response (#'http/router {:uri            "/chat"
+                                     :request-method :post
+                                     :headers        (ui-headers)
+                                     :body           (request-body {"message" "hello"
+                                                                    "session_id" (str sid)})})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= (str task-id) (get body "task_id")))
+        (is (= (str turn-id) (get body "current_turn_id")))
+        (is (= "waiting_input" (get-in body ["task" "state"])))
+        (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
+        (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))))))
 
 (deftest chat-route-resumes-closed-http-session
   (let [sid (db/create-session! :http)]
@@ -1021,6 +1053,181 @@
       (is (= "Child task completed: Investigate the invoice attachments. Found the attachment mismatch"
              (get-in task ["autonomy_state" "stack" 0 "summary"]))))))
 
+(deftest task-events-route-returns-normalized-runtime-events
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :running
+                                  :title "Review the invoice"})
+        turn-id  (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :running
+                                       :input "review the invoice"
+                                       :summary "Started invoice review"})]
+    (db/add-task-item! turn-id
+                       {:type :user-message
+                        :role :user
+                        :summary "review the invoice"
+                        :data {:text "review the invoice"}})
+    (db/add-task-item! turn-id
+                       {:type :status
+                        :status :running
+                        :summary "Planning the next step"
+                        :data {:phase "planning"}})
+    (db/add-task-item! turn-id
+                       {:type :tool-call
+                        :status :requested
+                        :summary "Use workspace-read"
+                        :tool-id "workspace-read"
+                        :tool-call-id "call-1"
+                        :data {:arguments "{\"path\":\"invoice.md\"}"}})
+    (db/add-task-item! turn-id
+                       {:type :tool-result
+                        :status :success
+                        :summary "Read invoice.md"
+                        :tool-id "workspace-read"
+                        :tool-call-id "call-1"
+                        :data {:summary "Read invoice.md"}})
+    (db/add-task-item! turn-id
+                       {:type :assistant-message
+                        :role :assistant
+                        :summary "Reviewed the invoice."})
+    (db/update-task-turn! turn-id
+                          {:state :completed
+                           :summary "Finished invoice review"})
+    (db/update-task! task-id
+                     {:state :completed
+                      :summary "Reviewed the invoice."
+                      :finished-at (java.util.Date.)})
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/events")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          events   (get body "events")
+          types    (mapv #(get % "type") events)
+          tool-event (some #(when (= "tool.requested" (get % "type")) %) events)]
+      (is (= 200 (:status response)))
+      (is (= (str task-id) (get body "task_id")))
+      (is (= ["task.started"
+              "turn.started"
+              "message.user"
+              "task.status"
+              "tool.requested"
+              "tool.completed"
+              "message.assistant"
+              "turn.completed"
+              "task.completed"]
+             types))
+      (is (= "workspace-read" (get tool-event "tool_id")))
+      (is (= "call-1" (get tool-event "tool_call_id")))
+      (is (= {"arguments" "{\"path\":\"invoice.md\"}"}
+             (get tool-event "data"))))))
+
+(deftest live-task-events-route-returns-buffered-runtime-events
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :running
+                                  :title "Review the invoice"})]
+    (reset! @#'xia.channel.http/task-runtime-events {})
+    (#'http/http-runtime-event-handler {:type :task.status
+                                        :task-id task-id
+                                        :created-at (java.util.Date. 1000)
+                                        :summary "Planning the next step"
+                                        :data {:phase "planning"
+                                               :state "running"}})
+    (#'http/http-runtime-event-handler {:type :message.assistant
+                                        :task-id task-id
+                                        :created-at (java.util.Date. 2000)
+                                        :summary "Reviewed the invoice."
+                                        :data {:text "Reviewed the invoice."}})
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/live-events")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          events   (get body "events")]
+      (is (= 200 (:status response)))
+      (is (= (str task-id) (get body "task_id")))
+      (is (= 2 (get body "next_stream_index")))
+      (is (= ["task.status" "message.assistant"]
+             (mapv #(get % "type") events)))
+      (is (= [1 2]
+             (mapv #(get % "stream_index") events))))
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/live-events")
+                                   :query-string   "after=1"
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          events   (get body "events")]
+      (is (= 200 (:status response)))
+      (is (= 1 (count events)))
+      (is (= "message.assistant" (get-in events [0 "type"]))))
+    (reset! @#'xia.channel.http/task-runtime-events {})))
+
+(deftest task-event-stream-route-replays-and-subscribes
+  (let [sid       (db/create-session! :http)
+        task-id   (db/create-task! {:session-id sid
+                                    :channel :http
+                                    :type :interactive
+                                    :state :running
+                                    :title "Review the invoice"})
+        handlers  (atom nil)
+        sends     (atom [])
+        ch        (Object.)
+        data-json (fn [payload]
+                    (some->> payload
+                             (re-find #"data: (.+)")
+                             second
+                             json/read-json))]
+    (reset! @#'xia.channel.http/task-runtime-events {})
+    (reset! @#'xia.channel.http/task-runtime-stream-subscribers {})
+    (#'http/http-runtime-event-handler {:type :task.status
+                                        :task-id task-id
+                                        :created-at (java.util.Date. 1000)
+                                        :summary "Planning the next step"
+                                        :data {:phase "planning"
+                                               :state "running"}})
+    (with-redefs [org.httpkit.server/as-channel (fn [_req stream-handlers]
+                                                  (reset! handlers stream-handlers)
+                                                  ::task-stream)
+                  org.httpkit.server/send! (fn [_ch payload & [close-after-send?]]
+                                             (swap! sends conj [payload close-after-send?])
+                                             true)]
+      (is (= ::task-stream
+             (#'http/router {:uri            (str "/tasks/" task-id "/stream")
+                             :request-method :get
+                             :headers        (ui-headers)})))
+      ((:on-open @handlers) ch)
+      (let [[[open-response close?]
+             [buffered-event _]
+             [connected-comment _]] @sends]
+        (is (= false close?))
+        (is (= 200 (:status open-response)))
+        (is (= "text/event-stream; charset=utf-8"
+               (get-in open-response [:headers "content-type"])))
+        (is (= "task.status" (get (data-json buffered-event) "type")))
+        (is (= ": connected\n\n" connected-comment)))
+      (#'http/http-runtime-event-handler {:type :message.assistant
+                                          :task-id task-id
+                                          :created-at (java.util.Date. 2000)
+                                          :summary "Reviewed the invoice."
+                                          :data {:text "Reviewed the invoice."}})
+      (is (= "message.assistant"
+             (get (data-json (first (last @sends))) "type")))
+      ((:on-close @handlers) ch 1000)
+      (let [send-count (count @sends)]
+        (#'http/http-runtime-event-handler {:type :task.status
+                                            :task-id task-id
+                                            :created-at (java.util.Date. 3000)
+                                            :summary "Done"
+                                            :data {:phase "finalizing"
+                                                   :state "running"}})
+        (is (= send-count (count @sends)))))
+    (reset! @#'xia.channel.http/task-runtime-events {})
+    (reset! @#'xia.channel.http/task-runtime-stream-subscribers {})))
+
 (deftest pause-task-route-updates-task
   (let [sid     (db/create-session! :http)
         task-id (db/create-task! {:session-id sid
@@ -1327,6 +1534,74 @@
           body     (response-json response)]
       (is (= 200 (:status response)))
       (is (nil? (get body "status"))))))
+
+(deftest session-status-route-prefers-task-runtime-status-over-session-atom
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :running
+                                  :title "Review the invoice"
+                                  :meta {:runtime {:state :running
+                                                   :phase :planning
+                                                   :message "Stale planning status"}}})
+        turn-id  (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :running
+                                       :input "review the invoice"
+                                       :summary "Started invoice review"})]
+    (#'http/http-runtime-event-handler {:type :task.status
+                                        :task-id task-id
+                                        :turn-id turn-id
+                                        :created-at (java.util.Date.)
+                                        :received-at (java.util.Date.)
+                                        :summary "Calling the invoice lookup tool"
+                                        :data {:state "running"
+                                               :phase "tool"
+                                               :message "Calling the invoice lookup tool"
+                                               :tool_name "workspace-read"
+                                               :iteration 2}})
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/status")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= (str sid) (get body "session_id")))
+      (is (= (str task-id) (get body "task_id")))
+      (is (= (str turn-id) (get body "current_turn_id")))
+      (is (= "running" (get-in body ["status" "state"])))
+      (is (= "tool" (get-in body ["status" "phase"])))
+      (is (= "Calling the invoice lookup tool" (get-in body ["status" "message"])))
+      (is (= "workspace-read" (get-in body ["status" "tool_name"])))
+      (is (= 2 (get-in body ["status" "iteration"])))))) 
+
+(deftest session-task-route-returns-current-live-task
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :waiting_input
+                                  :title "Capture OTP"
+                                  :meta {:runtime {:state :waiting_input
+                                                   :phase :waiting_input
+                                                   :message "Waiting for input: OTP Code"}}})
+        turn-id  (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :waiting_input
+                                       :input "Capture OTP"
+                                       :summary "Waiting for OTP"})]
+    (let [response (#'http/router {:uri            (str "/sessions/" sid "/task")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= (str sid) (get body "session_id")))
+      (is (= (str task-id) (get body "task_id")))
+      (is (= true (get body "task_live")))
+      (is (= (str turn-id) (get body "current_turn_id")))
+      (is (= "waiting_input" (get-in body ["task" "state"])))
+      (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
+      (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))))) 
 
 (deftest session-status-route-clears-terminal-error-status
   (let [sid (str (db/create-session! :http))]
@@ -1800,6 +2075,100 @@
         (is (= 200 (:status submit)))
         (is (= "recorded" (get submit-body "status")))))
     (is (= true (deref waiter 2000 ::timeout)))))
+
+(deftest task-approval-route-allows-round-trip
+  (let [session-id (db/create-session! :http)
+        sid        (str session-id)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :http
+                                     :type :interactive
+                                     :state :running
+                                     :title "Browser login"})
+        waiter     (future
+                     (#'http/http-approval-handler
+                       {:session-id   sid
+                        :tool-id      :browser-login
+                        :tool-name    "browser-login"
+                        :description  "Log into a site"
+                        :arguments    {"site" "jira"}
+                        :reason       "uses stored site credentials"
+                        :policy       :session}))]
+    (let [pending-body (wait-for
+                         #(let [response (#'http/router {:uri            (str "/tasks/" task-id "/approval")
+                                                         :request-method :get
+                                                         :headers        (ui-headers)})
+                                body     (response-json response)]
+                            (when (get body "pending")
+                              body)))]
+      (is (some? pending-body))
+      (is (= "browser-login" (get-in pending-body ["approval" "tool_name"])))
+      (let [approval-id (get-in pending-body ["approval" "approval_id"])
+            submit      (#'http/router {:uri            (str "/tasks/" task-id "/approval")
+                                        :request-method :post
+                                        :headers        (ui-headers)
+                                        :body           (request-body {"approval_id" approval-id
+                                                                       "decision" "allow"})})
+            submit-body (response-json submit)]
+        (is (= 200 (:status submit)))
+        (is (= "recorded" (get submit-body "status")))))
+    (is (= true (deref waiter 2000 ::timeout)))))
+
+(deftest prompt-route-allows-round-trip
+  (let [sid    (str (db/create-session! :http))
+        waiter (future
+                 (binding [prompt/*interaction-context* {:session-id sid}]
+                   (#'http/http-prompt-handler "OTP Code" :mask? true)))]
+    (let [pending-body (wait-for
+                         #(let [response (#'http/router {:uri            (str "/sessions/" sid "/prompt")
+                                                         :request-method :get
+                                                         :headers        (ui-headers)})
+                                body     (response-json response)]
+                            (when (get body "pending")
+                              body)))]
+      (is (some? pending-body))
+      (is (= "OTP Code" (get-in pending-body ["prompt" "label"])))
+      (is (= true (get-in pending-body ["prompt" "masked"])))
+      (let [prompt-id (get-in pending-body ["prompt" "prompt_id"])
+            submit    (#'http/router {:uri            (str "/sessions/" sid "/prompt")
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"prompt_id" prompt-id
+                                                                     "value" "123456"})})
+            submit-body (response-json submit)]
+        (is (= 200 (:status submit)))
+        (is (= "recorded" (get submit-body "status")))))
+    (is (= "123456" (deref waiter 2000 ::timeout)))))
+
+(deftest task-prompt-route-allows-round-trip
+  (let [session-id (db/create-session! :http)
+        sid        (str session-id)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :http
+                                     :type :interactive
+                                     :state :running
+                                     :title "Capture OTP"})
+        waiter     (future
+                     (binding [prompt/*interaction-context* {:session-id sid}]
+                       (#'http/http-prompt-handler "OTP Code" :mask? true)))]
+    (let [pending-body (wait-for
+                         #(let [response (#'http/router {:uri            (str "/tasks/" task-id "/prompt")
+                                                         :request-method :get
+                                                         :headers        (ui-headers)})
+                                body     (response-json response)]
+                            (when (get body "pending")
+                              body)))]
+      (is (some? pending-body))
+      (is (= "OTP Code" (get-in pending-body ["prompt" "label"])))
+      (let [prompt-id (get-in pending-body ["prompt" "prompt_id"])
+            submit    (#'http/router {:uri            (str "/tasks/" task-id "/prompt")
+                                      :request-method :post
+                                      :headers        (ui-headers)
+                                      :body           (request-body {"prompt_id" prompt-id
+                                                                     "value" "654321"})})
+            submit-body (response-json submit)]
+        (is (= 200 (:status submit)))
+        (is (= "recorded" (get submit-body "status")))))
+    (is (= "654321" (deref waiter 2000 ::timeout)))))
 
 (deftest approval-route-resumes-closed-http-session
   (let [sid (db/create-session! :http)]

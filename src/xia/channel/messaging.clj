@@ -501,6 +501,21 @@
                   {:session-id session-id
                    :channel channel})))))
 
+(defn- messaging-runtime-event
+  [{:keys [session-id channel type data summary]}]
+  (when (contains? #{:slack :telegram :imessage} channel)
+    (when (= :message.assistant type)
+      (let [text (or (nonblank-str (:text data))
+                     (nonblank-str summary))]
+        (when text
+          (try
+            (send-session-message! channel session-id text)
+            (catch Exception e
+              (log/warn e "Failed to deliver messaging runtime event"
+                        {:session-id session-id
+                         :channel channel
+                         :type type}))))))))
+
 (defn- handle-pending-interaction-reply!
   [session-id channel user-message]
   (when-let [interaction (current-pending-interaction session-id)]
@@ -535,11 +550,10 @@
         (do
           (persist-external-user-message! session-id channel user-message external-message-id)
           (try
-            (let [response (agent/process-message session-id
-                                                  user-message
-                                                  :channel channel
-                                                  :persist-message? false)]
-              (send-session-message! channel session-id response))
+            (agent/process-message session-id
+                                   user-message
+                                   :channel channel
+                                   :persist-message? false)
             (catch Exception e
               (log/error e "Messaging channel processing failed"
                          {:channel channel
@@ -742,9 +756,9 @@
   (prompt/register-approval! :slack messaging-approval)
   (prompt/register-approval! :telegram messaging-approval)
   (prompt/register-approval! :imessage messaging-approval)
-  (prompt/register-assistant-message! :slack messaging-assistant-message)
-  (prompt/register-assistant-message! :telegram messaging-assistant-message)
-  (prompt/register-assistant-message! :imessage messaging-assistant-message)
+  (prompt/register-runtime-event! :slack messaging-runtime-event)
+  (prompt/register-runtime-event! :telegram messaging-runtime-event)
+  (prompt/register-runtime-event! :imessage messaging-runtime-event)
   (start-imessage-poller!))
 
 (defn stop!
@@ -756,7 +770,7 @@
   (prompt/register-approval! :slack nil)
   (prompt/register-approval! :telegram nil)
   (prompt/register-approval! :imessage nil)
-  (prompt/register-assistant-message! :slack nil)
-  (prompt/register-assistant-message! :telegram nil)
-  (prompt/register-assistant-message! :imessage nil)
+  (prompt/register-runtime-event! :slack nil)
+  (prompt/register-runtime-event! :telegram nil)
+  (prompt/register-runtime-event! :imessage nil)
   (reset! pending-interactions {}))

@@ -5,6 +5,8 @@
             [xia.autonomous :as autonomous]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.prompt :as prompt]
+            [xia.task-event :as task-event]
             [xia.working-memory :as wm]))
 
 (defn- truncate-summary*
@@ -42,6 +44,43 @@
                                (clean-runtime-status
                                 (assoc status :updated-at (java.util.Date.))))))))
 
+(defn- emit-runtime-event!
+  [event]
+  (when event
+    (prompt/runtime-event! event)))
+
+(defn- emit-task-started-event!
+  [task-id]
+  (some-> task-id db/get-task task-event/task-started-event emit-runtime-event!))
+
+(defn- emit-task-updated-event!
+  [task-id]
+  (when-let [task (some-> task-id db/get-task)]
+    (emit-runtime-event! (task-event/task-updated-event task))
+    (some-> (task-event/task-state-event task)
+            emit-runtime-event!)))
+
+(defn- emit-turn-open-event!
+  [task-turn-id]
+  (when-let [turn (some-> task-turn-id db/get-task-turn)]
+    (when-let [task (db/get-task (:task-id turn))]
+      (some-> (task-event/turn-open-event task turn)
+              emit-runtime-event!))))
+
+(defn- emit-turn-close-event!
+  [task-turn-id]
+  (when-let [turn (some-> task-turn-id db/get-task-turn)]
+    (when-let [task (db/get-task (:task-id turn))]
+      (some-> (task-event/turn-close-event task turn)
+              emit-runtime-event!))))
+
+(defn- emit-item-event!
+  [task-turn-id item-id]
+  (when-let [turn (some-> task-turn-id db/get-task-turn)]
+    (when-let [task (db/get-task (:task-id turn))]
+      (when-let [item (db/get-task-item item-id)]
+        (emit-runtime-event! (task-event/item-event task turn item))))))
+
 (defn- task-title
   [deps user-message]
   (or (some-> user-message str str/trim not-empty (#(truncate-summary* deps % 240)))
@@ -70,6 +109,7 @@
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
   (let [operation        (resolve-task-operation task-id runtime-op)
         title            (task-title deps user-message)
+        new-task?        (nil? task-id)
         resolved-task-id (or task-id
                              (db/create-task! {:session-id session-id
                                                :channel channel
@@ -84,19 +124,27 @@
                        {:state :running
                         :summary title
                         :autonomy-state autonomy-state}))
-    {:task-id resolved-task-id
-     :task-turn-id (db/start-task-turn! resolved-task-id
-                                        {:operation operation
-                                         :state :running
-                                         :input user-message
-                                         :summary title
-                                         :interrupting-turn-id interrupting-turn-id})
-     :task-operation operation}))
+    (let [task-turn-id (db/start-task-turn! resolved-task-id
+                                            {:operation operation
+                                             :state :running
+                                             :input user-message
+                                             :summary title
+                                             :interrupting-turn-id interrupting-turn-id})]
+      (when new-task?
+        (emit-task-started-event! resolved-task-id))
+      (when-not new-task?
+        (emit-task-updated-event! resolved-task-id))
+      (emit-turn-open-event! task-turn-id)
+      {:task-id resolved-task-id
+       :task-turn-id task-turn-id
+       :task-operation operation})))
 
 (defn record-task-item!
   [task-turn-id attrs]
   (when task-turn-id
-    (db/add-task-item! task-turn-id attrs)))
+    (let [item-id (db/add-task-item! task-turn-id attrs)]
+      (emit-item-event! task-turn-id item-id)
+      item-id)))
 
 (defn record-task-message-item!
   [deps task-turn-id item-type role text & {:keys [message-id llm-call-id data status]}]
@@ -166,12 +214,15 @@
 (defn sync-runtime-task!
   [task-id attrs]
   (when task-id
-    (db/update-task! task-id attrs)))
+    (db/update-task! task-id attrs)
+    (emit-task-updated-event! task-id)))
 
 (defn sync-runtime-task-turn!
   [task-turn-id attrs]
   (when task-turn-id
-    (db/update-task-turn! task-turn-id attrs)))
+    (db/update-task-turn! task-turn-id attrs)
+    (when (contains? #{:completed :failed :cancelled} (:state attrs))
+      (emit-turn-close-event! task-turn-id))))
 
 (defn- live-task-run
   [deps task-id]
@@ -201,13 +252,14 @@
                                      {:operation operation
                                       :state :completed
                                       :summary summary})]
-    (db/add-task-item! turn-id
+    (record-task-item! turn-id
                        {:type :system-note
                         :status :success
                         :summary summary
                         :data {:operation (name operation)}})
     (db/update-task-turn! turn-id {:state :completed
                                    :summary summary})
+    (emit-turn-close-event! turn-id)
     turn-id))
 
 (defn- attach-child-task-to-parent!

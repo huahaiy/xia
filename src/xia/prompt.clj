@@ -15,6 +15,7 @@
 (defonce ^:private approval-handlers (atom {}))
 (defonce ^:private status-handlers (atom {}))
 (defonce ^:private assistant-message-handlers (atom {}))
+(defonce ^:private runtime-event-handlers (atom {}))
 
 (def ^:dynamic *interaction-context*
   "Dynamic execution context for tool interactions, e.g. {:channel :terminal :session-id ...}."
@@ -175,3 +176,23 @@
   "True if an assistant message handler is registered."
   []
   (some? (resolve-handler assistant-message-handlers)))
+
+(defn register-runtime-event!
+  "Register a runtime event callback for a channel.
+   The handler signature is: (fn [event-map] => any)."
+  ([f]
+   (register-runtime-event! :default f))
+  ([channel f]
+   (register-handler! runtime-event-handlers channel f)))
+
+(defn runtime-event!
+  "Report a typed runtime event for the current interaction context.
+   Returns nil if no runtime event handler is registered for the current channel."
+  [event]
+  (when-let [f (resolve-handler runtime-event-handlers)]
+    (f (merge {:channel (current-channel)} *interaction-context* event))))
+
+(defn runtime-event-available?
+  "True if a runtime event handler is registered."
+  []
+  (some? (resolve-handler runtime-event-handlers)))

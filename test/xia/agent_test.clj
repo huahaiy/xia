@@ -104,6 +104,36 @@
       (is (= :user (:role (first (filter #(= :user-message (:type %)) items)))))
       (is (= :assistant (:role (first (filter #(= :assistant-message (:type %)) items))))))))
 
+(deftest process-message-emits-live-runtime-events
+  (let [session-id (db/create-session! :terminal)
+        events     (atom [])]
+    (wm/ensure-wm! session-id)
+    (prompt/register-runtime-event! :terminal
+                                    (fn [event]
+                                      (swap! events conj event)))
+    (try
+      (with-redefs [xia.tool/tool-definitions          (constantly [])
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         {"content" "All set."})]
+        (is (= "All set."
+               (agent/process-message session-id "hello" :channel :terminal))))
+      (let [types (mapv :type @events)
+            assistant-event (some #(when (= :message.assistant (:type %)) %) @events)
+            status-event    (some #(when (= :task.status (:type %)) %) @events)]
+        (is (some #{:task.started} types))
+        (is (some #{:turn.started} types))
+        (is (some #{:message.user} types))
+        (is (some #{:task.status} types))
+        (is (some #{:message.assistant} types))
+        (is (some #{:turn.completed} types))
+        (is (some #{:task.completed} types))
+        (is (= "All set." (:summary assistant-event)))
+        (is (= "running" (get-in status-event [:data :state]))))
+      (finally
+        (prompt/register-runtime-event! :terminal nil)))))
+
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])

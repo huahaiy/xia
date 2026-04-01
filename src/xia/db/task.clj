@@ -308,6 +308,28 @@
                     :finished-at          (:task.turn/finished-at entity-map)}))))
     []))
 
+(defn get-task-turn
+  [deps turn-id]
+  (when-let [eid (turn-eid deps turn-id)]
+    (let [task-id    (turn-task-id deps eid)
+          entity-map (decrypt-entity* deps (raw-entity* deps eid))]
+      {:id                   (:task.turn/id entity-map)
+       :task-id              task-id
+       :index                (:task.turn/index entity-map)
+       :operation            (:task.turn/operation entity-map)
+       :state                (:task.turn/state entity-map)
+       :input                (empty->nil (:task.turn/input entity-map))
+       :summary              (empty->nil (:task.turn/summary entity-map))
+       :error                (empty->nil (:task.turn/error entity-map))
+       :meta                 (:task.turn/meta entity-map)
+       :interrupting-turn-id (:task.turn/interrupting-turn-id entity-map)
+       :created-at           (or (:task.turn/created-at entity-map)
+                                 (entity-created-at* deps entity-map))
+       :updated-at           (or (:task.turn/updated-at entity-map)
+                                 (entity-updated-at* deps entity-map))
+       :started-at           (:task.turn/started-at entity-map)
+       :finished-at          (:task.turn/finished-at entity-map)})))
+
 (defn add-task-item!
   [deps turn-id {:keys [id type status role summary data message-id llm-call-id
                         tool-id tool-call-id]}]
@@ -368,3 +390,27 @@
                     :created-at   (or (:task.item/created-at entity-map)
                                       (entity-created-at* deps entity-map))}))))
     []))
+
+(defn get-task-item
+  [deps item-id]
+  (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?iid
+                                    :where [?e :task.item/id ?iid]]
+                             item-id))]
+    (let [entity-map (decrypt-entity* deps (raw-entity* deps eid))
+          turn-eid*  (:task.item/turn entity-map)
+          turn-id    (when turn-eid*
+                       (:task.turn/id (raw-entity* deps turn-eid*)))]
+      {:id           (:task.item/id entity-map)
+       :turn-id      turn-id
+       :index        (:task.item/index entity-map)
+       :type         (:task.item/type entity-map)
+       :status       (:task.item/status entity-map)
+       :role         (:task.item/role entity-map)
+       :summary      (empty->nil (:task.item/summary entity-map))
+       :data         (:task.item/data entity-map)
+       :message-id   (:task.item/message-id entity-map)
+       :llm-call-id  (:task.item/llm-call-id entity-map)
+       :tool-id      (empty->nil (:task.item/tool-id entity-map))
+       :tool-call-id (empty->nil (:task.item/tool-call-id entity-map))
+       :created-at   (or (:task.item/created-at entity-map)
+                         (entity-created-at* deps entity-map))})))
