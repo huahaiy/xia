@@ -34,7 +34,6 @@
   (str (System/getProperty "user.home") "/Library/Messages/chat.db"))
 
 (defonce ^:private recent-external-message-ids (atom {}))
-(defonce ^:private pending-interactions (atom {}))
 (defonce ^:private imessage-poller-executor (atom nil))
 (defonce ^:private imessage-last-rowid (atom 0))
 
@@ -44,9 +43,18 @@
   [value]
   (some-> value str str/trim not-empty))
 
+(defn- get-config-safe
+  [config-key]
+  (try
+    (db/get-config config-key)
+    (catch clojure.lang.ExceptionInfo e
+      (if (str/includes? (or (ex-message e) "") "Database not connected")
+        nil
+        (throw e)))))
+
 (defn- boolean-config
   [config-key default]
-  (let [value (db/get-config config-key)]
+  (let [value (get-config-safe config-key)]
     (cond
       (nil? value) default
       (boolean? value) value
@@ -55,7 +63,7 @@
 
 (defn- positive-long-config
   [config-key default]
-  (let [value (db/get-config config-key)]
+  (let [value (get-config-safe config-key)]
     (try
       (let [parsed (some-> value str Long/parseLong)]
         (if (and parsed (pos? parsed))
@@ -83,19 +91,19 @@
 
 (defn- slack-bot-token
   []
-  (nonblank-str (db/get-config slack-bot-token-config-key)))
+  (nonblank-str (get-config-safe slack-bot-token-config-key)))
 
 (defn- slack-signing-secret
   []
-  (nonblank-str (db/get-config slack-signing-secret-config-key)))
+  (nonblank-str (get-config-safe slack-signing-secret-config-key)))
 
 (defn- telegram-bot-token
   []
-  (nonblank-str (db/get-config telegram-bot-token-config-key)))
+  (nonblank-str (get-config-safe telegram-bot-token-config-key)))
 
 (defn- telegram-webhook-secret
   []
-  (nonblank-str (db/get-config telegram-webhook-secret-config-key)))
+  (nonblank-str (get-config-safe telegram-webhook-secret-config-key)))
 
 (defn- mac-os?
   []
@@ -183,32 +191,6 @@
   []
   default-interaction-timeout-ms)
 
-(defn- clear-pending-interaction!
-  [session-id interaction-id]
-  (swap! pending-interactions
-         (fn [pending]
-           (let [current (get pending session-id)]
-             (if (= interaction-id (:interaction-id current))
-               (dissoc pending session-id)
-               pending)))))
-
-(defn- current-pending-interaction
-  [session-id]
-  (get @pending-interactions session-id))
-
-(defn- interaction-cancelled?
-  [text]
-  (contains? #{"cancel" "/cancel" "stop" "abort" "nevermind" "never mind"}
-             (some-> text str/trim str/lower-case)))
-
-(defn- parse-approval-decision
-  [text]
-  (let [value (some-> text str/trim str/lower-case)]
-    (cond
-      (contains? #{"yes" "y" "allow" "approve" "approved" "ok"} value) :allow
-      (contains? #{"no" "n" "deny" "reject" "denied"} value) :deny
-      :else nil)))
-
 (defn- prompt-request-text
   [{:keys [label mask?]}]
   (str "Need input: " (or (nonblank-str label) "required value") "\n"
@@ -266,14 +248,9 @@
           :else
           result)))))
 
-(defn- register-interaction!
-  [session-id interaction]
-  (swap! pending-interactions assoc session-id interaction)
-  interaction)
-
 (defn- messaging-prompt
   [label & {:keys [mask?] :or {mask? false}}]
-  (let [{:keys [channel session-id]} prompt/*interaction-context*]
+  (let [{:keys [channel session-id task-id]} prompt/*interaction-context*]
     (when-not (and session-id (messaging-channel? channel))
       (throw (ex-info "Messaging prompt requires a messaging session"
                       {:channel channel
@@ -281,20 +258,23 @@
                        :label label})))
     (let [interaction {:interaction-id (str (random-uuid))
                        :kind :prompt
+                       :channel channel
+                       :session-id session-id
+                       :task-id task-id
                        :label label
                        :mask? (boolean mask?)
                        :created-at (Date.)
                        :response (promise)}]
-      (register-interaction! session-id interaction)
+      (prompt/register-interaction! interaction)
       (try
         (send-session-message! channel session-id (prompt-request-text interaction))
         (str (await-interaction-result session-id channel interaction))
         (finally
-          (clear-pending-interaction! session-id (:interaction-id interaction)))))))
+          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
 
 (defn- messaging-approval
   [{:keys [tool-id tool-name description arguments reason]}]
-  (let [{:keys [channel session-id]} prompt/*interaction-context*]
+  (let [{:keys [channel session-id task-id]} prompt/*interaction-context*]
     (when-not (and session-id (messaging-channel? channel))
       (throw (ex-info "Messaging approval requires a messaging session"
                       {:channel channel
@@ -302,6 +282,9 @@
                        :tool-id tool-id})))
     (let [interaction {:interaction-id (str (random-uuid))
                        :kind :approval
+                       :channel channel
+                       :session-id session-id
+                       :task-id task-id
                        :tool-id tool-id
                        :tool-name tool-name
                        :description description
@@ -309,12 +292,12 @@
                        :reason reason
                        :created-at (Date.)
                        :response (promise)}]
-      (register-interaction! session-id interaction)
+      (prompt/register-interaction! interaction)
       (try
         (send-session-message! channel session-id (approval-request-text interaction))
         (= :allow (await-interaction-result session-id channel interaction))
         (finally
-          (clear-pending-interaction! session-id (:interaction-id interaction)))))))
+          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
 
 (defn valid-slack-signature?
   [body-bytes timestamp signature]
@@ -518,24 +501,37 @@
 
 (defn- handle-pending-interaction-reply!
   [session-id channel user-message]
-  (when-let [interaction (current-pending-interaction session-id)]
-    (let [text (some-> user-message str str/trim)
-          result (cond
-                   (interaction-cancelled? text) :cancel
-                   (= :approval (:kind interaction)) (parse-approval-decision text)
-                   (seq text) text
-                   :else nil)]
-      (if result
-        (do
-          (deliver (:response interaction) result)
-          true)
-        (do
-          (send-session-message! channel
-                                 session-id
-                                 (case (:kind interaction)
-                                   :approval "Still waiting for approval. Reply YES, NO, or CANCEL."
-                                   "Still waiting for input. Reply with the requested value or CANCEL."))
-          true)))))
+  (let [{:keys [status interaction]}
+        (prompt/submit-freeform-interaction-reply! {:session-id session-id
+                                                    :channel channel}
+                                                   user-message)]
+    (case status
+      :missing nil
+      :delivered true
+      :invalid (do
+                 (send-session-message! channel
+                                        session-id
+                                        (prompt/interaction-retry-text interaction))
+                 true)
+      nil)))
+
+(defn- handle-control-intent!
+  [session-id channel user-message]
+  (when-let [intent (prompt/parse-control-intent user-message)]
+    (let [task   (db/current-session-task session-id)
+          result (prompt/apply-task-control-intent!
+                  {:pause-task! agent/pause-task!
+                   :resume-task! agent/resume-task!
+                   :stop-task! agent/stop-task!
+                   :interrupt-task! agent/interrupt-task!
+                   :steer-task! agent/steer-task!
+                   :fork-task! agent/fork-task!}
+                  (some-> task :id)
+                  intent)]
+      (send-session-message! channel
+                             session-id
+                             (prompt/control-result-text intent result))
+      true)))
 
 (defn- handle-external-message!
   [{:keys [channel external-key external-meta external-message-id user-message label]}]
@@ -547,26 +543,28 @@
                                                :label label)]
       (if (handle-pending-interaction-reply! session-id channel user-message)
         true
-        (do
-          (persist-external-user-message! session-id channel user-message external-message-id)
-          (try
-            (agent/process-message session-id
-                                   user-message
-                                   :channel channel
-                                   :persist-message? false)
-            (catch Exception e
-              (log/error e "Messaging channel processing failed"
-                         {:channel channel
-                          :session-id session-id
-                          :external-key external-key})
+        (if (handle-control-intent! session-id channel user-message)
+        true
+            (do
+              (persist-external-user-message! session-id channel user-message external-message-id)
               (try
-                (send-session-message! channel session-id
-                                       (str "I hit an error while processing that message: "
-                                            (or (.getMessage e) "unknown error")))
-                (catch Exception send-error
-                  (log/warn send-error "Failed to deliver messaging error reply"
-                            {:channel channel
-                             :session-id session-id}))))))))))
+                (agent/process-message session-id
+                                       user-message
+                                       :channel channel
+                                       :persist-message? false)
+                (catch Exception e
+                  (log/error e "Messaging channel processing failed"
+                             {:channel channel
+                              :session-id session-id
+                              :external-key external-key})
+                  (try
+                    (send-session-message! channel session-id
+                                           (str "I hit an error while processing that message: "
+                                                (or (.getMessage e) "unknown error")))
+                    (catch Exception send-error
+                      (log/warn send-error "Failed to deliver messaging error reply"
+                                {:channel channel
+                                 :session-id session-id})))))))))))
 
 (defn handle-slack-event!
   [body]
@@ -750,27 +748,16 @@
 
 (defn start!
   []
-  (prompt/register-prompt! :slack messaging-prompt)
-  (prompt/register-prompt! :telegram messaging-prompt)
-  (prompt/register-prompt! :imessage messaging-prompt)
-  (prompt/register-approval! :slack messaging-approval)
-  (prompt/register-approval! :telegram messaging-approval)
-  (prompt/register-approval! :imessage messaging-approval)
-  (prompt/register-runtime-event! :slack messaging-runtime-event)
-  (prompt/register-runtime-event! :telegram messaging-runtime-event)
-  (prompt/register-runtime-event! :imessage messaging-runtime-event)
+  (doseq [channel [:slack :telegram :imessage]]
+    (prompt/register-channel-adapter! channel
+                                      {:prompt messaging-prompt
+                                       :approval messaging-approval
+                                       :runtime-event messaging-runtime-event}))
   (start-imessage-poller!))
 
 (defn stop!
   []
   (stop-imessage-poller!)
-  (prompt/register-prompt! :slack nil)
-  (prompt/register-prompt! :telegram nil)
-  (prompt/register-prompt! :imessage nil)
-  (prompt/register-approval! :slack nil)
-  (prompt/register-approval! :telegram nil)
-  (prompt/register-approval! :imessage nil)
-  (prompt/register-runtime-event! :slack nil)
-  (prompt/register-runtime-event! :telegram nil)
-  (prompt/register-runtime-event! :imessage nil)
-  (reset! pending-interactions {}))
+  (doseq [channel [:slack :telegram :imessage]]
+    (prompt/clear-channel-adapter! channel))
+  nil)

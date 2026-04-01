@@ -258,3 +258,50 @@
                  @delivered)))
         (finally
           (messaging/stop!))))))
+
+(deftest messaging-control-intent-interrupts-the-current-task
+  (let [session-id     (db/create-session! :telegram {:external-key "telegram:1001:main"
+                                                      :external-meta {:chat-id 1001}})
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :telegram
+                                         :type :interactive
+                                         :state :running
+                                         :title "Investigate outage"})
+        delivered      (atom [])
+        process-calls  (atom 0)
+        interrupt-calls (atom [])]
+    (with-redefs [xia.channel.messaging/telegram-enabled? (constantly true)
+                  xia.async/submit-background! (fn [_description f]
+                                                 (f))
+                  agent/process-message (fn [& _]
+                                          (swap! process-calls inc)
+                                          "unexpected")
+                  agent/interrupt-task! (fn [id]
+                                          (swap! interrupt-calls conj id)
+                                          {:status :interrupting
+                                           :task-id id
+                                           :session-id session-id})
+                  messaging/send-session-message! (fn [channel sid text]
+                                                    (swap! delivered conj {:channel channel
+                                                                           :session-id sid
+                                                                           :text text})
+                                                    true)]
+      (messaging/start!)
+      (try
+        (messaging/handle-telegram-update!
+         {"update_id" 101
+          "message" {"message_id" 18
+                      "text" "cancel"
+                      "chat" {"id" 1001}
+                      "from" {"id" 55
+                              "is_bot" false
+                              "first_name" "Alex"}}})
+        (is (= 0 @process-calls))
+        (is (= [task-id] @interrupt-calls))
+        (is (= [] (db/session-messages session-id)))
+        (is (= [{:channel :telegram
+                 :session-id session-id
+                 :text "Interrupting the current task."}]
+               @delivered))
+        (finally
+          (messaging/stop!))))))

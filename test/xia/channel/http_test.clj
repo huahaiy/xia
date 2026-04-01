@@ -2113,6 +2113,47 @@
         (is (= "recorded" (get submit-body "status")))))
     (is (= true (deref waiter 2000 ::timeout)))))
 
+(deftest task-approval-route-falls-back-to-session-scoped-approval
+  (let [session-id (db/create-session! :http)
+        sid        (str session-id)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :http
+                                     :type :interactive
+                                     :state :running
+                                     :title "Browser login"})
+        response   (promise)
+        approval   (prompt/register-interaction!
+                    {:kind :approval
+                     :channel :http
+                     :session-id sid
+                     :approval-id "approval-session-fallback"
+                     :tool-id :browser-login
+                     :tool-name "browser-login"
+                     :description "Log into a site"
+                     :arguments {"site" "jira"}
+                     :reason "uses stored site credentials"
+                     :policy :session
+                     :response response})]
+    (try
+      (let [pending   (#'http/router {:uri            (str "/tasks/" task-id "/approval")
+                                      :request-method :get
+                                      :headers        (ui-headers)})
+            pending-body (response-json pending)]
+        (is (= 200 (:status pending)))
+        (is (= true (get pending-body "pending")))
+        (is (= "browser-login" (get-in pending-body ["approval" "tool_name"])))
+        (let [submit      (#'http/router {:uri            (str "/tasks/" task-id "/approval")
+                                          :request-method :post
+                                          :headers        (ui-headers)
+                                          :body           (request-body {"approval_id" "approval-session-fallback"
+                                                                         "decision" "allow"})})
+              submit-body (response-json submit)]
+          (is (= 200 (:status submit)))
+          (is (= "recorded" (get submit-body "status")))
+          (is (= :allow (deref response 0 nil)))))
+      (finally
+        (prompt/clear-pending-interaction! {:interaction-id (:interaction-id approval)})))))
+
 (deftest prompt-route-allows-round-trip
   (let [sid    (str (db/create-session! :http))
         waiter (future

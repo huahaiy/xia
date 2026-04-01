@@ -1782,6 +1782,10 @@
   ([opts]
    (db-task/list-tasks (task-deps) opts)))
 
+(defn current-session-task
+  [session-id]
+  (db-task/current-session-task (task-deps) session-id))
+
 (defn start-task-turn!
   [task-id opts]
   (db-task/start-task-turn! (task-deps) task-id opts))

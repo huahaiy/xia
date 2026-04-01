@@ -219,6 +219,19 @@
          (mapv (fn [[task-id _]]
                  (get-task deps task-id))))))
 
+(defn current-session-task
+  [deps session-id]
+  (first
+   (sort-by (fn [task]
+              [(if (:current-turn-id task) 0 1)
+               (or (:updated-at task) (:created-at task))])
+            (fn [[a-priority a-time] [b-priority b-time]]
+              (let [priority (compare a-priority b-priority)]
+                (if (zero? priority)
+                  (compare b-time a-time)
+                  priority)))
+            (list-tasks deps {:session-id session-id}))))
+
 (defn start-task-turn!
   [deps task-id {:keys [id operation state input summary meta interrupting-turn-id]}]
   (let [task-eid* (or (task-eid deps task-id)

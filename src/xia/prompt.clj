@@ -5,7 +5,8 @@
    Channels register prompt/approval handlers keyed by channel.
    Tool code calls (prompt! ...) or privileged tool execution calls
    (approve! ...) which delegates to the current channel handler."
-  (:require [xia.audit :as audit]))
+  (:require [clojure.string :as str]
+            [xia.audit :as audit]))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt callback registry
@@ -16,10 +17,23 @@
 (defonce ^:private status-handlers (atom {}))
 (defonce ^:private assistant-message-handlers (atom {}))
 (defonce ^:private runtime-event-handlers (atom {}))
+(defonce ^:private pending-interactions
+  (atom {:by-id {}
+         :by-session {}
+         :by-task {}}))
+
+(def ^:private handler-registry
+  {:prompt prompt-handlers
+   :approval approval-handlers
+   :status status-handlers
+   :assistant-message assistant-message-handlers
+   :runtime-event runtime-event-handlers})
 
 (def ^:dynamic *interaction-context*
   "Dynamic execution context for tool interactions, e.g. {:channel :terminal :session-id ...}."
   nil)
+
+(declare deliver-pending-interaction!)
 
 (defn- current-channel []
   (or (:channel *interaction-context*) :default))
@@ -46,6 +60,347 @@
            (if f
              (assoc m channel f)
              (dissoc m channel)))))
+
+(defn register-channel-adapter!
+  "Register the shared interaction adapter for a channel.
+   Supported keys are:
+   - `:prompt`
+   - `:approval`
+   - `:status`
+   - `:assistant-message`
+   - `:runtime-event`
+
+   Any omitted key is cleared for that channel, so the adapter map acts as the
+   full interaction surface for that channel."
+  [channel adapter]
+  (doseq [[k handlers] handler-registry]
+    (register-handler! handlers channel (get adapter k)))
+  nil)
+
+(defn clear-channel-adapter!
+  "Remove all registered interaction handlers for a channel."
+  [channel]
+  (register-channel-adapter! channel {})
+  nil)
+
+(defn- normalize-interaction-selector
+  [{:keys [interaction-id session-id task-id] :as selector}]
+  (cond-> selector
+    interaction-id (assoc :interaction-id (str interaction-id))
+    session-id (assoc :session-id (str session-id))
+    task-id (assoc :task-id (str task-id))))
+
+(defn- interaction-id-for-selector
+  [state selector]
+  (let [{:keys [interaction-id task-id session-id]} (normalize-interaction-selector selector)]
+    (or interaction-id
+        (when task-id
+          (get-in state [:by-task task-id]))
+        (when session-id
+          (get-in state [:by-session session-id])))))
+
+(defn- dissoc-interaction*
+  [state interaction-id]
+  (if-let [{:keys [session-id task-id]} (get-in state [:by-id interaction-id])]
+    (cond-> (update state :by-id dissoc interaction-id)
+      session-id (update :by-session
+                         (fn [m]
+                           (if (= interaction-id (get m session-id))
+                             (dissoc m session-id)
+                             m)))
+      task-id (update :by-task
+                      (fn [m]
+                        (if (= interaction-id (get m task-id))
+                          (dissoc m task-id)
+                          m))))
+    state))
+
+(defn register-interaction!
+  "Register a pending channel interaction. Interactions are correlated by
+   `:task-id` when present, otherwise by `:session-id`.
+
+   Required/recognized keys:
+   - `:kind`
+   - `:response`
+   - `:interaction-id` (optional, generated when absent)
+   - `:session-id` (optional, defaults from `*interaction-context*`)
+   - `:task-id` (optional, defaults from `*interaction-context*`)
+   - `:channel` (optional, defaults from `*interaction-context*`)
+   - `:created-at` (optional, defaults to now)"
+  [{:keys [interaction-id session-id task-id channel created-at] :as interaction}]
+  (let [context      *interaction-context*
+        interaction* (cond-> interaction
+                       (nil? interaction-id) (assoc :interaction-id (str (random-uuid)))
+                       (nil? session-id) (assoc :session-id (:session-id context))
+                       (nil? task-id) (assoc :task-id (:task-id context))
+                       (nil? channel) (assoc :channel (or (:channel context) (current-channel)))
+                       (nil? created-at) (assoc :created-at (java.util.Date.)))
+        interaction* (-> interaction*
+                         (update :session-id #(some-> % str))
+                         (update :task-id #(some-> % str))
+                         (update :interaction-id str))]
+    (swap! pending-interactions
+           (fn [state]
+             (let [state* (cond-> state
+                            (:task-id interaction*)
+                            (dissoc-interaction* (get-in state [:by-task (:task-id interaction*)]))
+                            (and (nil? (:task-id interaction*))
+                                 (:session-id interaction*))
+                            (dissoc-interaction* (get-in state [:by-session (:session-id interaction*)])))]
+               (cond-> (assoc-in state* [:by-id (:interaction-id interaction*)] interaction*)
+                 (:session-id interaction*) (assoc-in [:by-session (:session-id interaction*)] (:interaction-id interaction*))
+                 (:task-id interaction*) (assoc-in [:by-task (:task-id interaction*)] (:interaction-id interaction*))))))
+    interaction*))
+
+(defn pending-interaction
+  "Look up a pending interaction by `:interaction-id`, `:task-id`, or
+   `:session-id`. Task lookup is preferred over session lookup.
+
+   Optional selector keys:
+   - `:kind`
+   - `:channel`"
+  [selector]
+  (let [state       @pending-interactions
+        selector*   (normalize-interaction-selector selector)
+        interaction-id (interaction-id-for-selector state selector*)
+        interaction (when interaction-id
+                      (get-in state [:by-id interaction-id]))]
+    (when (and interaction
+               (or (nil? (:kind selector*)) (= (:kind selector*) (:kind interaction)))
+               (or (nil? (:channel selector*)) (= (:channel selector*) (:channel interaction))))
+      interaction)))
+
+(defn resolve-pending-interaction
+  "Resolve a pending interaction by the most specific selector available.
+   Lookup order is `:interaction-id`, then `:task-id`, then `:session-id`."
+  [selector]
+  (let [selector* (normalize-interaction-selector selector)
+        options   (cond-> []
+                    (:interaction-id selector*) (conj {:interaction-id (:interaction-id selector*)})
+                    (:task-id selector*) (conj {:task-id (:task-id selector*)})
+                    (:session-id selector*) (conj {:session-id (:session-id selector*)}))]
+    (some (fn [base-selector]
+            (pending-interaction (merge base-selector
+                                        (select-keys selector* [:kind :channel]))))
+          options)))
+
+(def ^:private cancel-replies
+  #{"cancel" "/cancel" "stop" "abort" "nevermind" "never mind"})
+
+(def ^:private allow-replies
+  #{"yes" "y" "allow" "approve" "approved" "ok"})
+
+(def ^:private deny-replies
+  #{"no" "n" "deny" "reject" "denied"})
+
+(def ^:private pause-replies
+  #{"pause" "/pause"})
+
+(def ^:private resume-replies
+  #{"resume" "/resume" "continue" "/continue"})
+
+(def ^:private stop-replies
+  #{"stop-task" "/stop-task" "stop task" "stop"})
+
+(def ^:private interrupt-replies
+  #{"interrupt" "/interrupt" "cancel task" "cancel run"})
+
+(defn coerce-interaction-reply
+  "Coerce a free-form channel reply for a pending interaction into the value
+   that should be delivered to the waiting runtime.
+
+   Returns one of:
+   - `:cancel`
+   - `:allow`
+   - `:deny`
+   - normalized input text for prompt interactions
+   - `nil` when the reply is not actionable"
+  [interaction raw-reply]
+  (let [text  (some-> raw-reply str str/trim)
+        value (some-> text str/lower-case)]
+    (cond
+      (str/blank? text)
+      nil
+
+      (contains? cancel-replies value)
+      :cancel
+
+      (= :approval (:kind interaction))
+      (cond
+        (contains? allow-replies value) :allow
+        (contains? deny-replies value) :deny
+        :else nil)
+
+      :else
+      text)))
+
+(defn interaction-public-id
+  "Return the public correlation id for an interaction."
+  [interaction]
+  (case (:kind interaction)
+    :prompt (:prompt-id interaction)
+    :approval (:approval-id interaction)
+    (:interaction-id interaction)))
+
+(defn interaction-retry-text
+  "Return a standard retry hint for a pending interaction."
+  [interaction]
+  (case (:kind interaction)
+    :approval "Still waiting for approval. Reply YES, NO, or CANCEL."
+    "Still waiting for input. Reply with the requested value or CANCEL."))
+
+(defn deliver-validated-interaction!
+  "Resolve a pending interaction, validate its public id, and deliver a value.
+
+   Returns a result map with `:status`:
+   - `:missing`
+   - `:stale`
+   - `:delivered`"
+  [selector expected-public-id value]
+  (if-let [interaction (resolve-pending-interaction selector)]
+    (if (not= expected-public-id (interaction-public-id interaction))
+      {:status :stale
+       :interaction interaction}
+      (do
+        (deliver-pending-interaction! {:interaction-id (:interaction-id interaction)} value)
+        {:status :delivered
+         :interaction interaction
+         :value value}))
+    {:status :missing}))
+
+(defn submit-freeform-interaction-reply!
+  "Resolve a pending interaction, coerce a free-form reply, and deliver it.
+
+   Returns a result map with `:status`:
+   - `:missing`
+   - `:invalid`
+   - `:delivered`"
+  [selector raw-reply]
+  (if-let [interaction (resolve-pending-interaction selector)]
+    (if-let [value (coerce-interaction-reply interaction raw-reply)]
+      (do
+        (deliver-pending-interaction! {:interaction-id (:interaction-id interaction)} value)
+        {:status :delivered
+         :interaction interaction
+         :value value})
+      {:status :invalid
+       :interaction interaction})
+    {:status :missing}))
+
+(defn parse-control-intent
+  "Parse a free-form transport message into a task/session control intent.
+
+   Returns one of:
+   - `:interrupt`
+   - `:pause`
+   - `:resume`
+   - `:stop`
+   - `nil`"
+  [raw-reply]
+  (let [value (some-> raw-reply str str/trim str/lower-case)]
+    (cond
+      (str/blank? value) nil
+      (contains? stop-replies value) :stop
+      (contains? pause-replies value) :pause
+      (contains? resume-replies value) :resume
+      (or (contains? interrupt-replies value)
+          (contains? cancel-replies value)) :interrupt
+      :else nil)))
+
+(defn control-result-text
+  "Render a user-facing acknowledgement for a control intent result."
+  [intent result]
+  (case (:status result)
+    :paused (case intent
+              :interrupt "Pausing the current task."
+              "Task paused.")
+    :pausing "Pausing the current task."
+    :interrupting "Interrupting the current task."
+    :stopped "Task stopped."
+    :stopping "Stopping the current task."
+    :running (case intent
+               :resume "Resuming the current task."
+               "Task running.")
+    :already-running "Task is already running."
+    :already-paused "Task is already paused."
+    :already-stopped "Task is already stopped."
+    :not-found "No current task to control."
+    :missing "No current task to control."
+    :invalid (or (:error result) "That control request is not valid right now.")
+    :busy (or (:error result) "The current task is busy.")
+    :unavailable (or (:error result) "Task control is temporarily unavailable.")
+    :not-resumable (or (:error result) "This task cannot be resumed.")
+    (or (:error result) "I couldn't apply that control request.")))
+
+(defn control-result-view
+  "Return a normalized presentation for a task control result."
+  [intent result]
+  (let [status (:status result)]
+    {:status status
+     :status-key (case status
+                   :already-paused "already_paused"
+                   :already-stopped "already_stopped"
+                   (when (keyword? status)
+                     (name status)))
+     :response-kind (case status
+                      (:missing :not-found) :missing
+                      (:invalid :busy :already-running :not-resumable) :conflict
+                      :unavailable :unavailable
+                      (:pausing :stopping :interrupting :steering :forking :running) :accepted
+                      (:already-paused :already-stopped :paused :stopped) :completed
+                      :unknown)
+     :message (control-result-text intent result)}))
+
+(defn apply-task-control-intent!
+  "Dispatch a control intent to the supplied task-control handlers.
+
+   `handlers` should provide:
+   - `:pause-task!`
+   - `:resume-task!`
+   - `:stop-task!`
+   - `:interrupt-task!`
+   - `:steer-task!`
+   - `:fork-task!`"
+  [handlers task-id intent & {:keys [message]}]
+  (if-not task-id
+    {:status :missing}
+    (case intent
+      :pause ((:pause-task! handlers) task-id)
+      :resume ((:resume-task! handlers) task-id :message message)
+      :stop ((:stop-task! handlers) task-id)
+      :interrupt ((:interrupt-task! handlers) task-id)
+      :steer ((:steer-task! handlers) task-id message)
+      :fork ((:fork-task! handlers) task-id message)
+      {:status :invalid
+       :error (str "Unsupported control intent: " intent)})))
+
+(defn clear-pending-interaction!
+  "Remove a pending interaction by selector."
+  [selector]
+  (let [selector* (normalize-interaction-selector selector)]
+    (swap! pending-interactions
+           (fn [state]
+             (if-let [interaction-id (interaction-id-for-selector state selector*)]
+               (dissoc-interaction* state interaction-id)
+               state)))
+    nil))
+
+(defn deliver-pending-interaction!
+  "Deliver a value to a pending interaction response promise and clear it.
+   Returns true when an interaction was found."
+  [selector value]
+  (if-let [interaction (pending-interaction selector)]
+    (do
+      (when-let [response (:response interaction)]
+        (deliver response value))
+      (clear-pending-interaction! {:interaction-id (:interaction-id interaction)})
+      true)
+    false))
+
+(defn cancel-pending-interaction!
+  "Cancel a pending interaction and clear it."
+  [selector]
+  (deliver-pending-interaction! selector :cancel))
 
 (defn register-prompt!
   "Register a prompt function for a channel. Called by channels at startup.

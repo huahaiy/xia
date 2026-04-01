@@ -7,6 +7,7 @@
             [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
+            [xia.prompt :as prompt]
             [xia.schedule :as schedule]
             [xia.task-event :as task-event]
             [xia.working-memory :as wm]))
@@ -61,18 +62,6 @@
   [deps prompt]
   ((:prompt->body deps) prompt))
 
-(defn- pending-prompts-atom
-  [deps]
-  (:pending-prompts-atom deps))
-
-(defn- clear-pending-prompt!*
-  [deps session-id prompt-id]
-  ((:clear-pending-prompt! deps) session-id prompt-id))
-
-(defn- clear-pending-approval!*
-  [deps session-id approval-id]
-  ((:clear-pending-approval! deps) session-id approval-id))
-
 (defn- session-busy?*
   [deps session-id]
   ((:session-busy? deps) session-id))
@@ -116,23 +105,6 @@
 (defn- task-runtime-events-atom
   [deps]
   (:task-runtime-events-atom deps))
-
-(defn- pending-approvals-atom
-  [deps]
-  (:pending-approvals-atom deps))
-
-(defn- current-session-task
-  [session-id]
-  (first
-   (sort-by (fn [task]
-              [(if (:current-turn-id task) 0 1)
-               (or (:updated-at task) (:created-at task))])
-            (fn [[a-priority a-time] [b-priority b-time]]
-              (let [priority (compare a-priority b-priority)]
-                (if (zero? priority)
-                  (compare b-time a-time)
-                  priority)))
-            (db/list-tasks {:session-id session-id}))))
 
 (defn- live-task?
   [task]
@@ -550,7 +522,7 @@
                                           :local-doc-ids local-doc-ids
                                           :artifact-ids artifact-ids)
           assistant-message (db/latest-session-message session-id #{:assistant})
-          task              (current-session-task session-id)
+          task              (db/current-session-task session-id)
           body              (cond-> {:session_id (str session-id)
                                      :role       "assistant"
                                      :content    response
@@ -619,7 +591,7 @@
        :else
        (do
          (touch-rest-session!* deps sid)
-         (let [task   (current-session-task (java.util.UUID/fromString sid))
+         (let [task   (db/current-session-task (java.util.UUID/fromString sid))
                status (or (when task
                             (task-runtime-status deps task))
                           (get @(session-statuses-atom deps) sid))]
@@ -650,7 +622,7 @@
        :else
        (do
          (touch-rest-session!* deps sid)
-         (let [task (current-session-task (java.util.UUID/fromString sid))]
+         (let [task (db/current-session-task (java.util.UUID/fromString sid))]
            (json-response* deps 200
                            (cond-> {:session_id sid
                                     :task       (when task
@@ -679,7 +651,8 @@
      :else
      (do
        (touch-rest-session!* deps session-id)
-       (if-let [approval (get @(pending-approvals-atom deps) session-id)]
+       (if-let [approval (prompt/pending-interaction {:session-id session-id
+                                                      :kind :approval})]
          (json-response* deps 200 {:pending true
                                    :approval (approval->body* deps approval)})
          (json-response* deps 200 {:pending false}))))))
@@ -703,9 +676,10 @@
      :else
      (do
        (touch-rest-session!* deps session-id)
-       (if-let [prompt (get @(pending-prompts-atom deps) session-id)]
+       (if-let [interaction (prompt/pending-interaction {:session-id session-id
+                                                         :kind :prompt})]
          (json-response* deps 200 {:pending true
-                                   :prompt (prompt->body* deps prompt)})
+                                   :prompt (prompt->body* deps interaction)})
          (json-response* deps 200 {:pending false}))))))
 
 (defn handle-submit-prompt
@@ -718,25 +692,24 @@
        (json-response* deps 404 {:error "session not found"})
        (let [data      (read-body* deps req)
              prompt-id (get data "prompt_id")
-             current   (get @(pending-prompts-atom deps) session-id)
              has-value? (contains? data "value")
              value     (get data "value")]
          (cond
-           (nil? current)
-           (json-response* deps 404 {:error "no pending prompt"})
-
-           (not= prompt-id (:prompt-id current))
-           (json-response* deps 409 {:error "stale prompt id"})
-
            (not has-value?)
            (json-response* deps 400 {:error "missing value"})
 
            :else
-           (do
-             (deliver (:response current) (str (or value "")))
-             (clear-pending-prompt!* deps session-id prompt-id)
-             (touch-rest-session!* deps session-id)
-             (json-response* deps 200 {:status "recorded"}))))))))
+           (let [{:keys [status]}
+                 (prompt/deliver-validated-interaction! {:session-id session-id
+                                                         :kind :prompt}
+                                                        prompt-id
+                                                        (str (or value "")))]
+             (case status
+               :missing (json-response* deps 404 {:error "no pending prompt"})
+               :stale (json-response* deps 409 {:error "stale prompt id"})
+               (do
+                 (touch-rest-session!* deps session-id)
+                 (json-response* deps 200 {:status "recorded"}))))))))))
 
 (defn handle-submit-approval
   ([deps session-id req]
@@ -749,31 +722,26 @@
        (let [data        (read-body* deps req)
              approval-id (get data "approval_id")
              decision    (get data "decision")
-             current     (get @(pending-approvals-atom deps) session-id)
              decision*   (case decision
                            "allow" :allow
                            "deny"  :deny
                            nil)]
          (cond
-           (nil? current)
-           (json-response* deps 404 {:error "no pending approval"})
-
-           (not= approval-id (:approval-id current))
-           (json-response* deps 409 {:error "stale approval id"})
-
            (nil? decision*)
            (json-response* deps 400 {:error "invalid decision"})
 
            :else
-           (do
-             (deliver (:decision current) decision*)
-             (clear-pending-approval!* deps session-id approval-id)
-             (touch-rest-session!* deps session-id)
-             (json-response* deps 200 {:status "recorded"}))))))))
-
-(defn- task-session-id
-  [task]
-  (some-> (:session-id task) str))
+           (let [{:keys [status]}
+                 (prompt/deliver-validated-interaction! {:session-id session-id
+                                                         :kind :approval}
+                                                        approval-id
+                                                        decision*)]
+             (case status
+               :missing (json-response* deps 404 {:error "no pending approval"})
+               :stale (json-response* deps 409 {:error "stale approval id"})
+               (do
+                 (touch-rest-session!* deps session-id)
+                 (json-response* deps 200 {:status "recorded"}))))))))))
 
 (defn handle-get-task-prompt
   [deps task-id]
@@ -782,7 +750,12 @@
           task (db/get-task uuid)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (handle-get-prompt deps (task-session-id task))))
+        (if-let [interaction (prompt/resolve-pending-interaction {:task-id uuid
+                                                                  :session-id (:session-id task)
+                                                                  :kind :prompt})]
+          (json-response* deps 200 {:pending true
+                                    :prompt (prompt->body* deps interaction)})
+          (json-response* deps 200 {:pending false}))))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 
@@ -793,7 +766,25 @@
           task (db/get-task uuid)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (handle-submit-prompt deps (task-session-id task) req)))
+        (let [data      (read-body* deps req)
+              prompt-id (get data "prompt_id")
+              has-value? (contains? data "value")
+              value     (get data "value")]
+          (cond
+            (not has-value?)
+            (json-response* deps 400 {:error "missing value"})
+
+            :else
+            (let [{:keys [status]}
+                  (prompt/deliver-validated-interaction! {:task-id uuid
+                                                          :session-id (:session-id task)
+                                                          :kind :prompt}
+                                                         prompt-id
+                                                         (str (or value "")))]
+              (case status
+                :missing (json-response* deps 404 {:error "no pending prompt"})
+                :stale (json-response* deps 409 {:error "stale prompt id"})
+                (json-response* deps 200 {:status "recorded"})))))))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 
@@ -804,7 +795,12 @@
           task (db/get-task uuid)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (handle-get-approval deps (task-session-id task))))
+        (if-let [interaction (prompt/resolve-pending-interaction {:task-id uuid
+                                                                  :session-id (:session-id task)
+                                                                  :kind :approval})]
+          (json-response* deps 200 {:pending true
+                                    :approval (approval->body* deps interaction)})
+          (json-response* deps 200 {:pending false}))))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 
@@ -815,7 +811,28 @@
           task (db/get-task uuid)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (handle-submit-approval deps (task-session-id task) req)))
+        (let [data        (read-body* deps req)
+              approval-id (get data "approval_id")
+              decision    (get data "decision")
+              decision*   (case decision
+                            "allow" :allow
+                            "deny"  :deny
+                            nil)]
+          (cond
+            (nil? decision*)
+            (json-response* deps 400 {:error "invalid decision"})
+
+            :else
+            (let [{:keys [status]}
+                  (prompt/deliver-validated-interaction! {:task-id uuid
+                                                          :session-id (:session-id task)
+                                                          :kind :approval}
+                                                         approval-id
+                                                         decision*)]
+              (case status
+                :missing (json-response* deps 404 {:error "no pending approval"})
+                :stale (json-response* deps 409 {:error "stale approval id"})
+                (json-response* deps 200 {:status "recorded"})))))))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 
@@ -1006,145 +1023,92 @@
       (json-response* deps 400 {:error "invalid task id"}))))
 
 (defn- task-control-response
-  [deps result]
-  (let [status (:status result)]
-    (case status
-      :not-found
+  [deps intent result]
+  (let [{:keys [status response-kind status-key message]} (prompt/control-result-view intent result)]
+    (case response-kind
+      :missing
       (json-response* deps 404 {:error "task not found"})
 
-      :invalid
-      (json-response* deps 409 {:error (:error result)})
-
-      :busy
-      (json-response* deps 409 {:error (:error result)})
-
-      :already-running
-      (json-response* deps 409 {:error "task already running"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :not-resumable
-      (json-response* deps 409 {:error (:error result)
+      :conflict
+      (json-response* deps 409 {:error (or (:error result) message)
                                 :task_id (some-> (:task-id result) str)
                                 :session_id (some-> (:session-id result) str)})
 
       :unavailable
-      (json-response* deps 503 {:error (:error result)
+      (json-response* deps 503 {:error (or (:error result) message)
                                 :task_id (some-> (:task-id result) str)
                                 :session_id (some-> (:session-id result) str)})
 
-      :pausing
-      (json-response* deps 202 {:status "pausing"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
+      :accepted
+      (json-response* deps 202
+                      (cond-> {:status status-key
+                               :task_id (some-> (:task-id result) str)
+                               :session_id (some-> (:session-id result) str)}
+                        (= status :forking)
+                        (assoc :task (when-let [task (:task result)]
+                                       (task->body deps task)))))
 
-      :stopping
-      (json-response* deps 202 {:status "stopping"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :interrupting
-      (json-response* deps 202 {:status "interrupting"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :steering
-      (json-response* deps 202 {:status "steering"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :forking
-      (json-response* deps 202 {:status "forking"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)
-                                :task (when-let [task (:task result)]
-                                        (task->body deps task))})
-
-      :running
-      (json-response* deps 202 {:status "running"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :already-paused
-      (json-response* deps 200 {:status "already_paused"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :already-stopped
-      (json-response* deps 200 {:status "already_stopped"
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
-
-      :paused
+      :completed
       (json-response* deps 200
-                      {:status "paused"
-                       :task (when-let [task (:task result)]
-                               (task->body deps task))})
-
-      :stopped
-      (json-response* deps 200
-                      {:status "stopped"
-                       :task (when-let [task (:task result)]
-                               (task->body deps task))})
+                      (cond-> {:status status-key}
+                        (contains? #{:already-paused :already-stopped} status)
+                        (assoc :task_id (some-> (:task-id result) str)
+                               :session_id (some-> (:session-id result) str))
+                        (contains? #{:paused :stopped} status)
+                        (assoc :task (when-let [task (:task result)]
+                                       (task->body deps task)))))
 
       (json-response* deps 500 {:error "unknown task control result"}))))
 
-(defn handle-pause-task
-  [deps task-id]
+(def ^:private task-control-handlers
+  {:pause-task! agent/pause-task!
+   :resume-task! agent/resume-task!
+   :stop-task! agent/stop-task!
+   :interrupt-task! agent/interrupt-task!
+   :steer-task! agent/steer-task!
+   :fork-task! agent/fork-task!})
+
+(defn- handle-task-control-intent
+  [deps task-id intent & {:keys [message]}]
   (try
     (task-control-response deps
-                           (agent/pause-task! (java.util.UUID/fromString task-id)))
+                           intent
+                           (prompt/apply-task-control-intent! task-control-handlers
+                                                              (java.util.UUID/fromString task-id)
+                                                              intent
+                                                              :message message))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
+
+(defn handle-pause-task
+  [deps task-id]
+  (handle-task-control-intent deps task-id :pause))
 
 (defn handle-stop-task
   [deps task-id]
-  (try
-    (task-control-response deps
-                           (agent/stop-task! (java.util.UUID/fromString task-id)))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (handle-task-control-intent deps task-id :stop))
 
 (defn handle-interrupt-task
   [deps task-id]
-  (try
-    (task-control-response deps
-                           (agent/interrupt-task! (java.util.UUID/fromString task-id)))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (handle-task-control-intent deps task-id :interrupt))
 
 (defn handle-steer-task
   [deps task-id req]
-  (try
-    (let [data    (read-body* deps req)
-          message (get data "message")]
-      (task-control-response deps
-                             (agent/steer-task! (java.util.UUID/fromString task-id)
-                                                message)))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (let [data    (read-body* deps req)
+        message (get data "message")]
+    (handle-task-control-intent deps task-id :steer :message message)))
 
 (defn handle-fork-task
   [deps task-id req]
-  (try
-    (let [data    (read-body* deps req)
-          message (get data "message")]
-      (task-control-response deps
-                             (agent/fork-task! (java.util.UUID/fromString task-id)
-                                               message)))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (let [data    (read-body* deps req)
+        message (get data "message")]
+    (handle-task-control-intent deps task-id :fork :message message)))
 
 (defn handle-resume-task
   [deps task-id req]
-  (try
-    (let [data    (read-body* deps req)
-          message (get data "message")]
-      (task-control-response deps
-                             (agent/resume-task! (java.util.UUID/fromString task-id)
-                                                 :message message)))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (let [data    (read-body* deps req)
+        message (get data "message")]
+    (handle-task-control-intent deps task-id :resume :message message)))
 
 (defn handle-history-schedules
   [deps]

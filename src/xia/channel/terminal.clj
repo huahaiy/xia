@@ -103,10 +103,10 @@
 (defn start!
   "Start the terminal REPL loop."
   []
-  ;; Register the terminal prompt handler for interactive credential input
-  (prompt/register-prompt! :terminal terminal-prompt)
-  (prompt/register-approval! :terminal terminal-approval)
-  (prompt/register-runtime-event! :terminal terminal-runtime-event)
+  (prompt/register-channel-adapter! :terminal
+                                    {:prompt terminal-prompt
+                                     :approval terminal-approval
+                                     :runtime-event terminal-runtime-event})
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
     (wm/ensure-wm! session-id)
