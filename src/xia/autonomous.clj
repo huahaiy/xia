@@ -34,6 +34,7 @@
 
 (declare controller-state-message
          current-frame
+         apply-control
          suspend-progress-status
          normalized-state?
          normalize-state
@@ -349,7 +350,7 @@
        not-empty))
 
 (defn- stack-line
-  [{:keys [title progress-status next-step compressed? compressed-count]}]
+  [{:keys [title progress-status next-step compressed? compressed-count kind]}]
   (let [title*      (truncate-agenda-item title)
         status*     (progress-status-label progress-status)
         next-step*  (truncate-field next-step)]
@@ -357,6 +358,8 @@
       (str "  - "
            "[" (or status* "pending") "] "
            title*
+           (when (= kind :child-task)
+             " (child task)")
            (when compressed?
              (str " (compressed " (or compressed-count 1) ")"))
            (when next-step*
@@ -400,10 +403,50 @@
           missing-field
           ks))
 
+(defn- nullish-value?
+  [value]
+  (or (nil? value)
+      (= :json/null value)
+      (= "json/null" value)
+      (= ":json/null" value)))
+
+(defn- first-meaningful
+  [& values]
+  (first (remove nullish-value? values)))
+
 (defn- normalize-frame
   [frame default-title]
-  (let [agenda           (normalize-agenda (or (:agenda frame)
-                                               (get frame "agenda")))
+  (let [agenda           (normalize-agenda (first-meaningful (:agenda frame)
+                                                             (get frame "agenda")))
+        child-task-id    (let [value (first-meaningful (:child-task-id frame)
+                                                       (:child_task_id frame)
+                                                       (get frame "child_task_id")
+                                                       (get frame "child-task-id"))]
+                           (cond
+                             (uuid? value) value
+                             (string? value) (try
+                                               (java.util.UUID/fromString value)
+                                               (catch Exception _
+                                                 nil))
+                             :else nil))
+        kind             (let [raw-kind (or (:kind frame)
+                                            (get frame "kind"))]
+                           (cond
+                             child-task-id :child-task
+                             (contains? #{:child-task "child-task" "child_task"} raw-kind) :child-task
+                             :else nil))
+        child-task       (when child-task-id
+                           (db/get-task child-task-id))
+        child-progress   (case (:state child-task)
+                           :running :in-progress
+                           :waiting_input :blocked
+                           :waiting_approval :blocked
+                           :paused :paused
+                           :resumable :resumable
+                           :completed :complete
+                           :failed :blocked
+                           :cancelled :blocked
+                           nil)
         compressed?      (true? (or (:compressed? frame)
                                     (get frame "compressed?")))
         compressed-count (when compressed?
@@ -413,41 +456,49 @@
                                    long
                                    (max 1)))
         compressed-preview (when compressed?
-                             (->> (or (:compressed-preview frame)
-                                      (get frame "compressed_preview")
-                                      (get frame "compressed-preview"))
+                             (->> (first-meaningful (:compressed-preview frame)
+                                                    (get frame "compressed_preview")
+                                                    (get frame "compressed-preview"))
                                   (keep truncate-agenda-item)
                                   (take-last compressed-frame-preview-limit)
                                   vec
                                   not-empty))
-        status           (or (normalize-progress-status (or (:progress-status frame)
-                                                            (get frame "progress_status")
-                                                            (get frame "progress-status")))
-                             (normalize-progress-status (or (:status frame)
-                                                             (get frame "status")))
+        status           (or child-progress
+                             (normalize-progress-status (first-meaningful (:progress-status frame)
+                                                                          (get frame "progress_status")
+                                                                          (get frame "progress-status")))
+                             (normalize-progress-status (first-meaningful (:status frame)
+                                                                          (get frame "status")))
                              (derive-progress-status :continue false agenda)
                              :pending)
-        title            (or (truncate-goal (or (:title frame)
-                                                (get frame "title")))
-                             (truncate-goal (or (:current-focus frame)
-                                                (:current_focus frame)
-                                                (get frame "current_focus")
-                                                (get frame "current-focus")))
+        title            (or (some-> child-task :title truncate-goal)
+                             (truncate-goal (first-meaningful (:title frame)
+                                                              (get frame "title")))
+                             (truncate-goal (first-meaningful (:current-focus frame)
+                                                              (:current_focus frame)
+                                                              (get frame "current_focus")
+                                                              (get frame "current-focus")))
                              default-title)]
-    (cond-> {:title           title
-             :summary         (truncate-summary (or (:summary frame)
-                                                    (get frame "summary")))
-             :next-step       (truncate-next-step (or (:next-step frame)
-                                                      (:next_step frame)
-                                                      (get frame "next_step")
-                                                      (get frame "next-step")))
-             :reason          (truncate-reason (or (:reason frame)
-                                                  (get frame "reason")))
-             :progress-status status
-             :agenda          agenda}
+    (let [summary   (truncate-summary (first-meaningful (some-> child-task :summary)
+                                                        (:summary frame)
+                                                        (get frame "summary")))
+          next-step (truncate-next-step (first-meaningful (:next-step frame)
+                                                          (:next_step frame)
+                                                          (get frame "next_step")
+                                                          (get frame "next-step")))
+          reason    (truncate-reason (first-meaningful (:reason frame)
+                                                       (get frame "reason")))]
+      (cond-> {:title title
+               :progress-status status}
+        summary (assoc :summary summary)
+        next-step (assoc :next-step next-step)
+        reason (assoc :reason reason)
+        agenda (assoc :agenda agenda)
+      kind (assoc :kind kind)
+      child-task-id (assoc :child-task-id child-task-id)
       compressed? (assoc :compressed? true)
       compressed-count (assoc :compressed-count compressed-count)
-      compressed-preview (assoc :compressed-preview compressed-preview))))
+      compressed-preview (assoc :compressed-preview compressed-preview)))))
 
 (defn- compressed-frame?
   [frame]
@@ -530,11 +581,12 @@
   #{:completed :skipped})
 
 (defn- derive-parent-agenda-on-pop
-  [parent-tip child-tip]
+  [parent-tip child-tip pop-completion-status]
   (let [agenda      (:agenda parent-tip)
         child-title (:title child-tip)
         parent-next (:next-step parent-tip)]
-    (when (seq agenda)
+    (when (and (= :completed pop-completion-status)
+               (seq agenda))
       (let [match? (fn [{:keys [item status]}]
                      (and (contains? actionable-agenda-statuses status)
                           (or (matching-task? item child-title)
@@ -600,24 +652,99 @@
 
 (defn- derive-parent-control-on-pop
   [parent-tip child-tip control parent-title]
-  (let [derived-agenda     (when-not (agenda-present? control)
-                             (derive-parent-agenda-on-pop parent-tip child-tip))
+  (let [pop-completion-status (or (:pop-completion-status control) :completed)
+        derived-agenda     (when-not (agenda-present? control)
+                             (derive-parent-agenda-on-pop parent-tip
+                                                          child-tip
+                                                          pop-completion-status))
         effective-agenda   (or derived-agenda
                                (:agenda control)
                                (:agenda parent-tip))
         derived-next-step  (when-not (next-step-present? control)
                              (let [parent-next (:next-step parent-tip)]
                                (when (or (str/blank? parent-next)
-                                         (matching-task? parent-next (:title child-tip)))
+                                 (matching-task? parent-next (:title child-tip)))
                                  (first-actionable-agenda-item effective-agenda))))
         derived-progress   (when-not (progress-status-present? control)
-                             (derive-progress-status (:status control)
-                                                     (:goal-complete? control)
-                                                     effective-agenda))]
+                             (case pop-completion-status
+                               :failed :blocked
+                               :cancelled :resumable
+                               (derive-progress-status (:status control)
+                                                       (:goal-complete? control)
+                                                       effective-agenda)))]
     (cond-> (assoc control :title parent-title)
       derived-agenda (assoc :agenda derived-agenda)
       derived-next-step (assoc :next-step derived-next-step)
       derived-progress (assoc :progress-status derived-progress))))
+
+(defn- child-task-terminal-state
+  [child-task-id]
+  (some-> child-task-id
+          db/get-task
+          :state
+          ({:completed :completed
+            :failed :failed
+            :cancelled :cancelled})))
+
+(defn- child-task-pop-control
+  [parent-tip child-tip]
+  (let [child-task   (some-> child-tip :child-task-id db/get-task)
+        outcome      (or ({:completed :completed
+                           :failed :failed
+                           :cancelled :cancelled}
+                          (:state child-task))
+                         :completed)
+        child-title  (:title child-tip)
+        child-summary (or (:summary child-task)
+                          (:summary child-tip))
+        base-summary (case outcome
+                       :completed (str "Child task completed: " child-title)
+                       :failed (str "Child task failed: " child-title)
+                       :cancelled (str "Child task cancelled: " child-title)
+                       (str "Child task finished: " child-title))
+        summary      (truncate-summary
+                      (if (and child-summary
+                               (not= child-summary child-title))
+                        (str base-summary ". " child-summary)
+                        base-summary))
+        next-step    (case outcome
+                       :failed (truncate-next-step (str "Handle the failed child task: " child-title))
+                       :cancelled (truncate-next-step (str "Decide whether to resume child task: " child-title))
+                       nil)
+        reason       (truncate-reason
+                      (case outcome
+                        :completed "The child task reached completion and control returns to the parent."
+                        :failed "The child task failed and the parent now needs to handle that failure."
+                        :cancelled "The child task was cancelled and the parent may need to decide how to continue."
+                        "The child task finished and control returns to the parent."))]
+    (cond-> {:status :continue
+             :summary summary
+             :reason reason
+             :current-focus (:title parent-tip)
+             :stack-action :pop
+             :pop-completion-status outcome}
+      next-step (assoc :next-step next-step)
+      (= outcome :completed) (assoc :goal-complete? false)
+      (= outcome :failed) (assoc :progress-status :blocked)
+      (= outcome :cancelled) (assoc :progress-status :resumable))))
+
+(defn reconcile-child-task-state
+  [state]
+  (let [state* (cond
+                 (normalized-state? state) state
+                 (map? state)             (normalize-state state)
+                 :else                    (initial-state nil))]
+    (loop [current state*]
+      (let [stack* (:stack current)
+            tip    (peek stack*)
+            child-outcome (and (> (count stack*) 1)
+                               (= :child-task (:kind tip))
+                               (child-task-terminal-state (:child-task-id tip)))]
+        (if child-outcome
+          (let [parent-tip (peek (vec (butlast stack*)))]
+            (recur (apply-control current
+                                  (child-task-pop-control parent-tip tip))))
+          current)))))
 
 (defn- compress-stack
   [stack]
@@ -736,12 +863,22 @@
       state*
       (initial-state user-message))))
 
+(defn- effective-stack
+  [state]
+  (cond
+    (normalized-state? state)
+    (normalize-stack (some-> state :stack first :title)
+                     (:stack state))
+
+    (map? state)
+    (:stack (normalize-state state))
+
+    :else
+    (:stack (initial-state nil))))
+
 (defn root-frame
   [state]
-  (first (:stack (cond
-                   (normalized-state? state) state
-                   (map? state)             (normalize-state state)
-                   :else                    (initial-state nil)))))
+  (first (effective-stack state)))
 
 (defn root-goal
   [state]
@@ -769,10 +906,7 @@
 
 (defn current-frame
   [state]
-  (peek (:stack (cond
-                  (normalized-state? state) state
-                  (map? state)             (normalize-state state)
-                  :else                    (initial-state nil)))))
+  (peek (effective-stack state)))
 
 (defn- suspend-progress-status
   [status]
@@ -798,22 +932,35 @@
         merged-title (or (:title control*)
                          (:title existing*)
                          default-title)]
-    {:title           merged-title
-     :summary         (or (:summary control*)
-                          (:summary existing*))
-     :next-step       (or (:next-step control*)
-                          (:next-step existing*))
-     :reason          (or (:reason control*)
-                          (:reason existing*))
-     :progress-status (if progress?
-                        (or (:progress-status control*)
-                            (:progress-status existing*)
-                            :pending)
-                        (or (:progress-status existing*)
-                            (:progress-status control*)
-                            :pending))
-     :agenda          (or (:agenda control*)
-                          (:agenda existing*))}))
+    (let [summary   (or (:summary control*)
+                        (:summary existing*))
+          next-step (or (:next-step control*)
+                        (:next-step existing*))
+          reason    (or (:reason control*)
+                        (:reason existing*))
+          agenda    (or (:agenda control*)
+                        (:agenda existing*))]
+      (cond-> {:title           merged-title
+               :progress-status (if progress?
+                                  (or (:progress-status control*)
+                                      (:progress-status existing*)
+                                      :pending)
+                                  (or (:progress-status existing*)
+                                      (:progress-status control*)
+                                      :pending))}
+        summary (assoc :summary summary)
+        next-step (assoc :next-step next-step)
+        reason (assoc :reason reason)
+        agenda (assoc :agenda agenda)
+      (or (:kind control*)
+          (:kind existing*))
+      (assoc :kind (or (:kind control*)
+                       (:kind existing*)))
+
+      (or (:child-task-id control*)
+          (:child-task-id existing*))
+      (assoc :child-task-id (or (:child-task-id control*)
+                                (:child-task-id existing*)))))))
 
 (defn apply-control
   [state control]
@@ -917,6 +1064,39 @@
          (remove str/blank?)
          (str/join "\n"))))
 
+(defn child-task-frame
+  [child-task-id & {:keys [title summary next-step reason progress-status]}]
+  (normalize-frame
+   (cond-> {:kind :child-task
+            :child-task-id child-task-id}
+     title (assoc :title title)
+     summary (assoc :summary summary)
+     next-step (assoc :next-step next-step)
+     reason (assoc :reason reason)
+     progress-status (assoc :progress-status progress-status))
+   (or (truncate-goal title)
+       "Child task")))
+
+(defn attach-child-task
+  [state child-task-id & {:keys [title summary next-step reason progress-status]}]
+  (let [state*      (cond
+                      (normalized-state? state) state
+                      (map? state)             (normalize-state state)
+                      :else                    (initial-state title))
+        control     (cond-> {:status :continue
+                             :stack-action :push
+                             :kind :child-task
+                             :child-task-id child-task-id
+                             :current-focus (or title
+                                                (some-> (db/get-task child-task-id) :title)
+                                                "Child task")
+                             :agenda []}
+                      summary (assoc :summary summary)
+                      next-step (assoc :next-step next-step)
+                      reason (assoc :reason reason)
+                      progress-status (assoc :progress-status progress-status))]
+    (apply-control state* control)))
+
 (defn status-line
   [phase {:keys [stack] :as state} iteration max-iterations & {:keys [stack-action]}]
   (let [stack*        (normalize-stack (root-goal state) stack)
@@ -926,6 +1106,7 @@
                           (default-frame-title nil))
         progress      (progress-status-label (:progress-status tip))
         next-step     (truncate-field (:next-step tip))
+        child-task?   (= :child-task (:kind tip))
         compressed?   (true? (:compressed? tip))
         compressed-count (:compressed-count tip)
         depth         (count stack*)
@@ -946,6 +1127,8 @@
          prefix
          " "
          title
+         (when child-task?
+           " (child task)")
          (when compressed?
            (str " (compressed " (or compressed-count 1) ")"))
          (when progress

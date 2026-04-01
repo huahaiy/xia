@@ -2,6 +2,7 @@
   "Task runtime persistence and control operations."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.autonomous :as autonomous]
             [xia.async :as async]
             [xia.db :as db]
             [xia.working-memory :as wm]))
@@ -55,8 +56,15 @@
 
 (defn runtime-autonomy-state
   [session-id task-id]
-  (or (some-> task-id db/get-task :autonomy-state)
-      (wm/autonomy-state session-id)))
+  (let [task-state (some-> task-id db/get-task :autonomy-state)
+        wm-state   (wm/autonomy-state session-id)
+        base-state (or task-state wm-state)
+        reconciled (some-> base-state autonomous/reconcile-child-task-state)]
+    (when (and task-id reconciled (not= reconciled task-state))
+      (db/update-task! task-id {:autonomy-state reconciled}))
+    (when (and session-id reconciled (not= reconciled wm-state))
+      (wm/set-autonomy-state! session-id reconciled))
+    reconciled))
 
 (defn ensure-runtime-task!
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
@@ -198,6 +206,29 @@
     (db/update-task-turn! turn-id {:state :completed
                                    :summary summary})
     turn-id))
+
+(defn- attach-child-task-to-parent!
+  [task child-task-id title]
+  (when-let [task-id (:id task)]
+    (let [session-id   (:session-id task)
+          base-state   (or (when session-id
+                             (wm/autonomy-state session-id))
+                           (:autonomy-state task)
+                           (autonomous/initial-state (:title task)))
+          summary      (str "Delegated child task: " title)
+          next-state   (autonomous/attach-child-task
+                        base-state
+                        child-task-id
+                        :title title
+                        :summary summary
+                        :reason "Delegated work to a child task."
+                        :progress-status :in-progress)]
+      (db/update-task! task-id
+                       {:autonomy-state next-state
+                        :summary summary})
+      (when session-id
+        (wm/set-autonomy-state! session-id next-state))
+      next-state)))
 
 (defn- sync-runtime-waiting-state!
   [runtime-task state summary]
@@ -614,6 +645,7 @@
                                                  :title title
                                                  :summary title
                                                  :started-at (java.util.Date.)})
+              _                (attach-child-task-to-parent! task child-task-id title)
               submit-fork!     (fn []
                                  (async/submit-background!
                                   (str "task-fork:" child-task-id)

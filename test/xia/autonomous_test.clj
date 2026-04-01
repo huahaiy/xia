@@ -294,6 +294,41 @@
     (is (= "Task 5" (get-in state [:stack 2 :title])))
     (is (= "Task 6" (get-in state [:stack 3 :title])))))
 
+(deftest attach-child-task-pushes-a-child-task-frame-and-hydrates-from-task-state
+  (let [session-id     (db/create-session! :terminal)
+        child-task-id  (db/create-task! {:session-id session-id
+                                         :channel :terminal
+                                         :type :branch
+                                         :state :running
+                                         :title "Investigate invoice discrepancy"
+                                         :summary "Collecting invoice evidence"})
+        parent-state   (autonomous/attach-child-task
+                        (autonomous/initial-state "Handle billing issue")
+                        child-task-id
+                        :title "Investigate invoice discrepancy")
+        child-frame    (autonomous/current-frame parent-state)
+        control-state  (autonomous/controller-state-message
+                        {:goal (autonomous/root-goal parent-state)
+                         :iteration 1
+                         :max-iterations 6
+                         :stack (:stack parent-state)})]
+    (is (= "Handle billing issue" (autonomous/root-goal parent-state)))
+    (is (= 2 (count (:stack parent-state))))
+    (is (= :child-task (:kind child-frame)))
+    (is (= child-task-id (:child-task-id child-frame)))
+    (is (= "Investigate invoice discrepancy" (:title child-frame)))
+    (is (= :in-progress (:progress-status child-frame)))
+    (is (= "Collecting invoice evidence" (:summary child-frame)))
+    (is (str/includes? (:content control-state) "Investigate invoice discrepancy (child task)"))
+    (db/update-task! child-task-id
+                     {:state :completed
+                      :summary "Invoice evidence collected"})
+    (let [reconciled (autonomous/reconcile-child-task-state parent-state)
+          reconciled-frame (autonomous/current-frame reconciled)]
+      (is (= 1 (count (:stack reconciled))))
+      (is (= "Handle billing issue" (:title reconciled-frame)))
+      (is (not= :child-task (:kind reconciled-frame))))))
+
 (deftest apply-control-stay-preserves-existing-frame-fields
   (let [initial {:stack [{:title "Handle billing emails"
                           :summary "Checked inbox"
@@ -421,7 +456,6 @@
 (deftest prepare-turn-state-preserves-completed-stack-for-follow-ups
   (let [state {:stack [{:title "Handle billing emails"
                         :summary "Sent the reply"
-                        :next-step nil
                         :reason "Goal satisfied"
                         :progress-status :complete
                         :agenda [{:item "Send reply" :status :completed}]}]}]

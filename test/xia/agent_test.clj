@@ -503,6 +503,8 @@
       (let [result       (agent/fork-task! parent-task-id "Investigate the disputed invoice line item")
             child-task   (:task result)
             child-task-id (:id child-task)
+            parent-task   (db/get-task parent-task-id)
+            parent-tip    (some-> parent-task :autonomy-state autonomous/current-frame)
             child-turns  (db/task-turns child-task-id)
             parent-turns (db/task-turns parent-task-id)]
         (is (= :forking (:status result)))
@@ -511,6 +513,9 @@
         (is (= :branch (:type child-task)))
         (is (= :running (:state child-task)))
         (is (= "Investigate the disputed invoice line item" (:title child-task)))
+        (is (= :child-task (:kind parent-tip)))
+        (is (= child-task-id (:child-task-id parent-tip)))
+        (is (= "Investigate the disputed invoice line item" (:title parent-tip)))
         (is (uuid? (:session-id child-task)))
         (is (empty? child-turns))
         (is (= :fork (:operation (last parent-turns))))
@@ -527,7 +532,16 @@
                                        :resource-session-id parent-session-id}}}]
                @process-calls))
         (is (= [[(:session-id child-task) false]] @deactivated))
-        (is (= [(:session-id child-task)] @cleared))))))
+        (is (= [(:session-id child-task)] @cleared))
+        (db/update-task! child-task-id
+                         {:state :completed
+                          :summary "Invoice evidence collected"})
+        (let [reconciled (task-runtime/runtime-autonomy-state parent-session-id parent-task-id)
+              refreshed-parent (db/get-task parent-task-id)]
+          (is (= 1 (count (:stack reconciled))))
+          (is (= "Review the invoice"
+                 (some-> reconciled autonomous/current-frame :title)))
+          (is (= reconciled (:autonomy-state refreshed-parent))))))))
 
 (deftest process-message-records-tool-call-items
   (let [session-id (db/create-session! :terminal)
@@ -1529,7 +1543,6 @@
                                     :channel :terminal))))
     (is (= {:stack [{:title "reply to the billing emails"
                      :summary "Sent replies"
-                     :next-step nil
                      :reason "Goal satisfied"
                      :progress-status :complete
                      :agenda [{:item "Send replies" :status :completed}]}]}
@@ -1538,7 +1551,6 @@
     (wm/ensure-wm! session-id)
     (is (= {:stack [{:title "reply to the billing emails"
                      :summary "Sent replies"
-                     :next-step nil
                      :reason "Goal satisfied"
                      :progress-status :complete
                      :agenda [{:item "Send replies" :status :completed}]}]}

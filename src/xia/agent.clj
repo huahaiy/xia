@@ -1196,11 +1196,13 @@
 (defn- status-stack
   [stack]
   (->> stack
-       (keep (fn [{:keys [title progress-status next-step]}]
+       (keep (fn [{:keys [title progress-status next-step kind child-task-id]}]
                (when title
-                 {:title title
-                  :progress_status (some-> progress-status name)
-                  :next_step next-step})))
+                 (cond-> {:title title
+                          :progress_status (some-> progress-status name)
+                          :next_step next-step}
+                   kind (assoc :kind (name kind))
+                   child-task-id (assoc :child_task_id (str child-task-id))))))
        vec
        not-empty))
 
