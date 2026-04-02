@@ -2705,7 +2705,20 @@
         (is (re-find #"Too many tool-calling rounds" (.getMessage ^Exception err)))
         (is (= {:rounds 1
                 :max-tool-rounds 1}
-               (select-keys (ex-data err) [:rounds :max-tool-rounds])))))
+               (select-keys (ex-data err) [:rounds :max-tool-rounds])))
+        (let [task-id      (:id (first (db/list-tasks {:session-id session-id})))
+              turn-id      (:id (first (db/task-turns task-id)))
+              policy-items (->> (db/turn-items turn-id)
+                                (filter #(and (= :system-note (:type %))
+                                              (= "policy-decision" (get-in % [:data :kind])))))]
+          (is (some #(= {:decision-type "tool-round-policy"
+                         :allowed false
+                         :mode "round-limit"
+                         :rounds 1
+                         :max-tool-rounds 1}
+                        (select-keys (:data %)
+                                     [:decision-type :allowed :mode :rounds :max-tool-rounds]))
+                    policy-items)))))
     (is (= 2 @llm-calls))))
 
 (deftest process-message-schedules-fact-utility-review
@@ -3511,3 +3524,53 @@
                (select-keys (ex-data err)
                             [:tool-count :max-tool-calls-per-round])))
         (is (zero? @executed))))))
+
+(deftest process-message-records-policy-decision-for-oversized-tool-round
+  (let [session-id (db/create-session! :terminal)
+        tool-calls (vec (for [i (range 13)]
+                          {"id" (str "call-" i)
+                           "function" {"name" "web-search"
+                                       "arguments" "{}"}}))]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly true)
+                  xia.tool/execute-tool              (fn [& _]
+                                                       (throw (ex-info "should not execute" {})))
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "ACTION_INTENT_JSON:"
+                                                                       "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search broadly\",\"why\":\"Need broad search\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}")
+                                                        "tool_calls" tool-calls})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id
+                                         "research this"
+                                         :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Too many tool calls in one round: 13 \(max 12\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:tool-count 13
+                :max-tool-calls-per-round 12}
+               (select-keys (ex-data err)
+                            [:tool-count :max-tool-calls-per-round])))
+        (let [task-id      (:id (first (db/list-tasks {:session-id session-id})))
+              turn-id      (:id (first (db/task-turns task-id)))
+              policy-items (->> (db/turn-items turn-id)
+                                (filter #(and (= :system-note (:type %))
+                                              (= "policy-decision" (get-in % [:data :kind])))))]
+          (is (some #(= {:decision-type "tool-call-policy"
+                         :allowed false
+                         :mode "round-call-limit"
+                         :tool-count 13
+                         :max-tool-calls-per-round 12}
+                        (select-keys (:data %)
+                                     [:decision-type :allowed :mode :tool-count :max-tool-calls-per-round]))
+                    policy-items)))))))

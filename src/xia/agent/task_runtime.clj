@@ -433,7 +433,8 @@
    (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error
                 attempt max-restarts max-attempts max-retry-rounds max-retry-wait-ms
                 backoff-ms delay-ms grace-ms failure-type failure-phase worker-phase
-                tool-risk? round request-label url status providers workload provider-id]}]
+                tool-risk? round rounds tool-count max-tool-rounds max-tool-calls-per-round
+                request-label url status providers workload provider-id]}]
      (let [target-label (or request-label
                             (some-> provider-id name)
                             tool-name
@@ -445,6 +446,8 @@
                           :restart-policy "Restart policy"
                           :http-retry-policy "HTTP retry policy"
                           :provider-retry-policy "Provider retry policy"
+                          :tool-round-policy "Tool round policy"
+                          :tool-call-policy "Tool call policy"
                           "Policy")
                         " "
                         (if allowed? "allowed" "blocked")
@@ -470,7 +473,11 @@
                                      mode (assoc :mode (name mode))
                                      reason (assoc :reason reason)
                                      attempt (assoc :attempt attempt)
+                                     rounds (assoc :rounds rounds)
+                                     tool-count (assoc :tool-count tool-count)
                                      max-attempts (assoc :max-attempts max-attempts)
+                                     max-tool-rounds (assoc :max-tool-rounds max-tool-rounds)
+                                     max-tool-calls-per-round (assoc :max-tool-calls-per-round max-tool-calls-per-round)
                                      max-retry-rounds (assoc :max-retry-rounds max-retry-rounds)
                                      max-retry-wait-ms (assoc :max-retry-wait-ms max-retry-wait-ms)
                                      max-restarts (assoc :max-restarts max-restarts)

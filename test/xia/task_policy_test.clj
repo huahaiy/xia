@@ -10,6 +10,8 @@
                                       :agent/supervisor-max-restarts 5
                                       :agent/supervisor-restart-backoff-ms 250
                                       :agent/supervisor-restart-grace-ms 900
+                                      :agent/max-tool-rounds 14
+                                      :agent/max-tool-calls-per-round 6
                                       :llm/max-provider-retry-rounds 9
                                       :llm/max-provider-retry-wait-ms 777000
                                       :agent/max-turn-llm-calls 42
@@ -25,6 +27,8 @@
     (is (= 5 (task-policy/supervisor-max-restarts)))
     (is (= 250 (task-policy/supervisor-restart-backoff-ms)))
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
+    (is (= 14 (task-policy/max-tool-rounds)))
+    (is (= 6 (task-policy/max-tool-calls-per-round)))
     (is (= 9 (task-policy/llm-max-provider-retry-rounds)))
     (is (= 777000 (task-policy/llm-max-provider-retry-wait-ms)))
     (is (= 42 (task-policy/max-turn-llm-calls)))
@@ -202,3 +206,35 @@
     (is (nil? non-retry-sleep))
     (is (true? (task-policy/llm-retryable-error? retryable)))
     (is (false? (task-policy/llm-retryable-error? permanent)))))
+
+(deftest tool-limit-decisions-capture-round-and-call-caps
+  (with-redefs [task-policy/max-tool-rounds (constantly 3)
+                task-policy/max-tool-calls-per-round (constantly 4)]
+    (let [allowed-round (task-policy/tool-round-limit-decision 1 3)
+          blocked-round (task-policy/tool-round-limit-decision 3 3)
+          allowed-calls (task-policy/tool-call-limit-decision 4)
+          blocked-calls (task-policy/tool-call-limit-decision 5)]
+      (is (= {:allowed? true
+              :mode :within-limit
+              :rounds 1
+              :max-tool-rounds 3}
+             (select-keys allowed-round
+                          [:allowed? :mode :rounds :max-tool-rounds])))
+      (is (= {:allowed? false
+              :mode :round-limit
+              :rounds 3
+              :max-tool-rounds 3}
+             (select-keys blocked-round
+                          [:allowed? :mode :rounds :max-tool-rounds])))
+      (is (= {:allowed? true
+              :mode :within-limit
+              :tool-count 4
+              :max-tool-calls-per-round 4}
+             (select-keys allowed-calls
+                          [:allowed? :mode :tool-count :max-tool-calls-per-round])))
+      (is (= {:allowed? false
+              :mode :round-call-limit
+              :tool-count 5
+              :max-tool-calls-per-round 4}
+             (select-keys blocked-calls
+                          [:allowed? :mode :tool-count :max-tool-calls-per-round]))))))

@@ -8,6 +8,8 @@
 (def ^:private default-supervisor-max-restarts 1)
 (def ^:private default-supervisor-restart-backoff-ms 100)
 (def ^:private default-supervisor-restart-grace-ms 1000)
+(def ^:private default-max-tool-rounds 100)
+(def ^:private default-max-tool-calls-per-round 12)
 (def ^:private default-http-max-attempts 3)
 (def ^:private default-http-initial-backoff-ms 1000)
 (def ^:private default-http-max-backoff-ms 8000)
@@ -44,6 +46,16 @@
   []
   (cfg/positive-long :agent/supervisor-restart-grace-ms
                      default-supervisor-restart-grace-ms))
+
+(defn max-tool-rounds
+  []
+  (cfg/positive-long :agent/max-tool-rounds
+                     default-max-tool-rounds))
+
+(defn max-tool-calls-per-round
+  []
+  (cfg/positive-long :agent/max-tool-calls-per-round
+                     default-max-tool-calls-per-round))
 
 (defn llm-max-provider-retry-rounds
   []
@@ -335,6 +347,34 @@
                (pos? remaining-ms)
                (pos? (long (or requested-delay-ms 0))))
       (min remaining-ms (long requested-delay-ms)))))
+
+(defn tool-call-limit-decision
+  [tool-count]
+  (let [tool-count (long tool-count)
+        max-tool-calls-per-round (long (max-tool-calls-per-round))
+        allowed? (<= tool-count max-tool-calls-per-round)]
+    {:allowed? allowed?
+     :mode (if allowed? :within-limit :round-call-limit)
+     :tool-count tool-count
+     :max-tool-calls-per-round max-tool-calls-per-round
+     :reason (when-not allowed?
+               (str "Too many tool calls in one round: "
+                    tool-count
+                    " (max "
+                    max-tool-calls-per-round
+                    ")"))}))
+
+(defn tool-round-limit-decision
+  [round max-tool-rounds]
+  (let [rounds (long round)
+        max-tool-rounds (long max-tool-rounds)
+        allowed? (< rounds max-tool-rounds)]
+    {:allowed? allowed?
+     :mode (if allowed? :within-limit :round-limit)
+     :rounds rounds
+     :max-tool-rounds max-tool-rounds
+     :reason (when-not allowed?
+               "Too many tool-calling rounds")}))
 
 (def ^:private non-restartable-worker-error-types
   #{:request-cancelled

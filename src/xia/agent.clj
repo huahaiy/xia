@@ -29,8 +29,6 @@
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(def ^:private default-max-tool-rounds 100)
-(def ^:private default-max-tool-calls-per-round 12)
 (def ^:private default-max-user-message-chars 32768)
 (def ^:private default-max-user-message-tokens 8000)
 (def ^:private default-max-branch-tasks 5)
@@ -117,24 +115,15 @@
 
 (defn- configured-max-tool-rounds
   []
-  (cfg/positive-long :agent/max-tool-rounds
-                     default-max-tool-rounds))
-
-(defn- configured-max-tool-calls-per-round
-  []
-  (cfg/positive-long :agent/max-tool-calls-per-round
-                     default-max-tool-calls-per-round))
+  (task-policy/max-tool-rounds))
 
 (defn- validate-tool-round-call-count!
   [tool-calls]
-  (let [tool-count (count tool-calls)
-        max-tool-calls-per-round (configured-max-tool-calls-per-round)]
-    (when (> (long tool-count) (long max-tool-calls-per-round))
-      (throw (ex-info (str "Too many tool calls in one round: "
-                           tool-count
-                           " (max "
-                           max-tool-calls-per-round
-                           ")")
+  (let [{:keys [allowed? reason tool-count max-tool-calls-per-round] :as decision}
+        (task-policy/tool-call-limit-decision (count tool-calls))]
+    (when-not allowed?
+      (prompt/policy-decision! (assoc decision :decision-type :tool-call-policy))
+      (throw (ex-info reason
                       {:type :tool-call-limit-exceeded
                        :tool-count tool-count
                        :max-tool-calls-per-round max-tool-calls-per-round})))
@@ -2113,11 +2102,14 @@
                                              execution-context
                                              round
                                              parsed-response)
-              (when (>= (long round) (long max-tool-rounds))
-                (throw (ex-info "Too many tool-calling rounds"
-                                {:type :tool-round-limit-exceeded
-                                 :rounds round
-                                 :max-tool-rounds max-tool-rounds})))
+              (let [{:keys [allowed? reason rounds max-tool-rounds] :as decision}
+                    (task-policy/tool-round-limit-decision round max-tool-rounds)]
+                (when-not allowed?
+                  (prompt/policy-decision! (assoc decision :decision-type :tool-round-policy))
+                  (throw (ex-info reason
+                                  {:type :tool-round-limit-exceeded
+                                   :rounds rounds
+                                   :max-tool-rounds max-tool-rounds}))))
               (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
                     tool-calls (get response "tool_calls")
                     assistant-msg {:role "assistant"
