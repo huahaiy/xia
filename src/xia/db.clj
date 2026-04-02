@@ -463,6 +463,7 @@
    :schedule.state/last-error {:db/valueType :db.type/string}
    :schedule.state/last-failure-signature {:db/valueType :db.type/string}
    :schedule.state/last-recovery-hint {:db/valueType :db.type/string}
+   :schedule.state/last-policy {:db/valueType :db.type/idoc :db/domain "schedule-state-policy"}
    :schedule.state/consecutive-failures {:db/valueType :db.type/long}
    :schedule.state/backoff-until {:db/valueType :db.type/instant}
 

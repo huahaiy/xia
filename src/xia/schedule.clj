@@ -14,10 +14,10 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.config :as cfg]
             [xia.cron :as cron]
             [xia.db :as db]
             [xia.remote-bridge :as remote-bridge]
+            [xia.task-policy :as task-policy]
             [xia.working-memory :as wm]))
 
 ;; ---------------------------------------------------------------------------
@@ -26,32 +26,6 @@
 
 (def ^:private max-schedules 50)
 (def ^:private min-interval-minutes 5)
-(def ^:private default-failure-backoff-minutes 15)
-(def ^:private default-max-failure-backoff-minutes (* 12 60))
-(def ^:private default-pause-after-repeated-failures 3)
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
-
-(defn- failure-backoff-minutes
-  []
-  (cfg/positive-long :schedule/failure-backoff-minutes
-                     default-failure-backoff-minutes))
-
-(defn- max-failure-backoff-minutes
-  []
-  (cfg/positive-long :schedule/max-failure-backoff-minutes
-                     default-max-failure-backoff-minutes))
-
-(defn- pause-after-repeated-failures
-  []
-  (cfg/positive-long :schedule/pause-after-repeated-failures
-                     default-pause-after-repeated-failures))
 
 (defn- actions-doc
   [actions]
@@ -92,6 +66,25 @@
   [value]
   (when (map? value)
     value))
+
+(defn- policy-doc
+  [policy]
+  (when (map? policy)
+    (reduce-kv (fn [acc k v]
+                 (assoc acc k
+                        (cond
+                          (keyword? v) (name v)
+                          (instance? java.util.Date v) v
+                          :else v)))
+               {}
+               policy)))
+
+(defn- read-policy-doc
+  [value]
+  (when (map? value)
+    (cond-> value
+      (string? (:decision-type value)) (update :decision-type keyword)
+      (string? (:mode value)) (update :mode keyword))))
 
 (defn- checkpoint-progress-status-line
   [checkpoint]
@@ -202,6 +195,7 @@
        :status                (:schedule.state/status e)
        :phase                 (:schedule.state/phase e)
        :checkpoint            (read-checkpoint-doc (:schedule.state/checkpoint e))
+       :last-policy           (read-policy-doc (:schedule.state/last-policy e))
        :checkpoint-at         (:schedule.state/checkpoint-at e)
        :last-success-at       (:schedule.state/last-success-at e)
        :last-success-summary  (:schedule.state/last-success-summary e)
@@ -239,16 +233,10 @@
                  (:phase checkpoint) (assoc :schedule.state/phase (:phase checkpoint))
                  checkpoint-doc (assoc :schedule.state/checkpoint checkpoint-doc))]
         state-eid
-        (conj [:db/retract state-eid :schedule.state/backoff-until])))
+        (conj [:db/retract state-eid :schedule.state/backoff-until])
+        state-eid
+        (conj [:db/retract state-eid :schedule.state/last-policy])))
     (task-state schedule-id)))
-
-(defn- failure-backoff-ms
-  ^long
-  [consecutive-failures]
-  (* 60 1000
-     (long-min (long (max-failure-backoff-minutes))
-               (* (long (failure-backoff-minutes))
-                  (long (Math/pow 2.0 (double (long-max 0 (dec (long consecutive-failures))))))))))
 
 (defn record-task-success!
   "Mark a schedule task run as successful and clear failure state."
@@ -267,7 +255,9 @@
                 :schedule.state/last-failure-signature ""
                 :schedule.state/last-recovery-hint ""}]
         state-eid
-        (conj [:db/retract state-eid :schedule.state/backoff-until])))
+        (conj [:db/retract state-eid :schedule.state/backoff-until])
+        state-eid
+        (conj [:db/retract state-eid :schedule.state/last-policy])))
     (when (pos? (long (or (:consecutive-failures state) 0)))
       (remote-bridge/notify-schedule-recovered!
         schedule-id
@@ -285,17 +275,12 @@
                                 "Unknown scheduled task failure")
         signature           (normalize-failure-signature error-message)
         same-failure?       (= signature (:last-failure-signature state))
-        consecutive-failures (if same-failure?
-                               (inc (long (or (:consecutive-failures state) 0)))
-                               1)
         hint                (recovery-hint error-message)
-        pause-threshold     (pause-after-repeated-failures)
-        paused?             (and same-failure?
-                                 (>= consecutive-failures (long pause-threshold)))
-        backoff-until       (when-not paused?
-                              (java.util.Date.
-                                (long (+ (.getTime ^java.util.Date now)
-                                         (failure-backoff-ms consecutive-failures)))))]
+        {:keys [mode consecutive-failures backoff-until] :as policy}
+        (task-policy/schedule-failure-policy {:same-failure? same-failure?
+                                              :previous-failures (:consecutive-failures state)
+                                              :now now})
+        paused?             (= :pause mode)]
     (db/transact!
       (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
                         :schedule.state/status (if paused? :paused :backoff)
@@ -304,6 +289,7 @@
                         :schedule.state/last-error error-message
                         :schedule.state/last-failure-signature signature
                         :schedule.state/last-recovery-hint hint
+                        :schedule.state/last-policy (policy-doc policy)
                         :schedule.state/consecutive-failures consecutive-failures}
                  backoff-until (assoc :schedule.state/backoff-until backoff-until))
                (cond-> {:schedule/id schedule-id}
@@ -314,6 +300,7 @@
     (remote-bridge/notify-schedule-failure!
       schedule-id
       {:paused? paused?
+       :policy policy
        :consecutive-failures consecutive-failures
        :backoff-until backoff-until
        :error-message error-message})

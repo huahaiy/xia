@@ -12,6 +12,9 @@
                                       :agent/supervisor-restart-grace-ms 900
                                       :agent/max-tool-rounds 14
                                       :agent/max-tool-calls-per-round 6
+                                      :schedule/failure-backoff-minutes 20
+                                      :schedule/max-failure-backoff-minutes 600
+                                      :schedule/pause-after-repeated-failures 4
                                       :llm/max-provider-retry-rounds 9
                                       :llm/max-provider-retry-wait-ms 777000
                                       :agent/max-turn-llm-calls 42
@@ -29,6 +32,9 @@
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
     (is (= 14 (task-policy/max-tool-rounds)))
     (is (= 6 (task-policy/max-tool-calls-per-round)))
+    (is (= 20 (task-policy/schedule-failure-backoff-minutes)))
+    (is (= 600 (task-policy/schedule-max-failure-backoff-minutes)))
+    (is (= 4 (task-policy/schedule-pause-after-repeated-failures)))
     (is (= 9 (task-policy/llm-max-provider-retry-rounds)))
     (is (= 777000 (task-policy/llm-max-provider-retry-wait-ms)))
     (is (= 42 (task-policy/max-turn-llm-calls)))
@@ -238,3 +244,36 @@
               :max-tool-calls-per-round 4}
              (select-keys blocked-calls
                           [:allowed? :mode :tool-count :max-tool-calls-per-round]))))))
+
+(deftest schedule-failure-policy-captures-backoff-and-pause
+  (let [now (java.util.Date. 1000)]
+    (with-redefs [task-policy/schedule-failure-backoff-minutes (constantly 15)
+                  task-policy/schedule-max-failure-backoff-minutes (constantly 720)
+                  task-policy/schedule-pause-after-repeated-failures (constantly 3)]
+      (let [backoff (task-policy/schedule-failure-policy {:same-failure? false
+                                                          :previous-failures 0
+                                                          :now now})
+            paused  (task-policy/schedule-failure-policy {:same-failure? true
+                                                          :previous-failures 2
+                                                          :now now})]
+        (is (= {:decision-type :schedule-failure-policy
+                :mode :backoff
+                :same-failure? false
+                :consecutive-failures 1
+                :pause-threshold 3
+                :backoff-minutes 15
+                :max-backoff-minutes 720}
+               (select-keys backoff
+                            [:decision-type :mode :same-failure? :consecutive-failures
+                             :pause-threshold :backoff-minutes :max-backoff-minutes])))
+        (is (instance? java.util.Date (:backoff-until backoff)))
+        (is (= {:decision-type :schedule-failure-policy
+                :mode :pause
+                :same-failure? true
+                :consecutive-failures 3
+                :pause-threshold 3
+                :backoff-ms nil}
+               (select-keys paused
+                            [:decision-type :mode :same-failure? :consecutive-failures
+                             :pause-threshold :backoff-ms])))
+        (is (nil? (:backoff-until paused)))))))

@@ -18,6 +18,9 @@
 (def ^:private default-llm-retry-statuses #{408 409 425 429 500 502 503 504})
 (def ^:private default-max-provider-retry-rounds 4)
 (def ^:private default-max-provider-retry-wait-ms 300000)
+(def ^:private default-schedule-failure-backoff-minutes 15)
+(def ^:private default-schedule-max-failure-backoff-minutes (* 12 60))
+(def ^:private default-schedule-pause-after-repeated-failures 3)
 (def ^:private default-max-turn-llm-calls 600)
 (def ^:private default-max-turn-total-tokens 2000000)
 (def ^:private default-max-turn-wall-clock-ms 21600000)
@@ -56,6 +59,21 @@
   []
   (cfg/positive-long :agent/max-tool-calls-per-round
                      default-max-tool-calls-per-round))
+
+(defn schedule-failure-backoff-minutes
+  []
+  (cfg/positive-long :schedule/failure-backoff-minutes
+                     default-schedule-failure-backoff-minutes))
+
+(defn schedule-max-failure-backoff-minutes
+  []
+  (cfg/positive-long :schedule/max-failure-backoff-minutes
+                     default-schedule-max-failure-backoff-minutes))
+
+(defn schedule-pause-after-repeated-failures
+  []
+  (cfg/positive-long :schedule/pause-after-repeated-failures
+                     default-schedule-pause-after-repeated-failures))
 
 (defn llm-max-provider-retry-rounds
   []
@@ -375,6 +393,42 @@
      :max-tool-rounds max-tool-rounds
      :reason (when-not allowed?
                "Too many tool-calling rounds")}))
+
+(defn schedule-failure-backoff-ms
+  ^long
+  [consecutive-failures]
+  (* 60 1000
+     (min (long (schedule-max-failure-backoff-minutes))
+          (* (long (schedule-failure-backoff-minutes))
+             (long (Math/pow 2.0 (double (max 0 (dec (long consecutive-failures))))))))))
+
+(defn schedule-failure-policy
+  [{:keys [same-failure? previous-failures now]}]
+  (let [previous-failures (long (or previous-failures 0))
+        consecutive-failures (if same-failure?
+                               (inc previous-failures)
+                               1)
+        pause-threshold (long (schedule-pause-after-repeated-failures))
+        paused? (and same-failure?
+                     (>= consecutive-failures pause-threshold))
+        backoff-ms (when-not paused?
+                     (long (schedule-failure-backoff-ms consecutive-failures)))
+        backoff-until (when backoff-ms
+                        (java.util.Date.
+                         (long (+ (.getTime ^java.util.Date now) backoff-ms))))]
+    {:decision-type :schedule-failure-policy
+     :mode (if paused? :pause :backoff)
+     :same-failure? (boolean same-failure?)
+     :consecutive-failures consecutive-failures
+     :pause-threshold pause-threshold
+     :backoff-ms backoff-ms
+     :backoff-minutes (when backoff-ms
+                        (long (/ backoff-ms 60000)))
+     :max-backoff-minutes (long (schedule-max-failure-backoff-minutes))
+     :backoff-until backoff-until
+     :reason (if paused?
+               "Paused after repeated identical schedule failures"
+               "Applied schedule failure backoff")})) 
 
 (def ^:private non-restartable-worker-error-types
   #{:request-cancelled
