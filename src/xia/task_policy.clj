@@ -34,8 +34,19 @@
 (def ^:private default-max-branch-tasks 5)
 (def ^:private default-max-parallel-branches 3)
 (def ^:private default-max-branch-tool-rounds 5)
+(def ^:private default-branch-error-stack-frames 12)
+(def ^:private default-llm-status-preview-chars 160)
+(def ^:private default-llm-status-update-interval-ms 500)
+(def ^:private default-supervisor-tick-ms 250)
+(def ^:private default-task-control-wait-ms 10000)
 (def ^:private default-max-schedules 50)
 (def ^:private default-min-schedule-interval-minutes 5)
+(def ^:private default-scheduler-max-concurrent-runs 4)
+(def ^:private default-async-background-max-threads 4)
+(def ^:private default-async-background-queue-capacity 256)
+(def ^:private default-async-parallel-max-threads
+  (max 4 (.availableProcessors (Runtime/getRuntime))))
+(def ^:private default-async-parallel-queue-capacity 256)
 
 (defn supervisor-max-identical-iterations
   []
@@ -169,6 +180,31 @@
   (cfg/positive-long :agent/max-branch-tool-rounds
                      default-max-branch-tool-rounds))
 
+(defn branch-error-stack-frames
+  []
+  (cfg/positive-long :agent/branch-error-stack-frames
+                     default-branch-error-stack-frames))
+
+(defn llm-status-preview-chars
+  []
+  (cfg/positive-long :agent/llm-status-preview-chars
+                     default-llm-status-preview-chars))
+
+(defn llm-status-update-interval-ms
+  []
+  (cfg/positive-long :agent/llm-status-update-interval-ms
+                     default-llm-status-update-interval-ms))
+
+(defn supervisor-tick-ms
+  []
+  (cfg/positive-long :agent/supervisor-tick-ms
+                     default-supervisor-tick-ms))
+
+(defn task-control-wait-ms
+  []
+  (cfg/positive-long :agent/task-control-wait-ms
+                     default-task-control-wait-ms))
+
 (defn max-schedules
   []
   (cfg/positive-long :schedule/max-schedules
@@ -178,6 +214,31 @@
   []
   (cfg/positive-long :schedule/min-interval-minutes
                      default-min-schedule-interval-minutes))
+
+(defn scheduler-max-concurrent-runs
+  []
+  (cfg/positive-long :scheduler/max-concurrent-runs
+                     default-scheduler-max-concurrent-runs))
+
+(defn async-background-max-threads
+  []
+  (cfg/positive-long :async/background-max-threads
+                     default-async-background-max-threads))
+
+(defn async-background-queue-capacity
+  []
+  (cfg/positive-long :async/background-queue-capacity
+                     default-async-background-queue-capacity))
+
+(defn async-parallel-max-threads
+  []
+  (cfg/positive-long :async/parallel-max-threads
+                     default-async-parallel-max-threads))
+
+(defn async-parallel-queue-capacity
+  []
+  (cfg/positive-long :async/parallel-queue-capacity
+                     default-async-parallel-queue-capacity))
 
 (defn http-request-retry-config
   [req]

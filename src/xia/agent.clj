@@ -16,7 +16,6 @@
             [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.audit :as audit]
-            [xia.config :as cfg]
             [xia.context :as context]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -29,14 +28,6 @@
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(def ^:private default-max-branch-tasks 5)
-(def ^:private default-max-parallel-branches 3)
-(def ^:private default-max-branch-tool-rounds 5)
-(def ^:private default-branch-error-stack-frames 12)
-(def ^:private default-llm-status-preview-chars 160)
-(def ^:private default-llm-status-update-interval-ms 500)
-(def ^:private default-supervisor-tick-ms 250)
-(def ^:private default-task-control-wait-ms 10000)
 (defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
 (defonce ^:private active-task-runs (atom {}))
@@ -122,8 +113,7 @@
 
 (defn- branch-error-stack-frames
   []
-  (cfg/positive-long :agent/branch-error-stack-frames
-                     default-branch-error-stack-frames))
+  (task-policy/branch-error-stack-frames))
 
 (defn- max-branch-tasks
   []
@@ -139,23 +129,19 @@
 
 (defn- llm-status-preview-chars
   []
-  (cfg/positive-long :agent/llm-status-preview-chars
-                     default-llm-status-preview-chars))
+  (task-policy/llm-status-preview-chars))
 
 (defn- llm-status-update-interval-ms
   []
-  (cfg/positive-long :agent/llm-status-update-interval-ms
-                     default-llm-status-update-interval-ms))
+  (task-policy/llm-status-update-interval-ms))
 
 (defn- supervisor-tick-ms
   []
-  (cfg/positive-long :agent/supervisor-tick-ms
-                     default-supervisor-tick-ms))
+  (task-policy/supervisor-tick-ms))
 
 (defn- task-control-wait-ms
   []
-  (cfg/positive-long :agent/task-control-wait-ms
-                     default-task-control-wait-ms))
+  (task-policy/task-control-wait-ms))
 
 (defn- new-request-id
   []

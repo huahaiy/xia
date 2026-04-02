@@ -30,8 +30,18 @@
                                       :agent/max-branch-tasks 8
                                       :agent/max-parallel-branches 4
                                       :agent/max-branch-tool-rounds 6
+                                      :agent/branch-error-stack-frames 15
+                                      :agent/llm-status-preview-chars 210
+                                      :agent/llm-status-update-interval-ms 750
+                                      :agent/supervisor-tick-ms 12
+                                      :agent/task-control-wait-ms 4321
                                       :schedule/max-schedules 55
                                       :schedule/min-interval-minutes 7
+                                      :scheduler/max-concurrent-runs 9
+                                      :async/background-max-threads 11
+                                      :async/background-queue-capacity 300
+                                      :async/parallel-max-threads 12
+                                      :async/parallel-queue-capacity 400
                                       default-value))
                 cfg/positive-double (fn [key-name default-value]
                                       (case key-name
@@ -65,8 +75,18 @@
     (is (= 8 (task-policy/max-branch-tasks)))
     (is (= 4 (task-policy/max-parallel-branches)))
     (is (= 6 (task-policy/max-branch-tool-rounds)))
+    (is (= 15 (task-policy/branch-error-stack-frames)))
+    (is (= 210 (task-policy/llm-status-preview-chars)))
+    (is (= 750 (task-policy/llm-status-update-interval-ms)))
+    (is (= 12 (task-policy/supervisor-tick-ms)))
+    (is (= 4321 (task-policy/task-control-wait-ms)))
     (is (= 55 (task-policy/max-schedules)))
-    (is (= 7 (task-policy/min-schedule-interval-minutes)))))
+    (is (= 7 (task-policy/min-schedule-interval-minutes)))
+    (is (= 9 (task-policy/scheduler-max-concurrent-runs)))
+    (is (= 11 (task-policy/async-background-max-threads)))
+    (is (= 300 (task-policy/async-background-queue-capacity)))
+    (is (= 12 (task-policy/async-parallel-max-threads)))
+    (is (= 400 (task-policy/async-parallel-queue-capacity)))))
 
 (deftest turn-llm-budget-records-usage-and-exhaustion
   (with-redefs [task-policy/max-turn-llm-calls (constantly 2)
