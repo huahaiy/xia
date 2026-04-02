@@ -277,3 +277,20 @@
                             [:decision-type :mode :same-failure? :consecutive-failures
                              :pause-threshold :backoff-ms])))
         (is (nil? (:backoff-until paused)))))))
+
+(deftest rate-limit-policies-capture-provider-and-service-blocks
+  (is (= {:decision-type :provider-rate-limit-policy
+          :allowed? false
+          :mode :rate-limit
+          :provider-id :default
+          :workload :assistant
+          :limit 2}
+         (select-keys (task-policy/provider-rate-limit-policy :default :assistant 2)
+                      [:decision-type :allowed? :mode :provider-id :workload :limit])))
+  (is (= {:decision-type :service-rate-limit-policy
+          :allowed? false
+          :mode :rate-limit
+          :service-id :limited
+          :limit 3}
+         (select-keys (task-policy/service-rate-limit-policy :limited 3)
+                      [:decision-type :allowed? :mode :service-id :limit]))))

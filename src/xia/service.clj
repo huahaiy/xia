@@ -23,7 +23,8 @@
             [xia.http-client :as http]
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
-            [xia.rate-limit :as rate-limit])
+            [xia.rate-limit :as rate-limit]
+            [xia.task-policy :as task-policy])
   (:import [java.util Base64]
            [java.util.concurrent ConcurrentHashMap]
            [java.util.concurrent.atomic AtomicLong]))
@@ -189,6 +190,9 @@
       rate-limit-window-ms
       limit
       (fn []
+        (prompt/policy-decision! (task-policy/service-rate-limit-policy
+                                  service-id
+                                  limit))
         (ex-info (str "Rate limit exceeded for service " (name service-id)
                       " (max " limit " requests/minute)")
                  {:service-id service-id

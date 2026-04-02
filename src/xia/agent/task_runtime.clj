@@ -434,9 +434,10 @@
                 attempt max-restarts max-attempts max-retry-rounds max-retry-wait-ms
                 backoff-ms delay-ms grace-ms failure-type failure-phase worker-phase
                 tool-risk? round rounds tool-count max-tool-rounds max-tool-calls-per-round
-                request-label url status providers workload provider-id]}]
+                request-label url status providers workload provider-id service-id limit]}]
      (let [target-label (or request-label
                             (some-> provider-id name)
+                            (some-> service-id name)
                             tool-name
                             (some-> tool-id name)
                             "request")
@@ -446,6 +447,8 @@
                           :restart-policy "Restart policy"
                           :http-retry-policy "HTTP retry policy"
                           :provider-retry-policy "Provider retry policy"
+                          :provider-rate-limit-policy "Provider rate limit policy"
+                          :service-rate-limit-policy "Service rate limit policy"
                           :tool-round-policy "Tool round policy"
                           :tool-call-policy "Tool call policy"
                           "Policy")
@@ -467,7 +470,9 @@
                                      policy (assoc :policy (name policy))
                                      request-label (assoc :request-label request-label)
                                      provider-id (assoc :provider-id (name provider-id))
+                                     service-id (assoc :service-id (name service-id))
                                      workload (assoc :workload (name workload))
+                                     limit (assoc :limit limit)
                                      url (assoc :url url)
                                      status (assoc :status-code status)
                                      mode (assoc :mode (name mode))

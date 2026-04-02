@@ -244,12 +244,15 @@
                          :auth-key              "tok"
                          :rate-limit-per-minute 2})
   (let [request-count (atom 0)
-        now-values    (atom [0 1000 2000])]
+        now-values    (atom [0 1000 2000])
+        decisions     (atom [])]
     (with-redefs [xia.service/service-rate-limits (ConcurrentHashMap.)
                   xia.service/current-time-ms     (fn []
                                                     (let [value (first @now-values)]
                                                       (swap! now-values rest)
                                                       value))
+                  xia.prompt/policy-decision!     (fn [decision]
+                                                    (swap! decisions conj decision))
                   xia.http-client/request         (fn [_req]
                                                     (swap! request-count inc)
                                                     {:status 200
@@ -260,6 +263,14 @@
       (is (thrown-with-msg?
             clojure.lang.ExceptionInfo #"Rate limit exceeded for service limited"
             (service/request :limited :get "/three")))
+      (is (= [{:decision-type :service-rate-limit-policy
+               :allowed? false
+               :mode :rate-limit
+               :service-id :limited
+               :limit 2}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :service-id :limit])
+                   @decisions)))
       (is (= 2 @request-count)))))
 
 (deftest check-rate-limit-overflow-does-not-mutate-state

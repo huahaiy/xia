@@ -1066,6 +1066,10 @@
       rate-limit-window-ms
       limit
       (fn []
+        (prompt/policy-decision! (task-policy/provider-rate-limit-policy
+                                  provider-id
+                                  workload
+                                  limit))
         (ex-info (str "Rate limit exceeded for provider " (name provider-id)
                       " (max " limit " requests/minute)")
                  {:type        :llm/rate-limit

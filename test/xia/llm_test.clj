@@ -175,7 +175,8 @@
 
 (deftest chat-enforces-provider-rate-limit-before-http-request
   (let [request-count (atom 0)
-        provider-health* (atom {})]
+        provider-health* (atom {})
+        decisions (atom [])]
     (with-redefs [xia.db/get-default-provider
                   (constantly {:llm.provider/id :default
                                :llm.provider/base-url "https://api.example.com/v1"
@@ -194,6 +195,9 @@
                   (constantly 4)
                   xia.llm/max-provider-retry-wait-ms
                   (constantly 300000)
+                  xia.prompt/policy-decision!
+                  (fn [decision]
+                    (swap! decisions conj decision))
                   xia.http-client/request
                   (fn [_req]
                     (swap! request-count inc)
@@ -207,6 +211,15 @@
             clojure.lang.ExceptionInfo
             #"Rate limit exceeded for provider default"
             (llm/chat-simple [{"role" "user" "content" "three"}])))
+      (is (= [{:decision-type :provider-rate-limit-policy
+               :allowed? false
+               :mode :rate-limit
+               :provider-id :default
+               :workload nil
+               :limit 2}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :provider-id :workload :limit])
+                   @decisions)))
       (is (= 2 @request-count))
       (is (= 0 (get-in @provider-health* [:default :consecutive-failures])))
       (is (nil? (get-in @provider-health* [:default :last-error]))))))

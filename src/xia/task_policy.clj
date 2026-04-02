@@ -430,6 +430,27 @@
                "Paused after repeated identical schedule failures"
                "Applied schedule failure backoff")})) 
 
+(defn provider-rate-limit-policy
+  [provider-id workload limit]
+  {:decision-type :provider-rate-limit-policy
+   :allowed? false
+   :mode :rate-limit
+   :provider-id provider-id
+   :workload workload
+   :limit (long limit)
+   :reason (str "Rate limit exceeded for provider " (name provider-id)
+                " (max " (long limit) " requests/minute)")})
+
+(defn service-rate-limit-policy
+  [service-id limit]
+  {:decision-type :service-rate-limit-policy
+   :allowed? false
+   :mode :rate-limit
+   :service-id service-id
+   :limit (long limit)
+   :reason (str "Rate limit exceeded for service " (name service-id)
+                " (max " (long limit) " requests/minute)")})
+
 (def ^:private non-restartable-worker-error-types
   #{:request-cancelled
     :autonomous-loop-stalled
