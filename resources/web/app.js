@@ -11,6 +11,7 @@ const state = {
   pendingInput: null,
   pendingApproval: null,
   sending: false,
+  taskControlSubmitting: '',
   inputSubmitting: false,
   approvalSubmitting: false,
   localDocs: [],
@@ -659,6 +660,62 @@ function currentTaskCheckpointView() {
   return asObject(inspection.last_checkpoint);
 }
 
+function currentTaskLatestOutputView() {
+  const inspection = currentTaskInspection();
+  return asObject(asArray(inspection.recent_output)[0] || inspection.last_output);
+}
+
+function currentTaskControlActions() {
+  const task = asObject(state.currentTask);
+  const taskState = firstPresentText(currentTaskStateView().taskState, task.state).toLowerCase();
+  if (!task.id || !taskState) return [];
+  if (taskState === 'running') {
+    return [
+      { intent: 'pause', label: 'Pause', tone: 'secondary' },
+      { intent: 'stop', label: 'Stop', tone: 'secondary' }
+    ];
+  }
+  if (taskState === 'waiting_input' || taskState === 'waiting_approval') {
+    return [
+      { intent: 'stop', label: 'Stop', tone: 'secondary' }
+    ];
+  }
+  if (taskState === 'paused') {
+    return [
+      { intent: 'resume', label: 'Resume', tone: 'primary' },
+      { intent: 'stop', label: 'Stop', tone: 'secondary' }
+    ];
+  }
+  return [];
+}
+
+function currentTaskSummaryText() {
+  const task = asObject(state.currentTask);
+  const currentState = currentTaskStateView();
+  const attention = currentTaskAttentionView();
+  const latestOutput = currentTaskLatestOutputView();
+  const agenda = currentTaskAgendaView();
+  return [
+    firstPresentText(task.title) ? ('Task: ' + firstPresentText(task.title)) : '',
+    firstPresentText(currentState.taskState) ? ('State: ' + titleizeToken(currentState.taskState)) : '',
+    firstPresentText(currentState.phase) ? ('Phase: ' + titleizeToken(currentState.phase)) : '',
+    firstPresentText(currentState.currentFocus) ? ('Focus: ' + currentState.currentFocus) : '',
+    firstPresentText(currentState.nextStep) ? ('Next: ' + currentState.nextStep) : '',
+    firstPresentText(attention.summary) ? ('Needs: ' + attention.summary) : '',
+    firstPresentText(latestOutput.summary, latestOutput.text) ? ('Latest output: ' + firstPresentText(latestOutput.text, latestOutput.summary)) : '',
+    agenda.length ? ('Agenda: ' + agenda.map((item) => {
+      const label = firstPresentText(item.item, 'item');
+      const status = firstPresentText(item.status);
+      return status ? (label + ' [' + titleizeToken(status) + ']') : label;
+    }).join('; ')) : ''
+  ].filter(Boolean).join('\n');
+}
+
+function currentTaskLatestOutputText() {
+  const latestOutput = currentTaskLatestOutputView();
+  return firstPresentText(latestOutput.text, latestOutput.summary);
+}
+
 function taskBadgeTone(value) {
   const normalized = firstPresentText(value).toLowerCase();
   if (!normalized) return 'neutral';
@@ -801,6 +858,47 @@ function renderCurrentTaskPanel() {
     overview.appendChild(inlineMeta);
   }
 
+  const utilityRow = document.createElement('div');
+  utilityRow.className = 'actions task-utility-row';
+  const copySummaryButton = document.createElement('button');
+  copySummaryButton.type = 'button';
+  copySummaryButton.className = 'secondary';
+  copySummaryButton.textContent = 'Copy Summary';
+  copySummaryButton.addEventListener('click', () => {
+    copyText(currentTaskSummaryText(), 'Task summary copied');
+  });
+  utilityRow.appendChild(copySummaryButton);
+  const latestOutputText = currentTaskLatestOutputText();
+  if (latestOutputText) {
+    const copyOutputButton = document.createElement('button');
+    copyOutputButton.type = 'button';
+    copyOutputButton.className = 'secondary';
+    copyOutputButton.textContent = 'Copy Latest Output';
+    copyOutputButton.addEventListener('click', () => {
+      copyText(latestOutputText, 'Latest output copied');
+    });
+    utilityRow.appendChild(copyOutputButton);
+  }
+  overview.appendChild(utilityRow);
+
+  const controls = currentTaskControlActions();
+  if (controls.length) {
+    const controlRow = document.createElement('div');
+    controlRow.className = 'actions task-control-row';
+    controls.forEach((control) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = control.tone === 'primary' ? 'primary' : 'secondary';
+      button.textContent = state.taskControlSubmitting === control.intent
+        ? (titleizeToken(control.intent) + '...')
+        : control.label;
+      button.disabled = !!state.taskControlSubmitting;
+      button.addEventListener('click', () => submitTaskControl(control.intent));
+      controlRow.appendChild(button);
+    });
+    overview.appendChild(controlRow);
+  }
+
   const metaGrid = document.createElement('div');
   metaGrid.className = 'task-meta-grid';
   const metaEntries = [
@@ -866,6 +964,23 @@ function renderCurrentTaskPanel() {
     });
     if (attentionMeta.childNodes.length) {
       attentionCard.appendChild(attentionMeta);
+    }
+    if (attention.kind === 'waiting_input' || attention.kind === 'waiting_approval') {
+      const actions = document.createElement('div');
+      actions.className = 'actions task-control-row';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'primary';
+      button.textContent = attention.kind === 'waiting_input' ? 'Enter Input' : 'Review Approval';
+      button.addEventListener('click', () => {
+        if (attention.kind === 'waiting_input') {
+          jumpToPendingInput();
+        } else {
+          jumpToPendingApproval();
+        }
+      });
+      actions.appendChild(button);
+      attentionCard.appendChild(actions);
     }
     currentTaskPanelEl.appendChild(attentionCard);
   }
@@ -943,6 +1058,7 @@ function resetCurrentSession(statusText) {
   state.pendingInput = null;
   state.pendingApproval = null;
   state.sending = false;
+  state.taskControlSubmitting = '';
   state.inputSubmitting = false;
   state.approvalSubmitting = false;
   state.liveStatus = null;
@@ -1164,10 +1280,91 @@ function applyTaskSnapshot(task, options) {
       const startedAt = Date.parse(firstNonEmpty(task.started_at, task.created_at, ''));
       state.sendStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now();
     }
+  } else if (!taskIsLive(task) && opts.markSending !== true) {
+    state.sending = false;
+    state.sendStartedAt = 0;
   }
   updateComposerState();
   syncStatus();
   return task;
+}
+
+async function submitTaskControl(intent) {
+  if (!state.currentTaskId || state.taskControlSubmitting) return;
+  state.taskControlSubmitting = intent;
+  renderCurrentTaskPanel();
+  try {
+    const response = await safeFetch('/tasks/' + encodeURIComponent(state.currentTaskId)
+      + '/' + encodeURIComponent(intent), {
+      method: 'POST'
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || ('Failed to ' + intent + ' task'));
+    }
+    if (data.task) {
+      applyTaskSnapshot(data.task, {
+        markSending: intent === 'resume'
+      });
+    } else if (intent === 'resume' && data.status === 'running') {
+      state.sending = true;
+      if (!state.sendStartedAt) state.sendStartedAt = Date.now();
+      syncStatus();
+      await pollCurrentTask();
+    } else if (intent === 'pause' || intent === 'stop') {
+      await pollCurrentTask();
+    }
+    if (intent === 'resume') {
+      setStatus('Task resumed');
+      if (!openTaskEventStream()) {
+        await pollTaskRuntime();
+      }
+    } else if (intent === 'pause') {
+      closeTaskEventStream();
+      state.sending = false;
+      state.sendStartedAt = 0;
+      setStatus('Task paused');
+    } else if (intent === 'stop') {
+      closeTaskEventStream();
+      state.sending = false;
+      state.sendStartedAt = 0;
+      setStatus('Task stopped');
+    }
+  } catch (err) {
+    setStatus(err.message || ('Failed to ' + intent + ' task'));
+  } finally {
+    state.taskControlSubmitting = '';
+    renderCurrentTaskPanel();
+  }
+}
+
+function jumpToPendingInput() {
+  if (!state.pendingInput) {
+    pollPrompt().then(() => {
+      window.setTimeout(jumpToPendingInput, 100);
+    });
+    return;
+  }
+  inputPanelEl.hidden = false;
+  inputPanelEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  window.setTimeout(() => {
+    inputValueEl.focus();
+    inputValueEl.select();
+  }, 120);
+}
+
+function jumpToPendingApproval() {
+  if (!state.pendingApproval) {
+    pollApproval().then(() => {
+      window.setTimeout(jumpToPendingApproval, 100);
+    });
+    return;
+  }
+  approvalPanelEl.hidden = false;
+  approvalPanelEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  window.setTimeout(() => {
+    allowApprovalEl.focus();
+  }, 120);
 }
 
 function applyRuntimeEvent(event) {

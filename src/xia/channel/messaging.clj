@@ -5,11 +5,13 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.audit :as audit]
             [xia.db :as db]
             [xia.http-client :as http-client]
-            [xia.prompt :as prompt])
+            [xia.prompt :as prompt]
+            [xia.task-inspection :as task-inspection])
   (:import [java.nio.charset StandardCharsets]
            [java.util Date]
            [java.util.concurrent Executors ScheduledExecutorService TimeUnit]
@@ -30,6 +32,14 @@
 (def ^:private telegram-message-max-chars 3500)
 (def ^:private default-interaction-timeout-ms (* 15 60 1000))
 (def ^:private interaction-poll-ms 500)
+(def ^:private status-replies
+  #{"status" "/status" "task" "/task" "task status" "/task-status"})
+(def ^:private help-replies
+  #{"help" "/help" "commands" "/commands" "task help" "/task-help"})
+(def ^:private output-replies
+  #{"output" "/output" "last output" "latest output" "task output" "/task-output"})
+(def ^:private activity-replies
+  #{"activity" "/activity" "recent activity" "task activity" "/task-activity"})
 (def ^:private imessage-chat-db-path
   (str (System/getProperty "user.home") "/Library/Messages/chat.db"))
 
@@ -373,6 +383,221 @@
   [text]
   (some-> text str str/trim not-empty))
 
+(defn- titleize-token
+  [value]
+  (let [text (some-> value
+                     str
+                     (str/replace #"[_-]+" " ")
+                     str/trim
+                     not-empty)]
+    (when text
+      (str/capitalize text))))
+
+(defn- truncate-summary
+  [text max-chars]
+  (let [text* (normalize-outbound-text text)]
+    (cond
+      (nil? text*) nil
+      (<= (count text*) max-chars) text*
+      :else (str (subs text* 0 (max 0 (- max-chars 3))) "..."))))
+
+(defn- parse-status-intent
+  [user-message]
+  (let [value (some-> user-message str str/trim str/lower-case)]
+    (when (contains? status-replies value)
+      :status)))
+
+(defn- parse-help-intent
+  [user-message]
+  (let [value (some-> user-message str str/trim str/lower-case)]
+    (when (contains? help-replies value)
+      :help)))
+
+(defn- parse-output-intent
+  [user-message]
+  (let [value (some-> user-message str str/trim str/lower-case)]
+    (when (contains? output-replies value)
+      :output)))
+
+(defn- parse-activity-intent
+  [user-message]
+  (let [value (some-> user-message str str/trim str/lower-case)]
+    (when (contains? activity-replies value)
+      :activity)))
+
+(defn- current-task-context
+  ([session-id]
+   (current-task-context session-id true))
+  ([session-id compact?]
+   (when-let [task (db/current-session-task session-id)]
+     (let [autonomy-state (task-runtime/runtime-autonomy-state session-id (:id task))
+           inspection     (task-inspection/task-inspection
+                           {:truncate-text truncate-summary}
+                           task
+                           autonomy-state
+                           compact?)]
+       {:task task
+        :autonomy-state autonomy-state
+        :inspection inspection}))))
+
+(defn- task-status-text
+  [session-id]
+  (if-let [{:keys [task inspection]} (current-task-context session-id true)]
+    (let [inspection     inspection
+          current-state  (or (:current_state inspection) {})
+          current-tip    (or (:current_tip inspection) {})
+          attention      (or (:attention inspection) {})
+          last-activity  (or (:last_activity inspection)
+                             (:last_output inspection)
+                             (:last_tool_activity inspection))
+          state-label    (titleize-token (or (:task_state current-state)
+                                             (:state task)))
+          phase-label    (titleize-token (:phase current-state))
+          progress-label (titleize-token (or (:progress_status current-state)
+                                             (:progress_status current-tip)))
+          control-hint   (case (keyword (or (:state task)
+                                            (some-> (:task_state current-state) keyword)))
+                           :running "Reply PAUSE or STOP to control it."
+                           :waiting_input "Reply with the requested input, or STOP to end the task."
+                           :waiting_approval "Reply YES or NO to the approval request, or STOP to end the task."
+                           :paused "Reply RESUME or STOP to control it."
+                           nil)]
+      (str/join
+       "\n"
+       (remove str/blank?
+               [(str "Task: " (or (normalize-outbound-text (:title task))
+                                  "Current task"))
+                (str "State: "
+                     (or state-label "Unknown")
+                     (when phase-label
+                       (str " [" phase-label "]"))
+                     (when progress-label
+                       (str " · " progress-label)))
+                (when-let [focus (normalize-outbound-text (or (:current_focus current-state)
+                                                              (:title current-tip)))]
+                  (str "Focus: " focus))
+                (when-let [next-step (normalize-outbound-text (or (:next_step current-state)
+                                                                  (:next_step current-tip)))]
+                  (str "Next: " next-step))
+                (when-let [needs (normalize-outbound-text (:summary attention))]
+                  (str "Needs: " needs))
+                (when-let [recent (normalize-outbound-text (:summary last-activity))]
+                  (str "Recent: " recent))
+                control-hint])))
+    "No current task. Send a message to start one."))
+
+(defn- task-help-text
+  [session-id]
+  (let [task (db/current-session-task session-id)
+        task-state (some-> task :state)]
+    (str/join
+     "\n"
+     (remove str/blank?
+             ["Commands:"
+              "- STATUS: show the current task summary"
+              (when task
+                "- OUTPUT: show the latest assistant output")
+              (when task
+                "- ACTIVITY: show recent task actions")
+              (when task
+                (str "- "
+                     (case task-state
+                       :paused "RESUME: resume the current task"
+                       :running "PAUSE: pause the current task"
+                       :waiting_input "STOP: stop the current task"
+                       :waiting_approval "STOP: stop the current task"
+                       "PAUSE / RESUME / STOP: control the current task")))
+              (when (#{:running :waiting_input :waiting_approval} task-state)
+                "- CANCEL: interrupt the current task")
+              (when (= :waiting_input task-state)
+                "- Reply with the requested value to continue the task")
+              (when (= :waiting_approval task-state)
+                "- Reply YES or NO to answer the approval request")
+              (when-not task
+                "- Send a normal message to start a task")]))))
+
+(defn- activity-kind-label
+  [kind]
+  (case kind
+    "assistant_output" "Output"
+    "tool_requested" "Tool requested"
+    "tool_completed" "Tool completed"
+    "status_update" "Status"
+    "checkpoint" "Checkpoint"
+    "input_requested" "Input requested"
+    "approval_requested" "Approval requested"
+    "input_received" "Input received"
+    "approval_decided" "Approval decided"
+    "policy_decision" "Policy"
+    "budget_exhausted" "Budget"
+    "note" "Note"
+    "Activity"))
+
+(defn- task-output-text
+  [session-id]
+  (if-let [{:keys [task inspection]} (current-task-context session-id false)]
+    (let [current-state (or (:current_state inspection) {})
+          current-tip   (or (:current_tip inspection) {})
+          latest-output (or (first (:recent_output inspection))
+                            (:last_output inspection))
+          recent        (or (:last_activity inspection)
+                            (:last_tool_activity inspection))
+          state-label   (titleize-token (or (:task_state current-state)
+                                            (:state task)))
+          next-step     (normalize-outbound-text (or (:next_step current-state)
+                                                     (:next_step current-tip)))
+          output-text   (normalize-outbound-text (or (:text latest-output)
+                                                     (:summary latest-output)))]
+      (str/join
+       "\n"
+       (remove str/blank?
+               [(str "Task: " (or (normalize-outbound-text (:title task))
+                                  "Current task"))
+                (when state-label
+                  (str "State: " state-label))
+                (if output-text
+                  (str "Latest output: " output-text)
+                  "No assistant output yet for this task.")
+                (when (and (not output-text)
+                           recent)
+                  (str "Recent: "
+                       (or (normalize-outbound-text (:summary recent))
+                           (normalize-outbound-text (:text recent)))))
+                (when next-step
+                  (str "Next: " next-step))
+                "Reply ACTIVITY for recent actions or STATUS for the full summary."])))
+    "No current task. Send a message to start one."))
+
+(defn- task-activity-text
+  [session-id]
+  (if-let [{:keys [task inspection]} (current-task-context session-id false)]
+    (let [current-state (or (:current_state inspection) {})
+          state-label   (titleize-token (or (:task_state current-state)
+                                            (:state task)))
+          activities    (take 4 (or (:recent_activity inspection) []))
+          activity-lines (map (fn [entry]
+                                (str "- "
+                                     (activity-kind-label (:kind entry))
+                                     ": "
+                                     (or (normalize-outbound-text (:summary entry))
+                                         (normalize-outbound-text (:text entry))
+                                         "No details.")))
+                              activities)]
+      (str/join
+       "\n"
+       (concat
+        (remove str/blank?
+                [(str "Task: " (or (normalize-outbound-text (:title task))
+                                   "Current task"))
+                 (when state-label
+                   (str "State: " state-label))
+                 "Recent activity:"])
+        (if (seq activity-lines)
+          activity-lines
+          ["- No recent task activity yet."])
+        ["Reply OUTPUT for the latest assistant response or STATUS for the full summary."])))
+    "No current task. Send a message to start one."))
+
 (defn- split-telegram-text
   [text]
   (let [text* (normalize-outbound-text text)]
@@ -546,6 +771,38 @@
                              text)
       true)))
 
+(defn- handle-status-intent!
+  [session-id channel user-message]
+  (when (parse-status-intent user-message)
+    (send-session-message! channel
+                           session-id
+                           (task-status-text session-id))
+    true))
+
+(defn- handle-help-intent!
+  [session-id channel user-message]
+  (when (parse-help-intent user-message)
+    (send-session-message! channel
+                           session-id
+                           (task-help-text session-id))
+    true))
+
+(defn- handle-output-intent!
+  [session-id channel user-message]
+  (when (parse-output-intent user-message)
+    (send-session-message! channel
+                           session-id
+                           (task-output-text session-id))
+    true))
+
+(defn- handle-activity-intent!
+  [session-id channel user-message]
+  (when (parse-activity-intent user-message)
+    (send-session-message! channel
+                           session-id
+                           (task-activity-text session-id))
+    true))
+
 (defn- handle-external-message!
   [{:keys [channel external-key external-meta external-message-id user-message label]}]
   (when-not (duplicate-external-message? external-message-id)
@@ -554,30 +811,46 @@
                                                external-key
                                                external-meta
                                                :label label)]
-      (if (handle-pending-interaction-reply! session-id channel user-message)
+      (cond
+        (handle-help-intent! session-id channel user-message)
         true
-        (if (handle-control-intent! session-id channel user-message)
+
+        (handle-status-intent! session-id channel user-message)
         true
-            (do
-              (persist-external-user-message! session-id channel user-message external-message-id)
+
+        (handle-output-intent! session-id channel user-message)
+        true
+
+        (handle-activity-intent! session-id channel user-message)
+        true
+
+        (handle-pending-interaction-reply! session-id channel user-message)
+        true
+
+        (handle-control-intent! session-id channel user-message)
+        true
+
+        :else
+        (do
+          (persist-external-user-message! session-id channel user-message external-message-id)
+          (try
+            (agent/process-message session-id
+                                   user-message
+                                   :channel channel
+                                   :persist-message? false)
+            (catch Exception e
+              (log/error e "Messaging channel processing failed"
+                         {:channel channel
+                          :session-id session-id
+                          :external-key external-key})
               (try
-                (agent/process-message session-id
-                                       user-message
-                                       :channel channel
-                                       :persist-message? false)
-                (catch Exception e
-                  (log/error e "Messaging channel processing failed"
-                             {:channel channel
-                              :session-id session-id
-                              :external-key external-key})
-                  (try
-                    (send-session-message! channel session-id
-                                           (str "I hit an error while processing that message: "
-                                                (or (.getMessage e) "unknown error")))
-                    (catch Exception send-error
-                      (log/warn send-error "Failed to deliver messaging error reply"
-                                {:channel channel
-                                 :session-id session-id})))))))))))
+                (send-session-message! channel session-id
+                                       (str "I hit an error while processing that message: "
+                                            (or (.getMessage e) "unknown error")))
+                (catch Exception send-error
+                  (log/warn send-error "Failed to deliver messaging error reply"
+                            {:channel channel
+                             :session-id session-id}))))))))))
 
 (defn handle-slack-event!
   [body]
