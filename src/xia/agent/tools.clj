@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.async :as async]
+            [xia.task-policy :as task-policy]
             [xia.prompt :as prompt]
             [xia.ssrf :as ssrf]
             [xia.tool :as tool]
@@ -330,12 +331,17 @@
                        ((:parallel-tool-timeout-ms deps))
                        (fn [idx timeout-ms]
                          (let [call (nth calls idx)]
-                           (ex-info (str "Parallel tool execution timed out: " (:func-name call))
-                                    (merge (trace-context deps context)
-                                           {:type :parallel-tool-timeout
-                                            :timeout-ms timeout-ms
-                                            :tool-id (:tool-id call)
-                                            :func-name (:func-name call)})))))
+                           (let [decision (task-policy/parallel-tool-timeout-policy
+                                           (:tool-id call)
+                                           (:func-name call)
+                                           timeout-ms)]
+                             (prompt/policy-decision! decision)
+                             (ex-info (:reason decision)
+                                      (merge (trace-context deps context)
+                                             {:type :parallel-tool-timeout
+                                              :timeout-ms timeout-ms
+                                              :tool-id (:tool-id call)
+                                              :func-name (:func-name call)}))))))
                       (finally
                         (when-let [session-id (:session-id context)]
                           ((:clear-parallel-tool-futures! deps) session-id

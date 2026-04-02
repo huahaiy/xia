@@ -1,16 +1,10 @@
 (ns xia.async
   "Shared bounded executors for internal Xia async work."
   (:require [taoensso.timbre :as log]
-            [xia.config :as cfg])
+            [xia.task-policy :as task-policy])
   (:import [java.util.concurrent Callable ExecutorService LinkedBlockingQueue
             RejectedExecutionException RejectedExecutionHandler ThreadFactory
             ThreadPoolExecutor TimeUnit]))
-
-(def ^:private default-background-max-threads 4)
-(def ^:private default-background-queue-capacity 256)
-(def ^:private default-parallel-max-threads
-  (max 4 (.availableProcessors (Runtime/getRuntime))))
-(def ^:private default-parallel-queue-capacity 256)
 
 (defonce ^:private executors (atom {}))
 (defonce ^:private thread-counter (atom 0))
@@ -45,17 +39,13 @@
   [kind]
   (case kind
     :background
-    {:max-threads (cfg/positive-long :async/background-max-threads
-                                     default-background-max-threads)
-     :queue-capacity (cfg/positive-long :async/background-queue-capacity
-                                        default-background-queue-capacity)
+    {:max-threads (task-policy/async-background-max-threads)
+     :queue-capacity (task-policy/async-background-queue-capacity)
      :thread-prefix "xia-async-bg"}
 
     :parallel
-    {:max-threads (cfg/positive-long :async/parallel-max-threads
-                                     default-parallel-max-threads)
-     :queue-capacity (cfg/positive-long :async/parallel-queue-capacity
-                                        default-parallel-queue-capacity)
+    {:max-threads (task-policy/async-parallel-max-threads)
+     :queue-capacity (task-policy/async-parallel-queue-capacity)
      :thread-prefix "xia-async-par"}
 
     (throw (ex-info (str "Unknown async executor kind: " kind)

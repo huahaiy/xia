@@ -10,6 +10,11 @@
 (def ^:private default-supervisor-restart-grace-ms 1000)
 (def ^:private default-max-tool-rounds 100)
 (def ^:private default-max-tool-calls-per-round 12)
+(def ^:private default-parallel-tool-timeout-ms 30000)
+(def ^:private default-branch-task-timeout-ms 300000)
+(def ^:private default-supervisor-phase-timeout-ms 30000)
+(def ^:private default-supervisor-llm-timeout-ms 120000)
+(def ^:private default-supervisor-tool-timeout-ms 120000)
 (def ^:private default-http-max-attempts 3)
 (def ^:private default-http-initial-backoff-ms 1000)
 (def ^:private default-http-max-backoff-ms 8000)
@@ -24,6 +29,30 @@
 (def ^:private default-max-turn-llm-calls 600)
 (def ^:private default-max-turn-total-tokens 2000000)
 (def ^:private default-max-turn-wall-clock-ms 21600000)
+(def ^:private default-max-user-message-chars 32768)
+(def ^:private default-max-user-message-tokens 8000)
+(def ^:private default-max-branch-tasks 5)
+(def ^:private default-max-parallel-branches 3)
+(def ^:private default-max-branch-tool-rounds 5)
+(def ^:private default-branch-error-stack-frames 12)
+(def ^:private default-llm-status-preview-chars 160)
+(def ^:private default-llm-status-update-interval-ms 500)
+(def ^:private default-supervisor-tick-ms 250)
+(def ^:private default-task-control-wait-ms 10000)
+(def ^:private default-max-schedules 50)
+(def ^:private default-min-schedule-interval-minutes 5)
+(def ^:private default-scheduler-max-concurrent-runs 4)
+(def ^:private default-async-background-max-threads 4)
+(def ^:private default-async-background-queue-capacity 256)
+(def ^:private default-async-parallel-max-threads
+  (max 4 (.availableProcessors (Runtime/getRuntime))))
+(def ^:private default-async-parallel-queue-capacity 256)
+(def ^:private default-tool-sci-eval-timeout-ms 10000)
+(def ^:private default-tool-sci-handler-timeout-ms 120000)
+(def ^:private default-tool-max-active-sci-workers 32)
+(def ^:private default-local-doc-ocr-timeout-ms 120000)
+(def ^:private default-local-doc-ocr-max-tokens 2048)
+(def ^:private default-browser-playwright-timeout-ms 15000)
 
 (defn supervisor-max-identical-iterations
   []
@@ -59,6 +88,38 @@
   []
   (cfg/positive-long :agent/max-tool-calls-per-round
                      default-max-tool-calls-per-round))
+
+(defn parallel-tool-timeout-ms
+  []
+  (cfg/positive-long :agent/parallel-tool-timeout-ms
+                     default-parallel-tool-timeout-ms))
+
+(defn branch-task-timeout-ms
+  []
+  (cfg/positive-long :agent/branch-task-timeout-ms
+                     default-branch-task-timeout-ms))
+
+(defn supervisor-phase-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-phase-timeout-ms
+                     default-supervisor-phase-timeout-ms))
+
+(defn supervisor-llm-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-llm-timeout-ms
+                     default-supervisor-llm-timeout-ms))
+
+(defn supervisor-tool-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-tool-timeout-ms
+                     default-supervisor-tool-timeout-ms))
+
+(defn supervisor-worker-timeout-ms
+  [phase]
+  (case phase
+    :llm (supervisor-llm-timeout-ms)
+    :tool (supervisor-tool-timeout-ms)
+    (supervisor-phase-timeout-ms)))
 
 (defn schedule-failure-backoff-minutes
   []
@@ -99,6 +160,121 @@
   []
   (cfg/positive-long :agent/max-turn-wall-clock-ms
                      default-max-turn-wall-clock-ms))
+
+(defn max-user-message-chars
+  []
+  (cfg/positive-long :agent/max-user-message-chars
+                     default-max-user-message-chars))
+
+(defn max-user-message-tokens
+  []
+  (cfg/positive-long :agent/max-user-message-tokens
+                     default-max-user-message-tokens))
+
+(defn max-branch-tasks
+  []
+  (cfg/positive-long :agent/max-branch-tasks
+                     default-max-branch-tasks))
+
+(defn max-parallel-branches
+  []
+  (cfg/positive-long :agent/max-parallel-branches
+                     default-max-parallel-branches))
+
+(defn max-branch-tool-rounds
+  []
+  (cfg/positive-long :agent/max-branch-tool-rounds
+                     default-max-branch-tool-rounds))
+
+(defn branch-error-stack-frames
+  []
+  (cfg/positive-long :agent/branch-error-stack-frames
+                     default-branch-error-stack-frames))
+
+(defn llm-status-preview-chars
+  []
+  (cfg/positive-long :agent/llm-status-preview-chars
+                     default-llm-status-preview-chars))
+
+(defn llm-status-update-interval-ms
+  []
+  (cfg/positive-long :agent/llm-status-update-interval-ms
+                     default-llm-status-update-interval-ms))
+
+(defn supervisor-tick-ms
+  []
+  (cfg/positive-long :agent/supervisor-tick-ms
+                     default-supervisor-tick-ms))
+
+(defn task-control-wait-ms
+  []
+  (cfg/positive-long :agent/task-control-wait-ms
+                     default-task-control-wait-ms))
+
+(defn max-schedules
+  []
+  (cfg/positive-long :schedule/max-schedules
+                     default-max-schedules))
+
+(defn min-schedule-interval-minutes
+  []
+  (cfg/positive-long :schedule/min-interval-minutes
+                     default-min-schedule-interval-minutes))
+
+(defn scheduler-max-concurrent-runs
+  []
+  (cfg/positive-long :scheduler/max-concurrent-runs
+                     default-scheduler-max-concurrent-runs))
+
+(defn async-background-max-threads
+  []
+  (cfg/positive-long :async/background-max-threads
+                     default-async-background-max-threads))
+
+(defn async-background-queue-capacity
+  []
+  (cfg/positive-long :async/background-queue-capacity
+                     default-async-background-queue-capacity))
+
+(defn async-parallel-max-threads
+  []
+  (cfg/positive-long :async/parallel-max-threads
+                     default-async-parallel-max-threads))
+
+(defn async-parallel-queue-capacity
+  []
+  (cfg/positive-long :async/parallel-queue-capacity
+                     default-async-parallel-queue-capacity))
+
+(defn tool-sci-eval-timeout-ms
+  []
+  (cfg/positive-long :tool/sci-eval-timeout-ms
+                     default-tool-sci-eval-timeout-ms))
+
+(defn tool-sci-handler-timeout-ms
+  []
+  (cfg/positive-long :tool/sci-handler-timeout-ms
+                     default-tool-sci-handler-timeout-ms))
+
+(defn tool-max-active-sci-workers
+  []
+  (cfg/positive-long :tool/max-active-sci-workers
+                     default-tool-max-active-sci-workers))
+
+(defn local-doc-ocr-timeout-ms
+  []
+  (cfg/positive-long :local-doc/ocr-timeout-ms
+                     default-local-doc-ocr-timeout-ms))
+
+(defn local-doc-ocr-max-tokens
+  []
+  (cfg/positive-long :local-doc/ocr-max-tokens
+                     default-local-doc-ocr-max-tokens))
+
+(defn browser-playwright-timeout-ms
+  []
+  (cfg/positive-long :browser/playwright-timeout-ms
+                     default-browser-playwright-timeout-ms))
 
 (defn http-request-retry-config
   [req]
@@ -393,6 +569,117 @@
      :max-tool-rounds max-tool-rounds
      :reason (when-not allowed?
                "Too many tool-calling rounds")}))
+
+(defn user-message-size-decision
+  [char-count token-estimate]
+  (let [char-count (long char-count)
+        token-estimate (long token-estimate)
+        max-chars (long (max-user-message-chars))
+        max-tokens (long (max-user-message-tokens))]
+    (cond
+      (> char-count max-chars)
+      {:decision-type :user-message-size-policy
+       :allowed? false
+       :mode :char-limit
+       :char-count char-count
+       :max-chars max-chars
+       :reason (str "User message too large: "
+                    char-count
+                    " chars (max "
+                    max-chars
+                    ")")}
+
+      (> token-estimate max-tokens)
+      {:decision-type :user-message-size-policy
+       :allowed? false
+       :mode :token-limit
+       :token-estimate token-estimate
+       :max-tokens max-tokens
+       :reason (str "User message too large: ~"
+                    token-estimate
+                    " tokens (max "
+                    max-tokens
+                    ")")}
+
+      :else
+      {:decision-type :user-message-size-policy
+       :allowed? true
+       :mode :within-limit
+       :char-count char-count
+       :token-estimate token-estimate
+       :max-chars max-chars
+       :max-tokens max-tokens})))
+
+(defn branch-task-count-policy
+  [task-count max-tasks]
+  (let [task-count (long task-count)
+        max-tasks (long max-tasks)
+        allowed? (<= task-count max-tasks)]
+    {:decision-type :branch-task-count-policy
+     :allowed? allowed?
+     :mode (if allowed? :within-limit :task-limit)
+     :task-count task-count
+     :max-tasks max-tasks
+     :reason (when-not allowed?
+               (str "Too many branch tasks: "
+                    task-count
+                    " (max "
+                    max-tasks
+                    ")"))}))
+
+(defn schedule-frequency-policy
+  [{:keys [interval-minutes spec]}]
+  (let [minimum (long (min-schedule-interval-minutes))]
+    (cond
+      (some? interval-minutes)
+      {:decision-type :schedule-frequency-policy
+       :allowed? false
+       :mode :interval-limit
+       :interval-minutes (long interval-minutes)
+       :min-interval-minutes minimum
+       :reason (str "Interval too frequent (minimum " minimum " minutes)")}
+
+      :else
+      {:decision-type :schedule-frequency-policy
+       :allowed? false
+       :mode :calendar-frequency
+       :spec spec
+       :min-interval-minutes minimum
+       :reason (str "Schedule too frequent (minimum " minimum " minutes)")})))
+
+(defn schedule-count-policy
+  [current-count]
+  (let [current-count (long current-count)
+        max-schedules (long (max-schedules))
+        allowed? (< current-count max-schedules)]
+    {:decision-type :schedule-count-policy
+     :allowed? allowed?
+     :mode (if allowed? :within-limit :schedule-limit)
+     :current-count current-count
+     :max-schedules max-schedules
+     :reason (when-not allowed?
+               (str "Too many schedules (max " max-schedules ")"))}))
+
+(defn parallel-tool-timeout-policy
+  [tool-id tool-name timeout-ms]
+  {:decision-type :parallel-tool-timeout-policy
+   :allowed? false
+   :mode :timeout
+   :tool-id tool-id
+   :tool-name tool-name
+   :timeout-ms (long timeout-ms)
+   :reason (str "Parallel tool execution timed out: " tool-name)})
+
+(defn branch-task-timeout-policy
+  [task prompt timeout-ms]
+  (let [task-label (or task prompt "unnamed")]
+    {:decision-type :branch-task-timeout-policy
+     :allowed? false
+     :mode :timeout
+     :task task
+     :prompt prompt
+     :timeout-ms (long timeout-ms)
+     :reason (str "Branch task timed out: " task-label)}))
 
 (defn schedule-failure-backoff-ms
   ^long

@@ -8,7 +8,8 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
-            [xia.paths :as paths])
+            [xia.paths :as paths]
+            [xia.task-policy :as task-policy])
   (:import [java.io File InputStream]
            [java.net URI]
            [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
@@ -19,8 +20,6 @@
            [java.util.concurrent TimeUnit]))
 
 (def ^:private default-command "llama-cli")
-(def ^:private default-timeout-ms 120000)
-(def ^:private default-max-tokens 2048)
 (def ^:private default-model-backend :local)
 (def ^:private spotting-image-max-pixels 1605632)
 (def ^:private default-model-file "PaddleOCR-VL-1.5.gguf")
@@ -117,11 +116,11 @@
 
 (defn- timeout-ms
   []
-  (cfg/positive-long :local-doc/ocr-timeout-ms default-timeout-ms))
+  (task-policy/local-doc-ocr-timeout-ms))
 
 (defn- max-tokens
   []
-  (cfg/positive-long :local-doc/ocr-max-tokens default-max-tokens))
+  (task-policy/local-doc-ocr-max-tokens))
 
 (defn- configured?
   [resolved-model-path resolved-mmproj-path]

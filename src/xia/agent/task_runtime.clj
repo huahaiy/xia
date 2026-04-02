@@ -430,14 +430,16 @@
                                      policy (assoc :policy (name policy)))}))))
 
    :task-runtime/on-policy-decision
-   (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error
+   (fn [{:keys [tool-id tool-name task decision-type allowed? policy mode reason error
                 attempt max-restarts max-attempts max-retry-rounds max-retry-wait-ms
                 backoff-ms delay-ms grace-ms failure-type failure-phase worker-phase
                 tool-risk? round rounds tool-count max-tool-rounds max-tool-calls-per-round
+                timeout-ms char-count max-chars token-estimate max-tokens task-count max-tasks
                 request-label url status providers workload provider-id service-id limit]}]
      (let [target-label (or request-label
                             (some-> provider-id name)
                             (some-> service-id name)
+                            task
                             tool-name
                             (some-> tool-id name)
                             "request")
@@ -449,6 +451,12 @@
                           :provider-retry-policy "Provider retry policy"
                           :provider-rate-limit-policy "Provider rate limit policy"
                           :service-rate-limit-policy "Service rate limit policy"
+                          :user-message-size-policy "User message size policy"
+                          :branch-task-count-policy "Branch task count policy"
+                          :schedule-frequency-policy "Schedule frequency policy"
+                          :schedule-count-policy "Schedule count policy"
+                          :parallel-tool-timeout-policy "Parallel tool timeout policy"
+                          :branch-task-timeout-policy "Branch task timeout policy"
                           :tool-round-policy "Tool round policy"
                           :tool-call-policy "Tool call policy"
                           "Policy")
@@ -473,6 +481,14 @@
                                      service-id (assoc :service-id (name service-id))
                                      workload (assoc :workload (name workload))
                                      limit (assoc :limit limit)
+                                     char-count (assoc :char-count char-count)
+                                     max-chars (assoc :max-chars max-chars)
+                                     token-estimate (assoc :token-estimate token-estimate)
+                                     max-tokens (assoc :max-tokens max-tokens)
+                                     task-count (assoc :task-count task-count)
+                                     max-tasks (assoc :max-tasks max-tasks)
+                                     timeout-ms (assoc :timeout-ms timeout-ms)
+                                     task (assoc :task task)
                                      url (assoc :url url)
                                      status (assoc :status-code status)
                                      mode (assoc :mode (name mode))

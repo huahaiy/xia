@@ -12,6 +12,11 @@
                                       :agent/supervisor-restart-grace-ms 900
                                       :agent/max-tool-rounds 14
                                       :agent/max-tool-calls-per-round 6
+                                      :agent/parallel-tool-timeout-ms 3210
+                                      :agent/branch-task-timeout-ms 6543
+                                      :agent/supervisor-phase-timeout-ms 111
+                                      :agent/supervisor-llm-timeout-ms 222
+                                      :agent/supervisor-tool-timeout-ms 333
                                       :schedule/failure-backoff-minutes 20
                                       :schedule/max-failure-backoff-minutes 600
                                       :schedule/pause-after-repeated-failures 4
@@ -20,6 +25,29 @@
                                       :agent/max-turn-llm-calls 42
                                       :agent/max-turn-total-tokens 123456
                                       :agent/max-turn-wall-clock-ms 654321
+                                      :agent/max-user-message-chars 999
+                                      :agent/max-user-message-tokens 77
+                                      :agent/max-branch-tasks 8
+                                      :agent/max-parallel-branches 4
+                                      :agent/max-branch-tool-rounds 6
+                                      :agent/branch-error-stack-frames 15
+                                      :agent/llm-status-preview-chars 210
+                                      :agent/llm-status-update-interval-ms 750
+                                      :agent/supervisor-tick-ms 12
+                                      :agent/task-control-wait-ms 4321
+                                      :schedule/max-schedules 55
+                                      :schedule/min-interval-minutes 7
+                                      :scheduler/max-concurrent-runs 9
+                                      :async/background-max-threads 11
+                                      :async/background-queue-capacity 300
+                                      :async/parallel-max-threads 12
+                                      :async/parallel-queue-capacity 400
+                                      :tool/sci-eval-timeout-ms 12345
+                                      :tool/sci-handler-timeout-ms 54321
+                                      :tool/max-active-sci-workers 13
+                                      :local-doc/ocr-timeout-ms 180000
+                                      :local-doc/ocr-max-tokens 1024
+                                      :browser/playwright-timeout-ms 22000
                                       default-value))
                 cfg/positive-double (fn [key-name default-value]
                                       (case key-name
@@ -32,6 +60,14 @@
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
     (is (= 14 (task-policy/max-tool-rounds)))
     (is (= 6 (task-policy/max-tool-calls-per-round)))
+    (is (= 3210 (task-policy/parallel-tool-timeout-ms)))
+    (is (= 6543 (task-policy/branch-task-timeout-ms)))
+    (is (= 111 (task-policy/supervisor-phase-timeout-ms)))
+    (is (= 222 (task-policy/supervisor-llm-timeout-ms)))
+    (is (= 333 (task-policy/supervisor-tool-timeout-ms)))
+    (is (= 222 (task-policy/supervisor-worker-timeout-ms :llm)))
+    (is (= 333 (task-policy/supervisor-worker-timeout-ms :tool)))
+    (is (= 111 (task-policy/supervisor-worker-timeout-ms :planning)))
     (is (= 20 (task-policy/schedule-failure-backoff-minutes)))
     (is (= 600 (task-policy/schedule-max-failure-backoff-minutes)))
     (is (= 4 (task-policy/schedule-pause-after-repeated-failures)))
@@ -39,7 +75,30 @@
     (is (= 777000 (task-policy/llm-max-provider-retry-wait-ms)))
     (is (= 42 (task-policy/max-turn-llm-calls)))
     (is (= 123456 (task-policy/max-turn-total-tokens)))
-    (is (= 654321 (task-policy/max-turn-wall-clock-ms)))))
+    (is (= 654321 (task-policy/max-turn-wall-clock-ms)))
+    (is (= 999 (task-policy/max-user-message-chars)))
+    (is (= 77 (task-policy/max-user-message-tokens)))
+    (is (= 8 (task-policy/max-branch-tasks)))
+    (is (= 4 (task-policy/max-parallel-branches)))
+    (is (= 6 (task-policy/max-branch-tool-rounds)))
+    (is (= 15 (task-policy/branch-error-stack-frames)))
+    (is (= 210 (task-policy/llm-status-preview-chars)))
+    (is (= 750 (task-policy/llm-status-update-interval-ms)))
+    (is (= 12 (task-policy/supervisor-tick-ms)))
+    (is (= 4321 (task-policy/task-control-wait-ms)))
+    (is (= 55 (task-policy/max-schedules)))
+    (is (= 7 (task-policy/min-schedule-interval-minutes)))
+    (is (= 9 (task-policy/scheduler-max-concurrent-runs)))
+    (is (= 11 (task-policy/async-background-max-threads)))
+    (is (= 300 (task-policy/async-background-queue-capacity)))
+    (is (= 12 (task-policy/async-parallel-max-threads)))
+    (is (= 400 (task-policy/async-parallel-queue-capacity)))
+    (is (= 12345 (task-policy/tool-sci-eval-timeout-ms)))
+    (is (= 54321 (task-policy/tool-sci-handler-timeout-ms)))
+    (is (= 13 (task-policy/tool-max-active-sci-workers)))
+    (is (= 180000 (task-policy/local-doc-ocr-timeout-ms)))
+    (is (= 1024 (task-policy/local-doc-ocr-max-tokens)))
+    (is (= 22000 (task-policy/browser-playwright-timeout-ms)))))
 
 (deftest turn-llm-budget-records-usage-and-exhaustion
   (with-redefs [task-policy/max-turn-llm-calls (constantly 2)
@@ -294,3 +353,69 @@
           :limit 3}
          (select-keys (task-policy/service-rate-limit-policy :limited 3)
                       [:decision-type :allowed? :mode :service-id :limit]))))
+
+(deftest timeout-policies-capture-parallel-tool-and-branch-task-blocks
+  (is (= {:decision-type :parallel-tool-timeout-policy
+          :allowed? false
+          :mode :timeout
+          :tool-id :web-fetch
+          :tool-name "web-fetch"
+          :timeout-ms 50}
+         (select-keys (task-policy/parallel-tool-timeout-policy :web-fetch "web-fetch" 50)
+                      [:decision-type :allowed? :mode :tool-id :tool-name :timeout-ms])))
+  (is (= {:decision-type :branch-task-timeout-policy
+          :allowed? false
+          :mode :timeout
+          :task "slow"
+          :timeout-ms 75}
+         (select-keys (task-policy/branch-task-timeout-policy "slow" "slow branch" 75)
+                      [:decision-type :allowed? :mode :task :timeout-ms]))))
+
+(deftest user-message-and-branch-count-policies-capture-blocked-inputs
+  (with-redefs [task-policy/max-user-message-chars (constantly 5)
+                task-policy/max-user-message-tokens (constantly 2)]
+    (is (= {:decision-type :user-message-size-policy
+            :allowed? false
+            :mode :char-limit
+            :char-count 6
+            :max-chars 5}
+           (select-keys (task-policy/user-message-size-decision 6 2)
+                        [:decision-type :allowed? :mode :char-count :max-chars])))
+    (is (= {:decision-type :user-message-size-policy
+            :allowed? false
+            :mode :token-limit
+            :token-estimate 3
+            :max-tokens 2}
+           (select-keys (task-policy/user-message-size-decision 5 3)
+                        [:decision-type :allowed? :mode :token-estimate :max-tokens]))))
+  (is (= {:decision-type :branch-task-count-policy
+          :allowed? false
+          :mode :task-limit
+          :task-count 3
+          :max-tasks 2}
+         (select-keys (task-policy/branch-task-count-policy 3 2)
+                      [:decision-type :allowed? :mode :task-count :max-tasks]))))
+
+(deftest schedule-admission-policies-capture-frequency-and-count-blocks
+  (with-redefs [task-policy/min-schedule-interval-minutes (constantly 5)
+                task-policy/max-schedules (constantly 50)]
+    (is (= {:decision-type :schedule-frequency-policy
+            :allowed? false
+            :mode :interval-limit
+            :interval-minutes 2
+            :min-interval-minutes 5}
+           (select-keys (task-policy/schedule-frequency-policy {:interval-minutes 2})
+                        [:decision-type :allowed? :mode :interval-minutes :min-interval-minutes])))
+    (is (= {:decision-type :schedule-frequency-policy
+            :allowed? false
+            :mode :calendar-frequency
+            :min-interval-minutes 5}
+           (select-keys (task-policy/schedule-frequency-policy {:spec {}})
+                        [:decision-type :allowed? :mode :min-interval-minutes])))
+    (is (= {:decision-type :schedule-count-policy
+            :allowed? false
+            :mode :schedule-limit
+            :current-count 50
+            :max-schedules 50}
+           (select-keys (task-policy/schedule-count-policy 50)
+                        [:decision-type :allowed? :mode :current-count :max-schedules])))))

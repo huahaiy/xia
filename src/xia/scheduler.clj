@@ -14,11 +14,11 @@
             [xia.backup :as backup]
             [xia.db :as db]
             [xia.agent :as agent]
-            [xia.config :as cfg]
             [xia.hippocampus :as hippo]
             [xia.oauth :as oauth]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
+            [xia.task-policy :as task-policy]
             [xia.working-memory :as wm])
   (:import [java.util.concurrent ExecutorService Executors ScheduledExecutorService ThreadFactory TimeUnit RejectedExecutionException ThreadPoolExecutor]))
 
@@ -34,12 +34,9 @@
 (defonce ^:private thread-counter (atom 0))
 
 (def ^:private maintenance-interval-ms (* 24 60 60 1000))
-(def ^:private default-max-concurrent-runs 4)
-
 (defn- max-concurrent-runs
   []
-  (cfg/positive-long :scheduler/max-concurrent-runs
-                     default-max-concurrent-runs))
+  (task-policy/scheduler-max-concurrent-runs))
 
 (defn- daemon-thread-factory
   [prefix]

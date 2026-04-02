@@ -16,7 +16,6 @@
             [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.audit :as audit]
-            [xia.config :as cfg]
             [xia.context :as context]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -29,21 +28,6 @@
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(def ^:private default-max-user-message-chars 32768)
-(def ^:private default-max-user-message-tokens 8000)
-(def ^:private default-max-branch-tasks 5)
-(def ^:private default-max-parallel-branches 3)
-(def ^:private default-max-branch-tool-rounds 5)
-(def ^:private default-parallel-tool-timeout-ms 30000)
-(def ^:private default-branch-task-timeout-ms 300000)
-(def ^:private default-branch-error-stack-frames 12)
-(def ^:private default-llm-status-preview-chars 160)
-(def ^:private default-llm-status-update-interval-ms 500)
-(def ^:private default-supervisor-tick-ms 250)
-(def ^:private default-supervisor-phase-timeout-ms 30000)
-(def ^:private default-supervisor-llm-timeout-ms 120000)
-(def ^:private default-supervisor-tool-timeout-ms 120000)
-(def ^:private default-task-control-wait-ms 10000)
 (defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
 (defonce ^:private active-task-runs (atom {}))
@@ -105,13 +89,11 @@
 
 (defn- max-user-message-chars
   []
-  (cfg/positive-long :agent/max-user-message-chars
-                     default-max-user-message-chars))
+  (task-policy/max-user-message-chars))
 
 (defn- max-user-message-tokens
   []
-  (cfg/positive-long :agent/max-user-message-tokens
-                     default-max-user-message-tokens))
+  (task-policy/max-user-message-tokens))
 
 (defn- configured-max-tool-rounds
   []
@@ -131,68 +113,35 @@
 
 (defn- branch-error-stack-frames
   []
-  (cfg/positive-long :agent/branch-error-stack-frames
-                     default-branch-error-stack-frames))
+  (task-policy/branch-error-stack-frames))
 
 (defn- max-branch-tasks
   []
-  (cfg/positive-long :agent/max-branch-tasks
-                     default-max-branch-tasks))
+  (task-policy/max-branch-tasks))
 
 (defn- max-parallel-branches
   []
-  (cfg/positive-long :agent/max-parallel-branches
-                     default-max-parallel-branches))
+  (task-policy/max-parallel-branches))
 
 (defn- max-branch-tool-rounds
   []
-  (cfg/positive-long :agent/max-branch-tool-rounds
-                     default-max-branch-tool-rounds))
-
-(defn- parallel-tool-timeout-ms
-  []
-  (cfg/positive-long :agent/parallel-tool-timeout-ms
-                     default-parallel-tool-timeout-ms))
-
-(defn- branch-task-timeout-ms
-  []
-  (cfg/positive-long :agent/branch-task-timeout-ms
-                     default-branch-task-timeout-ms))
+  (task-policy/max-branch-tool-rounds))
 
 (defn- llm-status-preview-chars
   []
-  (cfg/positive-long :agent/llm-status-preview-chars
-                     default-llm-status-preview-chars))
+  (task-policy/llm-status-preview-chars))
 
 (defn- llm-status-update-interval-ms
   []
-  (cfg/positive-long :agent/llm-status-update-interval-ms
-                     default-llm-status-update-interval-ms))
+  (task-policy/llm-status-update-interval-ms))
 
 (defn- supervisor-tick-ms
   []
-  (cfg/positive-long :agent/supervisor-tick-ms
-                     default-supervisor-tick-ms))
-
-(defn- supervisor-phase-timeout-ms
-  []
-  (cfg/positive-long :agent/supervisor-phase-timeout-ms
-                     default-supervisor-phase-timeout-ms))
-
-(defn- supervisor-llm-timeout-ms
-  []
-  (cfg/positive-long :agent/supervisor-llm-timeout-ms
-                     default-supervisor-llm-timeout-ms))
-
-(defn- supervisor-tool-timeout-ms
-  []
-  (cfg/positive-long :agent/supervisor-tool-timeout-ms
-                     default-supervisor-tool-timeout-ms))
+  (task-policy/supervisor-tick-ms))
 
 (defn- task-control-wait-ms
   []
-  (cfg/positive-long :agent/task-control-wait-ms
-                     default-task-control-wait-ms))
+  (task-policy/task-control-wait-ms))
 
 (defn- new-request-id
   []
@@ -734,32 +683,18 @@
   (let [message (or user-message "")
         char-count (long (count message))
         token-estimate (long (context/estimate-tokens message))
-        max-chars (long (max-user-message-chars))
-        max-tokens (long (max-user-message-tokens))]
-    (cond
-      (> char-count max-chars)
-      (throw (ex-info (str "User message too large: "
-                           char-count
-                           " chars (max "
-                           max-chars
-                           ")")
-                      {:type :user-message-too-large
-                       :status 413
-                       :error "user message too large"
-                       :char-count char-count
-                       :max-chars max-chars}))
-
-      (> token-estimate max-tokens)
-      (throw (ex-info (str "User message too large: ~"
-                           token-estimate
-                           " tokens (max "
-                           max-tokens
-                           ")")
-                      {:type :user-message-too-large
-                       :status 413
-                       :error "user message too large"
-                       :token-estimate token-estimate
-                       :max-tokens max-tokens})))))
+        {:keys [allowed? reason char-count max-chars token-estimate max-tokens] :as decision}
+        (task-policy/user-message-size-decision char-count token-estimate)]
+    (when-not allowed?
+      (prompt/policy-decision! decision)
+      (throw (ex-info reason
+                      (cond-> {:type :user-message-too-large
+                               :status 413
+                               :error "user message too large"}
+                        char-count (assoc :char-count char-count)
+                        max-chars (assoc :max-chars max-chars)
+                        token-estimate (assoc :token-estimate token-estimate)
+                        max-tokens (assoc :max-tokens max-tokens)))))))
 
 (defn- call-model
   [messages tools provider-id & {:keys [on-delta session-id]}]
@@ -911,7 +846,7 @@
   {:await-futures! await-futures!
    :cancel-futures! cancel-futures!
    :clear-parallel-tool-futures! clear-parallel-tool-futures!
-   :parallel-tool-timeout-ms parallel-tool-timeout-ms
+   :parallel-tool-timeout-ms task-policy/parallel-tool-timeout-ms
    :register-parallel-tool-futures! register-parallel-tool-futures!
    :throw-if-cancelled! throw-if-cancelled!
    :trace-context trace-context
@@ -1489,10 +1424,7 @@
 
 (defn- worker-timeout-ms
   [phase]
-  (case phase
-    :llm (supervisor-llm-timeout-ms)
-    :tool (supervisor-tool-timeout-ms)
-    (supervisor-phase-timeout-ms)))
+  (task-policy/supervisor-worker-timeout-ms phase))
 
 (defn- worker-stalled?
   [{:keys [phase last-event-ms]}]
@@ -2843,7 +2775,7 @@
 (defn- branch-deps
   []
   {:await-futures! await-futures!
-   :branch-task-timeout-ms branch-task-timeout-ms
+   :branch-task-timeout-ms task-policy/branch-task-timeout-ms
    :max-branch-tasks max-branch-tasks
    :max-branch-tool-rounds max-branch-tool-rounds
    :max-parallel-branches max-parallel-branches
