@@ -453,6 +453,8 @@
                           :service-rate-limit-policy "Service rate limit policy"
                           :user-message-size-policy "User message size policy"
                           :branch-task-count-policy "Branch task count policy"
+                          :schedule-frequency-policy "Schedule frequency policy"
+                          :schedule-count-policy "Schedule count policy"
                           :parallel-tool-timeout-policy "Parallel tool timeout policy"
                           :branch-task-timeout-policy "Branch task timeout policy"
                           :tool-round-policy "Tool round policy"

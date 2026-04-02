@@ -16,6 +16,7 @@
             [taoensso.timbre :as log]
             [xia.cron :as cron]
             [xia.db :as db]
+            [xia.prompt :as prompt]
             [xia.remote-bridge :as remote-bridge]
             [xia.task-policy :as task-policy]
             [xia.working-memory :as wm]))
@@ -23,9 +24,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Limits
 ;; ---------------------------------------------------------------------------
-
-(def ^:private max-schedules 50)
-(def ^:private min-interval-minutes 5)
 
 (defn- actions-doc
   [actions]
@@ -379,18 +377,22 @@
   (cron/validate! spec)
   ;; Reject intervals < 5 minutes
   (when-let [m (:interval-minutes spec)]
-    (when (< (long m) (long min-interval-minutes))
-      (throw (ex-info (str "Interval too frequent (minimum " min-interval-minutes " minutes)")
-                      {:interval-minutes m}))))
+    (when (< (long m) (long (task-policy/min-schedule-interval-minutes)))
+      (let [decision (task-policy/schedule-frequency-policy {:interval-minutes m})]
+        (prompt/policy-decision! decision)
+        (throw (ex-info (:reason decision)
+                        {:interval-minutes m})))))
   ;; For calendar specs, reject if it would fire more than 12 times per hour
   (when-not (:interval-minutes spec)
     (let [norm (cron/normalize spec)]
       (when (and (= 24 (count (:hour norm)))
                  (= 12 (count (:month norm)))
                  (> (long (count (:minute norm)))
-                    (long (/ 60 (long min-interval-minutes)))))
-        (throw (ex-info (str "Schedule too frequent (minimum " min-interval-minutes " minutes)")
-                        {:spec spec}))))))
+                    (long (/ 60 (long (task-policy/min-schedule-interval-minutes))))))
+        (let [decision (task-policy/schedule-frequency-policy {:spec spec})]
+          (prompt/policy-decision! decision)
+          (throw (ex-info (:reason decision)
+                          {:spec spec})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; CRUD
@@ -427,9 +429,13 @@
 
     ;; Check schedule limit
     (let [current-count (count (db/q '[:find ?e :where [?e :schedule/id _]]))]
-      (when (>= (long current-count) (long max-schedules))
-        (throw (ex-info (str "Too many schedules (max " max-schedules ")")
-                        {:current current-count}))))
+      (let [{:keys [allowed? reason max-schedules] :as decision}
+            (task-policy/schedule-count-policy current-count)]
+        (when-not allowed?
+          (prompt/policy-decision! decision)
+          (throw (ex-info reason
+                          {:current current-count
+                           :max-schedules max-schedules})))))
 
     ;; Calculate first run time
     (let [now      (java.util.Date.)

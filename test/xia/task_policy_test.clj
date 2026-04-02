@@ -30,6 +30,8 @@
                                       :agent/max-branch-tasks 8
                                       :agent/max-parallel-branches 4
                                       :agent/max-branch-tool-rounds 6
+                                      :schedule/max-schedules 55
+                                      :schedule/min-interval-minutes 7
                                       default-value))
                 cfg/positive-double (fn [key-name default-value]
                                       (case key-name
@@ -62,7 +64,9 @@
     (is (= 77 (task-policy/max-user-message-tokens)))
     (is (= 8 (task-policy/max-branch-tasks)))
     (is (= 4 (task-policy/max-parallel-branches)))
-    (is (= 6 (task-policy/max-branch-tool-rounds)))))
+    (is (= 6 (task-policy/max-branch-tool-rounds)))
+    (is (= 55 (task-policy/max-schedules)))
+    (is (= 7 (task-policy/min-schedule-interval-minutes)))))
 
 (deftest turn-llm-budget-records-usage-and-exhaustion
   (with-redefs [task-policy/max-turn-llm-calls (constantly 2)
@@ -359,3 +363,27 @@
           :max-tasks 2}
          (select-keys (task-policy/branch-task-count-policy 3 2)
                       [:decision-type :allowed? :mode :task-count :max-tasks]))))
+
+(deftest schedule-admission-policies-capture-frequency-and-count-blocks
+  (with-redefs [task-policy/min-schedule-interval-minutes (constantly 5)
+                task-policy/max-schedules (constantly 50)]
+    (is (= {:decision-type :schedule-frequency-policy
+            :allowed? false
+            :mode :interval-limit
+            :interval-minutes 2
+            :min-interval-minutes 5}
+           (select-keys (task-policy/schedule-frequency-policy {:interval-minutes 2})
+                        [:decision-type :allowed? :mode :interval-minutes :min-interval-minutes])))
+    (is (= {:decision-type :schedule-frequency-policy
+            :allowed? false
+            :mode :calendar-frequency
+            :min-interval-minutes 5}
+           (select-keys (task-policy/schedule-frequency-policy {:spec {}})
+                        [:decision-type :allowed? :mode :min-interval-minutes])))
+    (is (= {:decision-type :schedule-count-policy
+            :allowed? false
+            :mode :schedule-limit
+            :current-count 50
+            :max-schedules 50}
+           (select-keys (task-policy/schedule-count-policy 50)
+                        [:decision-type :allowed? :mode :current-count :max-schedules])))))

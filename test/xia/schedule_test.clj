@@ -1,6 +1,7 @@
 (ns xia.schedule-test
   (:require [clojure.test :refer :all]
             [xia.db :as db]
+            [xia.prompt :as prompt]
             [xia.schedule :as schedule]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory :as wm]))
@@ -66,17 +67,40 @@
         (schedule/create-schedule! {:id :x :spec {:minute #{0}} :type :prompt}))))
 
 (deftest create-rejects-too-frequent
-  ;; Empty spec = every minute
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"too frequent"
-        (schedule/create-schedule!
-          {:id :x :spec {} :type :tool :tool-id :x}))))
+  (let [decisions (atom [])]
+    ;; Empty spec = every minute
+    (with-redefs [prompt/policy-decision! (fn [decision]
+                                            (swap! decisions conj decision)
+                                            nil)]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"too frequent"
+            (schedule/create-schedule!
+              {:id :x :spec {} :type :tool :tool-id :x})))
+      (is (some #(= {:decision-type :schedule-frequency-policy
+                     :allowed? false
+                     :mode :calendar-frequency
+                     :min-interval-minutes 5}
+                    (select-keys %
+                                 [:decision-type :allowed? :mode :min-interval-minutes]))
+                @decisions)))))
 
 (deftest create-rejects-short-interval
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"too frequent"
-        (schedule/create-schedule!
-          {:id :x :spec {:interval-minutes 2} :type :tool :tool-id :x}))))
+  (let [decisions (atom [])]
+    (with-redefs [prompt/policy-decision! (fn [decision]
+                                            (swap! decisions conj decision)
+                                            nil)]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"too frequent"
+            (schedule/create-schedule!
+              {:id :x :spec {:interval-minutes 2} :type :tool :tool-id :x})))
+      (is (some #(= {:decision-type :schedule-frequency-policy
+                     :allowed? false
+                     :mode :interval-limit
+                     :interval-minutes 2
+                     :min-interval-minutes 5}
+                    (select-keys %
+                                 [:decision-type :allowed? :mode :interval-minutes :min-interval-minutes]))
+                @decisions)))))
 
 (deftest create-allows-5-min-interval
   (let [result (schedule/create-schedule!
@@ -406,13 +430,25 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest schedule-limit-enforced
-  (dotimes [i 50]
-    (schedule/create-schedule!
-      {:id (keyword (str "sched-" i))
-       :spec {:minute #{0} :hour #{9}}
-       :type :tool
-       :tool-id :x}))
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"Too many schedules"
-        (schedule/create-schedule!
-          {:id :one-too-many :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x}))))
+  (let [decisions (atom [])]
+    (dotimes [i 50]
+      (schedule/create-schedule!
+        {:id (keyword (str "sched-" i))
+         :spec {:minute #{0} :hour #{9}}
+         :type :tool
+         :tool-id :x}))
+    (with-redefs [prompt/policy-decision! (fn [decision]
+                                            (swap! decisions conj decision)
+                                            nil)]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"Too many schedules"
+            (schedule/create-schedule!
+              {:id :one-too-many :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})))
+      (is (some #(= {:decision-type :schedule-count-policy
+                     :allowed? false
+                     :mode :schedule-limit
+                     :current-count 50
+                     :max-schedules 50}
+                    (select-keys %
+                                 [:decision-type :allowed? :mode :current-count :max-schedules]))
+                @decisions)))))

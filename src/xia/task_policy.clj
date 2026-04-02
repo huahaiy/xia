@@ -34,6 +34,8 @@
 (def ^:private default-max-branch-tasks 5)
 (def ^:private default-max-parallel-branches 3)
 (def ^:private default-max-branch-tool-rounds 5)
+(def ^:private default-max-schedules 50)
+(def ^:private default-min-schedule-interval-minutes 5)
 
 (defn supervisor-max-identical-iterations
   []
@@ -166,6 +168,16 @@
   []
   (cfg/positive-long :agent/max-branch-tool-rounds
                      default-max-branch-tool-rounds))
+
+(defn max-schedules
+  []
+  (cfg/positive-long :schedule/max-schedules
+                     default-max-schedules))
+
+(defn min-schedule-interval-minutes
+  []
+  (cfg/positive-long :schedule/min-interval-minutes
+                     default-min-schedule-interval-minutes))
 
 (defn http-request-retry-config
   [req]
@@ -517,6 +529,39 @@
                     " (max "
                     max-tasks
                     ")"))}))
+
+(defn schedule-frequency-policy
+  [{:keys [interval-minutes spec]}]
+  (let [minimum (long (min-schedule-interval-minutes))]
+    (cond
+      (some? interval-minutes)
+      {:decision-type :schedule-frequency-policy
+       :allowed? false
+       :mode :interval-limit
+       :interval-minutes (long interval-minutes)
+       :min-interval-minutes minimum
+       :reason (str "Interval too frequent (minimum " minimum " minutes)")}
+
+      :else
+      {:decision-type :schedule-frequency-policy
+       :allowed? false
+       :mode :calendar-frequency
+       :spec spec
+       :min-interval-minutes minimum
+       :reason (str "Schedule too frequent (minimum " minimum " minutes)")})))
+
+(defn schedule-count-policy
+  [current-count]
+  (let [current-count (long current-count)
+        max-schedules (long (max-schedules))
+        allowed? (< current-count max-schedules)]
+    {:decision-type :schedule-count-policy
+     :allowed? allowed?
+     :mode (if allowed? :within-limit :schedule-limit)
+     :current-count current-count
+     :max-schedules max-schedules
+     :reason (when-not allowed?
+               (str "Too many schedules (max " max-schedules ")"))}))
 
 (defn parallel-tool-timeout-policy
   [tool-id tool-name timeout-ms]
