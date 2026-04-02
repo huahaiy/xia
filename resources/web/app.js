@@ -4,6 +4,7 @@ const storageKeys = {
 const state = {
   sessionId: sessionStorage.getItem(storageKeys.sessionId) || '',
   currentTaskId: '',
+  currentTask: null,
   liveEventAfter: 0,
   liveEventReceivedAt: 0,
   messages: [],
@@ -138,6 +139,8 @@ let taskEventSourceTaskId = '';
 const statusEl = document.getElementById('status');
 const activityStatusEl = document.getElementById('activity-status');
 const sessionLabelEl = document.getElementById('session-label');
+const currentTaskNoteEl = document.getElementById('current-task-note');
+const currentTaskPanelEl = document.getElementById('current-task-panel');
 const inputPanelEl = document.getElementById('input-panel');
 const inputLabelEl = document.getElementById('input-label');
 const inputValueEl = document.getElementById('input-value');
@@ -559,6 +562,370 @@ function updateSessionLabel() {
     : 'New local session';
 }
 
+function currentTaskInspection() {
+  return asObject(state.currentTask && state.currentTask.inspection);
+}
+
+function currentTaskStateView() {
+  const task = asObject(state.currentTask);
+  const inspection = currentTaskInspection();
+  const currentState = asObject(inspection.current_state);
+  const currentTip = asObject(inspection.current_tip);
+  const runtime = normalizeTaskRuntimeStatus(task.runtime);
+  const live = state.liveStatus;
+  const stackDepth = live && typeof live.stack_depth === 'number'
+    ? live.stack_depth
+    : currentState.stack_depth;
+  return {
+    taskState: firstPresentText(live && live.state, currentState.task_state, runtime && runtime.state, task.state),
+    phase: firstPresentText(live && live.phase, currentState.phase, runtime && runtime.phase),
+    message: firstPresentText(live && live.message, currentState.message, runtime && runtime.message, task.summary),
+    currentFocus: firstPresentText(live && live.current_focus, currentState.current_focus, currentTip.title, task.title),
+    nextStep: firstPresentText(currentState.next_step, currentTip.next_step),
+    progressStatus: firstPresentText(live && live.progress_status, currentState.progress_status, currentTip.progress_status),
+    stackDepth: typeof stackDepth === 'number' ? stackDepth : null,
+    compressedFrameCount: typeof currentState.compressed_frame_count === 'number'
+      ? currentState.compressed_frame_count
+      : null,
+    childTaskFrameCount: typeof currentState.child_task_frame_count === 'number'
+      ? currentState.child_task_frame_count
+      : null
+  };
+}
+
+function currentTaskAttentionView() {
+  const inspection = currentTaskInspection();
+  if (state.pendingInput) {
+    return {
+      kind: 'waiting_input',
+      summary: firstPresentText(
+        state.pendingInput.label ? ('Waiting for input: ' + state.pendingInput.label) : '',
+        asObject(inspection.attention).summary,
+        state.liveStatus && state.liveStatus.message
+      ),
+      label: firstPresentText(state.pendingInput.label),
+      masked: !!state.pendingInput.masked,
+      requestedAt: firstPresentText(state.pendingInput.created_at)
+    };
+  }
+  if (state.pendingApproval) {
+    return {
+      kind: 'waiting_approval',
+      summary: firstPresentText(
+        state.liveStatus && state.liveStatus.message,
+        state.pendingApproval.reason,
+        asObject(inspection.attention).summary,
+        state.pendingApproval.description
+      ),
+      toolName: firstPresentText(state.pendingApproval.tool_name, state.pendingApproval.tool_id),
+      policy: firstPresentText(state.pendingApproval.policy),
+      description: firstPresentText(state.pendingApproval.description),
+      reason: firstPresentText(state.pendingApproval.reason),
+      requestedAt: firstPresentText(state.pendingApproval.created_at)
+    };
+  }
+  const attention = asObject(inspection.attention);
+  return {
+    kind: firstPresentText(attention.kind),
+    summary: firstPresentText(attention.summary),
+    label: firstPresentText(attention.label),
+    masked: !!attention.masked,
+    toolName: firstPresentText(attention.tool_name, attention.tool_id),
+    policy: firstPresentText(attention.policy),
+    description: firstPresentText(attention.description),
+    reason: firstPresentText(attention.reason),
+    requestedAt: firstPresentText(attention.requested_at)
+  };
+}
+
+function currentTaskActivityView() {
+  const inspection = currentTaskInspection();
+  return asArray(inspection.recent_activity).slice(0, 6);
+}
+
+function currentTaskAgendaView() {
+  const inspection = currentTaskInspection();
+  const tip = asObject(inspection.current_tip);
+  return asArray(tip.agenda).slice(0, 6);
+}
+
+function currentTaskBudgetView() {
+  const inspection = currentTaskInspection();
+  return asObject(inspection.budget);
+}
+
+function currentTaskCheckpointView() {
+  const inspection = currentTaskInspection();
+  return asObject(inspection.last_checkpoint);
+}
+
+function taskBadgeTone(value) {
+  const normalized = firstPresentText(value).toLowerCase();
+  if (!normalized) return 'neutral';
+  if (normalized.includes('waiting') || normalized.includes('approval') || normalized.includes('input')) return 'approval';
+  if (normalized === 'running' || normalized === 'working' || normalized === 'in progress') return 'working';
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'success') return 'success';
+  if (normalized === 'failed' || normalized === 'error') return 'error';
+  if (normalized === 'paused' || normalized === 'stopped' || normalized === 'cancelled'
+      || normalized === 'blocked' || normalized === 'resumable') return 'warning';
+  if (normalized === 'ready') return 'ready';
+  return 'neutral';
+}
+
+function createTaskMetaItem(label, value) {
+  const wrap = document.createElement('div');
+  wrap.className = 'task-meta-item';
+  const labelEl = document.createElement('div');
+  labelEl.className = 'task-meta-label';
+  labelEl.textContent = label;
+  const valueEl = document.createElement('div');
+  valueEl.className = 'task-meta-value';
+  valueEl.textContent = value;
+  wrap.appendChild(labelEl);
+  wrap.appendChild(valueEl);
+  return wrap;
+}
+
+function createTaskActivityItem(entry) {
+  const item = document.createElement('div');
+  item.className = 'task-list-item';
+  const head = document.createElement('div');
+  head.className = 'task-list-item-head';
+  const title = document.createElement('div');
+  title.className = 'task-list-title';
+  title.textContent = firstPresentText(entry.summary, titleizeToken(entry.kind), 'Activity');
+  const badge = document.createElement('span');
+  badge.className = 'task-state-badge';
+  badge.dataset.tone = taskBadgeTone(firstPresentText(entry.status, entry.kind));
+  badge.textContent = titleizeToken(entry.kind);
+  head.appendChild(title);
+  head.appendChild(badge);
+  item.appendChild(head);
+
+  const metaParts = [];
+  if (entry.created_at) metaParts.push(formatStamp(entry.created_at));
+  if (entry.tool_name) metaParts.push(entry.tool_name);
+  else if (entry.tool_id) metaParts.push(entry.tool_id);
+  else if (entry.target) metaParts.push(entry.target);
+  else if (entry.phase) metaParts.push(titleizeToken(entry.phase));
+  if (entry.status) metaParts.push(titleizeToken(entry.status));
+  const meta = document.createElement('div');
+  meta.className = 'task-list-meta';
+  meta.textContent = metaParts.join(' · ');
+  item.appendChild(meta);
+
+  const detailText = firstPresentText(entry.detail, entry.reason, entry.description, entry.text);
+  if (detailText && detailText !== title.textContent) {
+    const summary = document.createElement('p');
+    summary.className = 'task-list-summary';
+    summary.textContent = detailText;
+    item.appendChild(summary);
+  }
+  return item;
+}
+
+function renderCurrentTaskPanel() {
+  if (!currentTaskPanelEl || !currentTaskNoteEl) return;
+  currentTaskPanelEl.replaceChildren();
+
+  if (!state.currentTaskId && !state.currentTask) {
+    currentTaskNoteEl.textContent = 'No active task.';
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = 'No active task.';
+    currentTaskPanelEl.appendChild(empty);
+    return;
+  }
+
+  if (!state.currentTask || typeof state.currentTask !== 'object') {
+    currentTaskNoteEl.textContent = 'Loading task details...';
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = 'Loading task details...';
+    currentTaskPanelEl.appendChild(empty);
+    return;
+  }
+
+  const task = state.currentTask;
+  const inspection = currentTaskInspection();
+  const currentState = currentTaskStateView();
+  const attention = currentTaskAttentionView();
+  const activity = currentTaskActivityView();
+  const agenda = currentTaskAgendaView();
+  const checkpoint = currentTaskCheckpointView();
+  const budget = currentTaskBudgetView();
+  const title = firstPresentText(task.title, currentState.currentFocus, 'Current task');
+  const subtitle = firstPresentText(currentState.message, task.summary);
+  currentTaskNoteEl.textContent = firstPresentText(
+    currentState.taskState ? (titleizeToken(currentState.taskState) + ' · ' + title) : '',
+    title
+  );
+
+  const overview = document.createElement('section');
+  overview.className = 'task-card';
+  const overviewHeader = document.createElement('div');
+  overviewHeader.className = 'task-card-header';
+  const copy = document.createElement('div');
+  copy.className = 'task-card-copy';
+  const titleEl = document.createElement('h3');
+  titleEl.className = 'task-card-title';
+  titleEl.textContent = title;
+  copy.appendChild(titleEl);
+  if (subtitle) {
+    const summaryEl = document.createElement('p');
+    summaryEl.className = 'task-card-summary';
+    summaryEl.textContent = subtitle;
+    copy.appendChild(summaryEl);
+  }
+  overviewHeader.appendChild(copy);
+  const stateBadge = document.createElement('span');
+  stateBadge.className = 'task-state-badge';
+  stateBadge.dataset.tone = taskBadgeTone(firstPresentText(currentState.taskState, currentState.progressStatus));
+  stateBadge.textContent = titleizeToken(firstPresentText(currentState.taskState, currentState.progressStatus, 'active'));
+  overviewHeader.appendChild(stateBadge);
+  overview.appendChild(overviewHeader);
+
+  const inlineMeta = document.createElement('div');
+  inlineMeta.className = 'task-inline-meta';
+  const inlineValues = [];
+  if (task.id) inlineValues.push('Task ' + task.id.slice(0, 8));
+  if (budget.summary) inlineValues.push(budget.summary);
+  if (typeof currentState.stackDepth === 'number') inlineValues.push('Depth ' + currentState.stackDepth);
+  inlineValues.forEach((value) => {
+    const pill = document.createElement('span');
+    pill.className = 'task-inline-pill';
+    pill.textContent = value;
+    inlineMeta.appendChild(pill);
+  });
+  if (inlineValues.length) {
+    overview.appendChild(inlineMeta);
+  }
+
+  const metaGrid = document.createElement('div');
+  metaGrid.className = 'task-meta-grid';
+  const metaEntries = [
+    ['Task State', titleizeToken(currentState.taskState)],
+    ['Phase', titleizeToken(currentState.phase)],
+    ['Current Focus', currentState.currentFocus],
+    ['Next Step', currentState.nextStep],
+    ['Progress', titleizeToken(currentState.progressStatus)],
+    ['Last Checkpoint', firstPresentText(checkpoint.summary)]
+  ];
+  if (typeof currentState.compressedFrameCount === 'number' && currentState.compressedFrameCount > 0) {
+    metaEntries.push(['Compressed Frames', String(currentState.compressedFrameCount)]);
+  }
+  if (typeof currentState.childTaskFrameCount === 'number' && currentState.childTaskFrameCount > 0) {
+    metaEntries.push(['Child Tasks', String(currentState.childTaskFrameCount)]);
+  }
+  metaEntries.forEach(([label, value]) => {
+    if (!firstPresentText(value)) return;
+    metaGrid.appendChild(createTaskMetaItem(label, value));
+  });
+  if (metaGrid.childNodes.length) {
+    overview.appendChild(metaGrid);
+  }
+  currentTaskPanelEl.appendChild(overview);
+
+  if (firstPresentText(attention.kind, attention.summary)) {
+    const attentionCard = document.createElement('section');
+    attentionCard.className = 'task-card attention-card';
+    const header = document.createElement('div');
+    header.className = 'task-card-header';
+    const headerLabel = document.createElement('div');
+    headerLabel.className = 'detail-header';
+    headerLabel.textContent = 'Needs Attention';
+    header.appendChild(headerLabel);
+    const badge = document.createElement('span');
+    badge.className = 'task-state-badge';
+    badge.dataset.tone = 'approval';
+    badge.textContent = titleizeToken(attention.kind);
+    header.appendChild(badge);
+    attentionCard.appendChild(header);
+    if (attention.summary) {
+      const summaryEl = document.createElement('p');
+      summaryEl.className = 'task-card-summary';
+      summaryEl.textContent = attention.summary;
+      attentionCard.appendChild(summaryEl);
+    }
+    const attentionMeta = document.createElement('div');
+    attentionMeta.className = 'task-meta-grid';
+    const attentionEntries = [
+      ['Requested Input', attention.label],
+      ['Tool', attention.toolName],
+      ['Policy', attention.policy],
+      ['Description', attention.description],
+      ['Reason', attention.reason],
+      ['Requested At', attention.requestedAt ? formatDateTime(attention.requestedAt) : '']
+    ];
+    if (attention.masked) {
+      attentionEntries.push(['Masked', 'Yes']);
+    }
+    attentionEntries.forEach(([label, value]) => {
+      if (!firstPresentText(value)) return;
+      attentionMeta.appendChild(createTaskMetaItem(label, value));
+    });
+    if (attentionMeta.childNodes.length) {
+      attentionCard.appendChild(attentionMeta);
+    }
+    currentTaskPanelEl.appendChild(attentionCard);
+  }
+
+  if (agenda.length) {
+    const agendaCard = document.createElement('section');
+    agendaCard.className = 'task-card';
+    const header = document.createElement('div');
+    header.className = 'detail-header';
+    header.textContent = 'Agenda';
+    agendaCard.appendChild(header);
+    const list = document.createElement('div');
+    list.className = 'task-list';
+    agenda.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'task-list-item';
+      const head = document.createElement('div');
+      head.className = 'task-list-item-head';
+      const titleNode = document.createElement('div');
+      titleNode.className = 'task-list-title';
+      titleNode.textContent = firstPresentText(item.item, 'Agenda item');
+      head.appendChild(titleNode);
+      if (item.status) {
+        const badge = document.createElement('span');
+        badge.className = 'task-state-badge';
+        badge.dataset.tone = taskBadgeTone(item.status);
+        badge.textContent = titleizeToken(item.status);
+        head.appendChild(badge);
+      }
+      row.appendChild(head);
+      list.appendChild(row);
+    });
+    agendaCard.appendChild(list);
+    currentTaskPanelEl.appendChild(agendaCard);
+  }
+
+  if (activity.length) {
+    const activityCard = document.createElement('section');
+    activityCard.className = 'task-card';
+    const header = document.createElement('div');
+    header.className = 'detail-header';
+    header.textContent = 'Recent Activity';
+    activityCard.appendChild(header);
+    const list = document.createElement('div');
+    list.className = 'task-list';
+    activity.forEach((entry) => {
+      list.appendChild(createTaskActivityItem(asObject(entry)));
+    });
+    activityCard.appendChild(list);
+    currentTaskPanelEl.appendChild(activityCard);
+  }
+
+  if (!agenda.length && !activity.length && !firstPresentText(attention.kind, attention.summary)) {
+    const empty = document.createElement('p');
+    empty.className = 'task-empty-note';
+    empty.textContent = 'Task detail is available, but there is no recent agenda or activity yet.';
+    currentTaskPanelEl.appendChild(empty);
+  }
+}
+
 function isClosedSessionResponse(response, data) {
   if (!response || ![404, 409].includes(response.status)) return false;
   const message = firstNonEmpty(data && data.error, '').toLowerCase();
@@ -569,6 +936,7 @@ function resetCurrentSession(statusText) {
   closeTaskEventStream();
   state.sessionId = '';
   state.currentTaskId = '';
+  state.currentTask = null;
   state.liveEventAfter = 0;
   state.liveEventReceivedAt = 0;
   state.messages = [];
@@ -717,6 +1085,7 @@ function syncStatus() {
   }
   activityStatusEl.textContent = activityText;
   activityStatusEl.dataset.tone = currentActivityTone();
+  renderCurrentTaskPanel();
 }
 
 function setStatus(text) {
@@ -781,6 +1150,7 @@ function applyTaskSnapshot(task, options) {
   if (task.id) {
     setCurrentTaskId(task.id);
   }
+  state.currentTask = task;
   const runtime = normalizeTaskRuntimeStatus(task.runtime);
   if (runtime) {
     state.liveStatus = runtime;
@@ -1008,6 +1378,30 @@ function normalizeServerErrorMessage(message) {
 
 function firstNonEmpty(value, fallback) {
   return value && String(value).trim() ? String(value).trim() : (fallback || '');
+}
+
+function firstPresentText() {
+  for (let index = 0; index < arguments.length; index += 1) {
+    const value = arguments[index];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function titleizeToken(value) {
+  const text = firstPresentText(value).replace(/[_-]+/g, ' ');
+  if (!text) return '';
+  return text.replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
 function providerDisplayName(provider) {
@@ -6240,9 +6634,13 @@ function setCurrentTaskId(taskId) {
       closeTaskEventStream();
     }
     state.currentTaskId = next;
+    if (!state.currentTask || state.currentTask.id !== next) {
+      state.currentTask = null;
+    }
     state.liveEventAfter = 0;
     state.liveEventReceivedAt = 0;
   }
+  renderCurrentTaskPanel();
 }
 
 function supportsTaskEventStream() {
@@ -7451,6 +7849,7 @@ async function pollStatus() {
 
 async function pollCurrentTask() {
   if (!state.sessionId) {
+    state.currentTask = null;
     setCurrentTaskId('');
     return null;
   }
@@ -7470,6 +7869,7 @@ async function pollCurrentTask() {
     if (task) {
       applyTaskSnapshot(task);
     } else {
+      state.currentTask = null;
       setCurrentTaskId(data.task_id || '');
     }
     return task;
@@ -8039,6 +8439,7 @@ persistSession();
 renderInputRequest();
 renderApproval();
 renderMessages();
+renderCurrentTaskPanel();
 syncLocalDocPanel('No local document selected.');
 syncArtifactPanel('No artifact selected.');
 syncScratchEditor('No note selected.');
