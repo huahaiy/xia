@@ -10,6 +10,11 @@
 (def ^:private default-supervisor-restart-grace-ms 1000)
 (def ^:private default-max-tool-rounds 100)
 (def ^:private default-max-tool-calls-per-round 12)
+(def ^:private default-parallel-tool-timeout-ms 30000)
+(def ^:private default-branch-task-timeout-ms 300000)
+(def ^:private default-supervisor-phase-timeout-ms 30000)
+(def ^:private default-supervisor-llm-timeout-ms 120000)
+(def ^:private default-supervisor-tool-timeout-ms 120000)
 (def ^:private default-http-max-attempts 3)
 (def ^:private default-http-initial-backoff-ms 1000)
 (def ^:private default-http-max-backoff-ms 8000)
@@ -59,6 +64,38 @@
   []
   (cfg/positive-long :agent/max-tool-calls-per-round
                      default-max-tool-calls-per-round))
+
+(defn parallel-tool-timeout-ms
+  []
+  (cfg/positive-long :agent/parallel-tool-timeout-ms
+                     default-parallel-tool-timeout-ms))
+
+(defn branch-task-timeout-ms
+  []
+  (cfg/positive-long :agent/branch-task-timeout-ms
+                     default-branch-task-timeout-ms))
+
+(defn supervisor-phase-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-phase-timeout-ms
+                     default-supervisor-phase-timeout-ms))
+
+(defn supervisor-llm-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-llm-timeout-ms
+                     default-supervisor-llm-timeout-ms))
+
+(defn supervisor-tool-timeout-ms
+  []
+  (cfg/positive-long :agent/supervisor-tool-timeout-ms
+                     default-supervisor-tool-timeout-ms))
+
+(defn supervisor-worker-timeout-ms
+  [phase]
+  (case phase
+    :llm (supervisor-llm-timeout-ms)
+    :tool (supervisor-tool-timeout-ms)
+    (supervisor-phase-timeout-ms)))
 
 (defn schedule-failure-backoff-minutes
   []
@@ -393,6 +430,27 @@
      :max-tool-rounds max-tool-rounds
      :reason (when-not allowed?
                "Too many tool-calling rounds")}))
+
+(defn parallel-tool-timeout-policy
+  [tool-id tool-name timeout-ms]
+  {:decision-type :parallel-tool-timeout-policy
+   :allowed? false
+   :mode :timeout
+   :tool-id tool-id
+   :tool-name tool-name
+   :timeout-ms (long timeout-ms)
+   :reason (str "Parallel tool execution timed out: " tool-name)})
+
+(defn branch-task-timeout-policy
+  [task prompt timeout-ms]
+  (let [task-label (or task prompt "unnamed")]
+    {:decision-type :branch-task-timeout-policy
+     :allowed? false
+     :mode :timeout
+     :task task
+     :prompt prompt
+     :timeout-ms (long timeout-ms)
+     :reason (str "Branch task timed out: " task-label)}))
 
 (defn schedule-failure-backoff-ms
   ^long

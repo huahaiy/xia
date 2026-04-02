@@ -12,6 +12,11 @@
                                       :agent/supervisor-restart-grace-ms 900
                                       :agent/max-tool-rounds 14
                                       :agent/max-tool-calls-per-round 6
+                                      :agent/parallel-tool-timeout-ms 3210
+                                      :agent/branch-task-timeout-ms 6543
+                                      :agent/supervisor-phase-timeout-ms 111
+                                      :agent/supervisor-llm-timeout-ms 222
+                                      :agent/supervisor-tool-timeout-ms 333
                                       :schedule/failure-backoff-minutes 20
                                       :schedule/max-failure-backoff-minutes 600
                                       :schedule/pause-after-repeated-failures 4
@@ -32,6 +37,14 @@
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
     (is (= 14 (task-policy/max-tool-rounds)))
     (is (= 6 (task-policy/max-tool-calls-per-round)))
+    (is (= 3210 (task-policy/parallel-tool-timeout-ms)))
+    (is (= 6543 (task-policy/branch-task-timeout-ms)))
+    (is (= 111 (task-policy/supervisor-phase-timeout-ms)))
+    (is (= 222 (task-policy/supervisor-llm-timeout-ms)))
+    (is (= 333 (task-policy/supervisor-tool-timeout-ms)))
+    (is (= 222 (task-policy/supervisor-worker-timeout-ms :llm)))
+    (is (= 333 (task-policy/supervisor-worker-timeout-ms :tool)))
+    (is (= 111 (task-policy/supervisor-worker-timeout-ms :planning)))
     (is (= 20 (task-policy/schedule-failure-backoff-minutes)))
     (is (= 600 (task-policy/schedule-max-failure-backoff-minutes)))
     (is (= 4 (task-policy/schedule-pause-after-repeated-failures)))
@@ -294,3 +307,20 @@
           :limit 3}
          (select-keys (task-policy/service-rate-limit-policy :limited 3)
                       [:decision-type :allowed? :mode :service-id :limit]))))
+
+(deftest timeout-policies-capture-parallel-tool-and-branch-task-blocks
+  (is (= {:decision-type :parallel-tool-timeout-policy
+          :allowed? false
+          :mode :timeout
+          :tool-id :web-fetch
+          :tool-name "web-fetch"
+          :timeout-ms 50}
+         (select-keys (task-policy/parallel-tool-timeout-policy :web-fetch "web-fetch" 50)
+                      [:decision-type :allowed? :mode :tool-id :tool-name :timeout-ms])))
+  (is (= {:decision-type :branch-task-timeout-policy
+          :allowed? false
+          :mode :timeout
+          :task "slow"
+          :timeout-ms 75}
+         (select-keys (task-policy/branch-task-timeout-policy "slow" "slow branch" 75)
+                      [:decision-type :allowed? :mode :task :timeout-ms]))))

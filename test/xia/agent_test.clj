@@ -3173,14 +3173,18 @@
 
 (deftest run-branch-tasks-times-out-hung-batches
   (let [parent-session-id (db/create-session! :terminal)
-        started           (atom [])]
+        started           (atom [])
+        decisions         (atom [])]
     (db/set-config! :agent/branch-task-timeout-ms 50)
     (with-redefs [xia.agent/process-message
                   (fn [_session-id message & _]
                     (swap! started conj message)
                     (if (str/includes? message "What to do:\nslow branch")
                       (Thread/sleep 10000)
-                      "done"))]
+                      "done"))
+                  xia.prompt/policy-decision! (fn [decision]
+                                                (swap! decisions conj decision)
+                                                decision)]
       (let [started-at (System/nanoTime)
             err        (try
                          (agent/run-branch-tasks
@@ -3202,7 +3206,15 @@
         (is (< elapsed-ms 1000.0))
         (is (= 2 (count @started)))
         (is (some #(str/includes? % "What to do:\nslow branch") @started))
-        (is (some #(str/includes? % "What to do:\nfast branch") @started))))))
+        (is (some #(str/includes? % "What to do:\nfast branch") @started))
+        (is (some #(= {:decision-type :branch-task-timeout-policy
+                       :allowed? false
+                       :mode :timeout
+                       :task "slow"
+                       :timeout-ms 50}
+                      (select-keys %
+                                   [:decision-type :allowed? :mode :task :timeout-ms]))
+                  @decisions))))))
 
 (deftest run-branch-tasks-timeout-interrupts-child-process-message
   (let [parent-session-id (db/create-session! :terminal)
@@ -3573,4 +3585,64 @@
                          :max-tool-calls-per-round 12}
                         (select-keys (:data %)
                                      [:decision-type :allowed :mode :tool-count :max-tool-calls-per-round]))
+                    policy-items)))))))
+
+(deftest process-message-records-policy-decision-for-parallel-tool-timeout
+  (let [session-id (db/create-session! :terminal)
+        tool-calls [{"id" "call-1"
+                     "function" {"name" "web-fetch"
+                                 "arguments" "{}"}}
+                    {"id" "call-2"
+                     "function" {"name" "web-search"
+                                 "arguments" "{}"}}]]
+    (db/set-config! :agent/parallel-tool-timeout-ms 50)
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-fetch"
+                                                                              :parameters {}}}
+                                                                  {:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly true)
+                  xia.tool/execute-tool              (fn [tool-id _args _context]
+                                                       (if (= :web-fetch tool-id)
+                                                         (Thread/sleep 10000)
+                                                         {:tool (name tool-id)}))
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "ACTION_INTENT_JSON:"
+                                                                       "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search broadly\",\"why\":\"Need broad search\",\"tool\":\"web-fetch\",\"tool_args_summary\":\"{}\"}")
+                                                        "tool_calls" tool-calls})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id
+                                         "research this"
+                                         :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Parallel tool execution timed out: web-fetch"
+                     (.getMessage ^Exception err)))
+        (is (= {:type :parallel-tool-timeout
+                :timeout-ms 50
+                :tool-id :web-fetch
+                :func-name "web-fetch"}
+               (select-keys (ex-data err)
+                            [:type :timeout-ms :tool-id :func-name])))
+        (let [task-id      (:id (first (db/list-tasks {:session-id session-id})))
+              turn-id      (:id (first (db/task-turns task-id)))
+              policy-items (->> (db/turn-items turn-id)
+                                (filter #(and (= :system-note (:type %))
+                                              (= "policy-decision" (get-in % [:data :kind])))))]
+          (is (some #(= {:decision-type "parallel-tool-timeout-policy"
+                         :allowed false
+                         :mode "timeout"
+                         :tool-id "web-fetch"
+                         :timeout-ms 50}
+                        (select-keys (:data %)
+                                     [:decision-type :allowed :mode :tool-id :timeout-ms]))
                     policy-items)))))))
