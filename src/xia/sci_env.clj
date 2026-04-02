@@ -18,7 +18,6 @@
             [taoensso.timbre :as log]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
-            [xia.config :as cfg]
             [xia.cron :as cron]
             [xia.email :as email]
             [xia.instance-supervisor :as instance-supervisor]
@@ -31,15 +30,13 @@
             [xia.secret :as secret]
             [xia.service :as service]
             [xia.skill :as skill]
+            [xia.task-policy :as task-policy]
             [xia.web :as web]
             [xia.workspace :as workspace]
             [xia.working-memory :as wm])
   (:import [java.util Date]
            [java.util.concurrent.atomic AtomicLong]))
 
-(def ^:private default-sci-eval-timeout-ms 10000)
-(def ^:private default-sci-handler-timeout-ms 120000)
-(def ^:private default-max-active-sci-workers 32)
 (def ^:private sci-timeout-stop-grace-ms 100)
 (def ^:private sci-timeout-check-interval-mask 127)
 (def ^:private reader-eof (Object.))
@@ -333,18 +330,15 @@
 
 (defn- sci-eval-timeout-ms
   []
-  (cfg/positive-long :tool/sci-eval-timeout-ms
-                     default-sci-eval-timeout-ms))
+  (task-policy/tool-sci-eval-timeout-ms))
 
 (defn- sci-handler-timeout-ms
   []
-  (cfg/positive-long :tool/sci-handler-timeout-ms
-                     default-sci-handler-timeout-ms))
+  (task-policy/tool-sci-handler-timeout-ms))
 
 (defn- max-active-sci-workers
   []
-  (cfg/positive-long :tool/max-active-sci-workers
-                     default-max-active-sci-workers))
+  (task-policy/tool-max-active-sci-workers))
 
 (def ^:private timeout-check-form
   '(xia.sci-env/check-timeout!))

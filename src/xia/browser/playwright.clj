@@ -7,6 +7,7 @@
             [xia.browser.backend :as backend]
             [xia.browser.query :as browser.query]
             [xia.config :as cfg]
+            [xia.task-policy :as task-policy]
             [xia.web :as web])
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
@@ -50,7 +51,7 @@
   (cfg/boolean-option :browser/playwright-headless? true))
 
 (defn- timeout-ms []
-  (cfg/positive-long :browser/playwright-timeout-ms 15000))
+  (task-policy/browser-playwright-timeout-ms))
 
 (defn- auto-install? []
   (cfg/boolean-option :browser/playwright-auto-install? true))

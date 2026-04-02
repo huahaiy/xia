@@ -42,6 +42,12 @@
                                       :async/background-queue-capacity 300
                                       :async/parallel-max-threads 12
                                       :async/parallel-queue-capacity 400
+                                      :tool/sci-eval-timeout-ms 12345
+                                      :tool/sci-handler-timeout-ms 54321
+                                      :tool/max-active-sci-workers 13
+                                      :local-doc/ocr-timeout-ms 180000
+                                      :local-doc/ocr-max-tokens 1024
+                                      :browser/playwright-timeout-ms 22000
                                       default-value))
                 cfg/positive-double (fn [key-name default-value]
                                       (case key-name
@@ -86,7 +92,13 @@
     (is (= 11 (task-policy/async-background-max-threads)))
     (is (= 300 (task-policy/async-background-queue-capacity)))
     (is (= 12 (task-policy/async-parallel-max-threads)))
-    (is (= 400 (task-policy/async-parallel-queue-capacity)))))
+    (is (= 400 (task-policy/async-parallel-queue-capacity)))
+    (is (= 12345 (task-policy/tool-sci-eval-timeout-ms)))
+    (is (= 54321 (task-policy/tool-sci-handler-timeout-ms)))
+    (is (= 13 (task-policy/tool-max-active-sci-workers)))
+    (is (= 180000 (task-policy/local-doc-ocr-timeout-ms)))
+    (is (= 1024 (task-policy/local-doc-ocr-max-tokens)))
+    (is (= 22000 (task-policy/browser-playwright-timeout-ms)))))
 
 (deftest turn-llm-budget-records-usage-and-exhaustion
   (with-redefs [task-policy/max-turn-llm-calls (constantly 2)

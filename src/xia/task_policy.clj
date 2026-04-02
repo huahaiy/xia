@@ -47,6 +47,12 @@
 (def ^:private default-async-parallel-max-threads
   (max 4 (.availableProcessors (Runtime/getRuntime))))
 (def ^:private default-async-parallel-queue-capacity 256)
+(def ^:private default-tool-sci-eval-timeout-ms 10000)
+(def ^:private default-tool-sci-handler-timeout-ms 120000)
+(def ^:private default-tool-max-active-sci-workers 32)
+(def ^:private default-local-doc-ocr-timeout-ms 120000)
+(def ^:private default-local-doc-ocr-max-tokens 2048)
+(def ^:private default-browser-playwright-timeout-ms 15000)
 
 (defn supervisor-max-identical-iterations
   []
@@ -239,6 +245,36 @@
   []
   (cfg/positive-long :async/parallel-queue-capacity
                      default-async-parallel-queue-capacity))
+
+(defn tool-sci-eval-timeout-ms
+  []
+  (cfg/positive-long :tool/sci-eval-timeout-ms
+                     default-tool-sci-eval-timeout-ms))
+
+(defn tool-sci-handler-timeout-ms
+  []
+  (cfg/positive-long :tool/sci-handler-timeout-ms
+                     default-tool-sci-handler-timeout-ms))
+
+(defn tool-max-active-sci-workers
+  []
+  (cfg/positive-long :tool/max-active-sci-workers
+                     default-tool-max-active-sci-workers))
+
+(defn local-doc-ocr-timeout-ms
+  []
+  (cfg/positive-long :local-doc/ocr-timeout-ms
+                     default-local-doc-ocr-timeout-ms))
+
+(defn local-doc-ocr-max-tokens
+  []
+  (cfg/positive-long :local-doc/ocr-max-tokens
+                     default-local-doc-ocr-max-tokens))
+
+(defn browser-playwright-timeout-ms
+  []
+  (cfg/positive-long :browser/playwright-timeout-ms
+                     default-browser-playwright-timeout-ms))
 
 (defn http-request-retry-config
   [req]
