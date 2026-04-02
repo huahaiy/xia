@@ -10,6 +10,8 @@
                                       :agent/supervisor-max-restarts 5
                                       :agent/supervisor-restart-backoff-ms 250
                                       :agent/supervisor-restart-grace-ms 900
+                                      :llm/max-provider-retry-rounds 9
+                                      :llm/max-provider-retry-wait-ms 777000
                                       :agent/max-turn-llm-calls 42
                                       :agent/max-turn-total-tokens 123456
                                       :agent/max-turn-wall-clock-ms 654321
@@ -23,6 +25,8 @@
     (is (= 5 (task-policy/supervisor-max-restarts)))
     (is (= 250 (task-policy/supervisor-restart-backoff-ms)))
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
+    (is (= 9 (task-policy/llm-max-provider-retry-rounds)))
+    (is (= 777000 (task-policy/llm-max-provider-retry-wait-ms)))
     (is (= 42 (task-policy/max-turn-llm-calls)))
     (is (= 123456 (task-policy/max-turn-total-tokens)))
     (is (= 654321 (task-policy/max-turn-wall-clock-ms)))))
@@ -185,3 +189,16 @@
             :status 503}
            (select-keys disabled
                         [:allowed? :mode :attempt :status])))))
+
+(deftest llm-retry-helpers-capture-delay-and-retryability
+  (let [now-ms (constantly 1000)
+        retry-after (task-policy/llm-retry-after-ms {"retry-after" "120"} now-ms)
+        sleep-ms (task-policy/llm-retry-sleep-ms 1000 1 4 300000 5000 (constantly 2000))
+        non-retry-sleep (task-policy/llm-retry-sleep-ms 1000 4 4 300000 5000 (constantly 2000))
+        retryable (ex-info "rate limited" {:status 429})
+        permanent (ex-info "unauthorized" {:status 401})]
+    (is (= 120000 retry-after))
+    (is (= 5000 sleep-ms))
+    (is (nil? non-retry-sleep))
+    (is (true? (task-policy/llm-retryable-error? retryable)))
+    (is (false? (task-policy/llm-retryable-error? permanent)))))

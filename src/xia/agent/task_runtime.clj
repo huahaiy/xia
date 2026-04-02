@@ -431,10 +431,11 @@
 
    :task-runtime/on-policy-decision
    (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error
-                attempt max-restarts max-attempts backoff-ms delay-ms grace-ms
-                failure-type failure-phase worker-phase tool-risk? round
-                request-label url status]}]
+                attempt max-restarts max-attempts max-retry-rounds max-retry-wait-ms
+                backoff-ms delay-ms grace-ms failure-type failure-phase worker-phase
+                tool-risk? round request-label url status providers workload provider-id]}]
      (let [target-label (or request-label
+                            (some-> provider-id name)
                             tool-name
                             (some-> tool-id name)
                             "request")
@@ -443,6 +444,7 @@
                           :execution-policy "Execution policy"
                           :restart-policy "Restart policy"
                           :http-retry-policy "HTTP retry policy"
+                          :provider-retry-policy "Provider retry policy"
                           "Policy")
                         " "
                         (if allowed? "allowed" "blocked")
@@ -461,12 +463,16 @@
                                      decision-type (assoc :decision-type (name decision-type))
                                      policy (assoc :policy (name policy))
                                      request-label (assoc :request-label request-label)
+                                     provider-id (assoc :provider-id (name provider-id))
+                                     workload (assoc :workload (name workload))
                                      url (assoc :url url)
                                      status (assoc :status-code status)
                                      mode (assoc :mode (name mode))
                                      reason (assoc :reason reason)
                                      attempt (assoc :attempt attempt)
                                      max-attempts (assoc :max-attempts max-attempts)
+                                     max-retry-rounds (assoc :max-retry-rounds max-retry-rounds)
+                                     max-retry-wait-ms (assoc :max-retry-wait-ms max-retry-wait-ms)
                                      max-restarts (assoc :max-restarts max-restarts)
                                      delay-ms (assoc :delay-ms delay-ms)
                                      backoff-ms (assoc :backoff-ms backoff-ms)
@@ -475,6 +481,7 @@
                                      failure-phase (assoc :failure-phase (name failure-phase))
                                      worker-phase (assoc :worker-phase (name worker-phase))
                                      tool-risk? (assoc :tool-risk tool-risk?)
+                                     (seq providers) (assoc :providers (mapv name providers))
                                      round (assoc :round round)
                                      error (assoc :error error))}))))})
 
