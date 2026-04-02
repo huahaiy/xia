@@ -10,6 +10,8 @@
                                       :agent/supervisor-max-restarts 5
                                       :agent/supervisor-restart-backoff-ms 250
                                       :agent/supervisor-restart-grace-ms 900
+                                      :autonomous/max-iterations 9
+                                      :autonomous/max-stack-depth 48
                                       :agent/max-tool-rounds 14
                                       :agent/max-tool-calls-per-round 6
                                       :agent/parallel-tool-timeout-ms 3210
@@ -25,6 +27,9 @@
                                       :agent/max-turn-llm-calls 42
                                       :agent/max-turn-total-tokens 123456
                                       :agent/max-turn-wall-clock-ms 654321
+                                      :agent/max-task-llm-calls 420
+                                      :agent/max-task-total-tokens 1234567
+                                      :agent/max-task-llm-duration-ms 7654321
                                       :agent/max-user-message-chars 999
                                       :agent/max-user-message-tokens 77
                                       :agent/max-branch-tasks 8
@@ -58,6 +63,8 @@
     (is (= 5 (task-policy/supervisor-max-restarts)))
     (is (= 250 (task-policy/supervisor-restart-backoff-ms)))
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
+    (is (= 9 (task-policy/autonomous-max-iterations)))
+    (is (= 48 (task-policy/autonomous-max-stack-depth)))
     (is (= 14 (task-policy/max-tool-rounds)))
     (is (= 6 (task-policy/max-tool-calls-per-round)))
     (is (= 3210 (task-policy/parallel-tool-timeout-ms)))
@@ -76,6 +83,9 @@
     (is (= 42 (task-policy/max-turn-llm-calls)))
     (is (= 123456 (task-policy/max-turn-total-tokens)))
     (is (= 654321 (task-policy/max-turn-wall-clock-ms)))
+    (is (= 420 (task-policy/max-task-llm-calls)))
+    (is (= 1234567 (task-policy/max-task-total-tokens)))
+    (is (= 7654321 (task-policy/max-task-llm-duration-ms)))
     (is (= 999 (task-policy/max-user-message-chars)))
     (is (= 77 (task-policy/max-user-message-tokens)))
     (is (= 8 (task-policy/max-branch-tasks)))
@@ -171,8 +181,64 @@
             (task-policy/turn-llm-budget-status token-budget))))
     (is (= :wall-clock (:kind (task-policy/turn-llm-budget-status wall-clock-budget))))
     (is (re-find #"wall-clock budget"
-                 (task-policy/turn-llm-budget-summary
+                  (task-policy/turn-llm-budget-summary
                   (task-policy/turn-llm-budget-status wall-clock-budget))))))
+
+(deftest autonomy-iteration-limit-policy-captures-stop-decision
+  (is (= {:decision-type :autonomy-iteration-policy
+          :allowed? false
+          :mode :iteration-limit
+          :iteration 4
+          :max-iterations 4}
+         (select-keys (task-policy/autonomy-iteration-limit-policy 4 4)
+                      [:decision-type :allowed? :mode :iteration :max-iterations]))))
+
+(deftest task-llm-budget-records-usage-and-exhaustion
+  (with-redefs [task-policy/max-task-llm-calls (constantly 2)
+                task-policy/max-task-total-tokens (constantly 100)
+                task-policy/max-task-llm-duration-ms (constantly 1000)]
+    (let [budget-state (atom (task-policy/new-task-llm-budget "task-1" :terminal 0))]
+      (task-policy/record-task-llm-request!
+       budget-state
+       {:usage {"prompt_tokens" "25"
+                "completion_tokens" "15"
+                "total_tokens" "40"}
+        :duration-ms 150})
+      (is (= {:scope :task
+              :llm-call-count 1
+              :prompt-tokens 25
+              :completion-tokens 15
+              :total-tokens 40
+              :llm-total-duration-ms 150}
+             (select-keys @budget-state
+                          [:scope
+                           :llm-call-count
+                           :prompt-tokens
+                           :completion-tokens
+                           :total-tokens
+                           :llm-total-duration-ms])))
+      (is (nil? (task-policy/task-llm-budget-status budget-state)))
+      (task-policy/record-task-llm-request!
+       budget-state
+       {:usage {:prompt_tokens 30
+                :output_tokens 35}
+        :duration-ms 200
+        :error (ex-info "provider unavailable" {})})
+      (let [status (task-policy/task-llm-budget-status budget-state)]
+        (is (= :task (:scope status)))
+        (is (= :llm-calls (:kind status)))
+        (is (= 2 (:llm-call-count status)))
+        (is (= 105 (:total-tokens status)))
+        (is (= "cumulative task LLM call budget (2/2)"
+               (task-policy/task-llm-budget-summary status)))
+        (is (= "provider unavailable" (:last-llm-error @budget-state)))
+        (is (= 1 (:llm-error-count @budget-state)))
+        (is (= :task-budget-exhausted
+               (:type (ex-data (task-policy/task-llm-budget-ex budget-state)))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"Reached the cumulative task LLM call budget"
+                              (task-policy/throw-if-task-llm-budget-exhausted!
+                               budget-state)))))))
 
 (deftest restart-policy-decision-captures-restart-permission
   (with-redefs [task-policy/supervisor-max-restarts (constantly 2)

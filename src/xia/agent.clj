@@ -721,16 +721,32 @@
       (some-> parsed :intent :plan-step str str/trim not-empty)
       (some-> autonomy-state autonomous/current-frame :next-step str str/trim not-empty)))
 
-(defn- turn-budget-note
+(defn- llm-budget-summary
+  [budget-status]
+  (case (:scope budget-status)
+    :task (task-policy/task-llm-budget-summary budget-status)
+    (task-policy/turn-llm-budget-summary budget-status)))
+
+(defn- llm-budget-note
   [budget-status parsed autonomy-state & {:keys [before-tools?]}]
-  (str "Note: I stopped this turn after reaching the "
-       (task-policy/turn-llm-budget-summary budget-status)
-       "."
-       (when before-tools?
-         " I did not execute the next requested tool step.")
-       (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
-         (str " Suggested next step: " next-step))
-       " Reply to continue from the current agenda."))
+  (case (:scope budget-status)
+    :task
+    (str "Note: I paused this task after reaching the "
+         (llm-budget-summary budget-status)
+         "."
+         (when before-tools?
+           " I did not execute the next requested tool step.")
+         (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
+           (str " Suggested next step: " next-step)))
+
+    (str "Note: I stopped this turn after reaching the "
+         (llm-budget-summary budget-status)
+         "."
+         (when before-tools?
+           " I did not execute the next requested tool step.")
+         (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
+           (str " Suggested next step: " next-step))
+         " Reply to continue from the current agenda.")))
 
 (defn- autonomy-status-fields
   [autonomy-state iteration max-iterations]
@@ -2006,7 +2022,8 @@
                                (response-content response))
               assistant-content (or (:assistant-text parsed-response)
                                     (response-content response))
-              budget-status (task-policy/turn-llm-budget-status turn-budget-state)
+              budget-status (or (task-policy/task-llm-budget-status (:task-budget-state execution-context))
+                                (task-policy/turn-llm-budget-status turn-budget-state))
               _ (when (zero? round)
                   (emit-intent-event! emit-event!
                                       execution-context
@@ -2252,15 +2269,22 @@
                       initial-wm-query-fingerprint (wm-query-signature initial-wm-message)
                       turn-budget-state (or *turn-llm-budget-state*
                                             (atom (task-policy/new-turn-llm-budget session-id
-                                                                                   channel)))]
+                                                                                   channel)))
+                      task-budget-state (task-runtime/task-llm-budget-state task-id)]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
                   (binding [*turn-llm-budget-state* turn-budget-state
                             llm/*request-budget-guard* (fn [_request]
                                                          (task-policy/throw-if-turn-llm-budget-exhausted!
-                                                          turn-budget-state))
+                                                          turn-budget-state)
+                                                         (task-policy/throw-if-task-llm-budget-exhausted!
+                                                          task-budget-state))
                             llm/*request-observer* (fn [request]
                                                      (task-policy/record-turn-llm-request!
                                                       turn-budget-state
+                                                      request)
+                                                     (task-runtime/record-task-llm-request!
+                                                      task-id
+                                                      task-budget-state
                                                       request))]
                     (loop [iteration 1
                            fact-eids []
@@ -2273,6 +2297,7 @@
                       (let [autonomy-state (or (wm/autonomy-state session-id)
                                                initial-autonomy-state)
                             iteration-context (assoc base-execution-context
+                                                     :task-budget-state task-budget-state
                                                      :iteration iteration
                                                      :max-iterations max-iterations*)
                             controller-messages (autonomous-iteration-messages
@@ -2318,14 +2343,17 @@
                                                                 system-prompt-cache-entry
                                                                 turn-budget-state)
                                 (catch clojure.lang.ExceptionInfo e
-                                  (if (= :turn-budget-exhausted (:type (ex-data e)))
+                                  (if (contains? #{:turn-budget-exhausted
+                                                   :task-budget-exhausted}
+                                                 (:type (ex-data e)))
                                     {:budget-exhausted? true
                                      :budget-status (select-keys (ex-data e)
-                                                                 [:kind :session-id :channel
+                                                                 [:scope :kind :task-id :session-id :channel
                                                                   :llm-call-count :total-tokens
                                                                   :prompt-tokens :completion-tokens
-                                                                  :elapsed-ms :max-llm-calls
-                                                                  :max-total-tokens :max-wall-clock-ms])}
+                                                                  :elapsed-ms :llm-total-duration-ms
+                                                                  :max-llm-calls :max-total-tokens
+                                                                  :max-wall-clock-ms :max-llm-duration-ms])}
                                     (throw e))))
                               parsed parsed-response
                               control (:control parsed)
@@ -2379,20 +2407,24 @@
                                      (= :continue (:status control))))
                             (let [final-text (append-assistant-note
                                               text
-                                              (turn-budget-note budget-status
-                                                                parsed
-                                                                updated-autonomy-state
-                                                                :before-tools? budget-before-tools?))]
+                                              (llm-budget-note budget-status
+                                                               parsed
+                                                               updated-autonomy-state
+                                                               :before-tools? budget-before-tools?))]
                               (task-runtime/record-task-item! task-turn-id
                                                               {:type :system-note
                                                                :status :limit
-                                                               :summary (str "Turn budget exhausted: "
-                                                                             (task-policy/turn-llm-budget-summary budget-status))
+                                                               :summary (str (if (= :task (:scope budget-status))
+                                                                               "Task budget exhausted: "
+                                                                               "Turn budget exhausted: ")
+                                                                             (llm-budget-summary budget-status))
                                                                :data {:kind "budget-exhausted"
+                                                                      :budget-scope (some-> (:scope budget-status) name)
                                                                       :budget-kind (some-> (:kind budget-status) name)
                                                                       :llm-call-count (:llm-call-count budget-status)
                                                                       :total-tokens (:total-tokens budget-status)
                                                                       :elapsed-ms (:elapsed-ms budget-status)
+                                                                      :llm-total-duration-ms (:llm-total-duration-ms budget-status)
                                                                       :before-tools? (boolean budget-before-tools?)}})
                               (persist-assistant-message! session-id
                                                           final-text
@@ -2417,13 +2449,19 @@
                                {:phase :complete
                                 :iteration iteration
                                 :summary (or (truncate-summary final-text 500)
-                                             "Stopped after reaching the cumulative turn budget.")
+                                             (str "Stopped after reaching the "
+                                                  (llm-budget-summary budget-status)
+                                                  "."))
                                 :session-id session-id
-                                :status :turn-budget
+                                :status (if (= :task (:scope budget-status))
+                                          :task-budget
+                                          :turn-budget)
+                                :budget-scope (:scope budget-status)
                                 :budget-kind (:kind budget-status)
                                 :llm-call-count (:llm-call-count budget-status)
                                 :total-tokens (:total-tokens budget-status)
                                 :elapsed-ms (:elapsed-ms budget-status)
+                                :llm-total-duration-ms (:llm-total-duration-ms budget-status)
                                 :next-step (turn-budget-next-step parsed updated-autonomy-state)
                                 :progress-status (some-> updated-tip :progress-status)
                                 :agenda (some-> updated-tip :agenda)
@@ -2431,7 +2469,7 @@
                               (prompt/status! (merge {:state :done
                                                       :phase :complete
                                                       :message (str "Paused after reaching the "
-                                                                    (task-policy/turn-llm-budget-summary budget-status))}
+                                                                    (llm-budget-summary budget-status))}
                                                      (autonomy-status-fields updated-autonomy-state
                                                                              iteration
                                                                              max-iterations*)))
@@ -2471,6 +2509,10 @@
                             (let [final-text (append-assistant-note text
                                                                     (iteration-limit-note max-iterations*
                                                                                           control))]
+                              (prompt/policy-decision!
+                               (task-policy/autonomy-iteration-limit-policy
+                                iteration
+                                max-iterations*))
                               (persist-assistant-message! session-id
                                                           final-text
                                                           iteration-context

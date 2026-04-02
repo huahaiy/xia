@@ -2,12 +2,11 @@
   "Helpers for autonomous scheduled execution."
   (:require [charred.api :as json]
             [clojure.string :as str]
-            [xia.config :as cfg]
             [xia.db :as db]
-            [xia.prompt :as prompt])
+            [xia.prompt :as prompt]
+            [xia.task-policy :as task-policy])
   (:import (com.fasterxml.jackson.core JsonFactory JsonToken)))
 
-(def ^:private default-max-iterations 6)
 (def ^:private default-control-field-chars 280)
 (def ^:private default-goal-chars 1200)
 (def ^:private default-summary-chars 1200)
@@ -15,7 +14,6 @@
 (def ^:private default-reason-chars 600)
 (def ^:private max-agenda-items 8)
 (def ^:private max-agenda-item-chars 160)
-(def ^:private default-max-stack-depth 32)
 (def ^:private compressed-frame-preview-limit 6)
 (def ^:private compressed-frame-reason
   "Older suspended stack frames were compressed to stay within the depth limit.")
@@ -119,13 +117,11 @@
 
 (defn max-iterations
   []
-  (cfg/positive-long :autonomous/max-iterations
-                     default-max-iterations))
+  (task-policy/autonomous-max-iterations))
 
 (defn- max-stack-depth
   []
-  (cfg/positive-long :autonomous/max-stack-depth
-                     default-max-stack-depth))
+  (task-policy/autonomous-max-stack-depth))
 
 (defn control-marker-text
   []

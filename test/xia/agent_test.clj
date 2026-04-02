@@ -1905,7 +1905,8 @@
 (deftest process-message-returns-final-message-when-autonomous-loop-hits-iteration-cap
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom 0)
-        reviewed   (atom nil)]
+        reviewed   (atom nil)
+        decisions  (atom [])]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
                   xia.working-memory/update-wm!      (fn [& _] nil)
                   xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
@@ -1914,6 +1915,9 @@
                                                        {:messages [{:role "system" :content "test"}]
                                                         :used-fact-eids []})
                   xia.autonomous/max-iterations      (constantly 2)
+                  xia.prompt/policy-decision!        (fn [decision]
+                                                       (swap! decisions conj decision)
+                                                       decision)
                   xia.llm/chat-message               (fn [_messages & _opts]
                                                        (swap! llm-calls inc)
                                                        {"content" (str "Still working.\n\n"
@@ -1939,6 +1943,14 @@
     (is (= {:session-id session-id
             :assistant-response "Still working."}
            @reviewed))
+    (is (some #(= {:decision-type :autonomy-iteration-policy
+                   :allowed? false
+                   :mode :iteration-limit
+                   :iteration 2
+                   :max-iterations 2}
+                  (select-keys %
+                               [:decision-type :allowed? :mode :iteration :max-iterations]))
+              @decisions))
     (is (= :blocked (some-> (wm/autonomy-state session-id)
                             autonomous/current-frame
                             :progress-status)))))
@@ -2059,6 +2071,64 @@
                 (filter #(contains? #{:user :assistant} (:role %)))
                 (mapv (fn [{:keys [role content]}]
                         [role content])))))))
+
+(deftest process-message-stops-when-task-llm-call-budget-is-reached-across-turns
+  (let [session-id (db/create-session! :terminal)
+        llm-calls  (atom 0)]
+    (db/set-config! :agent/max-turn-llm-calls 10)
+    (db/set-config! :agent/max-turn-total-tokens 100000)
+    (db/set-config! :agent/max-turn-wall-clock-ms 300000)
+    (db/set-config! :agent/max-task-llm-calls 2)
+    (db/set-config! :agent/max-task-total-tokens 100000)
+    (db/set-config! :agent/max-task-llm-duration-ms 300000)
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 1)
+                  xia.llm/chat                       (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"choices" [{"message" {"content" (str "First task step.\n\n"
+                                                                                                   "AUTONOMOUS_STATUS_JSON:"
+                                                                                                   "{\"status\":\"continue\",\"summary\":\"First task step\",\"next_step\":\"Take the second task step\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Take the second task step\",\"status\":\"pending\"}]}")}}]
+                                                            "usage" {"prompt_tokens" 3
+                                                                     "completion_tokens" 4
+                                                                     "total_tokens" 7}}
+                                                         2 {"choices" [{"message" {"content" (str "Second task step.\n\n"
+                                                                                                   "AUTONOMOUS_STATUS_JSON:"
+                                                                                                   "{\"status\":\"continue\",\"summary\":\"Second task step\",\"next_step\":\"Take the third task step\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Take the third task step\",\"status\":\"pending\"}]}")}}]
+                                                            "usage" {"prompt_tokens" 3
+                                                                     "completion_tokens" 4
+                                                                     "total_tokens" 7}}
+                                                         (throw (ex-info "unexpected third LLM call" {}))))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [first-result (agent/process-message session-id "keep going" :channel :terminal)
+            task-id      (:id (db/current-session-task session-id))
+            second-result (agent/process-message session-id "keep going again"
+                                                 :channel :terminal
+                                                 :task-id task-id)]
+        (is (str/includes? first-result "Note: I stopped after reaching the autonomous iteration limit for this turn (1)."))
+        (is (str/includes? second-result "Second task step."))
+        (is (str/includes? second-result "Note: I paused this task after reaching the cumulative task LLM call budget (2/2)."))
+        (is (str/includes? second-result "Suggested next step: Take the third task step"))
+        (let [task (db/get-task task-id)
+              turns (db/task-turns task-id)
+              turn-items (db/turn-items (:id (last turns)))
+              turn-items-by-turn (into {}
+                                       (map (fn [turn]
+                                              [(:id turn) (db/turn-items (:id turn))]))
+                                       turns)
+              event-types (mapv :type (task-event/task-events task turns turn-items-by-turn))]
+          (is (= 2 (get-in task [:meta :llm-budget :llm-call-count])))
+          (is (some #(and (= :system-note (:type %))
+                          (= "budget-exhausted" (get-in % [:data :kind]))
+                          (= "task" (get-in % [:data :budget-scope])))
+                    turn-items))
+          (is (some #{:task.budget-exhausted} event-types)))))
+    (is (= 2 @llm-calls))))
 
 (deftest process-message-supervisor-stops-a-stalled-llm-worker
   (let [session-id (db/create-session! :terminal)

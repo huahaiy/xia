@@ -8,6 +8,8 @@
 (def ^:private default-supervisor-max-restarts 1)
 (def ^:private default-supervisor-restart-backoff-ms 100)
 (def ^:private default-supervisor-restart-grace-ms 1000)
+(def ^:private default-autonomous-max-iterations 6)
+(def ^:private default-autonomous-max-stack-depth 32)
 (def ^:private default-max-tool-rounds 100)
 (def ^:private default-max-tool-calls-per-round 12)
 (def ^:private default-parallel-tool-timeout-ms 30000)
@@ -29,6 +31,9 @@
 (def ^:private default-max-turn-llm-calls 600)
 (def ^:private default-max-turn-total-tokens 2000000)
 (def ^:private default-max-turn-wall-clock-ms 21600000)
+(def ^:private default-max-task-llm-calls 6000)
+(def ^:private default-max-task-total-tokens 20000000)
+(def ^:private default-max-task-llm-duration-ms 216000000)
 (def ^:private default-max-user-message-chars 32768)
 (def ^:private default-max-user-message-tokens 8000)
 (def ^:private default-max-branch-tasks 5)
@@ -78,6 +83,16 @@
   []
   (cfg/positive-long :agent/supervisor-restart-grace-ms
                      default-supervisor-restart-grace-ms))
+
+(defn autonomous-max-iterations
+  []
+  (cfg/positive-long :autonomous/max-iterations
+                     default-autonomous-max-iterations))
+
+(defn autonomous-max-stack-depth
+  []
+  (cfg/positive-long :autonomous/max-stack-depth
+                     default-autonomous-max-stack-depth))
 
 (defn max-tool-rounds
   []
@@ -160,6 +175,21 @@
   []
   (cfg/positive-long :agent/max-turn-wall-clock-ms
                      default-max-turn-wall-clock-ms))
+
+(defn max-task-llm-calls
+  []
+  (cfg/positive-long :agent/max-task-llm-calls
+                     default-max-task-llm-calls))
+
+(defn max-task-total-tokens
+  []
+  (cfg/positive-long :agent/max-task-total-tokens
+                     default-max-task-total-tokens))
+
+(defn max-task-llm-duration-ms
+  []
+  (cfg/positive-long :agent/max-task-llm-duration-ms
+                     default-max-task-llm-duration-ms))
 
 (defn max-user-message-chars
   []
@@ -329,7 +359,8 @@
 
 (defn new-turn-llm-budget
   [session-id channel]
-  {:session-id session-id
+  {:scope :turn
+   :session-id session-id
    :channel channel
    :started-at-ms (current-time-ms)
    :llm-call-count 0
@@ -341,10 +372,48 @@
    :max-total-tokens (long (max-turn-total-tokens))
    :max-wall-clock-ms (long (max-turn-wall-clock-ms))})
 
-(defn record-turn-llm-request!
-  [turn-budget-state {:keys [usage duration-ms error]}]
-  (when turn-budget-state
-    (swap! turn-budget-state
+(defn new-task-llm-budget
+  [task-id channel started-at]
+  {:scope :task
+   :task-id task-id
+   :channel channel
+   :started-at-ms (cond
+                    (instance? java.util.Date started-at)
+                    (.getTime ^java.util.Date started-at)
+
+                    (integer? started-at)
+                    (long started-at)
+
+                    :else
+                    (current-time-ms))
+   :llm-call-count 0
+   :llm-total-duration-ms 0
+   :prompt-tokens 0
+   :completion-tokens 0
+   :total-tokens 0
+   :max-llm-calls (long (max-task-llm-calls))
+   :max-total-tokens (long (max-task-total-tokens))
+   :max-llm-duration-ms (long (max-task-llm-duration-ms))})
+
+(defn restore-task-llm-budget
+  [task-id channel started-at persisted]
+  (merge (new-task-llm-budget task-id channel started-at)
+         (select-keys (or persisted {})
+                      [:started-at-ms
+                       :llm-call-count
+                       :llm-total-duration-ms
+                       :prompt-tokens
+                       :completion-tokens
+                       :total-tokens
+                       :last-llm-duration-ms
+                       :last-llm-error
+                       :last-llm-at-ms
+                       :llm-error-count])))
+
+(defn record-llm-budget-request!
+  [budget-state {:keys [usage duration-ms error]}]
+  (when budget-state
+    (swap! budget-state
            (fn [budget]
              (let [prompt-tokens (or (usage-value usage "prompt_tokens") 0)
                    completion-tokens (or (usage-value usage "completion_tokens")
@@ -365,6 +434,14 @@
                                   :last-llm-at-ms (current-time-ms)))
                  error
                  (update :llm-error-count (fnil inc 0))))))))
+
+(defn record-turn-llm-request!
+  [turn-budget-state request]
+  (record-llm-budget-request! turn-budget-state request))
+
+(defn record-task-llm-request!
+  [task-budget-state request]
+  (record-llm-budget-request! task-budget-state request))
 
 (defn- turn-llm-budget-status*
   [budget]
@@ -397,6 +474,37 @@
   (when turn-budget-state
     (turn-llm-budget-status* @turn-budget-state)))
 
+(defn- task-llm-budget-status*
+  [budget]
+  (let [status {:scope :task
+                :task-id (:task-id budget)
+                :channel (:channel budget)
+                :llm-call-count (long (:llm-call-count budget 0))
+                :total-tokens (long (:total-tokens budget 0))
+                :prompt-tokens (long (:prompt-tokens budget 0))
+                :completion-tokens (long (:completion-tokens budget 0))
+                :llm-total-duration-ms (long (:llm-total-duration-ms budget 0))
+                :max-llm-calls (long (:max-llm-calls budget 0))
+                :max-total-tokens (long (:max-total-tokens budget 0))
+                :max-llm-duration-ms (long (:max-llm-duration-ms budget 0))}]
+    (cond
+      (>= (:llm-call-count status) (:max-llm-calls status))
+      (assoc status :kind :llm-calls)
+
+      (>= (:total-tokens status) (:max-total-tokens status))
+      (assoc status :kind :tokens)
+
+      (>= (:llm-total-duration-ms status) (:max-llm-duration-ms status))
+      (assoc status :kind :llm-duration)
+
+      :else
+      nil)))
+
+(defn task-llm-budget-status
+  [task-budget-state]
+  (when task-budget-state
+    (task-llm-budget-status* @task-budget-state)))
+
 (defn format-duration-ms
   [value]
   (let [ms (long (or value 0))]
@@ -426,6 +534,22 @@
 
     "cumulative turn budget"))
 
+(defn task-llm-budget-summary
+  [{:keys [kind llm-call-count max-llm-calls total-tokens max-total-tokens
+           llm-total-duration-ms max-llm-duration-ms]}]
+  (case kind
+    :llm-calls
+    (str "cumulative task LLM call budget (" llm-call-count "/" max-llm-calls ")")
+
+    :tokens
+    (str "cumulative task token budget (" total-tokens "/" max-total-tokens ")")
+
+    :llm-duration
+    (str "cumulative task LLM runtime budget (" (format-duration-ms llm-total-duration-ms)
+         "/" (format-duration-ms max-llm-duration-ms) ")")
+
+    "cumulative task budget"))
+
 (defn turn-llm-budget-ex
   [turn-budget-state]
   (when-let [status (turn-llm-budget-status turn-budget-state)]
@@ -433,9 +557,21 @@
              (merge {:type :turn-budget-exhausted}
                     status))))
 
+(defn task-llm-budget-ex
+  [task-budget-state]
+  (when-let [status (task-llm-budget-status task-budget-state)]
+    (ex-info (str "Reached the " (task-llm-budget-summary status))
+             (merge {:type :task-budget-exhausted}
+                    status))))
+
 (defn throw-if-turn-llm-budget-exhausted!
   [turn-budget-state]
   (when-let [budget-ex (turn-llm-budget-ex turn-budget-state)]
+    (throw budget-ex)))
+
+(defn throw-if-task-llm-budget-exhausted!
+  [task-budget-state]
+  (when-let [budget-ex (task-llm-budget-ex task-budget-state)]
     (throw budget-ex)))
 
 (defn normalize-approval-policy
@@ -557,6 +693,19 @@
                     " (max "
                     max-tool-calls-per-round
                     ")"))}))
+
+(defn autonomy-iteration-limit-policy
+  [iteration max-iterations]
+  {:decision-type :autonomy-iteration-policy
+   :allowed? false
+   :mode :iteration-limit
+   :iteration (long iteration)
+   :max-iterations (long max-iterations)
+   :reason (str "Reached autonomous iteration limit for this turn ("
+                (long iteration)
+                "/"
+                (long max-iterations)
+                ")")})
 
 (defn tool-round-limit-decision
   [round max-tool-rounds]

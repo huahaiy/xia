@@ -7,6 +7,7 @@
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.task-event :as task-event]
+            [xia.task-policy :as task-policy]
             [xia.working-memory :as wm]))
 
 (defn- truncate-summary*
@@ -20,19 +21,51 @@
     (f result)
     result))
 
+(declare sanitize-doc-value)
+
 (defn- merge-task-meta!
   [task-id f]
   (when-let [task (db/get-task task-id)]
     (db/update-task! task-id
-                     {:meta (f (or (:meta task) {}))})))
+                     {:meta (sanitize-doc-value (f (or (:meta task) {})))})))
+
+(defn- nullish-value?
+  [value]
+  (or (nil? value)
+      (= :json/null value)
+      (= "json/null" value)
+      (= ":json/null" value)))
+
+(defn- sanitize-doc-value
+  [value]
+  (cond
+    (nullish-value? value)
+    nil
+
+    (map? value)
+    (let [entries (keep (fn [[k v]]
+                          (when-let [v* (sanitize-doc-value v)]
+                            [k v*]))
+                        value)]
+      (when (seq entries)
+        (into (empty value) entries)))
+
+    (vector? value)
+    (let [items (into [] (keep sanitize-doc-value) value)]
+      (when (seq items)
+        items))
+
+    (sequential? value)
+    (let [items (keep sanitize-doc-value value)]
+      (when (seq items)
+        (into (empty value) items)))
+
+    :else
+    value))
 
 (defn- clean-runtime-status
   [status]
-  (->> status
-       (keep (fn [[k v]]
-               (when (some? v)
-                 [k v])))
-       (into {})))
+  (or (sanitize-doc-value status) {}))
 
 (defn- set-task-runtime-status!
   [task-id status]
@@ -104,6 +137,28 @@
     (when (and session-id reconciled (not= reconciled wm-state))
       (wm/set-autonomy-state! session-id reconciled))
     reconciled))
+
+(defn task-llm-budget-state
+  [task-id]
+  (when-let [task (some-> task-id db/get-task)]
+    (atom (task-policy/restore-task-llm-budget
+           (:id task)
+           (:channel task)
+           (or (:started-at task) (:created-at task))
+           (get-in task [:meta :llm-budget])))))
+
+(defn persist-task-llm-budget!
+  [task-id task-budget-state]
+  (when (and task-id task-budget-state)
+    (merge-task-meta! task-id
+                      (fn [meta]
+                        (assoc meta :llm-budget @task-budget-state)))))
+
+(defn record-task-llm-request!
+  [task-id task-budget-state request]
+  (when task-budget-state
+    (task-policy/record-task-llm-request! task-budget-state request)
+    (persist-task-llm-budget! task-id task-budget-state)))
 
 (defn ensure-runtime-task!
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
