@@ -231,6 +231,58 @@
       (is (= "Need to review the invoice attachments."
              (:checkpoint-summary recovery))))))
 
+(deftest resume-task-restarts-a-runtime-recovered-task
+  (let [session-id     (db/create-session! :terminal)
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :running
+                                         :title "Review the invoice"
+                                         :summary "Waiting for input"
+                                         :meta {:runtime {:state :waiting_input
+                                                          :phase :waiting_input
+                                                          :message "Waiting for input"}
+                                                :checkpoint {:phase :observing
+                                                             :summary "Need to review the invoice attachments."
+                                                             :current-focus "Review the invoice"
+                                                             :next-step "Read the attachment list"}}})
+        _turn-id       (db/start-task-turn! task-id
+                                            {:operation :start
+                                             :state :waiting_input
+                                             :input "Review the invoice"
+                                             :summary "Waiting for input"})
+        submitted-work (atom nil)
+        process-calls  (atom [])]
+    (task-runtime/recover-interrupted-tasks!)
+    (with-redefs [xia.async/submit-background! (fn [_label f]
+                                                 (reset! submitted-work f)
+                                                 ::submitted)
+                  xia.agent/process-message     (fn [sid message & {:as opts}]
+                                                 (swap! process-calls conj {:session-id sid
+                                                                            :message message
+                                                                            :opts opts})
+                                                 "ok")]
+      (let [result      (agent/resume-task! task-id :message "Continue after restart")
+            task        (db/get-task task-id)
+            last-resume (get-in task [:meta :recovery :last-resume])
+            last-stop   (get-in task [:meta :recovery :last-stop])]
+        (is (= :running (:status result)))
+        (is (= :running (:state task)))
+        (is (nil? (:stop-reason task)))
+        (is (= "Task resumed" (:summary task)))
+        (is (= :resume (:operation last-resume)))
+        (is (= "Continue after restart" (:message last-resume)))
+        (is (= :runtime-restart (:stop-reason last-stop)))
+        (is (fn? @submitted-work))
+        (@submitted-work)
+        (is (= [{:session-id session-id
+                 :message "Continue after restart"
+                 :opts {:channel :terminal
+                        :task-id task-id
+                        :runtime-op :resume
+                        :persist-message? false}}]
+               @process-calls))))))
+
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])
