@@ -163,10 +163,13 @@
                                         (clojure.core/max 1 (long max-tasks)))]
     (when (zero? task-count)
       (throw (ex-info "Branch tasks require at least one task" {})))
-    (when (> (long task-count) (long max-tasks))
-      (throw (ex-info (str "Too many branch tasks: " task-count " (max " max-tasks ")")
-                      {:task-count task-count
-                       :max-tasks max-tasks})))
+    (let [{:keys [allowed? reason] :as decision}
+          (task-policy/branch-task-count-policy task-count max-tasks)]
+      (when-not allowed?
+        (prompt/policy-decision! decision)
+        (throw (ex-info reason
+                        {:task-count task-count
+                         :max-tasks max-tasks}))))
     ((:report-status! deps) (str "Running " task-count " branch task"
                                  (when (not= 1 task-count) "s"))
                             :phase :branch

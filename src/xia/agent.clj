@@ -29,8 +29,6 @@
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(def ^:private default-max-user-message-chars 32768)
-(def ^:private default-max-user-message-tokens 8000)
 (def ^:private default-max-branch-tasks 5)
 (def ^:private default-max-parallel-branches 3)
 (def ^:private default-max-branch-tool-rounds 5)
@@ -100,13 +98,11 @@
 
 (defn- max-user-message-chars
   []
-  (cfg/positive-long :agent/max-user-message-chars
-                     default-max-user-message-chars))
+  (task-policy/max-user-message-chars))
 
 (defn- max-user-message-tokens
   []
-  (cfg/positive-long :agent/max-user-message-tokens
-                     default-max-user-message-tokens))
+  (task-policy/max-user-message-tokens))
 
 (defn- configured-max-tool-rounds
   []
@@ -131,18 +127,15 @@
 
 (defn- max-branch-tasks
   []
-  (cfg/positive-long :agent/max-branch-tasks
-                     default-max-branch-tasks))
+  (task-policy/max-branch-tasks))
 
 (defn- max-parallel-branches
   []
-  (cfg/positive-long :agent/max-parallel-branches
-                     default-max-parallel-branches))
+  (task-policy/max-parallel-branches))
 
 (defn- max-branch-tool-rounds
   []
-  (cfg/positive-long :agent/max-branch-tool-rounds
-                     default-max-branch-tool-rounds))
+  (task-policy/max-branch-tool-rounds))
 
 (defn- llm-status-preview-chars
   []
@@ -704,32 +697,18 @@
   (let [message (or user-message "")
         char-count (long (count message))
         token-estimate (long (context/estimate-tokens message))
-        max-chars (long (max-user-message-chars))
-        max-tokens (long (max-user-message-tokens))]
-    (cond
-      (> char-count max-chars)
-      (throw (ex-info (str "User message too large: "
-                           char-count
-                           " chars (max "
-                           max-chars
-                           ")")
-                      {:type :user-message-too-large
-                       :status 413
-                       :error "user message too large"
-                       :char-count char-count
-                       :max-chars max-chars}))
-
-      (> token-estimate max-tokens)
-      (throw (ex-info (str "User message too large: ~"
-                           token-estimate
-                           " tokens (max "
-                           max-tokens
-                           ")")
-                      {:type :user-message-too-large
-                       :status 413
-                       :error "user message too large"
-                       :token-estimate token-estimate
-                       :max-tokens max-tokens})))))
+        {:keys [allowed? reason char-count max-chars token-estimate max-tokens] :as decision}
+        (task-policy/user-message-size-decision char-count token-estimate)]
+    (when-not allowed?
+      (prompt/policy-decision! decision)
+      (throw (ex-info reason
+                      (cond-> {:type :user-message-too-large
+                               :status 413
+                               :error "user message too large"}
+                        char-count (assoc :char-count char-count)
+                        max-chars (assoc :max-chars max-chars)
+                        token-estimate (assoc :token-estimate token-estimate)
+                        max-tokens (assoc :max-tokens max-tokens)))))))
 
 (defn- call-model
   [messages tools provider-id & {:keys [on-delta session-id]}]

@@ -29,6 +29,11 @@
 (def ^:private default-max-turn-llm-calls 600)
 (def ^:private default-max-turn-total-tokens 2000000)
 (def ^:private default-max-turn-wall-clock-ms 21600000)
+(def ^:private default-max-user-message-chars 32768)
+(def ^:private default-max-user-message-tokens 8000)
+(def ^:private default-max-branch-tasks 5)
+(def ^:private default-max-parallel-branches 3)
+(def ^:private default-max-branch-tool-rounds 5)
 
 (defn supervisor-max-identical-iterations
   []
@@ -136,6 +141,31 @@
   []
   (cfg/positive-long :agent/max-turn-wall-clock-ms
                      default-max-turn-wall-clock-ms))
+
+(defn max-user-message-chars
+  []
+  (cfg/positive-long :agent/max-user-message-chars
+                     default-max-user-message-chars))
+
+(defn max-user-message-tokens
+  []
+  (cfg/positive-long :agent/max-user-message-tokens
+                     default-max-user-message-tokens))
+
+(defn max-branch-tasks
+  []
+  (cfg/positive-long :agent/max-branch-tasks
+                     default-max-branch-tasks))
+
+(defn max-parallel-branches
+  []
+  (cfg/positive-long :agent/max-parallel-branches
+                     default-max-parallel-branches))
+
+(defn max-branch-tool-rounds
+  []
+  (cfg/positive-long :agent/max-branch-tool-rounds
+                     default-max-branch-tool-rounds))
 
 (defn http-request-retry-config
   [req]
@@ -430,6 +460,63 @@
      :max-tool-rounds max-tool-rounds
      :reason (when-not allowed?
                "Too many tool-calling rounds")}))
+
+(defn user-message-size-decision
+  [char-count token-estimate]
+  (let [char-count (long char-count)
+        token-estimate (long token-estimate)
+        max-chars (long (max-user-message-chars))
+        max-tokens (long (max-user-message-tokens))]
+    (cond
+      (> char-count max-chars)
+      {:decision-type :user-message-size-policy
+       :allowed? false
+       :mode :char-limit
+       :char-count char-count
+       :max-chars max-chars
+       :reason (str "User message too large: "
+                    char-count
+                    " chars (max "
+                    max-chars
+                    ")")}
+
+      (> token-estimate max-tokens)
+      {:decision-type :user-message-size-policy
+       :allowed? false
+       :mode :token-limit
+       :token-estimate token-estimate
+       :max-tokens max-tokens
+       :reason (str "User message too large: ~"
+                    token-estimate
+                    " tokens (max "
+                    max-tokens
+                    ")")}
+
+      :else
+      {:decision-type :user-message-size-policy
+       :allowed? true
+       :mode :within-limit
+       :char-count char-count
+       :token-estimate token-estimate
+       :max-chars max-chars
+       :max-tokens max-tokens})))
+
+(defn branch-task-count-policy
+  [task-count max-tasks]
+  (let [task-count (long task-count)
+        max-tasks (long max-tasks)
+        allowed? (<= task-count max-tasks)]
+    {:decision-type :branch-task-count-policy
+     :allowed? allowed?
+     :mode (if allowed? :within-limit :task-limit)
+     :task-count task-count
+     :max-tasks max-tasks
+     :reason (when-not allowed?
+               (str "Too many branch tasks: "
+                    task-count
+                    " (max "
+                    max-tasks
+                    ")"))}))
 
 (defn parallel-tool-timeout-policy
   [tool-id tool-name timeout-ms]

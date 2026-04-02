@@ -2932,11 +2932,15 @@
 (deftest process-message-rejects-oversized-user-message-by-char-count
   (let [session-id  (db/create-session! :terminal)
         wm-calls    (atom 0)
-        llm-calls   (atom 0)]
+        llm-calls   (atom 0)
+        decisions   (atom [])]
     (db/set-config! :agent/max-user-message-chars 5)
     (with-redefs [xia.working-memory/update-wm!      (fn [& _]
                                                        (swap! wm-calls inc))
                   xia.tool/tool-definitions          (constantly [])
+                  xia.prompt/policy-decision!        (fn [decision]
+                                                       (swap! decisions conj decision)
+                                                       nil)
                   xia.llm/resolve-provider-selection (fn [& _]
                                                        (swap! llm-calls inc)
                                                        {:provider {:llm.provider/id :default}
@@ -2961,7 +2965,15 @@
                 :char-count 6
                 :max-chars  5}
                (select-keys (ex-data err)
-                            [:type :status :error :char-count :max-chars])))))
+                            [:type :status :error :char-count :max-chars])))
+        (is (some #(= {:decision-type :user-message-size-policy
+                       :allowed? false
+                       :mode :char-limit
+                       :char-count 6
+                       :max-chars 5}
+                      (select-keys %
+                                   [:decision-type :allowed? :mode :char-count :max-chars]))
+                  @decisions))))
     (is (zero? @wm-calls))
     (is (zero? @llm-calls))
     (is (empty? (db/session-messages session-id)))))
@@ -2970,12 +2982,16 @@
   (let [session-id (db/create-session! :terminal)
         text       "hello world!"
         wm-calls   (atom 0)
-        llm-calls  (atom 0)]
+        llm-calls  (atom 0)
+        decisions  (atom [])]
     (db/set-config! :agent/max-user-message-chars 1000)
     (db/set-config! :agent/max-user-message-tokens 1)
     (with-redefs [xia.working-memory/update-wm!      (fn [& _]
                                                        (swap! wm-calls inc))
                   xia.tool/tool-definitions          (constantly [])
+                  xia.prompt/policy-decision!        (fn [decision]
+                                                       (swap! decisions conj decision)
+                                                       nil)
                   xia.llm/resolve-provider-selection (fn [& _]
                                                        (swap! llm-calls inc)
                                                        {:provider {:llm.provider/id :default}
@@ -2987,7 +3003,7 @@
                   xia.llm/chat-message               (fn [& _]
                                                        (swap! llm-calls inc)
                                                        {"content" "unreachable"})]
-        (let [err (try
+      (let [err (try
                   (agent/process-message session-id text :channel :terminal)
                   (catch clojure.lang.ExceptionInfo e
                     e))]
@@ -3000,10 +3016,49 @@
                 :token-estimate 2
                 :max-tokens     1}
                (select-keys (ex-data err)
-                            [:type :status :error :token-estimate :max-tokens])))))
+                            [:type :status :error :token-estimate :max-tokens])))
+        (is (some #(= {:decision-type :user-message-size-policy
+                       :allowed? false
+                       :mode :token-limit
+                       :token-estimate 2
+                       :max-tokens 1}
+                      (select-keys %
+                                   [:decision-type :allowed? :mode :token-estimate :max-tokens]))
+                  @decisions))))
     (is (zero? @wm-calls))
     (is (zero? @llm-calls))
     (is (empty? (db/session-messages session-id)))))
+
+(deftest run-branch-tasks-records-policy-decision-for-oversized-branch-fanout
+  (let [parent-session-id (db/create-session! :terminal)
+        decisions         (atom [])]
+    (db/set-config! :agent/max-branch-tasks 1)
+    (with-redefs [xia.prompt/policy-decision! (fn [decision]
+                                                (swap! decisions conj decision)
+                                                nil)]
+      (let [err (try
+                  (agent/run-branch-tasks
+                   [{:task "one" :prompt "first"}
+                    {:task "two" :prompt "second"}]
+                   :session-id parent-session-id
+                   :max-parallel 2)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Too many branch tasks: 2 \(max 1\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:task-count 2
+                :max-tasks 1}
+               (select-keys (ex-data err)
+                            [:task-count :max-tasks])))
+        (is (some #(= {:decision-type :branch-task-count-policy
+                       :allowed? false
+                       :mode :task-limit
+                       :task-count 2
+                       :max-tasks 1}
+                      (select-keys %
+                                   [:decision-type :allowed? :mode :task-count :max-tasks]))
+                  @decisions))))))
 
 (deftest process-message-rejects-concurrent-turns-per-session
   (let [session-id         (db/create-session! :http)

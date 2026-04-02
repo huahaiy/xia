@@ -25,6 +25,11 @@
                                       :agent/max-turn-llm-calls 42
                                       :agent/max-turn-total-tokens 123456
                                       :agent/max-turn-wall-clock-ms 654321
+                                      :agent/max-user-message-chars 999
+                                      :agent/max-user-message-tokens 77
+                                      :agent/max-branch-tasks 8
+                                      :agent/max-parallel-branches 4
+                                      :agent/max-branch-tool-rounds 6
                                       default-value))
                 cfg/positive-double (fn [key-name default-value]
                                       (case key-name
@@ -52,7 +57,12 @@
     (is (= 777000 (task-policy/llm-max-provider-retry-wait-ms)))
     (is (= 42 (task-policy/max-turn-llm-calls)))
     (is (= 123456 (task-policy/max-turn-total-tokens)))
-    (is (= 654321 (task-policy/max-turn-wall-clock-ms)))))
+    (is (= 654321 (task-policy/max-turn-wall-clock-ms)))
+    (is (= 999 (task-policy/max-user-message-chars)))
+    (is (= 77 (task-policy/max-user-message-tokens)))
+    (is (= 8 (task-policy/max-branch-tasks)))
+    (is (= 4 (task-policy/max-parallel-branches)))
+    (is (= 6 (task-policy/max-branch-tool-rounds)))))
 
 (deftest turn-llm-budget-records-usage-and-exhaustion
   (with-redefs [task-policy/max-turn-llm-calls (constantly 2)
@@ -324,3 +334,28 @@
           :timeout-ms 75}
          (select-keys (task-policy/branch-task-timeout-policy "slow" "slow branch" 75)
                       [:decision-type :allowed? :mode :task :timeout-ms]))))
+
+(deftest user-message-and-branch-count-policies-capture-blocked-inputs
+  (with-redefs [task-policy/max-user-message-chars (constantly 5)
+                task-policy/max-user-message-tokens (constantly 2)]
+    (is (= {:decision-type :user-message-size-policy
+            :allowed? false
+            :mode :char-limit
+            :char-count 6
+            :max-chars 5}
+           (select-keys (task-policy/user-message-size-decision 6 2)
+                        [:decision-type :allowed? :mode :char-count :max-chars])))
+    (is (= {:decision-type :user-message-size-policy
+            :allowed? false
+            :mode :token-limit
+            :token-estimate 3
+            :max-tokens 2}
+           (select-keys (task-policy/user-message-size-decision 5 3)
+                        [:decision-type :allowed? :mode :token-estimate :max-tokens]))))
+  (is (= {:decision-type :branch-task-count-policy
+          :allowed? false
+          :mode :task-limit
+          :task-count 3
+          :max-tasks 2}
+         (select-keys (task-policy/branch-task-count-policy 3 2)
+                      [:decision-type :allowed? :mode :task-count :max-tasks]))))
