@@ -2157,7 +2157,11 @@
                 @statuses))
       (let [task-id          (:id (first (db/list-tasks {:session-id session-id})))
             turn-id          (:id (first (db/task-turns task-id)))
-            status-items     (filter #(= :status (:type %)) (db/turn-items turn-id))
+            turn-items       (db/turn-items turn-id)
+            status-items     (filter #(= :status (:type %)) turn-items)
+            policy-items     (filter #(and (= :system-note (:type %))
+                                           (= "policy-decision" (get-in % [:data :kind])))
+                                     turn-items)
             restarting-item  (some #(when (= "Restarting iteration after Agent supervisor stopped a stalled worker during llm phase (attempt 1/1)"
                                                (:summary %))
                                       %)
@@ -2169,7 +2173,15 @@
                 :worker-phase "llm"}
                (some-> restarting-item
                        :data
-                       (select-keys [:attempt :max-restarts :failure-phase :worker-phase])))))
+                       (select-keys [:attempt :max-restarts :failure-phase :worker-phase])))
+        (is (some #(= {:decision-type "restart-policy"
+                       :allowed true
+                       :mode "restarting"
+                       :failure-phase "llm"
+                       :worker-phase "llm"}
+                      (select-keys (:data %)
+                                   [:decision-type :allowed :mode :failure-phase :worker-phase]))
+                  policy-items))))
       (is (= {:state :done
               :phase :complete
               :message "Ready"}

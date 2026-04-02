@@ -22,6 +22,7 @@
             [xia.db :as db]
             [xia.http-client :as http]
             [xia.oauth :as oauth]
+            [xia.prompt :as prompt]
             [xia.rate-limit :as rate-limit])
   (:import [java.util Base64]
            [java.util.concurrent ConcurrentHashMap]
@@ -325,6 +326,7 @@
         req     (cond-> {:url         url
                          :method      method
                          :allow-private-network? (:allow-private-network? svc)
+                         :policy-observer prompt/policy-decision!
                          :request-label (str "Service request " (name service-id))}
                   body-str     (assoc :body body-str)
                   body-str     (assoc-in [:headers "Content-Type"] "application/json")

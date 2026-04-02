@@ -430,30 +430,52 @@
                                      policy (assoc :policy (name policy)))}))))
 
    :task-runtime/on-policy-decision
-   (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error]}]
-     (let [tool-label (or tool-name (some-> tool-id name) "tool")
+   (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error
+                attempt max-restarts max-attempts backoff-ms delay-ms grace-ms
+                failure-type failure-phase worker-phase tool-risk? round
+                request-label url status]}]
+     (let [target-label (or request-label
+                            tool-name
+                            (some-> tool-id name)
+                            "request")
            summary (str (case decision-type
                           :approval-policy "Approval policy"
                           :execution-policy "Execution policy"
+                          :restart-policy "Restart policy"
+                          :http-retry-policy "HTTP retry policy"
                           "Policy")
                         " "
                         (if allowed? "allowed" "blocked")
                         " for "
-                        tool-label)]
+                        target-label)]
        (when-let [{:keys [task-turn-id]} @runtime-task]
          (record-task-item! task-turn-id
                             {:type :system-note
                              :status (if allowed? :success :error)
-                             :tool-id tool-label
+                             :tool-id target-label
                              :summary summary
                              :data (cond-> {:kind "policy-decision"
-                                            :tool-name tool-label
+                                            :tool-name target-label
                                             :allowed (boolean allowed?)}
                                      tool-id (assoc :tool-id (name tool-id))
                                      decision-type (assoc :decision-type (name decision-type))
                                      policy (assoc :policy (name policy))
+                                     request-label (assoc :request-label request-label)
+                                     url (assoc :url url)
+                                     status (assoc :status-code status)
                                      mode (assoc :mode (name mode))
                                      reason (assoc :reason reason)
+                                     attempt (assoc :attempt attempt)
+                                     max-attempts (assoc :max-attempts max-attempts)
+                                     max-restarts (assoc :max-restarts max-restarts)
+                                     delay-ms (assoc :delay-ms delay-ms)
+                                     backoff-ms (assoc :backoff-ms backoff-ms)
+                                     grace-ms (assoc :grace-ms grace-ms)
+                                     failure-type (assoc :failure-type (name failure-type))
+                                     failure-phase (assoc :failure-phase (name failure-phase))
+                                     worker-phase (assoc :worker-phase (name worker-phase))
+                                     tool-risk? (assoc :tool-risk tool-risk?)
+                                     round (assoc :round round)
                                      error (assoc :error error))}))))})
 
 (defn pause-task!

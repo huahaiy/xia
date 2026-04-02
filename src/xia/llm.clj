@@ -12,6 +12,7 @@
             [xia.http-client :as http]
             [xia.llm.routing :as llm-routing]
             [xia.oauth :as oauth]
+            [xia.prompt :as prompt]
             [xia.rate-limit :as rate-limit])
   (:import [java.net URI URLEncoder]
            [java.nio.charset StandardCharsets]
@@ -992,6 +993,7 @@
      :allow-private-network? (boolean allow-private-network?)
      :timeout       request-timeout-ms
      :retry-enabled? true
+     :policy-observer prompt/policy-decision!
      :request-label "LLM request"}))
 
 (defn provider-credential-source
@@ -1510,13 +1512,14 @@
         api-key         (some-> api-key str/trim not-empty)
         allow-private?  (loopback-base-url? base-url)
         resp            (http/request {:url     (str base-url "/models")
-                            :method  :get
-                            :headers (provider-api-headers provider-family
-                                                           {:api-key api-key
-                                                            :auth-header auth-header})
-                            :allow-private-network? allow-private?
-                            :timeout 15000
-                            :request-label "Fetch provider models"})]
+                                       :method  :get
+                                       :headers (provider-api-headers provider-family
+                                                                      {:api-key api-key
+                                                                       :auth-header auth-header})
+                                       :allow-private-network? allow-private?
+                                       :timeout 15000
+                                       :policy-observer prompt/policy-decision!
+                                       :request-label "Fetch provider models"})]
     (when (= 200 (:status resp))
       (let [body (json/read-json (:body resp))
             data (or (get body "data") [])]
@@ -1808,6 +1811,7 @@
                                                                        :auth-header auth-header})
                                        :allow-private-network? allow-private?
                                        :timeout 15000
+                                       :policy-observer prompt/policy-decision!
                                        :request-label "Fetch provider model metadata"})]
     (if (= 200 (:status resp))
       (let [body                  (json/read-json (:body resp))

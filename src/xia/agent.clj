@@ -45,9 +45,6 @@
 (def ^:private default-supervisor-phase-timeout-ms 30000)
 (def ^:private default-supervisor-llm-timeout-ms 120000)
 (def ^:private default-supervisor-tool-timeout-ms 120000)
-(def ^:private default-supervisor-max-restarts 1)
-(def ^:private default-supervisor-restart-backoff-ms 100)
-(def ^:private default-supervisor-restart-grace-ms 1000)
 (def ^:private default-task-control-wait-ms 10000)
 (defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
@@ -202,21 +199,6 @@
   []
   (cfg/positive-long :agent/supervisor-tool-timeout-ms
                      default-supervisor-tool-timeout-ms))
-
-(defn- supervisor-max-restarts
-  []
-  (cfg/positive-long :agent/supervisor-max-restarts
-                     default-supervisor-max-restarts))
-
-(defn- supervisor-restart-backoff-ms
-  []
-  (cfg/positive-long :agent/supervisor-restart-backoff-ms
-                     default-supervisor-restart-backoff-ms))
-
-(defn- supervisor-restart-grace-ms
-  []
-  (cfg/positive-long :agent/supervisor-restart-grace-ms
-                     default-supervisor-restart-grace-ms))
 
 (defn- task-control-wait-ms
   []
@@ -1563,7 +1545,7 @@
               :max-iterations max-iterations
               :current-focus (:title tip)
               :progress-status (:progress-status tip)
-              :grace-ms (supervisor-restart-grace-ms)
+              :grace-ms (task-policy/supervisor-restart-grace-ms)
               :tool-id (:tool-id worker-state)
               :tool-name (:tool-name worker-state)
               :round (:round worker-state)})))
@@ -1587,7 +1569,7 @@
        (if (nil? worker*)
          true
          (let [deadline-ms (+ (current-time-ms)
-                              (long (supervisor-restart-grace-ms)))]
+                              (long (task-policy/supervisor-restart-grace-ms)))]
            (loop []
              (cond
                (future-done? worker*)
@@ -1621,41 +1603,11 @@
               :max-iterations max-iterations
               :current-focus (:title tip)
               :progress-status (:progress-status tip)
-              :grace-ms (supervisor-restart-grace-ms)
+              :grace-ms (task-policy/supervisor-restart-grace-ms)
               :cancel-reason (cancellation-reason session-id)
               :tool-id (:tool-id worker-state)
               :tool-name (:tool-name worker-state)
               :round (:round worker-state)})))
-
-(def ^:private non-restartable-worker-error-types
-  #{:request-cancelled
-    :autonomous-loop-stalled
-    :autonomous-protocol-invalid
-    :turn-budget-exhausted
-    :agent-stop-timeout
-    :tool-round-limit-exceeded
-    :tool-call-limit-exceeded
-    :user-message-too-large
-    :session-busy})
-
-(defn- restartable-worker-error?
-  [t worker-state]
-  (let [type (some-> t ex-data :type)]
-    (cond
-      (:tool-risk? worker-state)
-      false
-
-      (instance? InterruptedException t)
-      false
-
-      (contains? non-restartable-worker-error-types type)
-      false
-
-      (contains? #{:agent-stalled :parallel-tool-timeout} type)
-      true
-
-      :else
-      true)))
 
 (defn- autonomous-protocol-ex
   [session-id execution-context round parsed-response message]
@@ -1835,11 +1787,17 @@
                        {:error t}))]
         (if-let [t (:error result)]
           (let [worker-snapshot @worker-state
-                max-restarts (long (supervisor-max-restarts))
-                attempt* (inc attempt)]
-            (if (and (< attempt max-restarts)
-                     (restartable-worker-error? t worker-snapshot)
-                     (not (session-cancelled? session-id)))
+                restart-decision (task-policy/restart-policy-decision
+                                  t
+                                  worker-snapshot
+                                  attempt
+                                  :session-cancelled? (session-cancelled? session-id))
+                max-restarts (:max-restarts restart-decision)
+                attempt* (:attempt restart-decision)
+                _ (prompt/policy-decision! (merge restart-decision
+                                                  {:decision-type :restart-policy
+                                                   :error (worker-failure-summary t)}))]
+            (if (:allowed? restart-decision)
               (do
                 (report-supervisor-status! :restarting
                                            (str "Restarting iteration after "
@@ -1866,7 +1824,7 @@
                                             :attempt attempt*
                                             :session-id session-id
                                             :failure-phase (some-> t ex-data :phase)})
-                (Thread/sleep (long (supervisor-restart-backoff-ms)))
+                (Thread/sleep (long (:backoff-ms restart-decision)))
                 (recur attempt*))
               (throw t)))
           (:ok result))))))
@@ -2716,7 +2674,7 @@
                                     {:type :agent-stop-timeout
                                      :session-id session-id
                                      :channel channel
-                                     :grace-ms (supervisor-restart-grace-ms)}
+                                     :grace-ms (task-policy/supervisor-restart-grace-ms)}
                                     e))))
                 (catch clojure.lang.ExceptionInfo e
                   (let [data (ex-data e)]

@@ -3,7 +3,8 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [hato.client :as hc]
-            [xia.ssrf :as ssrf])
+            [xia.ssrf :as ssrf]
+            [xia.task-policy :as task-policy])
   (:import [java.io BufferedReader InputStream InputStreamReader]
            [java.net URI URLEncoder]
            [java.net.http HttpClient HttpHeaders HttpRequest HttpRequest$BodyPublishers
@@ -14,15 +15,6 @@
 
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-request-timeout-ms 120000)
-(def ^:private default-max-attempts 3)
-(def ^:private default-initial-backoff-ms 1000)
-(def ^:private default-max-backoff-ms 8000)
-(def ^:private default-retry-statuses #{408 409 425 429 500 502 503 504})
-(def ^:private default-retry-methods #{:delete :get :head :options :put :trace})
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 (defonce ^:private http-clients (atom {}))
 
@@ -220,18 +212,10 @@
   [delay-ms]
   (Thread/sleep (long delay-ms)))
 
-(defn- backoff-ms
-  [attempt initial-backoff-ms max-backoff-ms]
-  (long-min (long max-backoff-ms)
-            (* (long initial-backoff-ms)
-               (bit-shift-left 1 (dec (long attempt))))))
-
-(defn- retry-enabled?
-  [{:keys [method retry-enabled? retry-methods]}]
-  (if (some? retry-enabled?)
-    retry-enabled?
-    (contains? (or retry-methods default-retry-methods)
-               (or method :get))))
+(defn- successful-status?
+  [status]
+  (and (integer? status)
+       (<= 200 (int status) 299)))
 
 (defn request
   "Send an HTTP request with request-level timeout and retries.
@@ -252,47 +236,60 @@
      :retry-methods        methods retried by default, default #{:delete :get :head :options :put :trace}
      :retry-enabled?       override automatic method-based retry gating
      :allow-private-network? bypass SSRF private-network blocking for explicitly trusted targets
-     :request-label        optional log label"
-  [{:keys [connect-timeout timeout max-attempts initial-backoff-ms max-backoff-ms retry-statuses request-label]
+     :request-label        optional log label
+     :policy-observer      optional callback for retry-policy decisions"
+  [{:keys [connect-timeout timeout request-label policy-observer]
     :or   {connect-timeout    default-connect-timeout-ms
-           timeout            default-request-timeout-ms
-           max-attempts       default-max-attempts
-           initial-backoff-ms default-initial-backoff-ms
-           max-backoff-ms     default-max-backoff-ms
-           retry-statuses     default-retry-statuses}
+           timeout            default-request-timeout-ms}
     :as   req}]
-  (let [req (assoc req
-                   :connect-timeout connect-timeout
-                   :timeout timeout)
+  (let [retry-config (task-policy/http-request-retry-config req)
+        req (merge req
+                   retry-config
+                   {:connect-timeout connect-timeout
+                    :timeout timeout})
         request-url-str (validate-request-target! req)
         label (or request-label "HTTP request")
-        can-retry? (retry-enabled? req)]
-    (letfn [(retry! [attempt reason]
-              (let [delay-ms (backoff-ms attempt initial-backoff-ms max-backoff-ms)]
+        emit-policy! (fn [decision]
+                       (when policy-observer
+                         (policy-observer (assoc decision
+                                                 :decision-type :http-retry-policy
+                                                 :request-label label
+                                                 :url request-url-str))))]
+    (letfn [(retry! [decision reason]
+              (let [delay-ms (:delay-ms decision)]
                 (log/warn reason
                           "Retrying request"
                           {:request label
-                           :attempt attempt
-                           :max-attempts max-attempts
+                           :attempt (:attempt decision)
+                           :max-attempts (:max-attempts decision)
                            :delay-ms delay-ms
                            :url request-url-str})
                 (sleep-ms! delay-ms)
-                (attempt-request (inc (long attempt)))))
+                (attempt-request (inc (long (:attempt decision))))))
             (attempt-request [attempt]
               (let [resp (try
                            (send-request! req)
                            (catch Exception e
-                             (if (and can-retry?
-                                      (< (long attempt) (long max-attempts))
-                                      (transient-exception? e))
-                               (retry! attempt (.getMessage e))
-                               (throw e))))
+                             (let [decision (task-policy/http-request-retry-decision
+                                             req
+                                             attempt
+                                             {:transient-exception? (transient-exception? e)
+                                              :reason (.getMessage e)})]
+                               (emit-policy! decision)
+                               (if (:allowed? decision)
+                                 (retry! decision (.getMessage e))
+                                 (throw e)))))
                     status (:status resp)]
-                (if (and can-retry?
-                         (< (long attempt) (long max-attempts))
-                         (contains? retry-statuses status))
-                  (retry! attempt (str label " returned transient status " status))
-                  (assoc resp :attempt (or (:attempt resp) attempt)))))]
+                (let [decision (task-policy/http-request-retry-decision
+                                req
+                                attempt
+                                {:status status
+                                 :reason (str label " returned transient status " status)})]
+                  (when-not (successful-status? status)
+                    (emit-policy! decision))
+                  (if (:allowed? decision)
+                    (retry! decision (str label " returned transient status " status))
+                    (assoc resp :attempt (or (:attempt resp) attempt))))))]
       (attempt-request 1))))
 
 (defn request-events
