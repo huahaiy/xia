@@ -36,7 +36,8 @@
 
 (deftest request-does-not-retry-non-idempotent-methods-by-default
   (let [attempts (atom 0)
-        sleeps   (atom [])]
+        sleeps   (atom [])
+        decisions (atom [])]
     (with-redefs [xia.ssrf/resolve-url! (fn [url _opts]
                                           {:url url
                                            :host "api.example.com"
@@ -56,9 +57,22 @@
                                    :method        :post
                                    :headers       {"Content-Type" "application/json"}
                                    :body          "{}"
+                                   :policy-observer #(swap! decisions conj %)
                                    :request-label "test request"})))
       (is (= 1 @attempts))
-      (is (empty? @sleeps)))))
+      (is (empty? @sleeps))
+      (is (= [{:decision-type :http-retry-policy
+               :allowed? false
+               :mode :retry-disabled
+               :attempt 1
+               :max-attempts 3
+               :status 503
+               :request-label "test request"
+               :url "https://api.example.com/test"}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :attempt
+                                   :max-attempts :status :request-label :url])
+                   @decisions))))))
 
 (deftest request-can-override-method-based-retry-gating
   (let [attempts (atom 0)
@@ -184,3 +198,48 @@
       (is (< (- (System/currentTimeMillis) t0) 800)))
     (is (not= ::timeout
               (deref worker 2000 ::timeout)))))
+
+(deftest request-emits-retry-policy-decisions-for-attempt-limits
+  (let [attempts  (atom 0)
+        sleeps    (atom [])
+        decisions (atom [])]
+    (with-redefs [xia.ssrf/resolve-url! (fn [url _opts]
+                                          {:url url
+                                           :host "api.example.com"
+                                           :addresses []})
+                  http-client/send-request! (fn [_]
+                                              (swap! attempts inc)
+                                              {:status 503
+                                               :headers {}
+                                               :body "{\"error\":\"busy\"}"})
+                  http-client/sleep-ms! (fn [delay-ms]
+                                          (swap! sleeps conj delay-ms))]
+      (is (= {:status 503
+              :headers {}
+              :body "{\"error\":\"busy\"}"
+              :attempt 2}
+             (http-client/request {:url "https://api.example.com/test"
+                                   :method :get
+                                   :max-attempts 2
+                                   :policy-observer #(swap! decisions conj %)
+                                   :request-label "test request"})))
+      (is (= 2 @attempts))
+      (is (= [1000] @sleeps))
+      (is (= [{:decision-type :http-retry-policy
+               :allowed? true
+               :mode :transient-status
+               :attempt 1
+               :max-attempts 2
+               :status 503
+               :delay-ms 1000}
+              {:decision-type :http-retry-policy
+               :allowed? false
+               :mode :attempt-limit
+               :attempt 2
+               :max-attempts 2
+               :status 503
+               :delay-ms nil}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :attempt
+                                   :max-attempts :status :delay-ms])
+                   @decisions))))))

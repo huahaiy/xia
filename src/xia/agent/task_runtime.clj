@@ -5,6 +5,8 @@
             [xia.autonomous :as autonomous]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.prompt :as prompt]
+            [xia.task-event :as task-event]
             [xia.working-memory :as wm]))
 
 (defn- truncate-summary*
@@ -42,6 +44,43 @@
                                (clean-runtime-status
                                 (assoc status :updated-at (java.util.Date.))))))))
 
+(defn- emit-runtime-event!
+  [event]
+  (when event
+    (prompt/runtime-event! event)))
+
+(defn- emit-task-started-event!
+  [task-id]
+  (some-> task-id db/get-task task-event/task-started-event emit-runtime-event!))
+
+(defn- emit-task-updated-event!
+  [task-id]
+  (when-let [task (some-> task-id db/get-task)]
+    (emit-runtime-event! (task-event/task-updated-event task))
+    (some-> (task-event/task-state-event task)
+            emit-runtime-event!)))
+
+(defn- emit-turn-open-event!
+  [task-turn-id]
+  (when-let [turn (some-> task-turn-id db/get-task-turn)]
+    (when-let [task (db/get-task (:task-id turn))]
+      (some-> (task-event/turn-open-event task turn)
+              emit-runtime-event!))))
+
+(defn- emit-turn-close-event!
+  [task-turn-id]
+  (when-let [turn (some-> task-turn-id db/get-task-turn)]
+    (when-let [task (db/get-task (:task-id turn))]
+      (some-> (task-event/turn-close-event task turn)
+              emit-runtime-event!))))
+
+(defn- emit-item-event!
+  [task-turn-id item-id]
+  (when-let [turn (some-> task-turn-id db/get-task-turn)]
+    (when-let [task (db/get-task (:task-id turn))]
+      (when-let [item (db/get-task-item item-id)]
+        (emit-runtime-event! (task-event/item-event task turn item))))))
+
 (defn- task-title
   [deps user-message]
   (or (some-> user-message str str/trim not-empty (#(truncate-summary* deps % 240)))
@@ -70,6 +109,7 @@
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
   (let [operation        (resolve-task-operation task-id runtime-op)
         title            (task-title deps user-message)
+        new-task?        (nil? task-id)
         resolved-task-id (or task-id
                              (db/create-task! {:session-id session-id
                                                :channel channel
@@ -84,19 +124,27 @@
                        {:state :running
                         :summary title
                         :autonomy-state autonomy-state}))
-    {:task-id resolved-task-id
-     :task-turn-id (db/start-task-turn! resolved-task-id
-                                        {:operation operation
-                                         :state :running
-                                         :input user-message
-                                         :summary title
-                                         :interrupting-turn-id interrupting-turn-id})
-     :task-operation operation}))
+    (let [task-turn-id (db/start-task-turn! resolved-task-id
+                                            {:operation operation
+                                             :state :running
+                                             :input user-message
+                                             :summary title
+                                             :interrupting-turn-id interrupting-turn-id})]
+      (when new-task?
+        (emit-task-started-event! resolved-task-id))
+      (when-not new-task?
+        (emit-task-updated-event! resolved-task-id))
+      (emit-turn-open-event! task-turn-id)
+      {:task-id resolved-task-id
+       :task-turn-id task-turn-id
+       :task-operation operation})))
 
 (defn record-task-item!
   [task-turn-id attrs]
   (when task-turn-id
-    (db/add-task-item! task-turn-id attrs)))
+    (let [item-id (db/add-task-item! task-turn-id attrs)]
+      (emit-item-event! task-turn-id item-id)
+      item-id)))
 
 (defn record-task-message-item!
   [deps task-turn-id item-type role text & {:keys [message-id llm-call-id data status]}]
@@ -166,12 +214,15 @@
 (defn sync-runtime-task!
   [task-id attrs]
   (when task-id
-    (db/update-task! task-id attrs)))
+    (db/update-task! task-id attrs)
+    (emit-task-updated-event! task-id)))
 
 (defn sync-runtime-task-turn!
   [task-turn-id attrs]
   (when task-turn-id
-    (db/update-task-turn! task-turn-id attrs)))
+    (db/update-task-turn! task-turn-id attrs)
+    (when (contains? #{:completed :failed :cancelled} (:state attrs))
+      (emit-turn-close-event! task-turn-id))))
 
 (defn- live-task-run
   [deps task-id]
@@ -201,13 +252,14 @@
                                      {:operation operation
                                       :state :completed
                                       :summary summary})]
-    (db/add-task-item! turn-id
+    (record-task-item! turn-id
                        {:type :system-note
                         :status :success
                         :summary summary
                         :data {:operation (name operation)}})
     (db/update-task-turn! turn-id {:state :completed
                                    :summary summary})
+    (emit-turn-close-event! turn-id)
     turn-id))
 
 (defn- attach-child-task-to-parent!
@@ -375,7 +427,75 @@
                                             :tool-name tool-label
                                             :approved (boolean approved?)}
                                      tool-id (assoc :tool-id (name tool-id))
-                                     policy (assoc :policy (name policy)))}))))})
+                                     policy (assoc :policy (name policy)))}))))
+
+   :task-runtime/on-policy-decision
+   (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error
+                attempt max-restarts max-attempts max-retry-rounds max-retry-wait-ms
+                backoff-ms delay-ms grace-ms failure-type failure-phase worker-phase
+                tool-risk? round rounds tool-count max-tool-rounds max-tool-calls-per-round
+                request-label url status providers workload provider-id service-id limit]}]
+     (let [target-label (or request-label
+                            (some-> provider-id name)
+                            (some-> service-id name)
+                            tool-name
+                            (some-> tool-id name)
+                            "request")
+           summary (str (case decision-type
+                          :approval-policy "Approval policy"
+                          :execution-policy "Execution policy"
+                          :restart-policy "Restart policy"
+                          :http-retry-policy "HTTP retry policy"
+                          :provider-retry-policy "Provider retry policy"
+                          :provider-rate-limit-policy "Provider rate limit policy"
+                          :service-rate-limit-policy "Service rate limit policy"
+                          :tool-round-policy "Tool round policy"
+                          :tool-call-policy "Tool call policy"
+                          "Policy")
+                        " "
+                        (if allowed? "allowed" "blocked")
+                        " for "
+                        target-label)]
+       (when-let [{:keys [task-turn-id]} @runtime-task]
+         (record-task-item! task-turn-id
+                            {:type :system-note
+                             :status (if allowed? :success :error)
+                             :tool-id target-label
+                             :summary summary
+                             :data (cond-> {:kind "policy-decision"
+                                            :tool-name target-label
+                                            :allowed (boolean allowed?)}
+                                     tool-id (assoc :tool-id (name tool-id))
+                                     decision-type (assoc :decision-type (name decision-type))
+                                     policy (assoc :policy (name policy))
+                                     request-label (assoc :request-label request-label)
+                                     provider-id (assoc :provider-id (name provider-id))
+                                     service-id (assoc :service-id (name service-id))
+                                     workload (assoc :workload (name workload))
+                                     limit (assoc :limit limit)
+                                     url (assoc :url url)
+                                     status (assoc :status-code status)
+                                     mode (assoc :mode (name mode))
+                                     reason (assoc :reason reason)
+                                     attempt (assoc :attempt attempt)
+                                     rounds (assoc :rounds rounds)
+                                     tool-count (assoc :tool-count tool-count)
+                                     max-attempts (assoc :max-attempts max-attempts)
+                                     max-tool-rounds (assoc :max-tool-rounds max-tool-rounds)
+                                     max-tool-calls-per-round (assoc :max-tool-calls-per-round max-tool-calls-per-round)
+                                     max-retry-rounds (assoc :max-retry-rounds max-retry-rounds)
+                                     max-retry-wait-ms (assoc :max-retry-wait-ms max-retry-wait-ms)
+                                     max-restarts (assoc :max-restarts max-restarts)
+                                     delay-ms (assoc :delay-ms delay-ms)
+                                     backoff-ms (assoc :backoff-ms backoff-ms)
+                                     grace-ms (assoc :grace-ms grace-ms)
+                                     failure-type (assoc :failure-type (name failure-type))
+                                     failure-phase (assoc :failure-phase (name failure-phase))
+                                     worker-phase (assoc :worker-phase (name worker-phase))
+                                     tool-risk? (assoc :tool-risk tool-risk?)
+                                     (seq providers) (assoc :providers (mapv name providers))
+                                     round (assoc :round round)
+                                     error (assoc :error error))}))))})
 
 (defn pause-task!
   [deps task-id]

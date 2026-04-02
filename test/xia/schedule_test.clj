@@ -317,6 +317,12 @@
     (is (= :error (:phase state)))
     (is (= 1 (:consecutive-failures state)))
     (is (= "No element matches selector #submit" (:last-error state)))
+    (is (= {:decision-type :schedule-failure-policy
+            :mode :backoff
+            :same-failure? false
+            :consecutive-failures 1}
+           (select-keys (:last-policy state)
+                        [:decision-type :mode :same-failure? :consecutive-failures])))
     (is (re-find #"Recovery context from previous scheduled attempts" prompt))
     (is (re-find #"browser-query-elements" prompt))
     (is (re-find #"Opened the dashboard and attempted the primary action" prompt))
@@ -334,6 +340,12 @@
         sched (schedule/get-schedule :fragile-site)]
     (is (= :paused (:status state)))
     (is (= 2 (:consecutive-failures state)))
+    (is (= {:decision-type :schedule-failure-policy
+            :mode :pause
+            :same-failure? true
+            :consecutive-failures 2}
+           (select-keys (:last-policy state)
+                        [:decision-type :mode :same-failure? :consecutive-failures])))
     (is (false? (:enabled? sched)))))
 
 (deftest failed-prompt-schedule-exposes-resumable-session
@@ -364,6 +376,7 @@
     (is (= :complete (:phase state)))
     (is (= 0 (:consecutive-failures state)))
     (is (= "Recovered after reloading the page." (:last-success-summary state)))
+    (is (nil? (:last-policy state)))
     (is (nil? (:backoff-until state)))))
 
 ;; ---------------------------------------------------------------------------

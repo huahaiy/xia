@@ -12,7 +12,9 @@
             [xia.http-client :as http]
             [xia.llm.routing :as llm-routing]
             [xia.oauth :as oauth]
-            [xia.rate-limit :as rate-limit])
+            [xia.prompt :as prompt]
+            [xia.rate-limit :as rate-limit]
+            [xia.task-policy :as task-policy])
   (:import [java.net URI URLEncoder]
            [java.nio.charset StandardCharsets]
            [java.time ZonedDateTime]
@@ -23,9 +25,6 @@
 (def ^:private request-timeout-ms 120000)
 (def ^:private provider-health-base-cooldown-ms 30000)
 (def ^:private provider-health-max-cooldown-ms 300000)
-(def ^:private llm-retry-statuses #{408 409 425 429 500 502 503 504})
-(def ^:private default-max-provider-retry-rounds 4)
-(def ^:private default-max-provider-retry-wait-ms 300000)
 (def default-rate-limit-per-minute 60)
 (def ^:private workload-options
   [{:id :assistant
@@ -159,13 +158,11 @@
 
 (defn- max-provider-retry-rounds
   []
-  (cfg/positive-long :llm/max-provider-retry-rounds
-                     default-max-provider-retry-rounds))
+  (task-policy/llm-max-provider-retry-rounds))
 
 (defn- max-provider-retry-wait-ms
   []
-  (cfg/positive-long :llm/max-provider-retry-wait-ms
-                     default-max-provider-retry-wait-ms))
+  (task-policy/llm-max-provider-retry-wait-ms))
 
 (defn provider-health-summary
   "Return the current in-memory health status for a provider."
@@ -203,48 +200,26 @@
 
 (defn- retry-after-ms
   [headers]
-  (when-let [raw (some-> (header-value headers "retry-after") str)]
-    (let [value (str/trim raw)]
-      (or (try
-            (* 1000 (long-max 0 (Long/parseLong value)))
-            (catch Exception _
-              nil))
-          (try
-            (long-max 0
-                      (- (.toEpochMilli (.toInstant (ZonedDateTime/parse value DateTimeFormatter/RFC_1123_DATE_TIME)))
-                         (long (now-ms))))
-            (catch Exception _
-              nil))))))
+  (task-policy/llm-retry-after-ms
+   {"retry-after" (header-value headers "retry-after")}
+   now-ms))
 
 (defn- retryable-llm-error?
   [^Throwable e]
-  (let [status (some-> e ex-data :status)]
-    (or (contains? llm-retry-statuses status)
-        (boolean
-          (some #(instance? Throwable %)
-                (filter (fn [cause]
-                          (or (instance? TimeoutException cause)
-                              (instance? java.net.http.HttpTimeoutException cause)
-                              (instance? java.net.http.HttpConnectTimeoutException cause)
-                              (instance? java.io.IOException cause)))
-                        (take-while some? (iterate ex-cause e))))))))
+  (task-policy/llm-retryable-error? e))
 
 (defn- attempts-cooldown-delay-ms
   [attempts]
   (llm-routing/attempts-cooldown-delay-ms provider-health-summary attempts))
 
-(defn- remaining-retry-wait-ms
-  ^long
-  [started-at max-retry-wait-ms]
-  (- (long max-retry-wait-ms) (- (long (now-ms)) (long started-at))))
-
 (defn- retry-sleep-ms
   [started-at round max-retry-rounds max-retry-wait-ms requested-delay-ms]
-  (let [remaining-ms (remaining-retry-wait-ms started-at max-retry-wait-ms)]
-    (when (and (< (long round) (long max-retry-rounds))
-               (pos? remaining-ms)
-               (pos? (long (or requested-delay-ms 0))))
-      (long-min remaining-ms (long requested-delay-ms)))))
+  (task-policy/llm-retry-sleep-ms started-at
+                                  round
+                                  max-retry-rounds
+                                  max-retry-wait-ms
+                                  requested-delay-ms
+                                  now-ms))
 
 (defn- provider-attempts
   [{:keys [provider-id workload]}]
@@ -992,6 +967,7 @@
      :allow-private-network? (boolean allow-private-network?)
      :timeout       request-timeout-ms
      :retry-enabled? true
+     :policy-observer prompt/policy-decision!
      :request-label "LLM request"}))
 
 (defn provider-credential-source
@@ -1090,6 +1066,10 @@
       rate-limit-window-ms
       limit
       (fn []
+        (prompt/policy-decision! (task-policy/provider-rate-limit-policy
+                                  provider-id
+                                  workload
+                                  limit))
         (ex-info (str "Rate limit exceeded for provider " (name provider-id)
                       " (max " limit " requests/minute)")
                  {:type        :llm/rate-limit
@@ -1449,6 +1429,17 @@
                                             max-retry-wait-ms*
                                             preflight-delay-ms)]
             (do
+              (prompt/policy-decision! {:decision-type :provider-retry-policy
+                                        :allowed? true
+                                        :mode :preflight-cooldown
+                                        :delay-ms delay-ms
+                                        :round round
+                                        :provider-id provider-id
+                                        :workload workload
+                                        :max-retry-rounds max-retry-rounds*
+                                        :max-retry-wait-ms max-retry-wait-ms*
+                                        :reason "All routed providers are cooling down"
+                                        :providers (mapv :provider-id attempts)})
               (log/warn "All routed LLM providers are cooling down; waiting before retry"
                         {:provider-id provider-id
                          :workload workload
@@ -1457,13 +1448,25 @@
                          :providers (mapv :provider-id attempts)})
               (sleep-ms! delay-ms)
               (recur (inc round)))
-            (throw (ex-info "LLM providers are still cooling down"
-                            {:provider-id provider-id
-                             :workload workload
-                             :round round
-                             :cooldown-ms preflight-delay-ms
-                             :max-retry-rounds max-retry-rounds*
-                             :max-retry-wait-ms max-retry-wait-ms*})))
+            (do
+              (prompt/policy-decision! {:decision-type :provider-retry-policy
+                                        :allowed? false
+                                        :mode :retry-limit
+                                        :round round
+                                        :provider-id provider-id
+                                        :workload workload
+                                        :max-retry-rounds max-retry-rounds*
+                                        :max-retry-wait-ms max-retry-wait-ms*
+                                        :delay-ms preflight-delay-ms
+                                        :reason "LLM providers are still cooling down"
+                                        :providers (mapv :provider-id attempts)})
+              (throw (ex-info "LLM providers are still cooling down"
+                              {:provider-id provider-id
+                               :workload workload
+                               :round round
+                               :cooldown-ms preflight-delay-ms
+                               :max-retry-rounds max-retry-rounds*
+                               :max-retry-wait-ms max-retry-wait-ms*}))))
           (let [round-result (attempt-provider-round messages opts attempts)]
             (case (:status round-result)
               :ok
@@ -1476,6 +1479,17 @@
                                                 max-retry-wait-ms*
                                                 (:delay-ms round-result))]
                 (do
+                  (prompt/policy-decision! {:decision-type :provider-retry-policy
+                                            :allowed? true
+                                            :mode :provider-backoff
+                                            :delay-ms delay-ms
+                                            :round round
+                                            :provider-id (:provider-id round-result)
+                                            :workload (:workload round-result)
+                                            :max-retry-rounds max-retry-rounds*
+                                            :max-retry-wait-ms max-retry-wait-ms*
+                                            :error (provider-error-message (:provider-id round-result)
+                                                                           (:error round-result))})
                   (log/warn "LLM request exhausted routed providers; retrying after backoff"
                             {:provider-id (:provider-id round-result)
                              :workload (:workload round-result)
@@ -1486,6 +1500,17 @@
                   (sleep-ms! delay-ms)
                   (recur (inc round)))
                 (do
+                  (prompt/policy-decision! {:decision-type :provider-retry-policy
+                                            :allowed? false
+                                            :mode :retry-limit
+                                            :round round
+                                            :provider-id (:provider-id round-result)
+                                            :workload (:workload round-result)
+                                            :max-retry-rounds max-retry-rounds*
+                                            :max-retry-wait-ms max-retry-wait-ms*
+                                            :delay-ms (:delay-ms round-result)
+                                            :error (provider-error-message (:provider-id round-result)
+                                                                           (:error round-result))})
                   (log/error (:error round-result) "LLM request failed after retries"
                              {:provider-id (:provider-id round-result)
                               :workload (:workload round-result)
@@ -1510,13 +1535,14 @@
         api-key         (some-> api-key str/trim not-empty)
         allow-private?  (loopback-base-url? base-url)
         resp            (http/request {:url     (str base-url "/models")
-                            :method  :get
-                            :headers (provider-api-headers provider-family
-                                                           {:api-key api-key
-                                                            :auth-header auth-header})
-                            :allow-private-network? allow-private?
-                            :timeout 15000
-                            :request-label "Fetch provider models"})]
+                                       :method  :get
+                                       :headers (provider-api-headers provider-family
+                                                                      {:api-key api-key
+                                                                       :auth-header auth-header})
+                                       :allow-private-network? allow-private?
+                                       :timeout 15000
+                                       :policy-observer prompt/policy-decision!
+                                       :request-label "Fetch provider models"})]
     (when (= 200 (:status resp))
       (let [body (json/read-json (:body resp))
             data (or (get body "data") [])]
@@ -1808,6 +1834,7 @@
                                                                        :auth-header auth-header})
                                        :allow-private-network? allow-private?
                                        :timeout 15000
+                                       :policy-observer prompt/policy-decision!
                                        :request-label "Fetch provider model metadata"})]
     (if (= 200 (:status resp))
       (let [body                  (json/read-json (:body resp))

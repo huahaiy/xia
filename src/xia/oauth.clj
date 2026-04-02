@@ -5,7 +5,8 @@
             [taoensso.timbre :as log]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
-            [xia.http-client :as http])
+            [xia.http-client :as http]
+            [xia.prompt :as prompt])
   (:import [java.net URI URLDecoder URLEncoder]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest SecureRandom]
@@ -118,6 +119,7 @@
                               :headers       {"Accept" "application/json"
                                               "Content-Type" "application/x-www-form-urlencoded"}
                               :body          (encode-www-form params)
+                              :policy-observer prompt/policy-decision!
                               :request-label "OAuth token request"})
         body   (parse-token-response (:body resp))
         status (:status resp)]

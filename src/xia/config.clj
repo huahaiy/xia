@@ -15,6 +15,18 @@
         default-value))
     default-value))
 
+(defn positive-double
+  [config-key default-value]
+  (if-let [raw (db/get-config config-key)]
+    (try
+      (let [parsed (Double/parseDouble (str raw))]
+        (if (pos? parsed)
+          parsed
+          default-value))
+      (catch Exception _
+        default-value))
+    default-value))
+
 (defn keyword-option
   [config-key default-value allowed-values]
   (if-let [raw (db/get-config config-key)]

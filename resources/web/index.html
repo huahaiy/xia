@@ -67,6 +67,32 @@
         </div>
       </section>
 
+      <section class="panel approval-panel" id="input-panel" hidden>
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Input Required</h2>
+            <p class="panel-note">Xia is waiting for a value before it can continue.</p>
+          </div>
+          <div class="actions">
+            <button type="button" class="primary" id="submit-input">Submit</button>
+          </div>
+        </div>
+        <div class="approval-summary">
+          <div class="meta-row">
+            <h3 class="meta-label">Field</h3>
+            <div class="meta-value" id="input-label">Waiting</div>
+          </div>
+          <div class="meta-row">
+            <h3 class="meta-label">Value</h3>
+            <input type="text" class="text-input" id="input-value" autocomplete="off">
+          </div>
+          <div class="meta-row">
+            <h3 class="meta-label">Notes</h3>
+            <p class="approval-reason" id="input-note">Enter the requested value and submit it to resume the task.</p>
+          </div>
+        </div>
+      </section>
+
       <div class="modal-shell" id="provider-onboarding-modal" hidden aria-hidden="true">
         <div class="modal-backdrop"></div>
         <div class="modal-dialog onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-onboarding-title">

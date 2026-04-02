@@ -12,6 +12,7 @@
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
+            [xia.task-event :as task-event]
             [xia.tool :as tool]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory :as wm]))
@@ -103,6 +104,36 @@
       (is (contains? item-types :checkpoint))
       (is (= :user (:role (first (filter #(= :user-message (:type %)) items)))))
       (is (= :assistant (:role (first (filter #(= :assistant-message (:type %)) items))))))))
+
+(deftest process-message-emits-live-runtime-events
+  (let [session-id (db/create-session! :terminal)
+        events     (atom [])]
+    (wm/ensure-wm! session-id)
+    (prompt/register-runtime-event! :terminal
+                                    (fn [event]
+                                      (swap! events conj event)))
+    (try
+      (with-redefs [xia.tool/tool-definitions          (constantly [])
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         {"content" "All set."})]
+        (is (= "All set."
+               (agent/process-message session-id "hello" :channel :terminal))))
+      (let [types (mapv :type @events)
+            assistant-event (some #(when (= :message.assistant (:type %)) %) @events)
+            status-event    (some #(when (= :task.status (:type %)) %) @events)]
+        (is (some #{:task.started} types))
+        (is (some #{:turn.started} types))
+        (is (some #{:message.user} types))
+        (is (some #{:task.status} types))
+        (is (some #{:message.assistant} types))
+        (is (some #{:turn.completed} types))
+        (is (some #{:task.completed} types))
+        (is (= "All set." (:summary assistant-event)))
+        (is (= "running" (get-in status-event [:data :state]))))
+      (finally
+        (prompt/register-runtime-event! :terminal nil)))))
 
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
@@ -309,6 +340,45 @@
                         :runtime-op :resume
                         :persist-message? false}}]
                @process-calls))))))
+
+(deftest resume-task-recovers-from-persisted-task-state-when-wm-is-missing
+  (let [session-id          (db/create-session! :terminal)
+        task-autonomy-state (autonomous/initial-state "Investigate the billing discrepancy")
+        task-id             (db/create-task! {:session-id session-id
+                                              :channel :terminal
+                                              :type :interactive
+                                              :state :paused
+                                              :title "Investigate the billing discrepancy"
+                                              :summary "Waiting for the next pass"
+                                              :stop-reason :paused
+                                              :autonomy-state task-autonomy-state})
+        submitted-work      (atom nil)
+        seen-messages       (atom nil)]
+    (wm/clear-wm! session-id)
+    (with-redefs [xia.async/submit-background!          (fn [_label f]
+                                                          (reset! submitted-work f)
+                                                          ::submitted)
+                  xia.tool/tool-definitions             (constantly [])
+                  xia.working-memory/update-wm!         (fn [& _] nil)
+                  xia.context/build-messages-data       (fn [_session-id _opts]
+                                                          {:messages [{:role "system" :content "base"}]
+                                                           :used-fact-eids []})
+                  xia.llm/resolve-provider-selection    (constantly {:provider {:llm.provider/id :default}
+                                                                     :provider-id :default})
+                  xia.llm/chat-message                  (fn [messages & _opts]
+                                                          (reset! seen-messages messages)
+                                                          {"content" "Continuing.\nAUTONOMOUS_STATUS_JSON:{\"status\":\"complete\",\"summary\":\"done\",\"goal_complete\":false}"})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [result (agent/resume-task! task-id :message "Continue the investigation")]
+        (is (= :running (:status result)))
+        (is (fn? @submitted-work))
+        (@submitted-work)))
+    (let [system-content (some-> @seen-messages first :content)
+          turns          (db/task-turns task-id)]
+      (is (str/includes? system-content "Investigate the billing discrepancy"))
+      (is (= "Investigate the billing discrepancy"
+             (autonomous/root-goal (wm/autonomy-state session-id))))
+      (is (= :resume (:operation (last turns)))))))
 
 (deftest steer-task-restarts-a-task-with-a-new-instruction
   (let [session-id     (db/create-session! :terminal)
@@ -1942,7 +2012,18 @@
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
       (let [result (agent/process-message session-id "keep going" :channel :terminal)]
         (is (str/includes? result "Spent the budget."))
-        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative token budget (10/10)."))))
+        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative token budget (10/10)."))
+        (let [task (db/current-session-task session-id)
+              turns (db/task-turns (:id task))
+              turn-items (into {}
+                               (map (fn [turn]
+                                      [(:id turn) (db/turn-items (:id turn))]))
+                               turns)
+              event-types (mapv :type (task-event/task-events task turns turn-items))]
+          (is (some #(and (= :system-note (:type %))
+                          (= "budget-exhausted" (get-in % [:data :kind])))
+                    (db/turn-items (:id (last turns)))))
+          (is (some #{:task.budget-exhausted} event-types)))))
     (is (= 1 @llm-calls))))
 
 (deftest process-message-counts-context-llm-calls-against-the-turn-budget
@@ -2076,7 +2157,11 @@
                 @statuses))
       (let [task-id          (:id (first (db/list-tasks {:session-id session-id})))
             turn-id          (:id (first (db/task-turns task-id)))
-            status-items     (filter #(= :status (:type %)) (db/turn-items turn-id))
+            turn-items       (db/turn-items turn-id)
+            status-items     (filter #(= :status (:type %)) turn-items)
+            policy-items     (filter #(and (= :system-note (:type %))
+                                           (= "policy-decision" (get-in % [:data :kind])))
+                                     turn-items)
             restarting-item  (some #(when (= "Restarting iteration after Agent supervisor stopped a stalled worker during llm phase (attempt 1/1)"
                                                (:summary %))
                                       %)
@@ -2088,7 +2173,15 @@
                 :worker-phase "llm"}
                (some-> restarting-item
                        :data
-                       (select-keys [:attempt :max-restarts :failure-phase :worker-phase])))))
+                       (select-keys [:attempt :max-restarts :failure-phase :worker-phase])))
+        (is (some #(= {:decision-type "restart-policy"
+                       :allowed true
+                       :mode "restarting"
+                       :failure-phase "llm"
+                       :worker-phase "llm"}
+                      (select-keys (:data %)
+                                   [:decision-type :allowed :mode :failure-phase :worker-phase]))
+                  policy-items))))
       (is (= {:state :done
               :phase :complete
               :message "Ready"}
@@ -2612,7 +2705,20 @@
         (is (re-find #"Too many tool-calling rounds" (.getMessage ^Exception err)))
         (is (= {:rounds 1
                 :max-tool-rounds 1}
-               (select-keys (ex-data err) [:rounds :max-tool-rounds])))))
+               (select-keys (ex-data err) [:rounds :max-tool-rounds])))
+        (let [task-id      (:id (first (db/list-tasks {:session-id session-id})))
+              turn-id      (:id (first (db/task-turns task-id)))
+              policy-items (->> (db/turn-items turn-id)
+                                (filter #(and (= :system-note (:type %))
+                                              (= "policy-decision" (get-in % [:data :kind])))))]
+          (is (some #(= {:decision-type "tool-round-policy"
+                         :allowed false
+                         :mode "round-limit"
+                         :rounds 1
+                         :max-tool-rounds 1}
+                        (select-keys (:data %)
+                                     [:decision-type :allowed :mode :rounds :max-tool-rounds]))
+                    policy-items)))))
     (is (= 2 @llm-calls))))
 
 (deftest process-message-schedules-fact-utility-review
@@ -3133,6 +3239,15 @@
 
 (deftest cancel-session-cancels-active-branch-child-sessions
   (let [parent-session-id (db/create-session! :terminal)
+        parent-task-id    (db/create-task! {:session-id parent-session-id
+                                            :channel :terminal
+                                            :type :interactive
+                                            :state :running
+                                            :title "Parent task"})
+        parent-turn-id    (db/start-task-turn! parent-task-id
+                                               {:operation :start
+                                                :state :running
+                                                :summary "Running parent task"})
         child-started     (promise)
         child-cancelled   (promise)
         child-stopped     (promise)]
@@ -3166,15 +3281,17 @@
                          (#'xia.agent/with-session-run
                           parent-session-id
                           (fn []
+                            (#'xia.agent/register-task-run! parent-session-id parent-task-id parent-turn-id)
                             (agent/run-branch-tasks
                              [{:task "slow" :prompt "slow branch"}]
                              :session-id parent-session-id
                              :max-parallel 1)))
-                         (catch Throwable t
-                           t)))
+                        (catch Throwable t
+                          t)))
               child-session-id (deref child-started 1000 ::timeout)]
           (is (not= ::timeout child-session-id))
-          (is (contains? (:child-session-ids (#'xia.agent/session-run-entry parent-session-id))
+          (is (empty? (:child-session-ids (#'xia.agent/session-run-entry parent-session-id))))
+          (is (contains? (:child-session-ids (#'xia.agent/task-run-entry parent-task-id))
                          child-session-id))
           (is (true? (agent/cancel-session! parent-session-id "user requested cancel")))
           (is (= child-session-id (deref child-cancelled 1000 ::timeout)))
@@ -3407,3 +3524,53 @@
                (select-keys (ex-data err)
                             [:tool-count :max-tool-calls-per-round])))
         (is (zero? @executed))))))
+
+(deftest process-message-records-policy-decision-for-oversized-tool-round
+  (let [session-id (db/create-session! :terminal)
+        tool-calls (vec (for [i (range 13)]
+                          {"id" (str "call-" i)
+                           "function" {"name" "web-search"
+                                       "arguments" "{}"}}))]
+    (with-redefs [xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.tool/tool-definitions          (constantly [{:type "function"
+                                                                   :function {:name "web-search"
+                                                                              :parameters {}}}])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.tool/parallel-safe?            (constantly true)
+                  xia.tool/execute-tool              (fn [& _]
+                                                       (throw (ex-info "should not execute" {})))
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" (str "ACTION_INTENT_JSON:"
+                                                                       "{\"focus\":\"Research this\",\"agenda_item\":\"Research this\",\"plan_step\":\"Search broadly\",\"why\":\"Need broad search\",\"tool\":\"web-search\",\"tool_args_summary\":\"{}\"}")
+                                                        "tool_calls" tool-calls})
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (let [err (try
+                  (agent/process-message session-id
+                                         "research this"
+                                         :channel :terminal)
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (is (re-find #"Too many tool calls in one round: 13 \(max 12\)"
+                     (.getMessage ^Exception err)))
+        (is (= {:tool-count 13
+                :max-tool-calls-per-round 12}
+               (select-keys (ex-data err)
+                            [:tool-count :max-tool-calls-per-round])))
+        (let [task-id      (:id (first (db/list-tasks {:session-id session-id})))
+              turn-id      (:id (first (db/task-turns task-id)))
+              policy-items (->> (db/turn-items turn-id)
+                                (filter #(and (= :system-note (:type %))
+                                              (= "policy-decision" (get-in % [:data :kind])))))]
+          (is (some #(= {:decision-type "tool-call-policy"
+                         :allowed false
+                         :mode "round-call-limit"
+                         :tool-count 13
+                         :max-tool-calls-per-round 12}
+                        (select-keys (:data %)
+                                     [:decision-type :allowed :mode :tool-count :max-tool-calls-per-round]))
+                    policy-items)))))))

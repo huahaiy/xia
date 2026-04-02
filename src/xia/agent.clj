@@ -24,12 +24,11 @@
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
+            [xia.task-policy :as task-policy]
             [xia.tool :as tool]
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(def ^:private default-max-tool-rounds 100)
-(def ^:private default-max-tool-calls-per-round 12)
 (def ^:private default-max-user-message-chars 32768)
 (def ^:private default-max-user-message-tokens 8000)
 (def ^:private default-max-branch-tasks 5)
@@ -44,15 +43,7 @@
 (def ^:private default-supervisor-phase-timeout-ms 30000)
 (def ^:private default-supervisor-llm-timeout-ms 120000)
 (def ^:private default-supervisor-tool-timeout-ms 120000)
-(def ^:private default-supervisor-max-identical-iterations 3)
-(def ^:private default-supervisor-semantic-loop-threshold 0.88)
-(def ^:private default-supervisor-max-restarts 1)
-(def ^:private default-supervisor-restart-backoff-ms 100)
-(def ^:private default-supervisor-restart-grace-ms 1000)
 (def ^:private default-task-control-wait-ms 10000)
-(def ^:private default-max-turn-llm-calls 600)
-(def ^:private default-max-turn-total-tokens 2000000)
-(def ^:private default-max-turn-wall-clock-ms 21600000)
 (defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
 (defonce ^:private active-task-runs (atom {}))
@@ -124,24 +115,15 @@
 
 (defn- configured-max-tool-rounds
   []
-  (cfg/positive-long :agent/max-tool-rounds
-                     default-max-tool-rounds))
-
-(defn- configured-max-tool-calls-per-round
-  []
-  (cfg/positive-long :agent/max-tool-calls-per-round
-                     default-max-tool-calls-per-round))
+  (task-policy/max-tool-rounds))
 
 (defn- validate-tool-round-call-count!
   [tool-calls]
-  (let [tool-count (count tool-calls)
-        max-tool-calls-per-round (configured-max-tool-calls-per-round)]
-    (when (> (long tool-count) (long max-tool-calls-per-round))
-      (throw (ex-info (str "Too many tool calls in one round: "
-                           tool-count
-                           " (max "
-                           max-tool-calls-per-round
-                           ")")
+  (let [{:keys [allowed? reason tool-count max-tool-calls-per-round] :as decision}
+        (task-policy/tool-call-limit-decision (count tool-calls))]
+    (when-not allowed?
+      (prompt/policy-decision! (assoc decision :decision-type :tool-call-policy))
+      (throw (ex-info reason
                       {:type :tool-call-limit-exceeded
                        :tool-count tool-count
                        :max-tool-calls-per-round max-tool-calls-per-round})))
@@ -207,45 +189,10 @@
   (cfg/positive-long :agent/supervisor-tool-timeout-ms
                      default-supervisor-tool-timeout-ms))
 
-(defn- supervisor-max-identical-iterations
-  []
-  (cfg/positive-long :agent/supervisor-max-identical-iterations
-                     default-supervisor-max-identical-iterations))
-
-(defn- supervisor-max-restarts
-  []
-  (cfg/positive-long :agent/supervisor-max-restarts
-                     default-supervisor-max-restarts))
-
-(defn- supervisor-restart-backoff-ms
-  []
-  (cfg/positive-long :agent/supervisor-restart-backoff-ms
-                     default-supervisor-restart-backoff-ms))
-
-(defn- supervisor-restart-grace-ms
-  []
-  (cfg/positive-long :agent/supervisor-restart-grace-ms
-                     default-supervisor-restart-grace-ms))
-
 (defn- task-control-wait-ms
   []
   (cfg/positive-long :agent/task-control-wait-ms
                      default-task-control-wait-ms))
-
-(defn- max-turn-llm-calls
-  []
-  (cfg/positive-long :agent/max-turn-llm-calls
-                     default-max-turn-llm-calls))
-
-(defn- max-turn-total-tokens
-  []
-  (cfg/positive-long :agent/max-turn-total-tokens
-                     default-max-turn-total-tokens))
-
-(defn- max-turn-wall-clock-ms
-  []
-  (cfg/positive-long :agent/max-turn-wall-clock-ms
-                     default-max-turn-wall-clock-ms))
 
 (defn- new-request-id
   []
@@ -410,7 +357,6 @@
              {:run-id run-id
               :supervisor-thread (Thread/currentThread)
               :task-id nil
-              :task-turn-id nil
               :child-session-ids #{}
               :cancelled? false
               :cancel-reason nil})
@@ -497,34 +443,37 @@
   [session-id task-id task-turn-id]
   (when (and session-id task-id task-turn-id)
     (when-let [entry (session-run-entry session-id)]
-      (let [run-id (:run-id entry)
+      (let [session-run-id (:run-id entry)
+            task-run-id (Object.)
             task-entry {:task-id task-id
                         :task-turn-id task-turn-id
                         :session-id session-id
-                        :run-id run-id
+                        :task-run-id task-run-id
+                        :session-run-id session-run-id
                         :supervisor-thread (:supervisor-thread entry)
+                        :child-session-ids (:child-session-ids entry)
                         :cancelled? (:cancelled? entry)
                         :cancel-reason (:cancel-reason entry)}]
         (swap! active-task-runs assoc task-id task-entry)
         (update-session-run-entry! session-id
                                    (fn [run]
-                                     (if (= run-id (:run-id run))
+                                     (if (= session-run-id (:run-id run))
                                        (assoc run
                                               :task-id task-id
-                                              :task-turn-id task-turn-id)
-                                       run)))
+                                              :child-session-ids #{})
+                                        run)))
         task-entry))))
 
 (defn- clear-task-run!
-  [session-id task-id task-turn-id]
+  [session-id task-id task-turn-id task-run-id]
   (when task-id
-    (let [expected-run-id (or (some-> (session-run-entry session-id) :run-id)
-                              (some-> (task-run-entry task-id) :run-id))]
+    (let [expected-task-run-id (or task-run-id
+                                   (some-> (task-run-entry task-id) :task-run-id))]
       (swap! active-task-runs
              (fn [runs]
                (if-let [entry (get runs task-id)]
-                 (if (and (or (nil? expected-run-id)
-                              (= expected-run-id (:run-id entry)))
+                 (if (and (or (nil? expected-task-run-id)
+                              (= expected-task-run-id (:task-run-id entry)))
                           (or (nil? session-id)
                               (= session-id (:session-id entry)))
                           (or (nil? task-turn-id)
@@ -535,12 +484,9 @@
       (when session-id
         (update-session-run-entry! session-id
                                    (fn [entry]
-                                     (if (and (= task-id (:task-id entry))
-                                              (or (nil? task-turn-id)
-                                                  (= task-turn-id (:task-turn-id entry))))
+                                     (if (= task-id (:task-id entry))
                                        (assoc entry
-                                              :task-id nil
-                                              :task-turn-id nil)
+                                              :task-id nil)
                                        entry)))))))
 
 (defn- register-child-session!
@@ -548,16 +494,22 @@
   (when (and parent-session-id
              child-session-id
              (not= parent-session-id child-session-id))
-    (update-session-run-entry! parent-session-id
-                               #(update % :child-session-ids (fnil conj #{}) child-session-id))))
+    (if-let [task-id (session-bound-task-id parent-session-id)]
+      (update-task-run-entry! task-id
+                              #(update % :child-session-ids (fnil conj #{}) child-session-id))
+      (update-session-run-entry! parent-session-id
+                                 #(update % :child-session-ids (fnil conj #{}) child-session-id)))))
 
 (defn- unregister-child-session!
   [parent-session-id child-session-id]
   (when (and parent-session-id
              child-session-id
              (not= parent-session-id child-session-id))
-    (update-session-run-entry! parent-session-id
-                               #(update % :child-session-ids disj child-session-id))))
+    (if-let [task-id (session-bound-task-id parent-session-id)]
+      (update-task-run-entry! task-id
+                              #(update % :child-session-ids disj child-session-id))
+      (update-session-run-entry! parent-session-id
+                                 #(update % :child-session-ids disj child-session-id)))))
 
 (defn- begin-worker-run!
   [session-id worker-token]
@@ -732,7 +684,8 @@
           (cancel-futures! parallel-tool-futures))
         (when-let [^Future worker-future (:worker-future entry)]
           (future-cancel worker-future))
-        (doseq [child-session-id (:child-session-ids @session-entry*)]
+        (doseq [child-session-id (or (:child-session-ids @task-entry*)
+                                     (:child-session-ids @session-entry*))]
           (when (not= child-session-id session-id)
             (request-session-cancel! child-session-id
                                      reason
@@ -827,143 +780,6 @@
   []
   (long (System/currentTimeMillis)))
 
-(defn- parse-long-value
-  [value]
-  (cond
-    (integer? value)
-    (long value)
-
-    (number? value)
-    (long value)
-
-    (string? value)
-    (try
-      (Long/parseLong (str/trim value))
-      (catch Exception _
-        nil))
-
-    :else
-    nil))
-
-(defn- usage-value
-  [usage key-name]
-  (when (map? usage)
-    (some-> (or (get usage key-name)
-                (get usage (name key-name))
-                (get usage (keyword (name key-name))))
-            parse-long-value)))
-
-(defn- new-turn-llm-budget
-  [session-id channel]
-  {:session-id session-id
-   :channel channel
-   :started-at-ms (current-time-ms)
-   :llm-call-count 0
-   :llm-total-duration-ms 0
-   :prompt-tokens 0
-   :completion-tokens 0
-   :total-tokens 0
-   :max-llm-calls (long (max-turn-llm-calls))
-   :max-total-tokens (long (max-turn-total-tokens))
-   :max-wall-clock-ms (long (max-turn-wall-clock-ms))})
-
-(defn- record-turn-llm-request!
-  [turn-budget-state {:keys [usage duration-ms error]}]
-  (when turn-budget-state
-    (swap! turn-budget-state
-           (fn [budget]
-             (let [prompt-tokens (or (usage-value usage "prompt_tokens") 0)
-                   completion-tokens (or (usage-value usage "completion_tokens")
-                                         (usage-value usage "output_tokens")
-                                         0)
-                   total-tokens (or (usage-value usage "total_tokens")
-                                    (+ prompt-tokens completion-tokens))]
-               (cond-> (-> budget
-                           (update :llm-call-count (fnil inc 0))
-                           (update :llm-total-duration-ms (fnil + 0) (long (or duration-ms 0)))
-                           (update :prompt-tokens (fnil + 0) (long prompt-tokens))
-                           (update :completion-tokens (fnil + 0) (long completion-tokens))
-                           (update :total-tokens (fnil + 0) (long total-tokens))
-                           (assoc :last-llm-duration-ms (long (or duration-ms 0))
-                                  :last-llm-error (when error
-                                                    (truncate-summary (.getMessage ^Throwable error)
-                                                                      240))
-                                  :last-llm-at-ms (current-time-ms)))
-                 error
-                 (update :llm-error-count (fnil inc 0))))))))
-
-(defn- turn-llm-budget-status*
-  [budget]
-  (let [elapsed-ms (- (current-time-ms) (long (:started-at-ms budget 0)))
-        status {:session-id (:session-id budget)
-                :channel (:channel budget)
-                :llm-call-count (long (:llm-call-count budget 0))
-                :total-tokens (long (:total-tokens budget 0))
-                :prompt-tokens (long (:prompt-tokens budget 0))
-                :completion-tokens (long (:completion-tokens budget 0))
-                :elapsed-ms elapsed-ms
-                :max-llm-calls (long (:max-llm-calls budget 0))
-                :max-total-tokens (long (:max-total-tokens budget 0))
-                :max-wall-clock-ms (long (:max-wall-clock-ms budget 0))}]
-    (cond
-      (>= (:llm-call-count status) (:max-llm-calls status))
-      (assoc status :kind :llm-calls)
-
-      (>= (:total-tokens status) (:max-total-tokens status))
-      (assoc status :kind :tokens)
-
-      (>= (:elapsed-ms status) (:max-wall-clock-ms status))
-      (assoc status :kind :wall-clock)
-
-      :else
-      nil)))
-
-(defn- turn-llm-budget-status
-  [turn-budget-state]
-  (when turn-budget-state
-    (turn-llm-budget-status* @turn-budget-state)))
-
-(defn- format-duration-ms
-  [value]
-  (let [ms (long (or value 0))]
-    (cond
-      (>= ms 60000)
-      (format "%.1fm" (/ ms 60000.0))
-
-      (>= ms 1000)
-      (format "%.1fs" (/ ms 1000.0))
-
-      :else
-      (str ms "ms"))))
-
-(defn- turn-llm-budget-summary
-  [{:keys [kind llm-call-count max-llm-calls total-tokens max-total-tokens elapsed-ms
-           max-wall-clock-ms]}]
-  (case kind
-    :llm-calls
-    (str "cumulative LLM call budget (" llm-call-count "/" max-llm-calls ")")
-
-    :tokens
-    (str "cumulative token budget (" total-tokens "/" max-total-tokens ")")
-
-    :wall-clock
-    (str "wall-clock budget (" (format-duration-ms elapsed-ms)
-         "/" (format-duration-ms max-wall-clock-ms) ")")
-
-    "cumulative turn budget"))
-
-(defn- turn-llm-budget-ex
-  [turn-budget-state]
-  (when-let [status (turn-llm-budget-status turn-budget-state)]
-    (ex-info (str "Reached the " (turn-llm-budget-summary status))
-             (merge {:type :turn-budget-exhausted}
-                    status))))
-
-(defn- throw-if-turn-llm-budget-exhausted!
-  [turn-budget-state]
-  (when-let [budget-ex (turn-llm-budget-ex turn-budget-state)]
-    (throw budget-ex)))
-
 (defn- turn-budget-next-step
   [parsed autonomy-state]
   (or (some-> parsed :control :next-step str str/trim not-empty)
@@ -973,7 +789,7 @@
 (defn- turn-budget-note
   [budget-status parsed autonomy-state & {:keys [before-tools?]}]
   (str "Note: I stopped this turn after reaching the "
-       (turn-llm-budget-summary budget-status)
+       (task-policy/turn-llm-budget-summary budget-status)
        "."
        (when before-tools?
          " I did not execute the next requested tool step.")
@@ -1516,7 +1332,7 @@
         {:embedding-cache embedding-cache**
          :same-semantic? (boolean (and similarity
                                        (>= similarity
-                                           default-supervisor-semantic-loop-threshold)))
+                                           (task-policy/supervisor-semantic-loop-threshold))))
          :semantic-similarity similarity
          :semantic-match-source (when similarity :embedding)}))))
 
@@ -1718,7 +1534,7 @@
               :max-iterations max-iterations
               :current-focus (:title tip)
               :progress-status (:progress-status tip)
-              :grace-ms (supervisor-restart-grace-ms)
+              :grace-ms (task-policy/supervisor-restart-grace-ms)
               :tool-id (:tool-id worker-state)
               :tool-name (:tool-name worker-state)
               :round (:round worker-state)})))
@@ -1742,7 +1558,7 @@
        (if (nil? worker*)
          true
          (let [deadline-ms (+ (current-time-ms)
-                              (long (supervisor-restart-grace-ms)))]
+                              (long (task-policy/supervisor-restart-grace-ms)))]
            (loop []
              (cond
                (future-done? worker*)
@@ -1776,41 +1592,11 @@
               :max-iterations max-iterations
               :current-focus (:title tip)
               :progress-status (:progress-status tip)
-              :grace-ms (supervisor-restart-grace-ms)
+              :grace-ms (task-policy/supervisor-restart-grace-ms)
               :cancel-reason (cancellation-reason session-id)
               :tool-id (:tool-id worker-state)
               :tool-name (:tool-name worker-state)
               :round (:round worker-state)})))
-
-(def ^:private non-restartable-worker-error-types
-  #{:request-cancelled
-    :autonomous-loop-stalled
-    :autonomous-protocol-invalid
-    :turn-budget-exhausted
-    :agent-stop-timeout
-    :tool-round-limit-exceeded
-    :tool-call-limit-exceeded
-    :user-message-too-large
-    :session-busy})
-
-(defn- restartable-worker-error?
-  [t worker-state]
-  (let [type (some-> t ex-data :type)]
-    (cond
-      (:tool-risk? worker-state)
-      false
-
-      (instance? InterruptedException t)
-      false
-
-      (contains? non-restartable-worker-error-types type)
-      false
-
-      (contains? #{:agent-stalled :parallel-tool-timeout} type)
-      true
-
-      :else
-      true)))
 
 (defn- autonomous-protocol-ex
   [session-id execution-context round parsed-response message]
@@ -1990,11 +1776,17 @@
                        {:error t}))]
         (if-let [t (:error result)]
           (let [worker-snapshot @worker-state
-                max-restarts (long (supervisor-max-restarts))
-                attempt* (inc attempt)]
-            (if (and (< attempt max-restarts)
-                     (restartable-worker-error? t worker-snapshot)
-                     (not (session-cancelled? session-id)))
+                restart-decision (task-policy/restart-policy-decision
+                                  t
+                                  worker-snapshot
+                                  attempt
+                                  :session-cancelled? (session-cancelled? session-id))
+                max-restarts (:max-restarts restart-decision)
+                attempt* (:attempt restart-decision)
+                _ (prompt/policy-decision! (merge restart-decision
+                                                  {:decision-type :restart-policy
+                                                   :error (worker-failure-summary t)}))]
+            (if (:allowed? restart-decision)
               (do
                 (report-supervisor-status! :restarting
                                            (str "Restarting iteration after "
@@ -2021,7 +1813,7 @@
                                             :attempt attempt*
                                             :session-id session-id
                                             :failure-phase (some-> t ex-data :phase)})
-                (Thread/sleep (long (supervisor-restart-backoff-ms)))
+                (Thread/sleep (long (:backoff-ms restart-decision)))
                 (recur attempt*))
               (throw t)))
           (:ok result))))))
@@ -2084,7 +1876,7 @@
 (defn- throw-if-identical-iteration-loop!
   [session-id channel iteration max-iterations loop-state autonomy-state control]
   (let [count* (long (or (:count loop-state) 0))
-        limit (long (supervisor-max-identical-iterations))]
+        limit (long (task-policy/supervisor-max-identical-iterations))]
     (when (>= count* limit)
       (let [tip (autonomous/current-frame autonomy-state)]
         (throw (ex-info (str "Autonomous loop made no progress after "
@@ -2282,7 +2074,7 @@
                                (response-content response))
               assistant-content (or (:assistant-text parsed-response)
                                     (response-content response))
-              budget-status (turn-llm-budget-status turn-budget-state)
+              budget-status (task-policy/turn-llm-budget-status turn-budget-state)
               _ (when (zero? round)
                   (emit-intent-event! emit-event!
                                       execution-context
@@ -2310,11 +2102,14 @@
                                              execution-context
                                              round
                                              parsed-response)
-              (when (>= (long round) (long max-tool-rounds))
-                (throw (ex-info "Too many tool-calling rounds"
-                                {:type :tool-round-limit-exceeded
-                                 :rounds round
-                                 :max-tool-rounds max-tool-rounds})))
+              (let [{:keys [allowed? reason rounds max-tool-rounds] :as decision}
+                    (task-policy/tool-round-limit-decision round max-tool-rounds)]
+                (when-not allowed?
+                  (prompt/policy-decision! (assoc decision :decision-type :tool-round-policy))
+                  (throw (ex-info reason
+                                  {:type :tool-round-limit-exceeded
+                                   :rounds rounds
+                                   :max-tool-rounds max-tool-rounds}))))
               (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
                     tool-calls (get response "tool_calls")
                     assistant-msg {:role "assistant"
@@ -2476,9 +2271,10 @@
                                                                                          task-id
                                                                                          runtime-op
                                                                                          interrupting-turn-id)
+                      task-run (register-task-run! session-id task-id task-turn-id)
                       _ (reset! runtime-task {:task-id task-id
-                                              :task-turn-id task-turn-id})
-                      _ (register-task-run! session-id task-id task-turn-id)
+                                              :task-turn-id task-turn-id
+                                              :task-run-id (:task-run-id task-run)})
                       user-message-id (when persist-message?
                                         (db/add-message! session-id :user user-message
                                                          :local-doc-ids local-doc-ids
@@ -2523,15 +2319,15 @@
                                              user-message)
                       initial-wm-query-fingerprint (wm-query-signature initial-wm-message)
                       turn-budget-state (or *turn-llm-budget-state*
-                                            (atom (new-turn-llm-budget session-id
-                                                                       channel)))]
+                                            (atom (task-policy/new-turn-llm-budget session-id
+                                                                                   channel)))]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
                   (binding [*turn-llm-budget-state* turn-budget-state
                             llm/*request-budget-guard* (fn [_request]
-                                                         (throw-if-turn-llm-budget-exhausted!
+                                                         (task-policy/throw-if-turn-llm-budget-exhausted!
                                                           turn-budget-state))
                             llm/*request-observer* (fn [request]
-                                                     (record-turn-llm-request!
+                                                     (task-policy/record-turn-llm-request!
                                                       turn-budget-state
                                                       request))]
                     (loop [iteration 1
@@ -2655,6 +2451,17 @@
                                                                 parsed
                                                                 updated-autonomy-state
                                                                 :before-tools? budget-before-tools?))]
+                              (task-runtime/record-task-item! task-turn-id
+                                                              {:type :system-note
+                                                               :status :limit
+                                                               :summary (str "Turn budget exhausted: "
+                                                                             (task-policy/turn-llm-budget-summary budget-status))
+                                                               :data {:kind "budget-exhausted"
+                                                                      :budget-kind (some-> (:kind budget-status) name)
+                                                                      :llm-call-count (:llm-call-count budget-status)
+                                                                      :total-tokens (:total-tokens budget-status)
+                                                                      :elapsed-ms (:elapsed-ms budget-status)
+                                                                      :before-tools? (boolean budget-before-tools?)}})
                               (persist-assistant-message! session-id
                                                           final-text
                                                           iteration-context
@@ -2692,7 +2499,7 @@
                               (prompt/status! (merge {:state :done
                                                       :phase :complete
                                                       :message (str "Paused after reaching the "
-                                                                    (turn-llm-budget-summary budget-status))}
+                                                                    (task-policy/turn-llm-budget-summary budget-status))}
                                                      (autonomy-status-fields updated-autonomy-state
                                                                              iteration
                                                                              max-iterations*)))
@@ -2859,7 +2666,7 @@
                                     {:type :agent-stop-timeout
                                      :session-id session-id
                                      :channel channel
-                                     :grace-ms (supervisor-restart-grace-ms)}
+                                     :grace-ms (task-policy/supervisor-restart-grace-ms)}
                                     e))))
                 (catch clojure.lang.ExceptionInfo e
                   (let [data (ex-data e)]
@@ -2993,8 +2800,8 @@
                                        :message (str "Request failed: " (.getMessage e))})
                       (throw e))))
                 (finally
-                  (when-let [{:keys [task-id task-turn-id]} @runtime-task]
-                    (clear-task-run! session-id task-id task-turn-id)))))))))))
+                  (when-let [{:keys [task-id task-turn-id task-run-id]} @runtime-task]
+                    (clear-task-run! session-id task-id task-turn-id task-run-id)))))))))))
 
 (defn- task-control-deps
   []

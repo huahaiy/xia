@@ -463,6 +463,7 @@
    :schedule.state/last-error {:db/valueType :db.type/string}
    :schedule.state/last-failure-signature {:db/valueType :db.type/string}
    :schedule.state/last-recovery-hint {:db/valueType :db.type/string}
+   :schedule.state/last-policy {:db/valueType :db.type/idoc :db/domain "schedule-state-policy"}
    :schedule.state/consecutive-failures {:db/valueType :db.type/long}
    :schedule.state/backoff-until {:db/valueType :db.type/instant}
 
@@ -1782,6 +1783,10 @@
   ([opts]
    (db-task/list-tasks (task-deps) opts)))
 
+(defn current-session-task
+  [session-id]
+  (db-task/current-session-task (task-deps) session-id))
+
 (defn start-task-turn!
   [task-id opts]
   (db-task/start-task-turn! (task-deps) task-id opts))
@@ -1794,6 +1799,10 @@
   [task-id]
   (db-task/task-turns (task-deps) task-id))
 
+(defn get-task-turn
+  [turn-id]
+  (db-task/get-task-turn (task-deps) turn-id))
+
 (defn add-task-item!
   [turn-id item]
   (db-task/add-task-item! (task-deps) turn-id item))
@@ -1801,6 +1810,10 @@
 (defn turn-items
   [turn-id]
   (db-task/turn-items (task-deps) turn-id))
+
+(defn get-task-item
+  [item-id]
+  (db-task/get-task-item (task-deps) item-id))
 
 ;; ---------------------------------------------------------------------------
 ;; Skills (markdown instructions)

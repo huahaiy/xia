@@ -32,8 +32,9 @@
 
 (defonce ^:private server-atom (atom nil))
 (defonce ^:private ws-sessions (atom {})) ; channel → session-id
-(defonce ^:private pending-approvals (atom {})) ; session-id string → approval map
 (defonce ^:private session-statuses (atom {})) ; session-id string → latest status map
+(defonce ^:private task-runtime-events (atom {})) ; task-id string → {:next-index long :events [...]}
+(defonce ^:private task-runtime-stream-subscribers (atom {})) ; task-id string → {subscriber-id callback}
 (defonce ^:private web-dev-state (atom {:enabled? false
                                         :root nil}))
 (defonce ^:private command-shutdown-handler-atom (atom nil))
@@ -44,6 +45,7 @@
 (def ^:private command-channel-token-config-key :secret/command-channel-token)
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
+(def ^:private max-live-task-runtime-events 200)
 (def ^:private session-finalize-lock-count 256)
 (def ^:private http-port-search-limit 100)
 (def ^:private rest-session-channels #{:http :command})
@@ -705,14 +707,61 @@
    :policy      (name policy)
    :created_at  (instant->str created-at)})
 
-(defn- clear-pending-approval!
-  [session-id approval-id]
-  (swap! pending-approvals
-         (fn [pending]
-           (let [current (get pending session-id)]
-             (if (= approval-id (:approval-id current))
-               (dissoc pending session-id)
-               pending)))))
+(defn- prompt->body
+  [{:keys [prompt-id label mask? created-at]}]
+  {:prompt_id  prompt-id
+   :label      label
+   :masked     (boolean mask?)
+   :created_at (instant->str created-at)})
+
+(defn- current-session-task-id
+  [session-id]
+  (try
+    (let [sid (java.util.UUID/fromString session-id)]
+      (some->> (db/list-tasks {:session-id sid})
+               (sort-by (fn [task]
+                          [(if (:current-turn-id task) 0 1)
+                           (or (:updated-at task) (:created-at task))])
+                        (fn [[a-priority a-time] [b-priority b-time]]
+                          (let [priority (compare a-priority b-priority)]
+                            (if (zero? priority)
+                              (compare b-time a-time)
+                              priority))))
+               first
+               :id))
+    (catch IllegalArgumentException _
+      nil)))
+
+(defn- http-prompt-handler
+  [label & {:keys [mask?] :or {mask? false}}]
+  (let [sid (some-> (:session-id prompt/*interaction-context*) str)]
+    (when-not sid
+      (throw (ex-info "HTTP prompt requires a session id"
+                      {:label label})))
+    (let [task-id   (or (:task-id prompt/*interaction-context*)
+                        (current-session-task-id sid))
+          prompt-id (str (random-uuid))
+          response  (promise)
+          prompt*   (prompt/register-interaction!
+                     {:interaction-id prompt-id
+                      :kind :prompt
+                      :channel (or (:channel prompt/*interaction-context*) :http)
+                      :session-id sid
+                      :task-id task-id
+                      :prompt-id  prompt-id
+                      :label      label
+                      :mask?      (boolean mask?)
+                      :created-at (java.util.Date.)
+                      :response   response})]
+      (try
+        (let [result (deref response approval-timeout-ms ::timeout)]
+          (if (= result ::timeout)
+            (throw (ex-info "Timed out waiting for interactive input"
+                            {:label label
+                             :session-id sid}))
+            (str (or result ""))))
+        (finally
+          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id prompt*)}))))))
 
 (defn- http-approval-handler
   [{:keys [session-id tool-id tool-name description arguments reason policy]}]
@@ -720,20 +769,27 @@
     (when-not sid
       (throw (ex-info "HTTP approval requires a session id"
                       {:tool-id tool-id})))
-    (let [approval-id (str (random-uuid))
-          decision    (promise)
-          approval    {:approval-id approval-id
-                       :tool-id     tool-id
-                       :tool-name   (or tool-name (name tool-id))
-                       :description description
-                       :arguments   arguments
-                       :reason      reason
-                       :policy      policy
-                       :created-at  (java.util.Date.)
-                       :decision    decision}]
-      (swap! pending-approvals assoc sid approval)
+    (let [task-id     (or (:task-id prompt/*interaction-context*)
+                          (current-session-task-id sid))
+          approval-id (str (random-uuid))
+          response    (promise)
+          approval*   (prompt/register-interaction!
+                       {:interaction-id approval-id
+                        :kind :approval
+                        :channel (or (:channel prompt/*interaction-context*) :http)
+                        :session-id sid
+                        :task-id task-id
+                        :approval-id approval-id
+                        :tool-id     tool-id
+                        :tool-name   (or tool-name (name tool-id))
+                        :description description
+                        :arguments   arguments
+                        :reason      reason
+                        :policy      policy
+                        :created-at  (java.util.Date.)
+                        :response    response})]
       (try
-        (let [result (deref decision approval-timeout-ms ::timeout)]
+        (let [result (deref response approval-timeout-ms ::timeout)]
           (case result
             :allow true
             :deny  false
@@ -741,15 +797,20 @@
                             {:tool-id tool-id
                              :session-id sid}))))
         (finally
-          (clear-pending-approval! sid approval-id))))))
+          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id approval*)}))))))
 
 (defn- parse-session-id
   [session-id]
-  (try
-    (let [uuid (java.util.UUID/fromString session-id)]
-      (str uuid))
-    (catch IllegalArgumentException _
-      nil)))
+  (cond
+    (instance? java.util.UUID session-id)
+    (str session-id)
+
+    :else
+    (try
+      (let [uuid (java.util.UUID/fromString session-id)]
+        (str uuid))
+      (catch IllegalArgumentException _
+        nil))))
 
 (defn- session-exists?
   [session-id]
@@ -890,11 +951,65 @@
   (when session-id
     (swap! session-statuses dissoc (str session-id))))
 
+(defn- append-task-runtime-event!
+  [event]
+  (when-let [task-id (some-> (:task-id event) str)]
+    (let [received-at (java.util.Date.)]
+      (-> (swap! task-runtime-events
+                 (fn [state]
+                   (let [{:keys [next-index events]} (get state task-id)
+                         next-index* (inc (long (or next-index 0)))
+                         event* (assoc event
+                                       :stream-index next-index*
+                                       :received-at received-at)
+                         events* (conj (vec (or events [])) event*)
+                         trimmed (if (> (count events*) max-live-task-runtime-events)
+                                   (subvec events* (- (count events*) max-live-task-runtime-events))
+                                   events*)]
+                     (assoc state task-id {:next-index next-index*
+                                           :events trimmed}))))
+          (get task-id)
+          :events
+          last))))
+
+(defn- register-task-runtime-stream-subscriber!
+  [task-id subscriber-id callback]
+  (when (and task-id subscriber-id callback)
+    (swap! task-runtime-stream-subscribers
+           update
+           (str task-id)
+           (fnil assoc {})
+           subscriber-id
+           callback)))
+
+(defn- unregister-task-runtime-stream-subscriber!
+  [task-id subscriber-id]
+  (when (and task-id subscriber-id)
+    (swap! task-runtime-stream-subscribers
+           (fn [state]
+             (let [task-key (str task-id)
+                   subscribers (dissoc (get state task-key {}) subscriber-id)]
+               (if (seq subscribers)
+                 (assoc state task-key subscribers)
+                 (dissoc state task-key)))))))
+
+(defn- notify-task-runtime-stream-subscribers!
+  [event]
+  (when-let [task-id (some-> (:task-id event) str)]
+    (doseq [[subscriber-id callback] (get @task-runtime-stream-subscribers task-id)]
+      (try
+        (callback event)
+        (catch Exception e
+          (log/warn e "Failed to deliver runtime event to task stream subscriber"
+                    "task" task-id
+                    "subscriber" subscriber-id)
+          (unregister-task-runtime-stream-subscriber! task-id subscriber-id))))))
+
 (defn- clear-rest-session-state!
   [session-id]
   (let [sid (str session-id)]
     (clear-session-status! sid)
-    (swap! pending-approvals dissoc sid)
+    (prompt/clear-pending-interaction! {:session-id sid})
     (cancel-rest-session-finalizer! sid)))
 
 (defn- terminal-status-state?
@@ -907,6 +1022,11 @@
     (if (terminal-status-state? state)
       (clear-session-status! sid)
       (swap! session-statuses assoc sid (assoc status :updated-at (java.util.Date.))))))
+
+(defn- http-runtime-event-handler
+  [event]
+  (when-let [event* (append-task-runtime-event! event)]
+    (notify-task-runtime-stream-subscribers! event*)))
 
 (defn- finalize-rest-session!
   ([session-id]
@@ -1077,7 +1197,6 @@
   []
   {:approval->body               approval->body
    :cancel-rest-session-finalizer! cancel-rest-session-finalizer!
-   :clear-pending-approval!      clear-pending-approval!
    :date->millis                 date->millis
    :exception-response           exception-response
    :finalize-rest-session!       finalize-rest-session!
@@ -1087,15 +1206,18 @@
    :parse-keyword-id             parse-keyword-id
    :parse-query-string           parse-query-string
    :parse-session-id             parse-session-id
-   :pending-approvals-atom       pending-approvals
+   :prompt->body                 prompt->body
    :read-body                    read-body
+   :register-task-runtime-stream-subscriber! register-task-runtime-stream-subscriber!
    :session-accessible?          session-accessible?
    :session-active?              session-active?
    :session-busy?                session-busy?
    :session-statuses-atom        session-statuses
+   :task-runtime-events-atom     task-runtime-events
    :throwable-message            throwable-message
    :touch-rest-session!          touch-rest-session!
-   :truncate-text                truncate-text})
+   :truncate-text                truncate-text
+   :unregister-task-runtime-stream-subscriber! unregister-task-runtime-stream-subscriber!})
 
 (defn- admin-handler-deps
   []
@@ -1123,11 +1245,29 @@
   ([session-id expected-channel]
    (http-session/handle-get-status (session-handler-deps) session-id expected-channel)))
 
+(defn- handle-get-current-task
+  ([session-id]
+   (handle-get-current-task session-id nil))
+  ([session-id expected-channel]
+   (http-session/handle-get-current-task (session-handler-deps) session-id expected-channel)))
+
 (defn- handle-get-approval
   ([session-id]
    (handle-get-approval session-id nil))
   ([session-id expected-channel]
    (http-session/handle-get-approval (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-get-prompt
+  ([session-id]
+   (handle-get-prompt session-id nil))
+  ([session-id expected-channel]
+   (http-session/handle-get-prompt (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-submit-prompt
+  ([session-id req]
+   (handle-submit-prompt session-id req nil))
+  ([session-id req expected-channel]
+   (http-session/handle-submit-prompt (session-handler-deps) session-id req expected-channel)))
 
 (defn- handle-submit-approval
   ([session-id req]
@@ -1155,6 +1295,27 @@
 
 (defn- handle-get-task [task-id]
   (http-session/handle-get-task (session-handler-deps) task-id))
+
+(defn- handle-get-task-events [task-id]
+  (http-session/handle-get-task-events (session-handler-deps) task-id))
+
+(defn- handle-get-live-task-events [task-id req]
+  (http-session/handle-get-live-task-events (session-handler-deps) task-id req))
+
+(defn- handle-get-task-prompt [task-id]
+  (http-session/handle-get-task-prompt (session-handler-deps) task-id))
+
+(defn- handle-submit-task-prompt [task-id req]
+  (http-session/handle-submit-task-prompt (session-handler-deps) task-id req))
+
+(defn- handle-get-task-approval [task-id]
+  (http-session/handle-get-task-approval (session-handler-deps) task-id))
+
+(defn- handle-submit-task-approval [task-id req]
+  (http-session/handle-submit-task-approval (session-handler-deps) task-id req))
+
+(defn- handle-get-task-event-stream [task-id req]
+  (http-session/handle-get-task-event-stream (session-handler-deps) task-id req))
 
 (defn- handle-pause-task [task-id]
   (http-session/handle-pause-task (session-handler-deps) task-id))
@@ -1307,14 +1468,23 @@
           session-close-match (re-matches #"/sessions/([0-9a-fA-F-]+)" uri)
           session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
           session-audit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/audit" uri)
+          session-task-match (re-matches #"/sessions/([0-9a-fA-F-]+)/task" uri)
           status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
+          prompt-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/prompt" uri)
           approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
           command-session-close-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)" uri)
           command-session-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/messages" uri)
           command-session-audit-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/audit" uri)
+          command-session-task-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/task" uri)
           command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
+          command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
           task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
+          task-events-match  (re-matches #"/tasks/([0-9a-fA-F-]+)/events" uri)
+          task-live-events-match (re-matches #"/tasks/([0-9a-fA-F-]+)/live-events" uri)
+          task-stream-match  (re-matches #"/tasks/([0-9a-fA-F-]+)/stream" uri)
+          task-prompt-match  (re-matches #"/tasks/([0-9a-fA-F-]+)/prompt" uri)
+          task-approval-match (re-matches #"/tasks/([0-9a-fA-F-]+)/approval" uri)
           task-pause-match   (re-matches #"/tasks/([0-9a-fA-F-]+)/pause" uri)
           task-stop-match    (re-matches #"/tasks/([0-9a-fA-F-]+)/stop" uri)
           task-interrupt-match (re-matches #"/tasks/([0-9a-fA-F-]+)/interrupt" uri)
@@ -1396,6 +1566,15 @@
         (and (= method :get) command-status-match)
         (command-route-response req #(handle-get-status (second command-status-match) :command))
 
+        (and (= method :get) command-session-task-match)
+        (command-route-response req #(handle-get-current-task (second command-session-task-match) :command))
+
+        (and (= method :get) command-prompt-match)
+        (command-route-response req #(handle-get-prompt (second command-prompt-match) :command))
+
+        (and (= method :post) command-prompt-match)
+        (command-route-response req #(handle-submit-prompt (second command-prompt-match) req :command))
+
         (and (= method :get) command-approval-match)
         (command-route-response req #(handle-get-approval (second command-approval-match) :command))
 
@@ -1413,6 +1592,15 @@
 
         (and (= method :get) status-match)
         (protected-route-response req #(handle-get-status (second status-match) :http))
+
+        (and (= method :get) session-task-match)
+        (protected-route-response req #(handle-get-current-task (second session-task-match) :http))
+
+        (and (= method :get) prompt-match)
+        (protected-route-response req #(handle-get-prompt (second prompt-match) :http))
+
+        (and (= method :post) prompt-match)
+        (protected-route-response req #(handle-submit-prompt (second prompt-match) req :http))
 
         (and (= method :get) approval-match)
         (protected-route-response req #(handle-get-approval (second approval-match) :http))
@@ -1437,6 +1625,27 @@
 
         (and (= method :get) history-schedule-match)
         (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
+
+        (and (= method :get) task-events-match)
+        (protected-route-response req #(handle-get-task-events (second task-events-match)))
+
+        (and (= method :get) task-live-events-match)
+        (protected-route-response req #(handle-get-live-task-events (second task-live-events-match) req))
+
+        (and (= method :get) task-stream-match)
+        (protected-route-response req #(handle-get-task-event-stream (second task-stream-match) req))
+
+        (and (= method :get) task-prompt-match)
+        (protected-route-response req #(handle-get-task-prompt (second task-prompt-match)))
+
+        (and (= method :post) task-prompt-match)
+        (protected-route-response req #(handle-submit-task-prompt (second task-prompt-match) req))
+
+        (and (= method :get) task-approval-match)
+        (protected-route-response req #(handle-get-task-approval (second task-approval-match)))
+
+        (and (= method :post) task-approval-match)
+        (protected-route-response req #(handle-submit-task-approval (second task-approval-match) req))
 
         (and (= method :get) task-match)
         (protected-route-response req #(handle-get-task (second task-match)))
@@ -1739,12 +1948,20 @@
                      {:bind-host bind-host
                       :port port})))
    (configure-web-dev! web-dev?)
-   (prompt/register-approval! :http http-approval-handler)
-   (prompt/register-approval! :command http-approval-handler)
-   (prompt/register-approval! :websocket http-approval-handler)
-   (prompt/register-status! :http http-status-handler)
-   (prompt/register-status! :command http-status-handler)
-   (prompt/register-status! :websocket http-status-handler)
+   (prompt/register-channel-adapter! :http
+                                     {:prompt http-prompt-handler
+                                      :approval http-approval-handler
+                                      :status http-status-handler
+                                      :runtime-event http-runtime-event-handler})
+   (prompt/register-channel-adapter! :command
+                                     {:prompt http-prompt-handler
+                                      :approval http-approval-handler
+                                      :status http-status-handler
+                                      :runtime-event http-runtime-event-handler})
+   (prompt/register-channel-adapter! :websocket
+                                     {:approval http-approval-handler
+                                      :status http-status-handler
+                                      :runtime-event http-runtime-event-handler})
    (let [^ScheduledExecutorService finalizer-exec
          (Executors/newSingleThreadScheduledExecutor)
          {:keys [stop-fn port]} (start-server-with-port-fallback bind-host port)]
@@ -1769,14 +1986,11 @@
         (catch InterruptedException _
           (.shutdownNow exec)))
       (reset! rest-session-finalizer-executor nil))
-    (prompt/register-approval! :http nil)
-    (prompt/register-approval! :command nil)
-    (prompt/register-approval! :websocket nil)
-    (prompt/register-status! :http nil)
-    (prompt/register-status! :command nil)
-    (prompt/register-status! :websocket nil)
-    (reset! pending-approvals {})
+    (prompt/clear-channel-adapter! :http)
+    (prompt/clear-channel-adapter! :command)
+    (prompt/clear-channel-adapter! :websocket)
     (reset! session-statuses {})
+    (reset! task-runtime-events {})
     (clear-command-shutdown-handler!)
     (configure-web-dev! false)
     (reset! server-atom nil)

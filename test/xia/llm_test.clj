@@ -175,7 +175,8 @@
 
 (deftest chat-enforces-provider-rate-limit-before-http-request
   (let [request-count (atom 0)
-        provider-health* (atom {})]
+        provider-health* (atom {})
+        decisions (atom [])]
     (with-redefs [xia.db/get-default-provider
                   (constantly {:llm.provider/id :default
                                :llm.provider/base-url "https://api.example.com/v1"
@@ -194,6 +195,9 @@
                   (constantly 4)
                   xia.llm/max-provider-retry-wait-ms
                   (constantly 300000)
+                  xia.prompt/policy-decision!
+                  (fn [decision]
+                    (swap! decisions conj decision))
                   xia.http-client/request
                   (fn [_req]
                     (swap! request-count inc)
@@ -207,6 +211,15 @@
             clojure.lang.ExceptionInfo
             #"Rate limit exceeded for provider default"
             (llm/chat-simple [{"role" "user" "content" "three"}])))
+      (is (= [{:decision-type :provider-rate-limit-policy
+               :allowed? false
+               :mode :rate-limit
+               :provider-id :default
+               :workload nil
+               :limit 2}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :provider-id :workload :limit])
+                   @decisions)))
       (is (= 2 @request-count))
       (is (= 0 (get-in @provider-health* [:default :consecutive-failures])))
       (is (nil? (get-in @provider-health* [:default :last-error]))))))
@@ -944,7 +957,8 @@
 (deftest chat-retries-single-provider-after-rate-limit-backoff
   (let [clock-ms (atom 1000)
         sleeps   (atom [])
-        calls    (atom 0)]
+        calls    (atom 0)
+        decisions (atom [])]
     (with-redefs [xia.db/get-default-provider
                   (constantly {:llm.provider/id :default
                                :llm.provider/base-url "https://api.example.com/v1"
@@ -962,6 +976,9 @@
                   (constantly 4)
                   xia.llm/max-provider-retry-wait-ms
                   (constantly 300000)
+                  xia.prompt/policy-decision!
+                  (fn [decision]
+                    (swap! decisions conj decision))
                   xia.http-client/request
                   (fn [_req]
                     (if (= 1 (swap! calls inc))
@@ -975,6 +992,15 @@
              (llm/chat-simple [{"role" "user" "content" "hello"}])))
       (is (= 2 @calls))
       (is (= [30000] @sleeps))
+      (is (= [{:decision-type :provider-retry-policy
+               :allowed? true
+               :mode :provider-backoff
+               :provider-id :default
+               :delay-ms 30000
+               :round 1}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :provider-id :delay-ms :round])
+                   @decisions)))
       (is (= :healthy
              (:status (llm/provider-health-summary :default)))))))
 
@@ -1041,7 +1067,8 @@
 (deftest chat-waits-for-cooling-provider-before-first-request
   (let [clock-ms (atom 1000)
         sleeps   (atom [])
-        calls    (atom 0)]
+        calls    (atom 0)
+        decisions (atom [])]
     (with-redefs [xia.db/get-default-provider
                   (constantly {:llm.provider/id :default
                                :llm.provider/base-url "https://api.example.com/v1"
@@ -1061,6 +1088,9 @@
                   (constantly 4)
                   xia.llm/max-provider-retry-wait-ms
                   (constantly 300000)
+                  xia.prompt/policy-decision!
+                  (fn [decision]
+                    (swap! decisions conj decision))
                   xia.http-client/request
                   (fn [_req]
                     (swap! calls inc)
@@ -1070,4 +1100,13 @@
       (is (= "ok"
              (llm/chat-simple [{"role" "user" "content" "hello"}])))
       (is (= [3000] @sleeps))
-      (is (= 1 @calls)))))
+      (is (= 1 @calls))
+      (is (= [{:decision-type :provider-retry-policy
+               :allowed? true
+               :mode :preflight-cooldown
+               :provider-id nil
+               :delay-ms 3000
+               :round 1}]
+             (mapv #(select-keys %
+                                  [:decision-type :allowed? :mode :provider-id :delay-ms :round])
+                   @decisions))))))

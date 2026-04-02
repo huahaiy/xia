@@ -80,14 +80,33 @@
     (println)
     (flush)))
 
+(defn- runtime-event-keyword
+  [value]
+  (cond
+    (keyword? value) value
+    (string? value) (keyword value)
+    :else nil))
+
+(defn- terminal-runtime-event
+  [{:keys [type data summary]}]
+  (case type
+    :task.status
+    (terminal-status {:session-id (:session-id prompt/*interaction-context*)
+                      :state (runtime-event-keyword (:state data))
+                      :phase (runtime-event-keyword (:phase data))
+                      :message (or (:message data) summary)
+                      :partial-content (:partial_content data)})
+    :message.assistant
+    (terminal-assistant-message {:text (or (:text data) summary)})
+    nil))
+
 (defn start!
   "Start the terminal REPL loop."
   []
-  ;; Register the terminal prompt handler for interactive credential input
-  (prompt/register-prompt! :terminal terminal-prompt)
-  (prompt/register-approval! :terminal terminal-approval)
-  (prompt/register-status! :terminal terminal-status)
-  (prompt/register-assistant-message! :terminal terminal-assistant-message)
+  (prompt/register-channel-adapter! :terminal
+                                    {:prompt terminal-prompt
+                                     :approval terminal-approval
+                                     :runtime-event terminal-runtime-event})
   (let [session-id (db/create-session! :terminal)]
     ;; Initialize working memory with warm start
     (wm/ensure-wm! session-id)
@@ -263,10 +282,7 @@
 
             :else
             (do (try
-                  (let [response (agent/process-message session-id trimmed :channel :terminal)]
-                    (println)
-                    (println (str "Xia> " response))
-                    (println))
+                  (agent/process-message session-id trimmed :channel :terminal)
                   (catch Exception e
                     (log/error e "Error processing message")
                     (println (str "  error: " (.getMessage e)))

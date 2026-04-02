@@ -18,28 +18,38 @@
                   agent/process-message (fn [session-id user-message & {:keys [channel persist-message?]}]
                                           (is (= :slack channel))
                                           (is (false? persist-message?))
+                                          (binding [prompt/*interaction-context* {:channel channel
+                                                                                  :session-id session-id}]
+                                            (prompt/runtime-event! {:type :message.assistant
+                                                                    :task-id (random-uuid)
+                                                                    :summary (str "ack: " user-message "@" session-id)
+                                                                    :data {:text (str "ack: " user-message "@" session-id)}}))
                                           (str "ack: " user-message "@" session-id))
                   messaging/send-session-message! (fn [channel session-id text]
                                                     (swap! delivered conj {:channel channel
                                                                            :session-id session-id
                                                                            :text text})
                                                     true)]
-      (messaging/handle-slack-event!
-       {"team_id" "T1"
-        "event_id" "EVT-1"
-        "event" {"type" "app_mention"
-                 "channel" "C1"
-                 "thread_ts" "1710000000.100"
-                 "text" "<@U123ABC> first task"
-                 "user" "U1"}})
-      (messaging/handle-slack-event!
-       {"team_id" "T1"
-        "event_id" "EVT-2"
-        "event" {"type" "app_mention"
-                 "channel" "C1"
-                 "thread_ts" "1710000000.100"
-                 "text" "<@U123ABC> follow up"
-                 "user" "U1"}}))
+      (messaging/start!)
+      (try
+        (messaging/handle-slack-event!
+         {"team_id" "T1"
+          "event_id" "EVT-1"
+          "event" {"type" "app_mention"
+                   "channel" "C1"
+                   "thread_ts" "1710000000.100"
+                   "text" "<@U123ABC> first task"
+                   "user" "U1"}})
+        (messaging/handle-slack-event!
+         {"team_id" "T1"
+          "event_id" "EVT-2"
+          "event" {"type" "app_mention"
+                   "channel" "C1"
+                   "thread_ts" "1710000000.100"
+                   "text" "<@U123ABC> follow up"
+                   "user" "U1"}})
+        (finally
+          (messaging/stop!))))
     (let [session (db/find-session-by-external-key "slack:T1:C1:1710000000.100")
           messages (db/session-messages (:id session))]
       (is (= :slack (:channel session)))
@@ -69,22 +79,32 @@
                                                  (f))
                   agent/process-message (fn [session-id user-message & {:keys [channel]}]
                                           (is (= :telegram channel))
+                                          (binding [prompt/*interaction-context* {:channel channel
+                                                                                  :session-id session-id}]
+                                            (prompt/runtime-event! {:type :message.assistant
+                                                                    :task-id (random-uuid)
+                                                                    :summary (str "handled: " user-message "@" session-id)
+                                                                    :data {:text (str "handled: " user-message "@" session-id)}}))
                                           (str "handled: " user-message "@" session-id))
                   messaging/send-session-message! (fn [channel session-id text]
                                                     (swap! delivered conj {:channel channel
                                                                            :session-id session-id
                                                                            :text text})
                                                     true)]
-      (messaging/handle-telegram-update!
-       {"update_id" 42
-        "message" {"message_id" 7
-                    "message_thread_id" 9
-                    "text" "status?"
-                    "chat" {"id" 1001
-                            "title" "Ops"}
-                    "from" {"id" 55
-                            "is_bot" false
-                            "first_name" "Alex"}}}))
+      (messaging/start!)
+      (try
+        (messaging/handle-telegram-update!
+         {"update_id" 42
+          "message" {"message_id" 7
+                      "message_thread_id" 9
+                      "text" "status?"
+                      "chat" {"id" 1001
+                              "title" "Ops"}
+                      "from" {"id" 55
+                              "is_bot" false
+                              "first_name" "Alex"}}})
+        (finally
+          (messaging/stop!))))
     (let [session (db/find-session-by-external-key "telegram:1001:9")
           messages (db/session-messages (:id session))]
       (is (= :telegram (:channel session)))
@@ -236,5 +256,92 @@
                    :session-id session-id
                    :text "Approval needed for email-send.\nDescription: Send the draft email\nReason: The draft is ready\nArguments: {:to \"ops@example.com\"}\nReply YES or NO. Reply CANCEL to stop this run."}]
                  @delivered)))
+        (finally
+          (messaging/stop!))))))
+
+(deftest messaging-control-intent-interrupts-the-current-task
+  (let [session-id     (db/create-session! :telegram {:external-key "telegram:1001:main"
+                                                      :external-meta {:chat-id 1001}})
+        task-id        (db/create-task! {:session-id session-id
+                                         :channel :telegram
+                                         :type :interactive
+                                         :state :running
+                                         :title "Investigate outage"})
+        delivered      (atom [])
+        process-calls  (atom 0)
+        interrupt-calls (atom [])]
+    (with-redefs [xia.channel.messaging/telegram-enabled? (constantly true)
+                  xia.async/submit-background! (fn [_description f]
+                                                 (f))
+                  agent/process-message (fn [& _]
+                                          (swap! process-calls inc)
+                                          "unexpected")
+                  agent/interrupt-task! (fn [id]
+                                          (swap! interrupt-calls conj id)
+                                          {:status :interrupting
+                                           :task-id id
+                                           :session-id session-id})
+                  messaging/send-session-message! (fn [channel sid text]
+                                                    (swap! delivered conj {:channel channel
+                                                                           :session-id sid
+                                                                           :text text})
+                                                    true)]
+      (messaging/start!)
+      (try
+        (messaging/handle-telegram-update!
+         {"update_id" 101
+          "message" {"message_id" 18
+                      "text" "cancel"
+                      "chat" {"id" 1001}
+                      "from" {"id" 55
+                              "is_bot" false
+                              "first_name" "Alex"}}})
+        (is (= 0 @process-calls))
+        (is (= [task-id] @interrupt-calls))
+        (is (= [] (db/session-messages session-id)))
+        (is (= [{:channel :telegram
+                 :session-id session-id
+                 :text "Interrupting the current task."}]
+               @delivered))
+        (finally
+          (messaging/stop!))))))
+
+(deftest messaging-control-intent-cancels-the-current-session-when-no-task-exists
+  (let [session-id      (db/create-session! :telegram {:external-key "telegram:1001:main"
+                                                       :external-meta {:chat-id 1001}})
+        delivered       (atom [])
+        process-calls   (atom 0)
+        cancel-calls    (atom [])]
+    (with-redefs [xia.channel.messaging/telegram-enabled? (constantly true)
+                  xia.async/submit-background! (fn [_description f]
+                                                 (f))
+                  agent/process-message (fn [& _]
+                                          (swap! process-calls inc)
+                                          "unexpected")
+                  agent/cancel-session! (fn [sid reason]
+                                          (swap! cancel-calls conj [sid reason])
+                                          true)
+                  messaging/send-session-message! (fn [channel sid text]
+                                                    (swap! delivered conj {:channel channel
+                                                                           :session-id sid
+                                                                           :text text})
+                                                    true)]
+      (messaging/start!)
+      (try
+        (messaging/handle-telegram-update!
+         {"update_id" 102
+          "message" {"message_id" 19
+                      "text" "cancel"
+                      "chat" {"id" 1001}
+                      "from" {"id" 55
+                              "is_bot" false
+                              "first_name" "Alex"}}})
+        (is (= 0 @process-calls))
+        (is (= [[session-id "session cancel requested"]] @cancel-calls))
+        (is (= [] (db/session-messages session-id)))
+        (is (= [{:channel :telegram
+                 :session-id session-id
+                 :text "Cancelling the current session."}]
+               @delivered))
         (finally
           (messaging/stop!))))))
