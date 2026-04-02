@@ -10,6 +10,7 @@
             [xia.prompt :as prompt]
             [xia.schedule :as schedule]
             [xia.task-event :as task-event]
+            [xia.task-inspection :as task-inspection]
             [xia.working-memory :as wm]))
 
 (def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
@@ -362,6 +363,11 @@
          checkpoint      (task-runtime/task-checkpoint task)
          checkpoint-at   (task-runtime/task-checkpoint-at task)
          recovery-brief  (task-runtime/task-recovery-brief task)
+         inspection      (task-inspection/task-inspection
+                          {:instant->str #(instant->str* deps %)
+                           :truncate-text #(truncate-text* deps %1 %2)}
+                          task
+                          autonomy-state)
          state           (or (:state runtime) (:state task))
          stack           (stack->body deps autonomy-state)]
      (cond-> {:id         (some-> (:id task) str)
@@ -382,6 +388,7 @@
        checkpoint (assoc :checkpoint checkpoint)
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
        recovery-brief (assoc :recovery_brief recovery-brief)
+       inspection (assoc :inspection inspection)
        (:meta task) (assoc :meta (:meta task))
        autonomy-state (assoc :autonomy_state autonomy-state)
        stack (assoc :stack stack)
@@ -423,6 +430,12 @@
          checkpoint  (task-runtime/task-checkpoint task)
          checkpoint-at (task-runtime/task-checkpoint-at task)
          recovery-brief (task-runtime/task-recovery-brief task)
+         inspection  (task-inspection/task-inspection
+                      {:instant->str #(instant->str* deps %)
+                       :truncate-text #(truncate-text* deps %1 %2)}
+                      task
+                      autonomy-state
+                      true)
          state       (or (:state runtime) (:state task))
          stack       (stack->body deps autonomy-state)]
      (cond-> {:id          (some-> (:id task) str)
@@ -441,6 +454,7 @@
        checkpoint (assoc :checkpoint checkpoint)
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
        recovery-brief (assoc :recovery_brief recovery-brief)
+       inspection (assoc :inspection inspection)
        stack (assoc :stack stack)
        latest-turn (assoc :latest_turn_state (some-> (:state latest-turn) name))
        latest-turn (assoc :latest_turn_summary (truncate-text* deps (:summary latest-turn) 160))

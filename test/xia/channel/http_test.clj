@@ -914,7 +914,12 @@
                                   :autonomy-state (autonomous/initial-state "Reply to the billing emails")
                                   :meta {:runtime {:state :running
                                                    :phase :planning
-                                                   :message "Planning the next reply"}}})
+                                                   :message "Planning the next reply"}
+                                         :llm-budget {:llm-call-count 2
+                                                      :prompt-tokens 700
+                                                      :completion-tokens 500
+                                                      :total-tokens 1200
+                                                      :llm-total-duration-ms 3400}}})
         turn-id  (db/start-task-turn! task-id
                                       {:operation :start
                                        :state :completed
@@ -924,12 +929,20 @@
                        {:type :assistant-message
                         :role :assistant
                         :summary "Drafted the first reply"})
+    (db/add-task-item! turn-id
+                       {:type :tool-result
+                        :status :success
+                        :summary "Loaded the billing thread"
+                        :tool-id "workspace-read"
+                        :tool-call-id "call-1"
+                        :data {:summary "Loaded the billing thread"}})
     (let [response (#'http/router {:uri            "/history/tasks"
                                    :request-method :get
                                    :headers        (ui-headers)})
           body     (response-json response)
           tasks    (get body "tasks")
-          task     (first tasks)]
+          task     (first tasks)
+          inspection (get task "inspection")]
       (is (= 200 (:status response)))
       (is (= 1 (count tasks)))
       (is (= (str task-id) (get task "id")))
@@ -951,7 +964,19 @@
              (some-> (get task "stack")
                      (select-keys ["depth" "current_focus" "root_goal"]))))
       (is (= 1 (get task "turn_count")))
-      (is (= "completed" (get task "latest_turn_state"))))))
+      (is (= "completed" (get task "latest_turn_state")))
+      (is (= "Reply to the billing emails"
+             (get-in inspection ["current_tip" "title"])))
+      (is (= "Drafted the first reply"
+             (get-in inspection ["last_output" "summary"])))
+      (is (= "workspace-read"
+             (get-in inspection ["last_tool_activity" "tool_id"])))
+      (is (= 2
+             (get-in inspection ["budget" "llm_call_count"])))
+      (is (= 1
+             (get-in inspection ["counts" "assistant_message_count"])))
+      (is (= 1
+             (get-in inspection ["counts" "tool_result_count"]))))))
 
 (deftest task-detail-route-returns-turns-and-items
   (let [sid      (db/create-session! :http)
@@ -960,10 +985,22 @@
                                    :type :interactive
                                    :state :running
                                    :title "Review the invoice"
-                                   :autonomy-state (autonomous/initial-state "Review the invoice")
+                                   :autonomy-state {:stack [{:title "Review the invoice"
+                                                             :summary "Investigating the disputed invoice line item."
+                                                             :next-step "Read the attached invoice notes"
+                                                             :progress-status :in-progress
+                                                             :agenda [{:item "Read the attached invoice notes"
+                                                                       :status :in-progress}
+                                                                      {:item "Draft the reply"
+                                                                       :status :pending}]}]}
                                    :meta {:runtime {:state :running
                                                     :phase :understanding
-                                                    :message "Understanding the goal"}}})
+                                                    :message "Understanding the goal"}
+                                          :llm-budget {:llm-call-count 3
+                                                       :prompt-tokens 900
+                                                       :completion-tokens 450
+                                                       :total-tokens 1350
+                                                       :llm-total-duration-ms 4200}}})
         turn-id   (db/start-task-turn! task-id
                                        {:operation :start
                                         :state :running
@@ -974,11 +1011,24 @@
                                       :role :user
                                       :summary "review the invoice"
                                       :data {:text "review the invoice"}})]
+    (db/add-task-item! turn-id
+                       {:type :assistant-message
+                        :role :assistant
+                        :summary "Reviewed the invoice notes."
+                        :data {:text "Reviewed the invoice notes and found the disputed line item."}})
+    (db/add-task-item! turn-id
+                       {:type :tool-result
+                        :status :success
+                        :summary "Loaded invoice-notes.md"
+                        :tool-id "workspace-read"
+                        :tool-call-id "call-2"
+                        :data {:summary "Loaded invoice-notes.md"}})
     (let [response (#'http/router {:uri            (str "/tasks/" task-id)
                                    :request-method :get
                                    :headers        (ui-headers)})
           body     (response-json response)
           task     (get body "task")
+          inspection (get task "inspection")
           turns    (get body "turns")
           turn     (first turns)
           items    (get turn "items")
@@ -1003,11 +1053,25 @@
                      (get "stack")
                      first
                      (get "title"))))
+      (is (= "Review the invoice"
+             (get-in inspection ["current_tip" "title"])))
+      (is (= "Read the attached invoice notes"
+             (get-in inspection ["current_tip" "next_step"])))
+      (is (= "in-progress"
+             (get-in inspection ["current_tip" "progress_status"])))
+      (is (= "Reviewed the invoice notes."
+             (get-in inspection ["recent_output" 0 "summary"])))
+      (is (= "workspace-read"
+             (get-in inspection ["recent_tool_activity" 0 "tool_id"])))
+      (is (= 3
+             (get-in inspection ["budget" "llm_call_count"])))
+      (is (= 2
+             (count (get-in inspection ["current_tip" "agenda"]))))
       (is (= 1 (count turns)))
       (is (= (str turn-id) (get turn "id")))
       (is (= "start" (get turn "operation")))
       (is (= "running" (get turn "state")))
-      (is (= 1 (count items)))
+      (is (= 3 (count items)))
       (is (= (str item-id) (get item "id")))
       (is (= "user-message" (get item "type")))
       (is (= "user" (get item "role")))
