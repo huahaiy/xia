@@ -529,11 +529,16 @@
                                      :message    (when assistant-message
                                                    (session-message->body deps assistant-message))}
                                task (assoc :task (task->body deps task))
-                              task (assoc :task_id (some-> (:id task) str))
-                              (:current-turn-id task) (assoc :current_turn_id
-                                                             (str (:current-turn-id task))))]
+                               task (assoc :task_id (some-> (:id task) str))
+                               (:current-turn-id task) (assoc :current_turn_id
+                                                              (str (:current-turn-id task))))]
+      (touch-rest-session!* deps session-id)
       (json-response* deps 200 body))
-      (touch-rest-session!* deps session-id))))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))
+    (catch Exception e
+      (log/error e "HTTP chat request failed")
+      (internal-server-error-response deps e))))
 
 (defn- handle-chat-sync
   [deps chat]

@@ -231,21 +231,25 @@
 (defn- execute-tool-call
   [deps {:keys [tool-call func-name args tool-id]} context]
   ((:throw-if-cancelled! deps) (:session-id context))
-  (when-let [emit-event! (:worker-event! context)]
-    (emit-event! {:phase :tool
-                  :message (str "Running tool " func-name)
-                  :round (:round context)
-                  :tool-id tool-id
-                  :tool-name func-name
-                  :tool-count (:tool-count context)
-                  :checkpoint {:phase :tool
-                               :iteration (:iteration context)
-                               :round (:round context)
-                               :tool-id tool-id
-                               :tool-name func-name
-                               :tool-count (:tool-count context)
-                               :summary (str "Running tool " func-name)
-                               :session-id (:session-id context)}}))
+  (let [risk-decision (tool/restart-risk-policy tool-id)]
+    (when-let [emit-event! (:worker-event! context)]
+      (emit-event! {:phase :tool
+                    :message (str "Running tool " func-name)
+                    :round (:round context)
+                    :tool-id tool-id
+                    :tool-name func-name
+                    :tool-count (:tool-count context)
+                    :tool-risk? (:tool-risk? risk-decision)
+                    :tool-risk-mode (:mode risk-decision)
+                    :tool-risk-reason (:reason risk-decision)
+                    :checkpoint {:phase :tool
+                                 :iteration (:iteration context)
+                                 :round (:round context)
+                                 :tool-id tool-id
+                                 :tool-name func-name
+                                 :tool-count (:tool-count context)
+                                 :summary (str "Running tool " func-name)
+                                 :session-id (:session-id context)}}))
   (let [result (tool/execute-tool tool-id args (assoc context
                                                       :tool-call-id (get tool-call "id")
                                                       :tool-name func-name))]
@@ -260,7 +264,7 @@
      :tool_name func-name
      :result (sanitized-tool-result result)
      :content (tool-result-content result)
-     :follow-up-messages (multimodal-follow-up-messages result context)}))
+     :follow-up-messages (multimodal-follow-up-messages result context)})))
 
 (defn- bind-original-tool-call-ids
   [deps prepared-calls tool-results]

@@ -30,6 +30,9 @@
                                       :agent/max-task-llm-calls 420
                                       :agent/max-task-total-tokens 1234567
                                       :agent/max-task-llm-duration-ms 7654321
+                                      :schedule/max-run-llm-calls 84
+                                      :schedule/max-run-total-tokens 765432
+                                      :schedule/max-run-wall-clock-ms 888888
                                       :agent/max-user-message-chars 999
                                       :agent/max-user-message-tokens 77
                                       :agent/max-branch-tasks 8
@@ -86,6 +89,9 @@
     (is (= 420 (task-policy/max-task-llm-calls)))
     (is (= 1234567 (task-policy/max-task-total-tokens)))
     (is (= 7654321 (task-policy/max-task-llm-duration-ms)))
+    (is (= 84 (task-policy/max-schedule-run-llm-calls)))
+    (is (= 765432 (task-policy/max-schedule-run-total-tokens)))
+    (is (= 888888 (task-policy/max-schedule-run-wall-clock-ms)))
     (is (= 999 (task-policy/max-user-message-chars)))
     (is (= 77 (task-policy/max-user-message-tokens)))
     (is (= 8 (task-policy/max-branch-tasks)))
@@ -240,6 +246,47 @@
                               (task-policy/throw-if-task-llm-budget-exhausted!
                                budget-state)))))))
 
+(deftest schedule-run-llm-budget-records-usage-and-exhaustion
+  (with-redefs [task-policy/max-schedule-run-llm-calls (constantly 2)
+                task-policy/max-schedule-run-total-tokens (constantly 100)
+                task-policy/max-schedule-run-wall-clock-ms (constantly 1000)]
+    (let [budget-state (atom (task-policy/new-schedule-run-llm-budget :nightly-review))]
+      (task-policy/record-schedule-run-llm-request!
+       budget-state
+       {:usage {"prompt_tokens" "20"
+                "completion_tokens" "10"
+                "total_tokens" "30"}
+        :duration-ms 120})
+      (is (= {:scope :schedule-run
+              :schedule-id :nightly-review
+              :llm-call-count 1
+              :prompt-tokens 20
+              :completion-tokens 10
+              :total-tokens 30
+              :llm-total-duration-ms 120}
+             (select-keys @budget-state
+                          [:scope :schedule-id :llm-call-count :prompt-tokens
+                           :completion-tokens :total-tokens :llm-total-duration-ms])))
+      (is (nil? (task-policy/schedule-run-llm-budget-status budget-state)))
+      (task-policy/record-schedule-run-llm-request!
+       budget-state
+       {:usage {:prompt_tokens 35
+                :output_tokens 45}
+        :duration-ms 80})
+      (let [status (task-policy/schedule-run-llm-budget-status budget-state)]
+        (is (= :schedule-run (:scope status)))
+        (is (= :llm-calls (:kind status)))
+        (is (= 2 (:llm-call-count status)))
+        (is (= 110 (:total-tokens status)))
+        (is (= "scheduled run LLM call budget (2/2)"
+               (task-policy/schedule-run-llm-budget-summary status)))
+        (is (= :schedule-run-budget-exhausted
+               (:type (ex-data (task-policy/schedule-run-llm-budget-ex budget-state)))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"Reached the scheduled run LLM call budget"
+                              (task-policy/throw-if-schedule-run-llm-budget-exhausted!
+                               budget-state)))))))
+
 (deftest restart-policy-decision-captures-restart-permission
   (with-redefs [task-policy/supervisor-max-restarts (constantly 2)
                 task-policy/supervisor-restart-backoff-ms (constantly 75)
@@ -256,6 +303,8 @@
                      (RuntimeException. "crashed after tool")
                      {:phase :tool
                       :tool-risk? true
+                      :tool-risk-mode :artifact-create
+                      :tool-risk-reason "creates a new artifact that could be duplicated on replay"
                       :tool-id :web-search}
                      0)]
       (is (= {:allowed? true
@@ -279,9 +328,59 @@
       (is (= {:allowed? false
               :mode :tool-risk
               :tool-risk? true
+              :tool-risk-mode :artifact-create
               :tool-id :web-search}
              (select-keys tool-risk
-                          [:allowed? :mode :tool-risk? :tool-id]))))))
+                          [:allowed? :mode :tool-risk? :tool-risk-mode :tool-id])))
+      (is (= "creates a new artifact that could be duplicated on replay"
+             (:tool-risk-reason tool-risk))))))
+
+(deftest tool-restart-risk-policy-distinguishes-read-only-and-side-effecting-tools
+  (let [safe-tool {:tool/id :web-search
+                   :tool/name "web-search"
+                   :tool/tags #{:web :search}
+                   :tool/execution-mode :parallel-safe
+                   :tool/handler "(fn [_] {\"status\" \"ok\"})"}
+        privileged-tool {:tool/id :email-send
+                         :tool/name "email-send"
+                         :tool/tags #{:email}
+                         :tool/approval :session
+                         :tool/handler "(fn [_] (xia.email/send! {}))"}
+        artifact-tool {:tool/id :artifact-create
+                       :tool/name "artifact-create"
+                       :tool/tags #{:artifact :output}
+                       :tool/handler "(fn [_] (xia.artifact/create-artifact! {:content \"x\"}))"}
+        branch-tool {:tool/id :branch-tasks
+                     :tool/name "branch-tasks"
+                     :tool/tags #{:branch :parallel}
+                     :tool/handler "(fn [_] (xia.agent/run-branch-tasks []))"}]
+    (is (= {:tool-risk? false
+            :mode :read-only
+            :policy :auto}
+           (select-keys (task-policy/tool-restart-risk-policy
+                         safe-tool
+                         (task-policy/tool-approval-policy safe-tool))
+                        [:tool-risk? :mode :policy])))
+    (is (= {:tool-risk? true
+            :mode :approval-gated
+            :policy :session}
+           (select-keys (task-policy/tool-restart-risk-policy
+                         privileged-tool
+                         (task-policy/tool-approval-policy privileged-tool))
+                        [:tool-risk? :mode :policy])))
+    (is (= {:tool-risk? true
+            :mode :artifact-create
+            :policy :auto}
+           (select-keys (task-policy/tool-restart-risk-policy
+                         artifact-tool
+                         (task-policy/tool-approval-policy artifact-tool))
+                        [:tool-risk? :mode :policy])))
+    (is (= {:tool-risk? true
+            :mode :branch}
+           (select-keys (task-policy/tool-restart-risk-policy
+                         branch-tool
+                         (task-policy/tool-approval-policy branch-tool))
+                        [:tool-risk? :mode])))))
 
 (deftest http-request-retry-decision-captures-allowed-and-terminal-outcomes
   (let [allowed (task-policy/http-request-retry-decision
@@ -369,6 +468,93 @@
               :max-tool-calls-per-round 4}
              (select-keys blocked-calls
                           [:allowed? :mode :tool-count :max-tool-calls-per-round]))))))
+
+(deftest tool-execution-decision-captures-channel-vision-branch-and-approval-outcomes
+  (is (= {:decision-type :execution-policy
+          :allowed? false
+          :policy :channel
+          :mode :channel-blocked
+          :error "channel blocked"}
+         (select-keys (task-policy/tool-execution-decision
+                       {:tool-id :browser-login-interactive
+                        :tool-name "browser-login-interactive"
+                        :channel-compatible? false
+                        :channel-error "channel blocked"})
+                      [:decision-type :allowed? :policy :mode :error])))
+  (is (= {:decision-type :execution-policy
+          :allowed? false
+          :policy :vision
+          :mode :vision-blocked
+          :error "vision blocked"}
+         (select-keys (task-policy/tool-execution-decision
+                       {:tool-id :vision-tool
+                        :tool-name "vision-tool"
+                        :channel-compatible? true
+                        :vision-compatible? false
+                        :vision-error "vision blocked"})
+                      [:decision-type :allowed? :policy :mode :error])))
+  (is (= {:decision-type :execution-policy
+          :allowed? false
+          :policy :branch
+          :mode :branch-blocked
+          :error "branch blocked"}
+         (select-keys (task-policy/tool-execution-decision
+                       {:tool-id :schedule-manage
+                        :tool-name "schedule-manage"
+                        :channel-compatible? true
+                        :vision-compatible? true
+                        :branch-worker? true
+                        :branch-allowed? false
+                        :branch-error "branch blocked"})
+                      [:decision-type :allowed? :policy :mode :error])))
+  (is (= {:decision-type :execution-policy
+          :allowed? true
+          :policy :always
+          :mode :interactive}
+         (select-keys (task-policy/tool-execution-decision
+                       {:tool-id :policy-tool
+                        :tool-name "policy-tool"
+                        :channel-compatible? true
+                        :vision-compatible? true
+                        :approval-decision {:allowed? true
+                                            :policy :always
+                                            :mode :interactive}})
+                      [:decision-type :allowed? :policy :mode]))))
+
+(deftest tool-admission-helpers-capture-inferred-approval-autonomous-and-branch-rules
+  (let [service-tool {:tool/id :service-tool
+                      :tool/handler "(fn [_] (xia.service/request :github :get \"/user\"))"}
+        browser-tool {:tool/id :browser-open
+                      :tool/handler "(fn [_] (xia.browser/open-session {:url \"https://example.com\"}))"}
+        auto-tool {:tool/id :web-search
+                   :tool/approval :auto
+                   :tool/handler "(fn [_] {\"status\" \"ok\"})"}]
+    (is (= {:policy :session
+            :autonomous-scope :service}
+           (select-keys (task-policy/inferred-tool-approval-policy service-tool)
+                        [:policy :autonomous-scope])))
+    (is (= #{:service}
+           (task-policy/tool-autonomous-scopes service-tool)))
+    (is (true? (task-policy/autonomous-tool-allowed?
+                service-tool
+                true
+                #(= % :service))))
+    (is (= "no approved services are available for autonomous execution"
+           (task-policy/autonomous-tool-block-message
+            service-tool
+            true
+            (constantly false))))
+    (is (= "tool requires live approval and is unavailable during autonomous execution"
+           (task-policy/autonomous-tool-block-message
+            service-tool
+            false
+            (constantly true))))
+    (is (false? (task-policy/branch-worker-tool-allowed?
+                 browser-tool
+                 (task-policy/tool-approval-policy browser-tool))))
+    (is (true? (task-policy/branch-worker-tool-allowed?
+                auto-tool
+                (task-policy/tool-approval-policy auto-tool))))))
 
 (deftest schedule-failure-policy-captures-backoff-and-pause
   (let [now (java.util.Date. 1000)]

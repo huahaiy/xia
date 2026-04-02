@@ -36,6 +36,20 @@
     (sequential? value) (vec value)
     :else           value))
 
+(defn- meta-doc
+  [meta]
+  (when (map? meta)
+    (into {}
+          (keep (fn [[k v]]
+                  (when (some? v)
+                    [k v])))
+          meta)))
+
+(defn- read-meta-doc
+  [value]
+  (when (map? value)
+    (into {} value)))
+
 (defn- truncate-string
   [value max-len]
   (let [s       (some-> value str)
@@ -641,7 +655,7 @@
 
 (defn record-run!
   "Record a schedule execution result."
-  [schedule-id {:keys [started-at finished-at status result error actions]}]
+  [schedule-id {:keys [started-at finished-at status result error actions meta]}]
   (db/transact!
     [(cond-> {:schedule-run/id          (random-uuid)
               :schedule-run/schedule-id schedule-id
@@ -656,7 +670,8 @@
                           (if (> (count (str error)) 2000)
                             (subs (str error) 0 2000)
                             (str error)))
-       (some? actions) (assoc :schedule-run/actions (actions-doc actions)))])
+       (some? actions) (assoc :schedule-run/actions (actions-doc actions))
+       (some? meta) (assoc :schedule-run/meta (meta-doc meta)))])
   ;; Update schedule's last-run and next-run
   (let [now      (java.util.Date.)
         sched    (get-schedule schedule-id)
@@ -687,6 +702,8 @@
                      :status      (:schedule-run/status e)
                      :actions     (some-> (:schedule-run/actions e)
                                           read-actions-doc)
+                     :meta        (some-> (:schedule-run/meta e)
+                                          read-meta-doc)
                      :result      (:schedule-run/result e)
                      :error       (:schedule-run/error e)})))))))
 

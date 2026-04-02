@@ -4,6 +4,7 @@
             [xia.agent]
             [xia.db :as db]
             [xia.hippocampus]
+            [xia.llm :as llm]
             [xia.oauth]
             [xia.schedule]
             [xia.scheduler :as scheduler]
@@ -27,6 +28,11 @@
                   xia.schedule/record-task-success! (fn [schedule-id result]
                                                       (swap! lifecycle conj [:task-success schedule-id result]))
                   xia.agent/process-message (fn [session-id prompt & {:keys [channel tool-context]}]
+                                              (llm/*request-observer* {:kind :chat-message
+                                                                       :usage {"prompt_tokens" 2
+                                                                               "completion_tokens" 3
+                                                                               "total_tokens" 5}
+                                                                       :duration-ms 25})
                                               (swap! lifecycle conj [:process session-id channel prompt
                                                                      (:schedule-id tool-context)
                                                                      (:approval-bypass? tool-context)])
@@ -49,8 +55,20 @@
     (is (= {:schedule-id :nightly-review
             :run {:status :success
                   :actions []
+                  :meta {:llm-budget {:scope :schedule-run
+                                      :schedule-id :nightly-review
+                                      :llm-call-count 1
+                                      :prompt-tokens 2
+                                      :completion-tokens 3
+                                      :total-tokens 5
+                                      :llm-total-duration-ms 25}}
                   :result "done"}}
-           (update @run* :run select-keys [:status :actions :result])))
+           (-> @run*
+               (update :run #(select-keys % [:status :actions :meta :result]))
+               (update-in [:run :meta :llm-budget]
+                          #(select-keys %
+                                        [:scope :schedule-id :llm-call-count :prompt-tokens
+                                         :completion-tokens :total-tokens :llm-total-duration-ms])))))
     (is (= [[:ensure sid]
             [:checkpoint :nightly-review :planning]
             [:process sid :scheduler "summarize the week" :nightly-review true]
@@ -58,6 +76,62 @@
             [:get-wm sid]
             [:snapshot sid]
             [:record sid :scheduler "nightly summary"]
+            [:clear sid]]
+           @lifecycle))))
+
+(deftest execute-prompt-schedule-records-budget-exhaustion
+  (let [sid (random-uuid)
+        lifecycle (atom [])
+        run* (atom nil)]
+    (db/set-config! :schedule/max-run-llm-calls 1)
+    (with-redefs [xia.db/create-session! (fn [_channel] sid)
+                  xia.working-memory/ensure-wm! (fn [session-id]
+                                                  (swap! lifecycle conj [:ensure session-id]))
+                  xia.schedule/augment-prompt-with-recovery-context (fn [_schedule-id prompt] prompt)
+                  xia.schedule/save-task-checkpoint! (fn [schedule-id checkpoint]
+                                                       (swap! lifecycle conj [:checkpoint schedule-id (:phase checkpoint)]))
+                  xia.schedule/record-task-failure! (fn [schedule-id error]
+                                                      (swap! lifecycle conj [:task-failure schedule-id error]))
+                  xia.agent/process-message (fn [session-id prompt & {:keys [channel]}]
+                                              (llm/*request-observer* {:kind :chat-message
+                                                                       :usage {"prompt_tokens" 3
+                                                                               "completion_tokens" 4
+                                                                               "total_tokens" 7}
+                                                                       :duration-ms 40})
+                                              (swap! lifecycle conj [:process session-id channel prompt])
+                                              (llm/*request-budget-guard* {:kind :chat-message})
+                                              "unreachable")
+                  xia.schedule/record-run! (fn [schedule-id run]
+                                             (reset! run* {:schedule-id schedule-id
+                                                           :run run}))
+                  xia.working-memory/get-wm (fn [session-id]
+                                              (swap! lifecycle conj [:get-wm session-id])
+                                              {:topics "failed run"})
+                  xia.working-memory/snapshot! (fn [session-id]
+                                                 (swap! lifecycle conj [:snapshot session-id]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.working-memory/clear-wm! (fn [session-id]
+                                                 (swap! lifecycle conj [:clear session-id]))]
+      (#'scheduler/execute-prompt-schedule {:id :nightly-review
+                                            :prompt "summarize the week"
+                                            :trusted? false}))
+    (is (= {:schedule-id :nightly-review
+            :run {:status :budget-exhausted}}
+           (update @run* :run #(select-keys % [:status]))))
+    (is (= {:scope :schedule-run
+            :schedule-id :nightly-review
+            :llm-call-count 1
+            :total-tokens 7}
+           (select-keys (get-in @run* [:run :meta :llm-budget])
+                        [:scope :schedule-id :llm-call-count :total-tokens])))
+    (is (= [[:ensure sid]
+            [:checkpoint :nightly-review :planning]
+            [:process sid :scheduler "summarize the week"]
+            [:task-failure :nightly-review "Reached the scheduled run LLM call budget (1/1)"]
+            [:get-wm sid]
+            [:snapshot sid]
+            [:record sid :scheduler "failed run"]
             [:clear sid]]
            @lifecycle))))
 

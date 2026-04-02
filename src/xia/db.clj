@@ -476,6 +476,7 @@
    :schedule-run/result      {:db/valueType :db.type/string}
    :schedule-run/error       {:db/valueType :db.type/string}
    :schedule-run/actions     {:db/valueType :db.type/idoc :db/domain "schedule-run-actions"}
+   :schedule-run/meta        {:db/valueType :db.type/idoc :db/domain "schedule-run-meta"}
 
    ;; --- LLM Call Log (debug/observability for every LLM request) ---
    :llm.log/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}

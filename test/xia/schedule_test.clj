@@ -283,6 +283,25 @@
            (:actions run)))
     (is (= "done" (:result run)))))
 
+(deftest record-run-persists-meta
+  (schedule/create-schedule!
+    {:id :meta-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
+  (schedule/record-run! :meta-test
+    {:started-at  (java.util.Date.)
+     :finished-at (java.util.Date.)
+     :status      :budget-exhausted
+     :meta        {:llm-budget {:scope :schedule-run
+                                :schedule-id :meta-test
+                                :llm-call-count 2
+                                :total-tokens 14}}
+     :error       "Reached the scheduled run LLM call budget (2/2)"})
+  (let [run (first (schedule/schedule-history :meta-test))]
+    (is (= {:llm-budget {:scope :schedule-run
+                         :schedule-id :meta-test
+                         :llm-call-count 2
+                         :total-tokens 14}}
+           (:meta run)))))
+
 (deftest safe-schedule-history-redacts-audit-actions
   (schedule/create-schedule!
     {:id :audit-safe :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})

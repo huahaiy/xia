@@ -15,6 +15,7 @@
             [xia.db :as db]
             [xia.agent :as agent]
             [xia.hippocampus :as hippo]
+            [xia.llm :as llm]
             [xia.oauth :as oauth]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
@@ -141,6 +142,7 @@
         session-id (or resumed-session-id
                        (db/create-session! :scheduler))
         audit-log (atom [])
+        budget-state (atom (task-policy/new-schedule-run-llm-budget id))
         prompt* (schedule/augment-prompt-with-recovery-context id prompt)
         execution-context (schedule-tool-context id trusted? audit-log)]
     (try
@@ -155,25 +157,40 @@
                    "Started a scheduled prompt run.")
         :resumed? (boolean resumed-session-id)
         :session-id session-id})
-      (let [result (agent/process-message session-id
-                                          prompt*
-                                          :channel :scheduler
-                                          :tool-context execution-context)]
+      (let [result (binding [llm/*request-budget-guard*
+                             (fn [_request]
+                               (task-policy/throw-if-schedule-run-llm-budget-exhausted!
+                                budget-state))
+                             llm/*request-observer*
+                             (fn [request]
+                               (task-policy/record-schedule-run-llm-request!
+                                budget-state
+                                request))]
+                     (agent/process-message session-id
+                                            prompt*
+                                            :channel :scheduler
+                                            :tool-context execution-context))]
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
                                :status :success
                                :actions @audit-log
+                               :meta {:llm-budget @budget-state}
                                :result (str result)})
         (schedule/record-task-success! id result))
       (catch Exception e
-        (schedule/record-run! id
-                              {:started-at started
-                               :finished-at (java.util.Date.)
-                               :status :error
-                               :actions @audit-log
-                               :error (.getMessage e)})
-        (schedule/record-task-failure! id (.getMessage e)))
+        (let [schedule-budget? (= :schedule-run-budget-exhausted
+                                  (:type (ex-data e)))]
+          (schedule/record-run! id
+                                {:started-at started
+                                 :finished-at (java.util.Date.)
+                                 :status (if schedule-budget?
+                                           :budget-exhausted
+                                           :error)
+                                 :actions @audit-log
+                                 :meta {:llm-budget @budget-state}
+                                 :error (.getMessage e)})
+          (schedule/record-task-failure! id (.getMessage e))))
       (finally
         (finalize-prompt-schedule-session! session-id)))))
 

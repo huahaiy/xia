@@ -13,6 +13,7 @@
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.task-event :as task-event]
+            [xia.task-policy :as task-policy]
             [xia.tool :as tool]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory :as wm]))
@@ -2129,6 +2130,51 @@
                     turn-items))
           (is (some #{:task.budget-exhausted} event-types)))))
     (is (= 2 @llm-calls))))
+
+(deftest process-message-composes-outer-llm-budget-hooks
+  (let [session-id (db/create-session! :scheduler)
+        llm-calls (atom 0)]
+    (db/set-config! :agent/max-turn-llm-calls 10)
+    (db/set-config! :agent/max-turn-total-tokens 100000)
+    (db/set-config! :agent/max-turn-wall-clock-ms 300000)
+    (db/set-config! :schedule/max-run-llm-calls 1)
+    (let [outer-budget (atom (task-policy/new-schedule-run-llm-budget :nightly-review))]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.working-memory/update-wm!      (fn [& _] nil)
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.context/build-messages-data    (fn [_session-id _opts]
+                                                       {:messages [{:role "system" :content "test"}]
+                                                        :used-fact-eids []})
+                  xia.autonomous/max-iterations      (constantly 6)
+                  xia.llm/chat                       (fn [_messages & _opts]
+                                                       (case (swap! llm-calls inc)
+                                                         1 {"choices" [{"message" {"content" (str "First scheduled step.\n\n"
+                                                                                                   "AUTONOMOUS_STATUS_JSON:"
+                                                                                                   "{\"status\":\"continue\",\"summary\":\"First scheduled step\",\"next_step\":\"Take the second scheduled step\",\"reason\":\"More work remains\",\"goal_complete\":false,\"progress_status\":\"in_progress\",\"agenda\":[{\"item\":\"Take the second scheduled step\",\"status\":\"pending\"}]}")}}]
+                                                            "usage" {"prompt_tokens" 3
+                                                                     "completion_tokens" 4
+                                                                     "total_tokens" 7}}
+                                                         (throw (ex-info "unexpected second LLM call" {}))))
+                  xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+      (binding [xia.llm/*request-budget-guard* (fn [_request]
+                                                 (task-policy/throw-if-schedule-run-llm-budget-exhausted!
+                                                  outer-budget))
+                xia.llm/*request-observer* (fn [request]
+                                             (task-policy/record-schedule-run-llm-request!
+                                              outer-budget
+                                              request))]
+        (let [err (try
+                    (agent/process-message session-id "keep going" :channel :scheduler)
+                    (catch clojure.lang.ExceptionInfo e
+                      e))]
+          (is (instance? clojure.lang.ExceptionInfo err))
+          (is (= :schedule-run-budget-exhausted (:type (ex-data err))))
+          (is (= 1 @llm-calls))
+          (is (= {:scope :schedule-run
+                  :llm-call-count 1
+                  :total-tokens 7}
+                 (select-keys @outer-budget [:scope :llm-call-count :total-tokens])))))))))
 
 (deftest process-message-supervisor-stops-a-stalled-llm-worker
   (let [session-id (db/create-session! :terminal)

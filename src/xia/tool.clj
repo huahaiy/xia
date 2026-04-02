@@ -86,106 +86,6 @@
   #{"a" "an" "and" "any" "for" "from" "get" "how" "i" "in" "into" "is"
     "it" "me" "my" "of" "on" "or" "the" "to" "up" "use" "using" "with"})
 
-(def ^:private branch-worker-blocked-tool-ids
-  #{:branch-tasks
-    :browser-bootstrap-runtime
-    :browser-install-deps
-    :peer-instance-list
-    :peer-instance-start
-    :peer-instance-status
-    :peer-instance-stop
-    :schedule-list
-    :schedule-create
-    :schedule-manage})
-
-(def ^:private privileged-handler-rules
-  [{:match "xia.service/request"
-    :policy :session
-    :autonomous-scope :service
-    :reason "uses stored service credentials"}
-   {:match "xia.peer/chat"
-    :policy :session
-    :autonomous-scope :service
-    :reason "communicates with a configured Xia peer through stored service credentials"}
-   {:match "xia.instance-supervisor/"
-    :policy :session
-    :autonomous-scope nil
-    :reason "starts or stops managed local Xia instances on the host"}
-   {:match "xia.email/"
-    :policy :session
-    :autonomous-scope :service
-    :reason "uses stored email service credentials"}
-   {:match "xia.browser/open-session"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "uses live browser automation"}
-   {:match "xia.browser/navigate"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "uses live browser automation"}
-   {:match "xia.browser/read-page"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "uses live browser automation"}
-   {:match "xia.browser/query-elements"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "uses live browser automation"}
-   {:match "xia.browser/wait-for-page"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "uses live browser automation"}
-   {:match "xia.browser/screenshot"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "uses live browser automation"}
-   {:match "xia.browser/login-interactive"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "prompts for interactive credentials"}
-   {:match "xia.browser/login"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope :site
-    :reason "uses stored site credentials"}
-   {:match "xia.browser/fill-form"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "submits data into live browser sessions"}
-   {:match "xia.browser/click"
-    :policy :session
-    :session-scope :browser
-    :autonomous-scope nil
-    :reason "can trigger live browser actions"}
-   {:match "xia.schedule/create-schedule!"
-    :policy :session
-    :autonomous-scope nil
-    :reason "creates autonomous background tasks"}
-   {:match "xia.schedule/update-schedule!"
-    :policy :session
-    :autonomous-scope nil
-    :reason "changes autonomous background tasks"}
-   {:match "xia.schedule/remove-schedule!"
-    :policy :session
-    :autonomous-scope nil
-    :reason "changes autonomous background tasks"}
-   {:match "xia.schedule/pause-schedule!"
-    :policy :session
-    :autonomous-scope nil
-    :reason "changes autonomous background tasks"}
-   {:match "xia.schedule/resume-schedule!"
-    :policy :session
-    :autonomous-scope nil
-    :reason "changes autonomous background tasks"}])
-
 (def ^:private expected-tool-input-error-types
   #{:artifact/missing-content
     :artifact/unsupported-kind
@@ -244,7 +144,7 @@
   [session-id]
   (swap! session-approvals dissoc session-id))
 
-(declare matching-privileged-rules autonomous-tool-allowed?)
+(declare autonomous-tool-allowed?)
 
 ;; ---------------------------------------------------------------------------
 ;; Tool loading
@@ -307,27 +207,9 @@
     (log/info "Imported tool:" (or name (clojure.core/name id)))
     tool-def))
 
-(defn- explicit-approval-policy
-  [tool]
-  (when-let [approval (or (:tool/approval tool) (:approval tool))]
-    {:policy (task-policy/normalize-approval-policy approval)}))
-
-(defn- inferred-approval-policy
-  [tool]
-  (or (first (matching-privileged-rules tool))
-      {:policy :auto}))
-
-(defn- matching-privileged-rules
-  [tool]
-  (let [handler (or (:tool/handler tool) "")]
-    (filterv (fn [{:keys [match]}]
-               (str/includes? handler match))
-             privileged-handler-rules)))
-
 (defn- tool-approval-policy
   [tool]
-  (task-policy/tool-approval-policy tool
-                                    (inferred-approval-policy tool)))
+  (task-policy/tool-approval-policy tool))
 
 (defn- tool-channel-compatible?
   [tool context]
@@ -342,6 +224,22 @@
     :browser-login-interactive "interactive login is only available in terminal sessions"
     (str "tool " (name (:tool/id tool)) " is not available on this channel")))
 
+(defn- tool-requires-vision?
+  [tool]
+  (contains? (set (:tool/tags tool)) :vision))
+
+(defn- tool-vision-compatible?
+  [tool context]
+  (or (not (tool-requires-vision? tool))
+      (and (nil? (:assistant-provider context))
+           (nil? (:assistant-provider-id context)))
+      (llm/vision-capable? (:assistant-provider context))
+      (llm/vision-capable? (:assistant-provider-id context))))
+
+(defn- tool-vision-block-message
+  [_tool]
+  "requires a vision-capable model")
+
 (defn- tool-description-for-llm
   [tool context]
   (let [{:keys [policy]} (tool-approval-policy tool)
@@ -355,68 +253,28 @@
   [context]
   (autonomous/autonomous-run? context))
 
-(defn- autonomous-supported-scope?
-  [scope]
-  (contains? #{:service :site} scope))
-
-(defn- autonomous-tool-scopes
-  [tool]
-  (->> (matching-privileged-rules tool)
-       (map :autonomous-scope)
-       set))
-
 (defn- autonomous-tool-allowed?
   [tool context]
-  (let [scopes (autonomous-tool-scopes tool)]
-    (and (autonomous/trusted? context)
-         (seq scopes)
-         (every? autonomous-supported-scope? scopes)
-         (every? autonomous/scope-available? scopes))))
+  (task-policy/autonomous-tool-allowed? tool
+                                        (autonomous/trusted? context)
+                                        autonomous/scope-available?))
 
 (defn- autonomous-block-message
   [tool context]
-  (let [scopes (autonomous-tool-scopes tool)
-        unavailable (remove autonomous/scope-available? (filter autonomous-supported-scope? scopes))]
-    (cond
-      (not (autonomous/trusted? context))
-      "tool requires live approval and is unavailable during autonomous execution"
-
-      (empty? scopes)
-      (str "trusted autonomous execution is not allowed for tool "
-           (name (:tool/id tool)))
-
-      (some (complement autonomous-supported-scope?) scopes)
-      (str "trusted autonomous execution is not allowed for tool "
-           (name (:tool/id tool)))
-
-      (= unavailable '(:service))
-      "no approved services are available for autonomous execution"
-
-      (= unavailable '(:site))
-      "no approved site accounts are available for autonomous execution"
-
-      (seq unavailable)
-      "required services or site accounts are not approved for autonomous execution"
-
-      :else
-      (str "trusted autonomous execution is not allowed for tool "
-           (name (:tool/id tool))))))
+  (task-policy/autonomous-tool-block-message tool
+                                             (autonomous/trusted? context)
+                                             autonomous/scope-available?))
 
 (defn- tool-visible?
   [tool context]
-  (let [requires-vision? (contains? (set (:tool/tags tool)) :vision)
-        channel-compatible? (tool-channel-compatible? tool context)
-        vision-allowed?  (or (not requires-vision?)
-                             (llm/vision-capable? (:assistant-provider context))
-                             (llm/vision-capable? (:assistant-provider-id context)))
-        {:keys [policy]} (tool-approval-policy tool)
+  (let [channel-compatible? (tool-channel-compatible? tool context)
+        vision-compatible?  (tool-vision-compatible? tool context)
+        approval-decision  (tool-approval-policy tool)
+        {:keys [policy]} approval-decision
         branch-worker?   (:branch-worker? context)
-        branch-allowed?  (and branch-worker?
-                              (= :auto policy)
-                              (not (contains? branch-worker-blocked-tool-ids
-                                              (:tool/id tool))))]
+        branch-allowed?  (task-policy/branch-worker-tool-allowed? tool approval-decision)]
     (and channel-compatible?
-         vision-allowed?
+         vision-compatible?
          (cond
            branch-worker? branch-allowed?
            (autonomous-run? context)
@@ -441,6 +299,18 @@
     (let [{:keys [policy]} (tool-approval-policy tool)]
       (and (= :auto policy)
            (= :parallel-safe (execution-mode tool))))))
+
+(defn restart-risk-policy
+  "Return the restart-risk policy decision for a loaded tool."
+  [tool-id]
+  (if-let [{:keys [tool]} (get @registry tool-id)]
+    (task-policy/tool-restart-risk-policy tool (tool-approval-policy tool))
+    {:decision-type :tool-restart-risk-policy
+     :tool-id tool-id
+     :tool-name (name tool-id)
+     :tool-risk? true
+     :mode :unknown-tool
+     :reason "tool is not loaded, so automatic replay is not considered restart-safe"}))
 
 (defn import-tool-file!
   "Import tools from an EDN file."
@@ -690,39 +560,41 @@
                    wm/*session-id*            (or (:resource-session-id context)
                                                   (:session-id context))]
            (let [channel-blocked? (not (tool-channel-compatible? tool context))
-                 branch-blocked? (and (:branch-worker? context)
-                                      (not (tool-visible? tool context)))
-                 {:keys [allowed? error policy mode]}
-                 (if channel-blocked?
-                   {:allowed? false
-                    :error    (tool-channel-block-message tool)
-                    :policy   :channel
-                    :mode     :channel-blocked}
-                   (if branch-blocked?
-                   {:allowed? false
-                    :error    (str "tool " (name tool-id)
-                                   " is not available to branch workers")
-                    :policy   :branch
-                    :mode     :branch-blocked}
-                   (ensure-approved tool-id
-                                    tool
-                                    arguments
-                                    context)))
-                 _ (prompt/policy-decision! {:decision-type :execution-policy
-                                             :tool-id tool-id
-                                             :tool-name (or (:tool/name tool) (name tool-id))
-                                             :allowed? allowed?
-                                             :policy policy
-                                             :mode mode
-                                             :error error})]
+                 vision-compatible? (tool-vision-compatible? tool context)
+                 branch-worker? (:branch-worker? context)
+                 branch-allowed? (task-policy/branch-worker-tool-allowed?
+                                  tool
+                                  (tool-approval-policy tool))
+                 tool-name (or (:tool/name tool) (name tool-id))
+                 decision-context {:tool-id tool-id
+                                   :tool-name tool-name
+                                   :channel-compatible? (not channel-blocked?)
+                                   :channel-error (tool-channel-block-message tool)
+                                   :vision-compatible? vision-compatible?
+                                   :vision-error (tool-vision-block-message tool)
+                                   :branch-worker? branch-worker?
+                                   :branch-allowed? branch-allowed?
+                                   :branch-error (str "tool " (name tool-id)
+                                                      " is not available to branch workers")}
+                 preflight-decision (task-policy/tool-execution-decision decision-context)
+                 approval-decision (when (:allowed? preflight-decision)
+                                     (ensure-approved tool-id
+                                                      tool
+                                                      arguments
+                                                      context))
+                 {:keys [allowed? error policy mode] :as execution-decision}
+                 (if approval-decision
+                   (task-policy/tool-execution-decision
+                    (assoc decision-context :approval-decision approval-decision))
+                   preflight-decision)
+                 _ (prompt/policy-decision! execution-decision)]
              (if allowed?
                (do
                  (prompt/status! {:state    :running
                                   :phase    :tool
-                                  :message  (str "Running tool " (or (:tool/name tool)
-                                                                     (name tool-id)))
+                                  :message  (str "Running tool " tool-name)
                                   :tool-id  tool-id
-                                  :tool-name (or (:tool/name tool) (name tool-id))})
+                                  :tool-name tool-name})
                  (try
                    (let [result (sci-env/call-fn handler arguments)]
                      (audit-entry! context tool-id tool arguments
@@ -731,10 +603,9 @@
                                     :approval-mode   (name mode)})
                      (prompt/status! {:state    :running
                                       :phase    :tool
-                                      :message  (str "Finished tool " (or (:tool/name tool)
-                                                                          (name tool-id)))
+                                      :message  (str "Finished tool " tool-name)
                                       :tool-id  tool-id
-                                      :tool-name (or (:tool/name tool) (name tool-id))})
+                                      :tool-name tool-name})
                      result)
                    (catch Exception e
                      (audit-entry! context tool-id tool arguments
@@ -751,11 +622,10 @@
                                 :error           error})
                  (prompt/status! {:state    :running
                                   :phase    :approval
-                                  :message  (str "Skipped tool " (or (:tool/name tool)
-                                                                     (name tool-id))
+                                  :message  (str "Skipped tool " tool-name
                                                  ": " error)
                                   :tool-id  tool-id
-                                  :tool-name (or (:tool/name tool) (name tool-id))})
+                                  :tool-name tool-name})
                  (approval-error tool-id error)))))
          (catch Exception e
            (let [cancelled? (cancelled-tool-error? e)

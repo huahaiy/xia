@@ -280,6 +280,36 @@
     (is (= "Tool browser-login-interactive blocked: interactive login is only available in terminal sessions"
            (:error result)))))
 
+(deftest vision-tools-block-execution-without-vision-capability
+  (db/install-tool! {:id          :vision-tool
+                     :name        "vision-tool"
+                     :description "Interpret a screenshot"
+                     :tags        #{:vision :image}
+                     :approval    :auto
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :vision-tool)
+  (let [decisions (atom [])
+        context {:assistant-provider {:llm.provider/id :text-only
+                                      :llm.provider/vision? false}
+                 :task-runtime/on-policy-decision
+                 (fn [decision]
+                   (swap! decisions conj
+                          (select-keys decision
+                                       [:decision-type :tool-id
+                                        :allowed? :policy :mode :error])))}
+        result (tool/execute-tool :vision-tool
+                                  {"image_url" "https://example.com/test.png"}
+                                  context)]
+    (is (= "Tool vision-tool blocked: requires a vision-capable model"
+           (:error result)))
+    (is (= [{:decision-type :execution-policy
+             :tool-id :vision-tool
+             :allowed? false
+             :policy :vision
+             :mode :vision-blocked
+             :error "requires a vision-capable model"}]
+           @decisions))))
+
 (deftest tool-definitions-fall-back-to-all-visible-tools-without-match
   (tool/reset-runtime!)
   (db/install-tool! {:id          :web-search
@@ -952,6 +982,27 @@
                                        :branch-worker? true})]
     (is (= "Tool branch-tasks blocked: tool branch-tasks is not available to branch workers"
            (:error result)))))
+
+(deftest restart-risk-policy-identifies-side-effecting-tools
+  (tool/ensure-bundled-tools!)
+  (doseq [tool-id [:web-search :artifact-create :artifact-delete :branch-tasks]]
+    (tool/load-tool! tool-id))
+  (is (= {:tool-risk? false
+          :mode :read-only}
+         (select-keys (tool/restart-risk-policy :web-search)
+                      [:tool-risk? :mode])))
+  (is (= {:tool-risk? true
+          :mode :artifact-create}
+         (select-keys (tool/restart-risk-policy :artifact-create)
+                      [:tool-risk? :mode])))
+  (is (= {:tool-risk? true
+          :mode :artifact-delete}
+         (select-keys (tool/restart-risk-policy :artifact-delete)
+                      [:tool-risk? :mode])))
+  (is (= {:tool-risk? true
+          :mode :branch}
+         (select-keys (tool/restart-risk-policy :branch-tasks)
+                      [:tool-risk? :mode]))))
 
 (deftest browser-runtime-tools-execute-through-sci
   (tool/ensure-bundled-tools!)

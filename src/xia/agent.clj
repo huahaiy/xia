@@ -223,6 +223,30 @@
               (assoc :reason reason))
             cause)))
 
+(defn- compose-request-budget-guard
+  [outer-guard inner-guard]
+  (cond
+    (and outer-guard inner-guard)
+    (fn [request]
+      (outer-guard request)
+      (inner-guard request))
+
+    outer-guard outer-guard
+    inner-guard inner-guard
+    :else nil))
+
+(defn- compose-request-observer
+  [outer-observer inner-observer]
+  (cond
+    (and outer-observer inner-observer)
+    (fn [request]
+      (outer-observer request)
+      (inner-observer request))
+
+    outer-observer outer-observer
+    inner-observer inner-observer
+    :else nil))
+
 (defn- task-cancellation-outcome
   [reason]
   (case reason
@@ -1419,6 +1443,9 @@
                                   :tool-count nil
                                   :tool-id nil
                                   :tool-name nil
+                                  :tool-risk? nil
+                                  :tool-risk-mode nil
+                                  :tool-risk-reason nil
                                   :parallel nil
                                   :checkpoint nil}
                                  event
@@ -1435,7 +1462,11 @@
                           :updated-at-ms now-ms
                           :seq seq-no
                           :tool-risk? (or (:tool-risk? state)
-                                          (= phase :tool)))
+                                          (true? (:tool-risk? event*)))
+                          :tool-risk-mode (or (:tool-risk-mode state)
+                                              (:tool-risk-mode event*))
+                          :tool-risk-reason (or (:tool-risk-reason state)
+                                                (:tool-risk-reason event*)))
                    (update :events (fnil conj []) event*)))))))
 
 (defn- worker-timeout-ms
@@ -2270,22 +2301,28 @@
                       turn-budget-state (or *turn-llm-budget-state*
                                             (atom (task-policy/new-turn-llm-budget session-id
                                                                                    channel)))
-                      task-budget-state (task-runtime/task-llm-budget-state task-id)]
+                      task-budget-state (task-runtime/task-llm-budget-state task-id)
+                      outer-budget-guard llm/*request-budget-guard*
+                      outer-request-observer llm/*request-observer*]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
                   (binding [*turn-llm-budget-state* turn-budget-state
-                            llm/*request-budget-guard* (fn [_request]
-                                                         (task-policy/throw-if-turn-llm-budget-exhausted!
-                                                          turn-budget-state)
-                                                         (task-policy/throw-if-task-llm-budget-exhausted!
-                                                          task-budget-state))
-                            llm/*request-observer* (fn [request]
-                                                     (task-policy/record-turn-llm-request!
-                                                      turn-budget-state
-                                                      request)
-                                                     (task-runtime/record-task-llm-request!
-                                                      task-id
-                                                      task-budget-state
-                                                      request))]
+                            llm/*request-budget-guard* (compose-request-budget-guard
+                                                        outer-budget-guard
+                                                        (fn [_request]
+                                                          (task-policy/throw-if-turn-llm-budget-exhausted!
+                                                           turn-budget-state)
+                                                          (task-policy/throw-if-task-llm-budget-exhausted!
+                                                           task-budget-state)))
+                            llm/*request-observer* (compose-request-observer
+                                                    outer-request-observer
+                                                    (fn [request]
+                                                      (task-policy/record-turn-llm-request!
+                                                       turn-budget-state
+                                                       request)
+                                                      (task-runtime/record-task-llm-request!
+                                                       task-id
+                                                       task-budget-state
+                                                       request)))]
                     (loop [iteration 1
                            fact-eids []
                            loop-state nil
