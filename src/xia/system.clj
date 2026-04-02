@@ -70,6 +70,9 @@
   [_ {:keys [db]}]
   (hippo/reset-runtime!)
   (llm/reset-runtime!)
+  (let [recovered (agent/recover-runtime-tasks!)]
+    (when (seq recovered)
+      (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart")))
   {:db db})
 
 (defmethod ig/halt-key! :xia/runtime-support

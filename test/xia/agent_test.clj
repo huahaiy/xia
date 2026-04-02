@@ -190,6 +190,47 @@
       (is (= :checkpoint
              (get-in persisted [:meta :recovery :last-recovery :source]))))))
 
+(deftest recover-interrupted-tasks-pauses-orphaned-running-tasks-after-runtime-restart
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :interactive
+                                     :state :running
+                                     :title "Review the invoice"
+                                     :summary "Waiting for the next pass"
+                                     :meta {:runtime {:state :waiting_input
+                                                      :phase :waiting_input
+                                                      :message "Waiting for input"}
+                                            :checkpoint {:phase :observing
+                                                         :summary "Need to review the invoice attachments."
+                                                         :current-focus "Review the invoice"}}})
+        turn-id    (db/start-task-turn! task-id
+                                        {:operation :start
+                                         :state :waiting_input
+                                         :input "Review the invoice"
+                                         :summary "Waiting for input"})]
+    (let [recovered (task-runtime/recover-interrupted-tasks!)
+          task      (db/get-task task-id)
+          turn      (db/get-task-turn turn-id)
+          recovery  (get-in task [:meta :recovery :last-recovery])]
+      (is (= [{:task-id task-id
+               :session-id session-id
+               :current-turn-id turn-id
+               :summary "Paused after runtime restart while task was waiting_input. Resume to continue from the latest checkpoint."}]
+             recovered))
+      (is (= :paused (:state task)))
+      (is (= :runtime-restart (:stop-reason task)))
+      (is (nil? (:current-turn-id task)))
+      (is (= :paused (get-in task [:meta :runtime :state])))
+      (is (= :recovered (get-in task [:meta :runtime :phase])))
+      (is (= :cancelled (:state turn)))
+      (is (= "Interrupted by runtime restart" (:summary turn)))
+      (is (= :runtime-restart (:source recovery)))
+      (is (= :waiting_input (:interrupted-state recovery)))
+      (is (= turn-id (:interrupted-turn-id recovery)))
+      (is (= "Need to review the invoice attachments."
+             (:checkpoint-summary recovery))))))
+
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])

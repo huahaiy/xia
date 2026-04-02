@@ -23,9 +23,12 @@
 
 (declare sanitize-doc-value
          checkpoint-summary
+         sync-runtime-task!
          emit-task-updated-event!)
 
 (def ^:private restart-lineage-limit 20)
+(def ^:private startup-recovery-task-limit 100000)
+(def ^:private startup-recovery-states #{:running :waiting_input :waiting_approval})
 
 (defn- merge-task-meta!
   [task-id f]
@@ -157,6 +160,13 @@
                                            :source source}
                                     checkpoint (assoc :summary (checkpoint-summary checkpoint)))))))
 
+(defn- record-task-recovery-doc!
+  [task-id doc]
+  (when task-id
+    (update-task-recovery! task-id
+                           (fn [recovery]
+                             (assoc recovery :last-recovery (sanitize-doc-value doc))))))
+
 (defn- checkpoint-summary
   [checkpoint]
   (or (:summary checkpoint)
@@ -278,6 +288,63 @@
                         (conj (str "Restart attempts: " (count restart-lineage))))]
     (when (seq lines)
       (str/join "\n" lines))))
+
+(defn- startup-recovery-needed?
+  [task]
+  (let [runtime-state (get-in task [:meta :runtime :state])]
+    (or (:current-turn-id task)
+        (contains? startup-recovery-states (:state task))
+        (contains? startup-recovery-states runtime-state))))
+
+(defn- startup-recovery-summary
+  [task]
+  (let [interrupted-state (or (get-in task [:meta :runtime :state])
+                              (:state task)
+                              :running)]
+    (str "Paused after runtime restart while task was "
+         (name interrupted-state)
+         ". Resume to continue from the latest checkpoint.")))
+
+(defn recover-interrupted-tasks!
+  []
+  (let [now   (java.util.Date.)
+        tasks (db/list-tasks {:limit startup-recovery-task-limit})]
+    (->> tasks
+         (keep (fn [task]
+                 (when (startup-recovery-needed? task)
+                   (let [task-id          (:id task)
+                         current-turn-id (:current-turn-id task)
+                         summary        (startup-recovery-summary task)
+                         recovery-doc   (cond-> {:at now
+                                                 :source :runtime-restart
+                                                 :summary summary
+                                                 :interrupted-state (or (get-in task [:meta :runtime :state])
+                                                                        (:state task))}
+                                          current-turn-id (assoc :interrupted-turn-id current-turn-id)
+                                          (task-checkpoint task) (assoc :checkpoint-summary
+                                                                        (checkpoint-summary (task-checkpoint task))))]
+                     (when current-turn-id
+                       (db/update-task-turn! current-turn-id
+                                             {:state :cancelled
+                                              :summary "Interrupted by runtime restart"
+                                              :error "Xia restarted before the task turn completed."
+                                              :finished-at now}))
+                     (sync-runtime-task! task-id
+                                         {:state :paused
+                                          :stop-reason :runtime-restart
+                                          :summary summary
+                                          :error nil
+                                          :finished-at nil})
+                     (set-task-runtime-status! task-id
+                                               {:state :paused
+                                                :phase :recovered
+                                                :message summary})
+                     (record-task-recovery-doc! task-id recovery-doc)
+                     {:task-id task-id
+                      :session-id (:session-id task)
+                      :current-turn-id current-turn-id
+                      :summary summary}))))
+         vec)))
 
 (defn- emit-runtime-event!
   [event]

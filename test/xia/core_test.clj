@@ -216,6 +216,32 @@
          (is (.contains ^String output "open http://localhost:4012/"))))
     (is (= 4012 (:port @started)))))
 
+(deftest start-server-runtime-recovers-interrupted-tasks-on-startup
+  (let [calls   (atom [])
+        options {:db "/tmp/xia-dev-repl"
+                 :bind "127.0.0.1"
+                 :port 4011}]
+    (with-redefs-fn {#'xia.system/ensure-db-dir! (fn [_] nil)
+                     #'xia.db/connect! (fn [_ _] nil)
+                     #'xia.crypto/current-key-source (fn [] :passphrase)
+                     #'xia.setup/needs-setup? (constantly false)
+                     #'xia.setup/run-setup! (fn [] nil)
+                     #'xia.identity/init-identity! (fn [] nil)
+                     #'xia.instance-supervisor/configure! (fn [_] nil)
+                     #'xia.tool/ensure-bundled-tools! (fn [] 0)
+                     #'xia.tool/reset-runtime! (fn [] nil)
+                     #'xia.tool/load-all-tools! (fn [] nil)
+                     #'xia.tool/registered-tools (fn [] [])
+                     #'xia.skill/all-enabled-skills (fn [] [])
+                     #'xia.agent/recover-runtime-tasks! (fn []
+                                                         (swap! calls conj :agent/recover-runtime-tasks)
+                                                         [])
+                     #'xia.scheduler/start! (fn [] nil)
+                     #'xia.channel.http/start! (fn [_ _ _] nil)
+                     #'xia.core/local-ui-url (fn [_ _] "http://localhost:4011/")}
+      #(core/start-server-runtime! options))
+    (is (= [:agent/recover-runtime-tasks] @calls))))
+
 (deftest start-server-runtime-skips-interactive-setup-on-first-run
   (let [calls   (atom [])
         options {:db "/tmp/xia-dev-repl"

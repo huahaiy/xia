@@ -2854,6 +2854,16 @@
   [task-id message]
   (task-runtime/fork-task! (task-control-deps) task-id message))
 
+(defn recover-runtime-tasks!
+  []
+  (try
+    (task-runtime/recover-interrupted-tasks!)
+    (catch clojure.lang.ExceptionInfo e
+      (if (= "Database not connected. Call (xia.db/connect!) first."
+             (.getMessage e))
+        []
+        (throw e)))))
+
 (defn- branch-deps
   []
   {:await-futures! await-futures!
