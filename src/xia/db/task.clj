@@ -64,6 +64,52 @@
                        [?session :session/id ?sid]]
                 task-eid*))))
 
+(defn- session-link-eid
+  [deps task-eid* session-eid*]
+  (when (and task-eid* session-eid*)
+    (ffirst (q* deps '[:find ?link :in $ ?task ?session
+                       :where
+                       [?link :task.session-link/task ?task]
+                       [?link :task.session-link/session ?session]]
+                task-eid*
+                session-eid*))))
+
+(defn- task-session-links*
+  [deps task-eid*]
+  (when task-eid*
+    (->> (q* deps '[:find ?sid ?role ?created-at ?updated-at
+                    :in $ ?task
+                    :where
+                    [?link :task.session-link/task ?task]
+                    [?link :task.session-link/session ?session]
+                    [?session :session/id ?sid]
+                    [?link :task.session-link/role ?role]
+                    [?link :task.session-link/created-at ?created-at]
+                    [?link :task.session-link/updated-at ?updated-at]]
+                 task-eid*)
+         (map (fn [[sid role created-at updated-at]]
+                {:session-id sid
+                 :role role
+                 :created-at created-at
+                 :updated-at updated-at}))
+         (sort-by (juxt #(or (:created-at %) (:updated-at %))
+                        :session-id))
+         vec)))
+
+(defn- attach-task-session!*
+  [deps task-eid* session-eid* role]
+  (when (and task-eid* session-eid*)
+    (let [timestamp (now)]
+      (if-let [link-eid (session-link-eid deps task-eid* session-eid*)]
+        (transact!* deps [{:db/id link-eid
+                           :task.session-link/role (or role :attached)
+                           :task.session-link/updated-at timestamp}])
+        (transact!* deps [{:task.session-link/task task-eid*
+                           :task.session-link/session session-eid*
+                           :task.session-link/role (or role :attached)
+                           :task.session-link/created-at timestamp
+                           :task.session-link/updated-at timestamp}])))))
+
 (defn- turn-task-id
   [deps turn-eid*]
   (when turn-eid*
@@ -94,7 +140,7 @@
                        :task/updated-at (now)}])))
 
 (defn create-task!
-  [deps {:keys [id session-id parent-id channel type state title summary stop-reason
+  [deps {:keys [id session-id session-role parent-id channel type state title summary stop-reason
                 error meta autonomy-state current-turn-id started-at finished-at]}]
   (let [task-id      (or id (random-uuid))
         created-at   (now)
@@ -121,15 +167,32 @@
         current-turn-id (assoc :task/current-turn-id current-turn-id)
         (some? started-at) (assoc :task/started-at started-at)
         (some? finished-at) (assoc :task/finished-at finished-at))])
+    (attach-task-session!* deps (task-eid deps task-id) session-eid* (or session-role :origin))
     task-id))
 
 (defn update-task!
-  [deps task-id {:keys [parent-id channel type state title summary stop-reason error
+  [deps task-id {:keys [session-id session-role parent-id channel type state title summary stop-reason error
                         meta autonomy-state current-turn-id started-at finished-at]
                  :as attrs}]
   (when-let [eid (task-eid deps task-id)]
-    (let [entity-map (raw-entity* deps eid)
+    (let [entity-map    (raw-entity* deps eid)
+          current-session-eid
+          (let [value (:task/session entity-map)]
+            (cond
+              (map? value) (:db/id value)
+              (number? value) value
+              :else value))
+          session-eid*  (when (contains? attrs :session-id)
+                          (when session-id
+                            (or (session-eid deps session-id)
+                                (throw (ex-info "Cannot update task: session not found"
+                                                {:task-id task-id
+                                                 :session-id session-id})))))
           retracts   (cond-> []
+                       (and (contains? attrs :session-id)
+                            current-session-eid
+                            (not= session-eid* current-session-eid))
+                       (conj [:db/retract eid :task/session current-session-eid])
                        (and (contains? attrs :stop-reason)
                             (nil? stop-reason)
                             (contains? entity-map :task/stop-reason))
@@ -159,6 +222,7 @@
        (into retracts
              [(cond-> {:db/id eid
                        :task/updated-at (now)}
+                session-eid* (assoc :task/session session-eid*)
                 parent-id (assoc :task/parent-id parent-id)
                 channel (assoc :task/channel channel)
                 type (assoc :task/type type)
@@ -171,8 +235,9 @@
                 (some? autonomy-state) (assoc :task/autonomy-state autonomy-state)
                 current-turn-id (assoc :task/current-turn-id current-turn-id)
                 (some? started-at) (assoc :task/started-at started-at)
-                (some? finished-at) (assoc :task/finished-at finished-at))])))
-    true))
+                (some? finished-at) (assoc :task/finished-at finished-at))]))
+      (attach-task-session!* deps eid session-eid* (or session-role :attached))
+    true)))
 
 (defn get-task
   [deps task-id]
@@ -180,6 +245,7 @@
     (let [entity-map (decrypt-entity* deps (raw-entity* deps eid))]
       {:id             (:task/id entity-map)
        :session-id     (task-session-id deps eid)
+       :session-links  (task-session-links* deps eid)
        :parent-id      (:task/parent-id entity-map)
        :channel        (:task/channel entity-map)
        :type           (:task/type entity-map)
@@ -201,18 +267,19 @@
 (defn list-tasks
   [deps & [{:keys [session-id limit] :or {limit 100}}]]
   (let [rows (if session-id
-               (q* deps '[:find ?task-id ?created-at
+               (q* deps '[:find ?task-id ?updated-at
                           :in $ ?sid
                           :where
                           [?session :session/id ?sid]
-                          [?task :task/session ?session]
+                          [?link :task.session-link/session ?session]
+                          [?link :task.session-link/task ?task]
                           [?task :task/id ?task-id]
-                          [(get-else $ ?task :task/created-at 0) ?created-at]]
+                          [(get-else $ ?task :task/updated-at 0) ?updated-at]]
                    session-id)
-               (q* deps '[:find ?task-id ?created-at
+               (q* deps '[:find ?task-id ?updated-at
                           :where
                           [?task :task/id ?task-id]
-                          [(get-else $ ?task :task/created-at 0) ?created-at]]))]
+                          [(get-else $ ?task :task/updated-at 0) ?updated-at]]))]
     (->> rows
          (sort-by second #(compare %2 %1))
          (take (long limit))
@@ -230,7 +297,28 @@
                 (if (zero? priority)
                   (compare b-time a-time)
                   priority)))
-            (list-tasks deps {:session-id session-id}))))
+            (filter #(= session-id (:session-id %))
+                    (list-tasks deps {:session-id session-id})))))
+
+(defn attach-task-session!
+  [deps task-id session-id & [{:keys [role primary?]
+                               :or {role :attached
+                                    primary? false}}]]
+  (when-let [task-eid* (task-eid deps task-id)]
+    (let [session-eid* (or (session-eid deps session-id)
+                           (throw (ex-info "Cannot attach task session: session not found"
+                                           {:task-id task-id
+                                            :session-id session-id})))]
+      (attach-task-session!* deps task-eid* session-eid* role)
+      (when primary?
+        (update-task! deps task-id {:session-id session-id
+                                    :session-role role}))
+      (get-task deps task-id))))
+
+(defn task-session-links
+  [deps task-id]
+  (when-let [task-eid* (task-eid deps task-id)]
+    (task-session-links* deps task-eid*)))
 
 (defn start-task-turn!
   [deps task-id {:keys [id operation state input summary meta interrupting-turn-id]}]

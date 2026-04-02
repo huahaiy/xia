@@ -165,6 +165,12 @@
    :task/started-at    {:db/valueType :db.type/instant}
    :task/finished-at   {:db/valueType :db.type/instant}
 
+   :task.session-link/task       {:db/valueType :db.type/ref}
+   :task.session-link/session    {:db/valueType :db.type/ref}
+   :task.session-link/role       {:db/valueType :db.type/keyword}
+   :task.session-link/created-at {:db/valueType :db.type/instant}
+   :task.session-link/updated-at {:db/valueType :db.type/instant}
+
    :task.turn/id                   {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :task.turn/task                 {:db/valueType :db.type/ref}
    :task.turn/index                {:db/valueType :db.type/long}
@@ -455,6 +461,7 @@
    :schedule.state/schedule-id {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
    :schedule.state/status {:db/valueType :db.type/keyword}
    :schedule.state/phase {:db/valueType :db.type/keyword}
+   :schedule.state/task-id {:db/valueType :db.type/uuid}
    :schedule.state/checkpoint {:db/valueType :db.type/idoc :db/domain "schedule-state-checkpoint"}
    :schedule.state/checkpoint-at {:db/valueType :db.type/instant}
    :schedule.state/last-success-at {:db/valueType :db.type/instant}
@@ -1787,6 +1794,16 @@
 (defn current-session-task
   [session-id]
   (db-task/current-session-task (task-deps) session-id))
+
+(defn attach-task-session!
+  ([task-id session-id]
+   (attach-task-session! task-id session-id nil))
+  ([task-id session-id opts]
+   (db-task/attach-task-session! (task-deps) task-id session-id opts)))
+
+(defn task-session-links
+  [task-id]
+  (db-task/task-session-links (task-deps) task-id))
 
 (defn start-task-turn!
   [task-id opts]

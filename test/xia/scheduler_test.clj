@@ -6,7 +6,7 @@
             [xia.hippocampus]
             [xia.llm :as llm]
             [xia.oauth]
-            [xia.schedule]
+            [xia.schedule :as schedule]
             [xia.scheduler :as scheduler]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory]))
@@ -14,9 +14,10 @@
 (use-fixtures :each with-test-db)
 
 (deftest execute-prompt-schedule-records-conversation-on-success
-  (let [sid (random-uuid)
+  (let [sid (db/create-session! :scheduler)
         lifecycle (atom [])
-        run* (atom nil)]
+        run* (atom nil)
+        process-call (atom nil)]
     (with-redefs [xia.db/create-session! (fn [channel]
                                            (is (= :scheduler channel))
                                            sid)
@@ -27,7 +28,10 @@
                                                        (swap! lifecycle conj [:checkpoint schedule-id (:phase checkpoint)]))
                   xia.schedule/record-task-success! (fn [schedule-id result]
                                                       (swap! lifecycle conj [:task-success schedule-id result]))
-                  xia.agent/process-message (fn [session-id prompt & {:keys [channel tool-context]}]
+                  xia.agent/process-message (fn [session-id prompt & {:keys [channel tool-context task-id runtime-op]}]
+                                              (reset! process-call {:session-id session-id
+                                                                    :task-id task-id
+                                                                    :runtime-op runtime-op})
                                               (llm/*request-observer* {:kind :chat-message
                                                                        :usage {"prompt_tokens" 2
                                                                                "completion_tokens" 3
@@ -55,7 +59,8 @@
     (is (= {:schedule-id :nightly-review
             :run {:status :success
                   :actions []
-                  :meta {:llm-budget {:scope :schedule-run
+                  :meta {:task-id (:task-id @process-call)
+                         :llm-budget {:scope :schedule-run
                                       :schedule-id :nightly-review
                                       :llm-call-count 1
                                       :prompt-tokens 2
@@ -69,6 +74,12 @@
                           #(select-keys %
                                         [:scope :schedule-id :llm-call-count :prompt-tokens
                                          :completion-tokens :total-tokens :llm-total-duration-ms])))))
+    (let [task (db/get-task (:task-id @process-call))]
+      (is (= sid (:session-id task)))
+      (is (= :scheduler (:channel task)))
+      (is (= :schedule (:type task)))
+      (is (= :start (:runtime-op @process-call)))
+      (is (= :nightly-review (get-in task [:meta :schedule-id]))))
     (is (= [[:ensure sid]
             [:checkpoint :nightly-review :planning]
             [:process sid :scheduler "summarize the week" :nightly-review true]
@@ -80,7 +91,7 @@
            @lifecycle))))
 
 (deftest execute-prompt-schedule-records-budget-exhaustion
-  (let [sid (random-uuid)
+  (let [sid (db/create-session! :scheduler)
         lifecycle (atom [])
         run* (atom nil)]
     (db/set-config! :schedule/max-run-llm-calls 1)
@@ -136,7 +147,7 @@
            @lifecycle))))
 
 (deftest execute-prompt-schedule-records-conversation-on-error
-  (let [sid (random-uuid)
+  (let [sid (db/create-session! :scheduler)
         lifecycle (atom [])
         run* (atom nil)]
     (with-redefs [xia.db/create-session! (fn [_channel] sid)
@@ -181,7 +192,7 @@
            @lifecycle))))
 
 (deftest execute-prompt-schedule-injects-recovery-context
-  (let [sid (random-uuid)
+  (let [sid (db/create-session! :scheduler)
         seen-prompt (atom nil)]
     (with-redefs [xia.db/create-session! (fn [_channel] sid)
                   xia.working-memory/ensure-wm! (fn [_session-id] nil)
@@ -206,7 +217,7 @@
     (is (= "summarize the week\n\nRecovery context" @seen-prompt))))
 
 (deftest execute-prompt-schedule-reuses-resumable-session
-  (let [sid (random-uuid)
+  (let [sid (db/create-session! :scheduler)
         created? (atom false)
         activated? (atom [])
         checkpoints (atom [])]
@@ -238,6 +249,130 @@
     (is (= [[sid true]] @activated?))
     (is (some #(true? (:resumed? %)) @checkpoints))
     (is (some #(= sid (:session-id %)) @checkpoints))))
+
+(deftest execute-prompt-schedule-reuses-existing-schedule-task
+  (let [sid      (db/create-session! :scheduler)
+        task-id  (db/create-task! {:session-id sid
+                                   :channel :scheduler
+                                   :type :schedule
+                                   :state :paused
+                                   :title "Nightly review"
+                                   :meta {:schedule-id :nightly-review}})
+        seen     (atom nil)]
+    (xia.schedule/bind-task! :nightly-review task-id)
+    (with-redefs [xia.schedule/resumable-session-id (fn [_schedule-id] sid)
+                  xia.db/create-session! (fn [_channel]
+                                           (throw (ex-info "unexpected create-session!" {})))
+                  xia.db/set-session-active! (fn [_session-id _active?] true)
+                  xia.working-memory/ensure-wm! (fn [_session-id] nil)
+                  xia.schedule/augment-prompt-with-recovery-context (fn [_schedule-id prompt] prompt)
+                  xia.schedule/save-task-checkpoint! (fn [& _] nil)
+                  xia.schedule/record-task-success! (fn [& _] nil)
+                  xia.agent/process-message (fn [session-id _prompt & {:keys [task-id runtime-op channel]}]
+                                              (reset! seen {:session-id session-id
+                                                            :task-id task-id
+                                                            :runtime-op runtime-op
+                                                            :channel channel})
+                                              "done")
+                  xia.schedule/record-run! (fn [& _] nil)
+                  xia.working-memory/get-wm (fn [_session-id] {:topics "summary"})
+                  xia.working-memory/snapshot! (fn [_session-id] nil)
+                  xia.hippocampus/record-conversation! (fn [& _] nil)
+                  xia.working-memory/clear-wm! (fn [_session-id] nil)]
+      (#'scheduler/execute-prompt-schedule {:id :nightly-review
+                                            :name "Nightly review"
+                                            :prompt "summarize the week"
+                                            :trusted? true}))
+    (is (= {:session-id sid
+            :task-id task-id
+            :runtime-op :resume
+            :channel :scheduler}
+           @seen))))
+
+(deftest execute-prompt-schedule-keeps-the-same-task-across-session-change
+  (let [sid-a    (db/create-session! :scheduler)
+        sid-b    (db/create-session! :scheduler)
+        task-id  (db/create-task! {:session-id sid-a
+                                   :channel :scheduler
+                                   :type :schedule
+                                   :state :paused
+                                   :title "Nightly review"
+                                   :meta {:schedule-id :nightly-review}})
+        seen     (atom nil)]
+    (xia.schedule/bind-task! :nightly-review task-id)
+    (with-redefs [xia.schedule/resumable-session-id (fn [_schedule-id] nil)
+                  xia.db/create-session! (fn [_channel] sid-b)
+                  xia.db/set-session-active! (fn [_session-id _active?] true)
+                  xia.working-memory/ensure-wm! (fn [_session-id] nil)
+                  xia.schedule/augment-prompt-with-recovery-context (fn [_schedule-id prompt] prompt)
+                  xia.schedule/save-task-checkpoint! (fn [& _] nil)
+                  xia.schedule/record-task-success! (fn [& _] nil)
+                  xia.agent/process-message (fn [session-id _prompt & {:keys [task-id runtime-op channel]}]
+                                              (reset! seen {:session-id session-id
+                                                            :task-id task-id
+                                                            :runtime-op runtime-op
+                                                            :channel channel})
+                                              "done")
+                  xia.schedule/record-run! (fn [& _] nil)
+                  xia.working-memory/get-wm (fn [_session-id] {:topics "summary"})
+                  xia.working-memory/snapshot! (fn [_session-id] nil)
+                  xia.hippocampus/record-conversation! (fn [& _] nil)
+                  xia.working-memory/clear-wm! (fn [_session-id] nil)]
+      (#'scheduler/execute-prompt-schedule {:id :nightly-review
+                                            :name "Nightly review"
+                                            :prompt "summarize the week"
+                                            :trusted? true}))
+    (let [task (db/get-task task-id)]
+      (is (= {:session-id sid-b
+              :task-id task-id
+              :runtime-op :resume
+              :channel :scheduler}
+             @seen))
+      (is (= sid-b (:session-id task)))
+      (is (= #{sid-a sid-b}
+             (set (map :session-id (:session-links task))))))))
+
+(deftest execute-tool-schedule-creates-and-reuses-explicit-schedule-task
+  (schedule/create-schedule!
+    {:id :nightly-tool
+     :name "Nightly tool"
+     :spec {:minute #{0} :hour #{9}}
+     :type :tool
+     :tool-id :web-fetch
+     :tool-args {:url "https://example.com"}})
+  (let [seen-contexts (atom [])]
+    (with-redefs [xia.tool/execute-tool
+                  (fn [tool-id args context]
+                    (swap! seen-contexts conj {:tool-id tool-id
+                                               :args args
+                                               :context context})
+                    {:summary "Fetched the nightly page."
+                     :content "Fetched the nightly page."})]
+      (#'scheduler/execute-tool-schedule (schedule/get-schedule :nightly-tool))
+      (let [first-task-id (schedule/schedule-task-id :nightly-tool)
+            first-task    (db/get-task first-task-id)
+            first-turns   (db/task-turns first-task-id)
+            first-items   (db/turn-items (:id (last first-turns)))
+            first-run     (first (schedule/schedule-history :nightly-tool 1))]
+        (is (= :scheduler (:channel first-task)))
+        (is (= :schedule (:type first-task)))
+        (is (= :nightly-tool (get-in first-task [:meta :schedule-id])))
+        (is (= :tool (get-in first-task [:meta :schedule-type])))
+        (is (= :completed (:state first-task)))
+        (is (= :start (:operation (last first-turns))))
+        (is (= [:tool-call :tool-result]
+               (mapv :type first-items)))
+        (is (= first-task-id (get-in first-run [:meta :task-id])))
+        (is (= first-task-id (get-in (first @seen-contexts) [:context :task-id]))))
+      (#'scheduler/execute-tool-schedule (schedule/get-schedule :nightly-tool))
+      (let [task-id (schedule/schedule-task-id :nightly-tool)
+            turns   (db/task-turns task-id)
+            last-run (first (schedule/schedule-history :nightly-tool 1))]
+        (is (= 2 (count turns)))
+        (is (= :resume (:operation (last turns))))
+        (is (= task-id (get-in last-run [:meta :task-id])))
+        (is (= [task-id task-id]
+               (mapv #(get-in % [:context :task-id]) @seen-contexts)))))))
 
 (deftest tick-submits-due-schedules-through-worker-pool
   (let [submitted (atom [])

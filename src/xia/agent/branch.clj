@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.async :as async]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.task-policy :as task-policy]
@@ -67,7 +68,7 @@
 
 (defn run-branch-task*
   [deps parent-session-id {:keys [task prompt] :as branch-task}
-   {:keys [channel provider-id resource-session-id objective
+   {:keys [channel provider-id resource-session-id objective parent-task-id
            max-tool-rounds tool-context]
     :or {channel :terminal}}]
   ((:throw-if-runtime-stopping! deps) parent-session-id)
@@ -86,7 +87,22 @@
                                              {:parent-session-id parent-session-id
                                               :worker? true
                                               :active? false
-                                              :label task})]
+                                              :label task})
+        child-task-id (db/create-task! {:session-id child-session-id
+                                        :parent-id parent-task-id
+                                        :channel :branch
+                                        :type :branch
+                                        :state :running
+                                        :title task
+                                        :summary task
+                                        :meta {:branch-worker true
+                                               :parent-session-id parent-session-id
+                                               :resource-session-id (or resource-session-id
+                                                                        parent-session-id)
+                                               :objective objective}
+                                        :started-at (java.util.Date.)})]
+    (when-let [parent-task (some-> parent-task-id db/get-task)]
+      (task-runtime/attach-child-task-to-parent! parent-task child-task-id task))
     ((:register-child-session! deps) parent-session-id child-session-id)
     (try
       ((:throw-if-runtime-stopping! deps) child-session-id)
@@ -95,6 +111,8 @@
       (let [result ((:process-message deps) child-session-id
                     (branch-task-prompt branch-task objective)
                     :channel :branch
+                    :task-id child-task-id
+                    :runtime-op :start
                     :provider-id provider-id
                     :resource-session-id (or resource-session-id
                                              parent-session-id)
@@ -109,6 +127,7 @@
         (merge branch-trace
                {:task task
                 :status "completed"
+                :task-id child-task-id
                 :session-id child-session-id
                 :topics (:topics wm-context)
                 :result result}))
@@ -121,6 +140,7 @@
         (merge branch-trace
                {:task task
                 :status "failed"
+                :task-id child-task-id
                 :session-id child-session-id
                 :error (.getMessage t)
                 :error-detail ((:throwable-detail deps) t)}))
@@ -153,6 +173,7 @@
         channel* (or channel (:channel parent-context) :terminal)
         provider-id* (or provider-id
                          (:assistant-provider-id parent-context))
+        parent-task-id (:task-id parent-context)
         resource-session-id* (or resource-session-id parent-session-id)
         branch-tasks (->> tasks (map normalize-branch-task) (remove #(str/blank? (:prompt %))) vec)
         task-count (count branch-tasks)
@@ -190,6 +211,7 @@
                                                                 {:channel channel*
                                                                  :provider-id provider-id*
                                                                  :resource-session-id resource-session-id*
+                                                                 :parent-task-id parent-task-id
                                                                  :objective objective
                                                                  :max-tool-rounds (or max-tool-rounds
                                                                                       ((:max-branch-tool-rounds deps)))

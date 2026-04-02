@@ -591,7 +591,7 @@
     (emit-turn-close-event! turn-id)
     turn-id))
 
-(defn- attach-child-task-to-parent!
+(defn attach-child-task-to-parent!
   [task child-task-id title]
   (when-let [task-id (:id task)]
     (let [session-id   (:session-id task)

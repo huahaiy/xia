@@ -718,17 +718,7 @@
   [session-id]
   (try
     (let [sid (java.util.UUID/fromString session-id)]
-      (some->> (db/list-tasks {:session-id sid})
-               (sort-by (fn [task]
-                          [(if (:current-turn-id task) 0 1)
-                           (or (:updated-at task) (:created-at task))])
-                        (fn [[a-priority a-time] [b-priority b-time]]
-                          (let [priority (compare a-priority b-priority)]
-                            (if (zero? priority)
-                              (compare b-time a-time)
-                              priority))))
-               first
-               :id))
+      (some-> (db/current-session-task sid) :id))
     (catch IllegalArgumentException _
       nil)))
 

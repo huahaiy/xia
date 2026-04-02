@@ -117,6 +117,31 @@
       (is (= [{:text "reply to the billing emails"}]
              (mapv :data items))))))
 
+(deftest tasks-can-span-multiple-sessions-while-keeping-a-current-session
+  (let [sid-a   (db/create-session! :terminal)
+        sid-b   (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid-a
+                                  :channel :terminal
+                                  :type :interactive
+                                  :state :running
+                                  :title "Cross-session task"})]
+    (db/update-task! task-id {:session-id sid-b
+                              :session-role :resumed
+                              :channel :http})
+    (let [task    (db/get-task task-id)
+          links   (db/task-session-links task-id)
+          tasks-a (db/list-tasks {:session-id sid-a})
+          tasks-b (db/list-tasks {:session-id sid-b})]
+      (is (= sid-b (:session-id task)))
+      (is (= #{sid-a sid-b}
+             (set (map :session-id links))))
+      (is (= #{:origin :resumed}
+             (set (map :role links))))
+      (is (= [task-id] (mapv :id tasks-a)))
+      (is (= [task-id] (mapv :id tasks-b)))
+      (is (nil? (db/current-session-task sid-a)))
+      (is (= task-id (:id (db/current-session-task sid-b)))))))
+
 (deftest close-records-debug-event-when-runtime-is-running
   (runtime-state/mark-running!)
   (try

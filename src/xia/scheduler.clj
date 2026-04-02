@@ -10,7 +10,8 @@
                (LLM decides what tools to use)
 
   Lifecycle: start! → (tick every 60s) → stop!"
-  (:require [taoensso.timbre :as log]
+  (:require [clojure.string :as str]
+            [taoensso.timbre :as log]
             [xia.backup :as backup]
             [xia.db :as db]
             [xia.agent :as agent]
@@ -79,32 +80,107 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- schedule-tool-context
-  [schedule-id trusted? audit-log]
-  {:channel :scheduler
-   :schedule-id schedule-id
-   :autonomous-run? true
-   :approval-bypass? trusted?
-   :audit-log audit-log})
+  [schedule-id trusted? audit-log & {:keys [task-id task-turn-id]}]
+  (cond-> {:channel :scheduler
+           :schedule-id schedule-id
+           :autonomous-run? true
+           :approval-bypass? trusted?
+           :audit-log audit-log}
+    task-id (assoc :task-id task-id)
+    task-turn-id (assoc :task-turn-id task-turn-id)))
+
+(defn- schedule-tool-turn-input
+  [tool-id]
+  (str "Run scheduled tool " (name tool-id)))
+
+(defn- schedule-tool-turn-summary
+  [tool-id]
+  (str "Running scheduled tool " (name tool-id) "."))
+
+(defn- schedule-tool-result-summary
+  [tool-id result]
+  (or (:summary result)
+      (:error result)
+      (some-> (:content result) str)
+      (str (name tool-id) " completed")))
+
+(defn- task-operation
+  [existing-task-id task-id]
+  (if (= existing-task-id task-id) :resume :start))
+
+(defn- open-schedule-tool-turn!
+  [task-id operation tool-id tool-args]
+  (let [turn-id (db/start-task-turn! task-id
+                                     {:operation operation
+                                      :state :running
+                                      :input (schedule-tool-turn-input tool-id)
+                                      :summary (schedule-tool-turn-summary tool-id)})]
+    (db/add-task-item! turn-id
+                       {:type :tool-call
+                        :status :requested
+                        :summary (schedule-tool-turn-summary tool-id)
+                        :tool-id (name tool-id)
+                        :data {:tool-name (name tool-id)
+                               :arguments (or tool-args {})}})
+    turn-id))
+
+(defn- close-schedule-tool-turn!
+  [task-id turn-id tool-id result]
+  (let [status  (if (:error result) :error :success)
+        summary (schedule-tool-result-summary tool-id result)]
+    (db/add-task-item! turn-id
+                       {:type :tool-result
+                        :status status
+                        :summary summary
+                        :tool-id (name tool-id)
+                        :data (cond-> {:tool-name (name tool-id)
+                                       :status (name status)}
+                                (contains? result :content) (assoc :content (:content result))
+                                (:summary result) (assoc :summary (:summary result))
+                                (:error result) (assoc :error (:error result))
+                                (contains? result :result) (assoc :result (:result result)))})
+    (db/update-task-turn! turn-id
+                          {:state (if (:error result) :failed :completed)
+                           :summary summary
+                           :error (:error result)})
+    (db/update-task! task-id
+                     {:state (if (:error result) :failed :completed)
+                      :summary summary
+                      :stop-reason (when (:error result) :error)
+                      :error (:error result)
+                      :finished-at (java.util.Date.)})))
 
 (defn- execute-tool-schedule
   "Execute a :tool type schedule."
-  [{:keys [id tool-id tool-args trusted?]}]
-  (let [started (java.util.Date.)
-        audit-log (atom [])
-        context (schedule-tool-context id trusted? audit-log)]
+  [{:keys [id tool-id tool-args trusted?] :as sched}]
+  (let [started          (java.util.Date.)
+        existing-task-id (schedule/schedule-task-id id)
+        task-id          (schedule/ensure-schedule-task! sched
+                                                         :started-at started)
+        turn-id          (open-schedule-tool-turn! task-id
+                                                   (task-operation existing-task-id task-id)
+                                                   tool-id
+                                                   tool-args)
+        audit-log        (atom [])
+        context          (schedule-tool-context id trusted? audit-log
+                                                :task-id task-id
+                                                :task-turn-id turn-id)]
     (schedule/save-task-checkpoint!
      id
      {:phase :tool
       :summary (str "Running scheduled tool " (name tool-id) ".")
-      :tool-id tool-id})
+      :tool-id tool-id
+      :task-id task-id})
     (try
       (let [result (tool/execute-tool tool-id (or tool-args {}) context)]
+        (close-schedule-tool-turn! task-id turn-id tool-id result)
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
                                :status (if (:error result) :error :success)
                                :result (str result)
                                :actions @audit-log
+                               :meta {:task-id task-id}
                                :error (:error result)})
         (if-let [error-message (:error result)]
           (schedule/record-task-failure! id error-message)
@@ -112,11 +188,13 @@
                                          (or (:summary result)
                                              (str result)))))
       (catch Exception e
+        (close-schedule-tool-turn! task-id turn-id tool-id {:error (.getMessage e)})
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
                                :status :error
                                :actions @audit-log
+                               :meta {:task-id task-id}
                                :error (.getMessage e)})
         (schedule/record-task-failure! id (.getMessage e))))))
 
@@ -136,16 +214,21 @@
 
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
-  [{:keys [id prompt trusted?]}]
+  [{:keys [id name prompt trusted?] :as sched}]
   (let [started (java.util.Date.)
         resumed-session-id (schedule/resumable-session-id id)
         session-id (or resumed-session-id
                        (db/create-session! :scheduler))
+        existing-task-id (schedule/schedule-task-id id)
+        task-id (schedule/ensure-schedule-task! sched
+                                                :session-id session-id
+                                                :started-at started)
         audit-log (atom [])
         budget-state (atom (task-policy/new-schedule-run-llm-budget id))
         prompt* (schedule/augment-prompt-with-recovery-context id prompt)
         execution-context (schedule-tool-context id trusted? audit-log)]
     (try
+      (schedule/bind-task! id task-id)
       (when resumed-session-id
         (db/set-session-active! session-id true))
       (wm/ensure-wm! session-id)
@@ -156,7 +239,8 @@
                    "Resumed a scheduled prompt run from the last checkpoint."
                    "Started a scheduled prompt run.")
         :resumed? (boolean resumed-session-id)
-        :session-id session-id})
+        :session-id session-id
+        :task-id task-id})
       (let [result (binding [llm/*request-budget-guard*
                              (fn [_request]
                                (task-policy/throw-if-schedule-run-llm-budget-exhausted!
@@ -169,13 +253,18 @@
                      (agent/process-message session-id
                                             prompt*
                                             :channel :scheduler
+                                            :task-id task-id
+                                            :runtime-op (if (= task-id existing-task-id)
+                                                          :resume
+                                                          :start)
                                             :tool-context execution-context))]
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
                                :status :success
                                :actions @audit-log
-                               :meta {:llm-budget @budget-state}
+                               :meta {:task-id task-id
+                                      :llm-budget @budget-state}
                                :result (str result)})
         (schedule/record-task-success! id result))
       (catch Exception e
@@ -188,7 +277,8 @@
                                            :budget-exhausted
                                            :error)
                                  :actions @audit-log
-                                 :meta {:llm-budget @budget-state}
+                                 :meta {:task-id task-id
+                                        :llm-budget @budget-state}
                                  :error (.getMessage e)})
           (schedule/record-task-failure! id (.getMessage e))))
       (finally

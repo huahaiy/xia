@@ -59,6 +59,10 @@
         (subs s 0 max-len)
         s))))
 
+(defn- nonblank-str
+  [value]
+  (some-> value str str/trim not-empty))
+
 (defn- checkpoint-doc
   [checkpoint]
   (when (map? checkpoint)
@@ -206,6 +210,7 @@
       {:schedule-id           (:schedule.state/schedule-id e)
        :status                (:schedule.state/status e)
        :phase                 (:schedule.state/phase e)
+       :task-id               (:schedule.state/task-id e)
        :checkpoint            (read-checkpoint-doc (:schedule.state/checkpoint e))
        :last-policy           (read-policy-doc (:schedule.state/last-policy e))
        :checkpoint-at         (:schedule.state/checkpoint-at e)
@@ -217,6 +222,72 @@
        :last-recovery-hint    (:schedule.state/last-recovery-hint e)
        :consecutive-failures  (or (:schedule.state/consecutive-failures e) 0)
        :backoff-until         (:schedule.state/backoff-until e)})))
+
+(defn schedule-task-id
+  "Return the bound task id for a schedule when it still exists."
+  [schedule-id]
+  (when-let [task-id (:task-id (task-state schedule-id))]
+    (when (db/get-task task-id)
+      task-id)))
+
+(declare bind-task!)
+
+(defn schedule-task-title
+  "Derive a stable task title for a schedule-backed task."
+  [{:keys [id name type prompt tool-id]}]
+  (or (nonblank-str name)
+      (when (= :prompt type)
+        (truncate-string (nonblank-str prompt) 240))
+      (when tool-id
+        (str "Run scheduled tool " (clojure.core/name tool-id)))
+      (str "Scheduled task " (clojure.core/name id))))
+
+(defn ensure-schedule-task!
+  "Create or reuse the durable task record bound to a schedule."
+  [{:keys [id type trusted?] :as sched} & {:keys [session-id started-at]}]
+  (let [existing-task-id (schedule-task-id id)
+        existing-task    (some-> existing-task-id db/get-task)
+        title            (schedule-task-title sched)
+        summary          title
+        meta             (merge (:meta existing-task)
+                                {:schedule-id id
+                                 :schedule-type type
+                                 :trusted? (boolean trusted?)})]
+    (if existing-task
+      (do
+        (db/update-task! existing-task-id
+                         (cond-> {:channel :scheduler
+                          :type :schedule
+                          :state :running
+                          :title title
+                          :summary summary
+                          :meta meta
+                          :stop-reason nil
+                          :error nil
+                          :finished-at nil}
+                           session-id (assoc :session-id session-id
+                                             :session-role :schedule-run)))
+        (bind-task! id existing-task-id)
+        existing-task-id)
+      (let [task-id (db/create-task! {:session-id session-id
+                                      :session-role :origin
+                                      :channel :scheduler
+                                      :type :schedule
+                                      :state :running
+                                      :title title
+                                      :summary summary
+                                      :meta meta
+                                      :started-at (or started-at (java.util.Date.))})]
+        (bind-task! id task-id)
+        task-id))))
+
+(defn bind-task!
+  "Bind a durable task id to a schedule state record."
+  [schedule-id task-id]
+  (when task-id
+    (db/transact! [{:schedule.state/schedule-id schedule-id
+                    :schedule.state/task-id task-id}])
+    (task-state schedule-id)))
 
 (defn resumable-session-id
   "Return the session id that should be reused for a recovering scheduled prompt,
@@ -237,11 +308,14 @@
   [schedule-id checkpoint]
   (let [now            (java.util.Date.)
         state-eid      (schedule-state-eid schedule-id)
-        checkpoint-doc (checkpoint-doc checkpoint)]
+        checkpoint-doc (checkpoint-doc checkpoint)
+        task-id        (or (:task-id checkpoint)
+                           (:task-id (task-state schedule-id)))]
     (db/transact!
       (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
                         :schedule.state/status      :running
                         :schedule.state/checkpoint-at now}
+                 task-id (assoc :schedule.state/task-id task-id)
                  (:phase checkpoint) (assoc :schedule.state/phase (:phase checkpoint))
                  checkpoint-doc (assoc :schedule.state/checkpoint checkpoint-doc))]
         state-eid

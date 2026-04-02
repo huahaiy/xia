@@ -3478,6 +3478,65 @@
             (is (= 2 (count (filter :worker? worker-sessions))))
             (is (every? false? (map :active? (filter :worker? worker-sessions))))))))))
 
+(deftest run-branch-tasks-create-explicit-branch-task-records
+  (let [parent-session-id (db/create-session! :terminal)
+        parent-task-id    (db/create-task! {:session-id parent-session-id
+                                            :channel :terminal
+                                            :type :interactive
+                                            :state :running
+                                            :title "Parent task"})
+        seen              (atom [])]
+    (binding [prompt/*interaction-context* {:channel :terminal
+                                            :session-id parent-session-id
+                                            :task-id parent-task-id
+                                            :request-id "req-parent"
+                                            :correlation-id "corr-root"}]
+      (with-redefs [xia.agent/process-message
+                    (fn [session-id message & {:keys [channel task-id runtime-op]}]
+                      (swap! seen conj {:session-id session-id
+                                        :message message
+                                        :channel channel
+                                        :task-id task-id
+                                        :runtime-op runtime-op})
+                      "branch result")]
+        (let [result        (agent/run-branch-tasks
+                             [{:task "site a" :prompt "inspect site a"}]
+                             :session-id parent-session-id
+                             :max-parallel 1)
+              branch-result (first (:results result))
+              child-task-id (:task-id branch-result)
+              child-task    (db/get-task child-task-id)
+              parent-task   (db/get-task parent-task-id)
+              parent-tip    (some-> parent-task :autonomy-state :stack peek)]
+          (is (= 1 (:branch_count result)))
+          (is (= "completed" (:status branch-result)))
+          (is (= parent-task-id (:parent-id child-task)))
+          (is (= :branch (:channel child-task)))
+          (is (= :branch (:type child-task)))
+          (is (= "site a" (:title child-task)))
+          (is (= (:session-id branch-result) (:session-id child-task)))
+          (is (= :child-task (:kind parent-tip)))
+          (is (= child-task-id (:child-task-id parent-tip)))
+          (is (= [{:session-id (:session-id child-task)
+                   :message (str "You are a temporary branch worker for the main Xia agent.\n"
+                                 "You are not talking directly to the user. Work independently on the assigned subtask and report back to the parent agent.\n"
+                                 "Rules:\n"
+                                 "- Do not ask the user questions.\n"
+                                 "- Use tools only when they help complete this subtask.\n"
+                                 "- Do not create schedules, request approvals, or perform privileged actions.\n"
+                                 "- Focus only on the assigned subtask.\n"
+                                 "- Return concise, factual results for the parent agent.\n"
+                                 "- End with short sections titled Findings, Evidence, and Open Questions.\n\n"
+                                 "Assigned subtask:\n"
+                                 "site a"
+                                 "\n\n"
+                                 "What to do:\n"
+                                 "inspect site a")
+                   :channel :branch
+                   :task-id child-task-id
+                   :runtime-op :start}]
+                 @seen)))))))
+
 (deftest run-branch-tasks-captures-throwable-detail-and-trace
   (let [parent-session-id (db/create-session! :terminal)]
     (binding [prompt/*interaction-context* {:channel :terminal
