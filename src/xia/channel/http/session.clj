@@ -526,14 +526,13 @@
           body              (cond-> {:session_id (str session-id)
                                      :role       "assistant"
                                      :content    response
-                                     :message    (some-> assistant-message
-                                                         (session-message->body deps))}
+                                     :message    (when assistant-message
+                                                   (session-message->body deps assistant-message))}
                                task (assoc :task (task->body deps task))
                               task (assoc :task_id (some-> (:id task) str))
                               (:current-turn-id task) (assoc :current_turn_id
                                                              (str (:current-turn-id task))))]
       (json-response* deps 200 body))
-    (finally
       (touch-rest-session!* deps session-id))))
 
 (defn- handle-chat-sync
