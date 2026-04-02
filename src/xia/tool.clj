@@ -18,6 +18,7 @@
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]
+            [xia.task-policy :as task-policy]
             [xia.working-memory :as wm]))
 
 ;; ---------------------------------------------------------------------------
@@ -309,10 +310,7 @@
 (defn- explicit-approval-policy
   [tool]
   (when-let [approval (or (:tool/approval tool) (:approval tool))]
-    {:policy (cond
-               (keyword? approval) approval
-               (string? approval) (keyword approval)
-               :else :auto)}))
+    {:policy (task-policy/normalize-approval-policy approval)}))
 
 (defn- inferred-approval-policy
   [tool]
@@ -328,13 +326,8 @@
 
 (defn- tool-approval-policy
   [tool]
-  (let [{:keys [policy] :as decision} (merge (inferred-approval-policy tool)
-                                             (explicit-approval-policy tool))]
-    (assoc decision :policy (case policy
-                              :session :session
-                              :always  :always
-                              :auto    :auto
-                              :auto))))
+  (task-policy/tool-approval-policy tool
+                                    (inferred-approval-policy tool)))
 
 (defn- tool-channel-compatible?
   [tool context]
@@ -611,78 +604,76 @@
                                  :arguments   arguments
                                  :policy      policy
                                  :reason      reason}]
-    (cond
-      bypass?
-      {:allowed? true
-       :policy   policy
-       :mode     :autonomous-bypass}
+    (letfn [(record-decision [decision]
+              (prompt/policy-decision! (assoc decision
+                                              :decision-type :approval-policy
+                                              :tool-id tool-id
+                                              :tool-name tool-name))
+              decision)
+            (interactive-decision []
+              (try
+                (prompt/status! {:state    :waiting
+                                 :phase    :approval
+                                 :message  (str "Waiting for approval for " tool-name)
+                                 :tool-id  tool-id
+                                 :tool-name tool-name})
+                (if (prompt/approve! request)
+                  (do
+                    (remember-session-approval! session-id approval-key)
+                    {:allowed? true
+                     :policy   policy
+                     :mode     :interactive
+                     :reason   reason})
+                  {:allowed? false
+                   :policy   policy
+                   :mode     :denied
+                   :reason   reason
+                   :error    (str "user denied approval for privileged tool "
+                                  (name tool-id))})
+                (catch Exception e
+                  {:allowed? false
+                   :policy   policy
+                   :mode     :approval-error
+                   :reason   reason
+                   :error    (.getMessage e)})))]
+      (record-decision
+       (cond
+         bypass?
+         {:allowed? true
+          :policy   policy
+          :mode     :autonomous-bypass
+          :reason   reason}
 
-      (and autonomous? (not= :auto policy))
-      {:allowed? false
-       :policy   policy
-       :mode     :autonomous-blocked
-       :error    (autonomous-block-message tool context)}
+         (and autonomous? (not= :auto policy))
+         {:allowed? false
+          :policy   policy
+          :mode     :autonomous-blocked
+          :reason   reason
+          :error    (autonomous-block-message tool context)}
 
-      :else
-      (case policy
-        :auto
-        {:allowed? true
-         :policy   policy
-         :mode     :not-required}
+         :else
+         (case policy
+           :auto
+           {:allowed? true
+            :policy   policy
+            :mode     :not-required
+            :reason   reason}
 
-        :session
-        (if (and session-id (approved-for-session? session-id approval-key))
-          {:allowed? true
-           :policy   policy
-           :mode     :session-cached}
-          (try
-            (prompt/status! {:state    :waiting
-                             :phase    :approval
-                             :message  (str "Waiting for approval for " tool-name)
-                             :tool-id  tool-id
-                             :tool-name tool-name})
-            (if (prompt/approve! request)
-              (do
-                (remember-session-approval! session-id approval-key)
-                {:allowed? true
-                 :policy   policy
-                 :mode     :interactive})
-              {:allowed? false
-               :policy   policy
-               :mode     :denied
-               :error    (str "user denied approval for privileged tool "
-                              (name tool-id))})
-            (catch Exception e
-              {:allowed? false
-               :policy   policy
-               :mode     :approval-error
-               :error    (.getMessage e)})))
+           :session
+           (if (and session-id (approved-for-session? session-id approval-key))
+             {:allowed? true
+              :policy   policy
+              :mode     :session-cached
+              :reason   reason}
+             (interactive-decision))
 
-        :always
-        (try
-          (prompt/status! {:state    :waiting
-                           :phase    :approval
-                           :message  (str "Waiting for approval for " tool-name)
-                           :tool-id  tool-id
-                           :tool-name tool-name})
-          (if (prompt/approve! request)
-            {:allowed? true
-             :policy   policy
-             :mode     :interactive}
-            {:allowed? false
-             :policy   policy
-             :mode     :denied
-             :error    (str "user denied approval for privileged tool "
-                            (name tool-id))})
-          (catch Exception e
-            {:allowed? false
-             :policy   policy
-             :mode     :approval-error
-             :error    (.getMessage e)}))
+           :always
+           (interactive-decision)
 
-        {:allowed? true
-         :policy   policy
-         :mode     :not-required}))))
+           {:allowed? true
+            :policy   policy
+            :mode     :not-required
+            :reason   reason}))))))
 
 (defn execute-tool
   "Execute a tool by id with the given arguments map."
@@ -716,7 +707,14 @@
                    (ensure-approved tool-id
                                     tool
                                     arguments
-                                    context)))]
+                                    context)))
+                 _ (prompt/policy-decision! {:decision-type :execution-policy
+                                             :tool-id tool-id
+                                             :tool-name (or (:tool/name tool) (name tool-id))
+                                             :allowed? allowed?
+                                             :policy policy
+                                             :mode mode
+                                             :error error})]
              (if allowed?
                (do
                  (prompt/status! {:state    :running

@@ -564,6 +564,22 @@
                            :policy   (some-> (:policy req) name)}})
       approved?)))
 
+(defn policy-decision!
+  "Record a policy decision for the current interaction context.
+   Used to persist explicit approval-policy and execution-policy decisions."
+  [decision]
+  (invoke-runtime-hook! :task-runtime/on-policy-decision decision)
+  (audit/log! *interaction-context*
+              {:actor :assistant
+               :type :policy-decision
+               :tool-id (some-> (:tool-id decision) name)
+               :data (into {}
+                           (keep (fn [[k v]]
+                                   (when (some? v)
+                                     [k (if (keyword? v) (name v) v)])))
+                           decision)})
+  nil)
+
 (defn approval-available?
   "True if an approval handler is registered."
   []

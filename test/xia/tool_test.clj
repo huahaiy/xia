@@ -509,6 +509,41 @@
              :approval-mode "autonomous-bypass"}]
            (mapv #(dissoc % :at) @audit-log)))))
 
+(deftest privileged-tool-emits-separate-approval-and-execution-policy-decisions
+  (db/install-tool! {:id          :policy-tool
+                     :name        "policy-tool"
+                     :description "Policy tool"
+                     :approval    :always
+                     :handler     "(fn [_] {\"status\" \"ok\"})"})
+  (tool/load-tool! :policy-tool)
+  (let [decisions  (atom [])
+        session-id (random-uuid)]
+    (prompt/register-approval! :terminal (fn [_] true))
+    (try
+      (is (= {"status" "ok"}
+             (tool/execute-tool :policy-tool {}
+                                {:channel :terminal
+                                 :session-id session-id
+                                 :task-runtime/on-policy-decision
+                                 (fn [decision]
+                                   (swap! decisions conj
+                                          (select-keys decision
+                                                       [:decision-type :tool-id :allowed? :policy :mode])))})))
+      (is (= [{:decision-type :approval-policy
+               :tool-id :policy-tool
+               :allowed? true
+               :policy :always
+               :mode :interactive}
+              {:decision-type :execution-policy
+               :tool-id :policy-tool
+               :allowed? true
+               :policy :always
+               :mode :interactive}]
+             @decisions))
+      (finally
+        (prompt/register-approval! :terminal nil)
+        (tool/clear-session-approvals! session-id)))))
+
 (deftest execution-mode-controls-parallel-safety
   (db/install-tool! {:id             :parallel-tool
                      :name           "parallel-tool"

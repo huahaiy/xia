@@ -26,6 +26,8 @@
     :system-note (case (get-in item [:data :kind])
                    "input-response" :input.received
                    "approval-decision" :approval.decided
+                   "budget-exhausted" :task.budget-exhausted
+                   "policy-decision" :task.policy-decision
                    :task.note)
     (keyword (str "item." (name (:type item))))))
 

@@ -427,7 +427,34 @@
                                             :tool-name tool-label
                                             :approved (boolean approved?)}
                                      tool-id (assoc :tool-id (name tool-id))
-                                     policy (assoc :policy (name policy)))}))))})
+                                     policy (assoc :policy (name policy)))}))))
+
+   :task-runtime/on-policy-decision
+   (fn [{:keys [tool-id tool-name decision-type allowed? policy mode reason error]}]
+     (let [tool-label (or tool-name (some-> tool-id name) "tool")
+           summary (str (case decision-type
+                          :approval-policy "Approval policy"
+                          :execution-policy "Execution policy"
+                          "Policy")
+                        " "
+                        (if allowed? "allowed" "blocked")
+                        " for "
+                        tool-label)]
+       (when-let [{:keys [task-turn-id]} @runtime-task]
+         (record-task-item! task-turn-id
+                            {:type :system-note
+                             :status (if allowed? :success :error)
+                             :tool-id tool-label
+                             :summary summary
+                             :data (cond-> {:kind "policy-decision"
+                                            :tool-name tool-label
+                                            :allowed (boolean allowed?)}
+                                     tool-id (assoc :tool-id (name tool-id))
+                                     decision-type (assoc :decision-type (name decision-type))
+                                     policy (assoc :policy (name policy))
+                                     mode (assoc :mode (name mode))
+                                     reason (assoc :reason reason)
+                                     error (assoc :error error))}))))})
 
 (defn pause-task!
   [deps task-id]

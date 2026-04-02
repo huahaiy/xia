@@ -12,6 +12,7 @@
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
+            [xia.task-event :as task-event]
             [xia.tool :as tool]
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory :as wm]))
@@ -2011,7 +2012,18 @@
                   xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
       (let [result (agent/process-message session-id "keep going" :channel :terminal)]
         (is (str/includes? result "Spent the budget."))
-        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative token budget (10/10)."))))
+        (is (str/includes? result "Note: I stopped this turn after reaching the cumulative token budget (10/10)."))
+        (let [task (db/current-session-task session-id)
+              turns (db/task-turns (:id task))
+              turn-items (into {}
+                               (map (fn [turn]
+                                      [(:id turn) (db/turn-items (:id turn))]))
+                               turns)
+              event-types (mapv :type (task-event/task-events task turns turn-items))]
+          (is (some #(and (= :system-note (:type %))
+                          (= "budget-exhausted" (get-in % [:data :kind])))
+                    (db/turn-items (:id (last turns)))))
+          (is (some #{:task.budget-exhausted} event-types)))))
     (is (= 1 @llm-calls))))
 
 (deftest process-message-counts-context-llm-calls-against-the-turn-budget

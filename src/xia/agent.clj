@@ -24,6 +24,7 @@
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
+            [xia.task-policy :as task-policy]
             [xia.tool :as tool]
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
@@ -44,15 +45,10 @@
 (def ^:private default-supervisor-phase-timeout-ms 30000)
 (def ^:private default-supervisor-llm-timeout-ms 120000)
 (def ^:private default-supervisor-tool-timeout-ms 120000)
-(def ^:private default-supervisor-max-identical-iterations 3)
-(def ^:private default-supervisor-semantic-loop-threshold 0.88)
 (def ^:private default-supervisor-max-restarts 1)
 (def ^:private default-supervisor-restart-backoff-ms 100)
 (def ^:private default-supervisor-restart-grace-ms 1000)
 (def ^:private default-task-control-wait-ms 10000)
-(def ^:private default-max-turn-llm-calls 600)
-(def ^:private default-max-turn-total-tokens 2000000)
-(def ^:private default-max-turn-wall-clock-ms 21600000)
 (defonce ^:private active-session-turns (atom #{}))
 (defonce ^:private active-session-runs (atom {}))
 (defonce ^:private active-task-runs (atom {}))
@@ -207,11 +203,6 @@
   (cfg/positive-long :agent/supervisor-tool-timeout-ms
                      default-supervisor-tool-timeout-ms))
 
-(defn- supervisor-max-identical-iterations
-  []
-  (cfg/positive-long :agent/supervisor-max-identical-iterations
-                     default-supervisor-max-identical-iterations))
-
 (defn- supervisor-max-restarts
   []
   (cfg/positive-long :agent/supervisor-max-restarts
@@ -231,21 +222,6 @@
   []
   (cfg/positive-long :agent/task-control-wait-ms
                      default-task-control-wait-ms))
-
-(defn- max-turn-llm-calls
-  []
-  (cfg/positive-long :agent/max-turn-llm-calls
-                     default-max-turn-llm-calls))
-
-(defn- max-turn-total-tokens
-  []
-  (cfg/positive-long :agent/max-turn-total-tokens
-                     default-max-turn-total-tokens))
-
-(defn- max-turn-wall-clock-ms
-  []
-  (cfg/positive-long :agent/max-turn-wall-clock-ms
-                     default-max-turn-wall-clock-ms))
 
 (defn- new-request-id
   []
@@ -833,143 +809,6 @@
   []
   (long (System/currentTimeMillis)))
 
-(defn- parse-long-value
-  [value]
-  (cond
-    (integer? value)
-    (long value)
-
-    (number? value)
-    (long value)
-
-    (string? value)
-    (try
-      (Long/parseLong (str/trim value))
-      (catch Exception _
-        nil))
-
-    :else
-    nil))
-
-(defn- usage-value
-  [usage key-name]
-  (when (map? usage)
-    (some-> (or (get usage key-name)
-                (get usage (name key-name))
-                (get usage (keyword (name key-name))))
-            parse-long-value)))
-
-(defn- new-turn-llm-budget
-  [session-id channel]
-  {:session-id session-id
-   :channel channel
-   :started-at-ms (current-time-ms)
-   :llm-call-count 0
-   :llm-total-duration-ms 0
-   :prompt-tokens 0
-   :completion-tokens 0
-   :total-tokens 0
-   :max-llm-calls (long (max-turn-llm-calls))
-   :max-total-tokens (long (max-turn-total-tokens))
-   :max-wall-clock-ms (long (max-turn-wall-clock-ms))})
-
-(defn- record-turn-llm-request!
-  [turn-budget-state {:keys [usage duration-ms error]}]
-  (when turn-budget-state
-    (swap! turn-budget-state
-           (fn [budget]
-             (let [prompt-tokens (or (usage-value usage "prompt_tokens") 0)
-                   completion-tokens (or (usage-value usage "completion_tokens")
-                                         (usage-value usage "output_tokens")
-                                         0)
-                   total-tokens (or (usage-value usage "total_tokens")
-                                    (+ prompt-tokens completion-tokens))]
-               (cond-> (-> budget
-                           (update :llm-call-count (fnil inc 0))
-                           (update :llm-total-duration-ms (fnil + 0) (long (or duration-ms 0)))
-                           (update :prompt-tokens (fnil + 0) (long prompt-tokens))
-                           (update :completion-tokens (fnil + 0) (long completion-tokens))
-                           (update :total-tokens (fnil + 0) (long total-tokens))
-                           (assoc :last-llm-duration-ms (long (or duration-ms 0))
-                                  :last-llm-error (when error
-                                                    (truncate-summary (.getMessage ^Throwable error)
-                                                                      240))
-                                  :last-llm-at-ms (current-time-ms)))
-                 error
-                 (update :llm-error-count (fnil inc 0))))))))
-
-(defn- turn-llm-budget-status*
-  [budget]
-  (let [elapsed-ms (- (current-time-ms) (long (:started-at-ms budget 0)))
-        status {:session-id (:session-id budget)
-                :channel (:channel budget)
-                :llm-call-count (long (:llm-call-count budget 0))
-                :total-tokens (long (:total-tokens budget 0))
-                :prompt-tokens (long (:prompt-tokens budget 0))
-                :completion-tokens (long (:completion-tokens budget 0))
-                :elapsed-ms elapsed-ms
-                :max-llm-calls (long (:max-llm-calls budget 0))
-                :max-total-tokens (long (:max-total-tokens budget 0))
-                :max-wall-clock-ms (long (:max-wall-clock-ms budget 0))}]
-    (cond
-      (>= (:llm-call-count status) (:max-llm-calls status))
-      (assoc status :kind :llm-calls)
-
-      (>= (:total-tokens status) (:max-total-tokens status))
-      (assoc status :kind :tokens)
-
-      (>= (:elapsed-ms status) (:max-wall-clock-ms status))
-      (assoc status :kind :wall-clock)
-
-      :else
-      nil)))
-
-(defn- turn-llm-budget-status
-  [turn-budget-state]
-  (when turn-budget-state
-    (turn-llm-budget-status* @turn-budget-state)))
-
-(defn- format-duration-ms
-  [value]
-  (let [ms (long (or value 0))]
-    (cond
-      (>= ms 60000)
-      (format "%.1fm" (/ ms 60000.0))
-
-      (>= ms 1000)
-      (format "%.1fs" (/ ms 1000.0))
-
-      :else
-      (str ms "ms"))))
-
-(defn- turn-llm-budget-summary
-  [{:keys [kind llm-call-count max-llm-calls total-tokens max-total-tokens elapsed-ms
-           max-wall-clock-ms]}]
-  (case kind
-    :llm-calls
-    (str "cumulative LLM call budget (" llm-call-count "/" max-llm-calls ")")
-
-    :tokens
-    (str "cumulative token budget (" total-tokens "/" max-total-tokens ")")
-
-    :wall-clock
-    (str "wall-clock budget (" (format-duration-ms elapsed-ms)
-         "/" (format-duration-ms max-wall-clock-ms) ")")
-
-    "cumulative turn budget"))
-
-(defn- turn-llm-budget-ex
-  [turn-budget-state]
-  (when-let [status (turn-llm-budget-status turn-budget-state)]
-    (ex-info (str "Reached the " (turn-llm-budget-summary status))
-             (merge {:type :turn-budget-exhausted}
-                    status))))
-
-(defn- throw-if-turn-llm-budget-exhausted!
-  [turn-budget-state]
-  (when-let [budget-ex (turn-llm-budget-ex turn-budget-state)]
-    (throw budget-ex)))
-
 (defn- turn-budget-next-step
   [parsed autonomy-state]
   (or (some-> parsed :control :next-step str str/trim not-empty)
@@ -979,7 +818,7 @@
 (defn- turn-budget-note
   [budget-status parsed autonomy-state & {:keys [before-tools?]}]
   (str "Note: I stopped this turn after reaching the "
-       (turn-llm-budget-summary budget-status)
+       (task-policy/turn-llm-budget-summary budget-status)
        "."
        (when before-tools?
          " I did not execute the next requested tool step.")
@@ -1522,7 +1361,7 @@
         {:embedding-cache embedding-cache**
          :same-semantic? (boolean (and similarity
                                        (>= similarity
-                                           default-supervisor-semantic-loop-threshold)))
+                                           (task-policy/supervisor-semantic-loop-threshold))))
          :semantic-similarity similarity
          :semantic-match-source (when similarity :embedding)}))))
 
@@ -2090,7 +1929,7 @@
 (defn- throw-if-identical-iteration-loop!
   [session-id channel iteration max-iterations loop-state autonomy-state control]
   (let [count* (long (or (:count loop-state) 0))
-        limit (long (supervisor-max-identical-iterations))]
+        limit (long (task-policy/supervisor-max-identical-iterations))]
     (when (>= count* limit)
       (let [tip (autonomous/current-frame autonomy-state)]
         (throw (ex-info (str "Autonomous loop made no progress after "
@@ -2288,7 +2127,7 @@
                                (response-content response))
               assistant-content (or (:assistant-text parsed-response)
                                     (response-content response))
-              budget-status (turn-llm-budget-status turn-budget-state)
+              budget-status (task-policy/turn-llm-budget-status turn-budget-state)
               _ (when (zero? round)
                   (emit-intent-event! emit-event!
                                       execution-context
@@ -2530,15 +2369,15 @@
                                              user-message)
                       initial-wm-query-fingerprint (wm-query-signature initial-wm-message)
                       turn-budget-state (or *turn-llm-budget-state*
-                                            (atom (new-turn-llm-budget session-id
-                                                                       channel)))]
+                                            (atom (task-policy/new-turn-llm-budget session-id
+                                                                                   channel)))]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
                   (binding [*turn-llm-budget-state* turn-budget-state
                             llm/*request-budget-guard* (fn [_request]
-                                                         (throw-if-turn-llm-budget-exhausted!
+                                                         (task-policy/throw-if-turn-llm-budget-exhausted!
                                                           turn-budget-state))
                             llm/*request-observer* (fn [request]
-                                                     (record-turn-llm-request!
+                                                     (task-policy/record-turn-llm-request!
                                                       turn-budget-state
                                                       request))]
                     (loop [iteration 1
@@ -2662,6 +2501,17 @@
                                                                 parsed
                                                                 updated-autonomy-state
                                                                 :before-tools? budget-before-tools?))]
+                              (task-runtime/record-task-item! task-turn-id
+                                                              {:type :system-note
+                                                               :status :limit
+                                                               :summary (str "Turn budget exhausted: "
+                                                                             (task-policy/turn-llm-budget-summary budget-status))
+                                                               :data {:kind "budget-exhausted"
+                                                                      :budget-kind (some-> (:kind budget-status) name)
+                                                                      :llm-call-count (:llm-call-count budget-status)
+                                                                      :total-tokens (:total-tokens budget-status)
+                                                                      :elapsed-ms (:elapsed-ms budget-status)
+                                                                      :before-tools? (boolean budget-before-tools?)}})
                               (persist-assistant-message! session-id
                                                           final-text
                                                           iteration-context
@@ -2699,7 +2549,7 @@
                               (prompt/status! (merge {:state :done
                                                       :phase :complete
                                                       :message (str "Paused after reaching the "
-                                                                    (turn-llm-budget-summary budget-status))}
+                                                                    (task-policy/turn-llm-budget-summary budget-status))}
                                                      (autonomy-status-fields updated-autonomy-state
                                                                              iteration
                                                                              max-iterations*)))
