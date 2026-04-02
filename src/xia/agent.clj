@@ -931,13 +931,16 @@
 
 (defn- save-schedule-checkpoint!
   [execution-context checkpoint]
-  (task-runtime/record-task-item! (:task-turn-id execution-context)
-                                  {:type :checkpoint
-                                   :summary (or (:summary checkpoint)
-                                                (some-> (:phase checkpoint) name)
-                                                "Checkpoint")
-                                   :data (merge (trace-context execution-context)
-                                                checkpoint)})
+  (let [checkpoint* (merge (trace-context execution-context)
+                           checkpoint)]
+    (task-runtime/record-task-item! (:task-turn-id execution-context)
+                                    {:type :checkpoint
+                                     :summary (or (:summary checkpoint*)
+                                                  (some-> (:phase checkpoint*) name)
+                                                  "Checkpoint")
+                                     :data checkpoint*})
+    (task-runtime/save-task-checkpoint! (:task-id execution-context)
+                                        checkpoint*))
   (when-let [schedule-id (:schedule-id execution-context)]
     (try
       (schedule/save-task-checkpoint! schedule-id

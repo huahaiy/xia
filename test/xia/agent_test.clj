@@ -136,6 +136,58 @@
       (finally
         (prompt/register-runtime-event! :terminal nil)))))
 
+(deftest process-message-persists-latest-task-checkpoint
+  (let [session-id (db/create-session! :terminal)]
+    (with-redefs [xia.tool/tool-definitions          (constantly [])
+                  xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                  :provider-id :default})
+                  xia.llm/chat-message               (fn [_messages & _opts]
+                                                       {"content" "All set."})]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (let [task       (first (db/list-tasks {:session-id session-id}))
+          checkpoint (get-in task [:meta :checkpoint])]
+      (is (= :observing (:phase checkpoint)))
+      (is (= session-id (:session-id checkpoint)))
+      (is (string? (:summary checkpoint)))
+      (is (instance? java.util.Date
+                     (get-in task [:meta :checkpoint-at]))))))
+
+(deftest runtime-autonomy-state-recovers-from-durable-task-checkpoint
+  (let [session-id  (db/create-session! :terminal)
+        checkpoint  {:phase :observing
+                     :summary "Need to review the invoice attachments."
+                     :current-focus "Review the invoice"
+                     :next-step "Read the attachment list"
+                     :progress-status :in-progress
+                     :agenda [{:item "Read the attachment list"
+                               :status :in-progress}]
+                     :stack [{:title "Review the invoice"
+                              :summary "Need to review the invoice attachments."
+                              :next-step "Read the attachment list"
+                              :progress-status :in-progress
+                              :agenda [{:item "Read the attachment list"
+                                        :status :in-progress}]}]}
+        task-id     (db/create-task! {:session-id session-id
+                                      :channel :terminal
+                                      :type :interactive
+                                      :state :paused
+                                      :title "Review the invoice"
+                                      :summary "Paused pending follow-up"
+                                      :meta {:checkpoint checkpoint
+                                             :checkpoint-at (java.util.Date.)}})]
+    (wm/ensure-wm! session-id)
+    (wm/clear-autonomy-state! session-id)
+    (db/update-task! task-id {:autonomy-state nil})
+    (let [recovered (task-runtime/runtime-autonomy-state session-id task-id)
+          persisted (db/get-task task-id)]
+      (is (= "Review the invoice"
+             (some-> recovered :stack first :title)))
+      (is (= "Read the attachment list"
+             (some-> recovered :stack first :next-step)))
+      (is (= recovered (:autonomy-state persisted)))
+      (is (= recovered (wm/autonomy-state session-id))))))
+
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
     (with-redefs [xia.tool/tool-definitions          (constantly [])

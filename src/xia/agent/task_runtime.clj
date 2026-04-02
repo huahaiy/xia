@@ -21,7 +21,8 @@
     (f result)
     result))
 
-(declare sanitize-doc-value)
+(declare sanitize-doc-value
+         emit-task-updated-event!)
 
 (defn- merge-task-meta!
   [task-id f]
@@ -67,6 +68,22 @@
   [status]
   (or (sanitize-doc-value status) {}))
 
+(defn- checkpoint-summary
+  [checkpoint]
+  (or (:summary checkpoint)
+      (some-> (:phase checkpoint) name)
+      (some-> (:current-focus checkpoint) str/trim not-empty)
+      "Checkpoint"))
+
+(defn- checkpoint-doc
+  [checkpoint]
+  (when (map? checkpoint)
+    (let [checkpoint* (clean-runtime-status checkpoint)]
+      (when (seq checkpoint*)
+        (assoc checkpoint*
+               :summary
+               (checkpoint-summary checkpoint*))))))
+
 (defn- set-task-runtime-status!
   [task-id status]
   (when task-id
@@ -76,6 +93,78 @@
                                :runtime
                                (clean-runtime-status
                                 (assoc status :updated-at (java.util.Date.))))))))
+
+(defn save-task-checkpoint!
+  [task-id checkpoint]
+  (when-let [checkpoint* (checkpoint-doc checkpoint)]
+    (merge-task-meta! task-id
+                      (fn [meta]
+                        (assoc meta
+                               :checkpoint checkpoint*
+                               :checkpoint-at (java.util.Date.))))
+    (emit-task-updated-event! task-id)))
+
+(defn task-checkpoint
+  [task-or-id]
+  (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
+    (get-in task [:meta :checkpoint])))
+
+(defn task-checkpoint-at
+  [task-or-id]
+  (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
+    (get-in task [:meta :checkpoint-at])))
+
+(defn- checkpoint->autonomy-state
+  [checkpoint]
+  (when-let [checkpoint* (checkpoint-doc checkpoint)]
+    (let [stack      (seq (:stack checkpoint*))
+          title      (or (:current-focus checkpoint*)
+                         (:summary checkpoint*))
+          frame      (cond-> {:title (or title "Recovered task")}
+                       (:summary checkpoint*) (assoc :summary (:summary checkpoint*))
+                       (:next-step checkpoint*) (assoc :next-step (:next-step checkpoint*))
+                       (:progress-status checkpoint*) (assoc :progress-status (:progress-status checkpoint*))
+                       (seq (:agenda checkpoint*)) (assoc :agenda (:agenda checkpoint*)))
+          state      (cond
+                       stack {:stack (vec stack)}
+                       title {:stack [frame]}
+                       :else nil)]
+      (some-> state autonomous/normalize-state))))
+
+(defn task-recovery-brief
+  [task-or-id]
+  (let [task          (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))
+        checkpoint    (task-checkpoint task)
+        checkpoint-at (task-checkpoint-at task)
+        lines         (cond-> []
+                        (:stop-reason task)
+                        (conj (str "Stop reason: " (name (:stop-reason task))))
+
+                        (:error task)
+                        (conj (str "Last error: " (:error task)))
+
+                        checkpoint
+                        (conj (str "Last checkpoint"
+                                   (when-let [phase (:phase checkpoint)]
+                                     (str " [" (name phase) "]"))
+                                   ": "
+                                   (checkpoint-summary checkpoint)))
+
+                        checkpoint-at
+                        (conj (str "Checkpoint at: " checkpoint-at))
+
+                        (:next-step checkpoint)
+                        (conj (str "Next step: " (:next-step checkpoint)))
+
+                        (seq (:agenda checkpoint))
+                        (conj (str "Agenda: "
+                                   (str/join "; "
+                                             (keep :item (:agenda checkpoint)))))
+
+                        (seq (:stack checkpoint))
+                        (conj (str "Stack depth: " (count (:stack checkpoint)))))]
+    (when (seq lines)
+      (str/join "\n" lines))))
 
 (defn- emit-runtime-event!
   [event]
@@ -128,9 +217,11 @@
 
 (defn runtime-autonomy-state
   [session-id task-id]
-  (let [task-state (some-> task-id db/get-task :autonomy-state)
+  (let [task       (some-> task-id db/get-task)
+        task-state (:autonomy-state task)
+        checkpoint-state (checkpoint->autonomy-state (task-checkpoint task))
         wm-state   (wm/autonomy-state session-id)
-        base-state (or task-state wm-state)
+        base-state (or task-state checkpoint-state wm-state)
         reconciled (some-> base-state autonomous/reconcile-child-task-state)]
     (when (and task-id reconciled (not= reconciled task-state))
       (db/update-task! task-id {:autonomy-state reconciled}))

@@ -357,9 +357,12 @@
                task
                (task-runtime/runtime-autonomy-state (:session-id task) (:id task))))
   ([deps task autonomy-state]
-   (let [runtime (get-in task [:meta :runtime])
-         state   (or (:state runtime) (:state task))
-         stack   (stack->body deps autonomy-state)]
+   (let [runtime         (get-in task [:meta :runtime])
+         checkpoint      (task-runtime/task-checkpoint task)
+         checkpoint-at   (task-runtime/task-checkpoint-at task)
+         recovery-brief  (task-runtime/task-recovery-brief task)
+         state           (or (:state runtime) (:state task))
+         stack           (stack->body deps autonomy-state)]
      (cond-> {:id         (some-> (:id task) str)
               :session_id (some-> (:session-id task) str)
               :channel    (some-> (:channel task) name)
@@ -374,6 +377,9 @@
        (:stop-reason task) (assoc :stop_reason (name (:stop-reason task)))
        (:error task) (assoc :error (:error task))
        runtime (assoc :runtime runtime)
+       checkpoint (assoc :checkpoint checkpoint)
+       checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
+       recovery-brief (assoc :recovery_brief recovery-brief)
        (:meta task) (assoc :meta (:meta task))
        autonomy-state (assoc :autonomy_state autonomy-state)
        stack (assoc :stack stack)
@@ -411,6 +417,9 @@
    (let [turns       (db/task-turns (:id task))
          latest-turn (last turns)
          runtime     (get-in task [:meta :runtime])
+         checkpoint  (task-runtime/task-checkpoint task)
+         checkpoint-at (task-runtime/task-checkpoint-at task)
+         recovery-brief (task-runtime/task-recovery-brief task)
          state       (or (:state runtime) (:state task))
          stack       (stack->body deps autonomy-state)]
      (cond-> {:id          (some-> (:id task) str)
@@ -425,6 +434,9 @@
        (:title task) (assoc :title (:title task))
        (:summary task) (assoc :summary (:summary task))
        runtime (assoc :runtime runtime)
+       checkpoint (assoc :checkpoint checkpoint)
+       checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
+       recovery-brief (assoc :recovery_brief recovery-brief)
        stack (assoc :stack stack)
        latest-turn (assoc :latest_turn_state (some-> (:state latest-turn) name))
        latest-turn (assoc :latest_turn_summary (truncate-text* deps (:summary latest-turn) 160))

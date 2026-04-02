@@ -1013,6 +1013,39 @@
       (is (= "user" (get item "role")))
       (is (= {"text" "review the invoice"} (get item "data"))))))
 
+(deftest task-detail-route-returns-durable-checkpoint-and-recovery-brief
+  (let [sid      (db/create-session! :http)
+        task-id  (db/create-task! {:session-id sid
+                                   :channel :http
+                                   :type :interactive
+                                   :state :paused
+                                   :title "Review the invoice"
+                                   :summary "Paused pending follow-up"
+                                   :meta {:checkpoint {:phase :observing
+                                                       :summary "Need to review the invoice attachments."
+                                                       :current-focus "Review the invoice"
+                                                       :next-step "Read the attachment list"
+                                                       :progress-status :in-progress
+                                                       :agenda [{:item "Read the attachment list"
+                                                                 :status :in-progress}]}
+                                          :checkpoint-at (java.util.Date.)}})]
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (get body "task")]
+      (is (= 200 (:status response)))
+      (is (= {"phase" "observing"
+              "summary" "Need to review the invoice attachments."
+              "current-focus" "Review the invoice"
+              "next-step" "Read the attachment list"
+              "progress-status" "in-progress"}
+             (some-> (get task "checkpoint")
+                     (select-keys ["phase" "summary" "current-focus" "next-step" "progress-status"]))))
+      (is (string? (get task "checkpoint_at")))
+      (is (str/includes? (get task "recovery_brief") "Last checkpoint [observing]"))
+      (is (str/includes? (get task "recovery_brief") "Next step: Read the attachment list")))))
+
 (deftest task-detail-route-reconciles-terminal-child-task-tip
   (let [sid           (db/create-session! :http)
         child-task-id (db/create-task! {:session-id sid
