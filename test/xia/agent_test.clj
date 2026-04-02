@@ -186,7 +186,9 @@
       (is (= "Read the attachment list"
              (some-> recovered :stack first :next-step)))
       (is (= recovered (:autonomy-state persisted)))
-      (is (= recovered (wm/autonomy-state session-id))))))
+      (is (= recovered (wm/autonomy-state session-id)))
+      (is (= :checkpoint
+             (get-in persisted [:meta :recovery :last-recovery :source]))))))
 
 (deftest process-message-attaches-to-an-existing-task
   (let [session-id (db/create-session! :terminal)]
@@ -255,11 +257,15 @@
           task         (db/get-task task-id)
           turns        (db/task-turns task-id)
           control-turn (last turns)
-          items        (db/turn-items (:id control-turn))]
+          items        (db/turn-items (:id control-turn))
+          last-stop    (get-in task [:meta :recovery :last-stop])]
       (is (= :paused (:status result)))
       (is (= :paused (:state task)))
       (is (= :paused (:stop-reason task)))
       (is (= "Task paused by user" (:summary task)))
+      (is (= :paused (:state last-stop)))
+      (is (= :paused (:stop-reason last-stop)))
+      (is (= "Task paused by user" (:summary last-stop)))
       (is (= :pause (:operation control-turn)))
       (is (= :completed (:state control-turn)))
       (is (= [:system-note] (mapv :type items)))
@@ -378,12 +384,15 @@
                                                                             :opts opts})
                                                  "ok")]
       (let [result (agent/resume-task! task-id :message "Continue reviewing the invoice")
-            task   (db/get-task task-id)]
+            task   (db/get-task task-id)
+            last-resume (get-in task [:meta :recovery :last-resume])]
         (is (= :running (:status result)))
         (is (= :running (:state task)))
         (is (nil? (:stop-reason task)))
         (is (nil? (:finished-at task)))
         (is (= "Task resumed" (:summary task)))
+        (is (= :resume (:operation last-resume)))
+        (is (= "Continue reviewing the invoice" (:message last-resume)))
         (is (fn? @submitted-work))
         (@submitted-work)
         (is (= [{:session-id session-id
@@ -2324,12 +2333,14 @@
                     %)
                 @statuses))
       (let [task-id          (:id (first (db/list-tasks {:session-id session-id})))
+            task             (db/get-task task-id)
             turn-id          (:id (first (db/task-turns task-id)))
             turn-items       (db/turn-items turn-id)
             status-items     (filter #(= :status (:type %)) turn-items)
             policy-items     (filter #(and (= :system-note (:type %))
                                            (= "policy-decision" (get-in % [:data :kind])))
                                      turn-items)
+            restart-lineage  (get-in task [:meta :recovery :restart-lineage])
             restarting-item  (some #(when (= "Restarting iteration after Agent supervisor stopped a stalled worker during llm phase (attempt 1/1)"
                                                (:summary %))
                                       %)
@@ -2339,17 +2350,26 @@
                 :max-restarts 1
                 :failure-phase "llm"
                 :worker-phase "llm"}
-               (some-> restarting-item
-                       :data
-                       (select-keys [:attempt :max-restarts :failure-phase :worker-phase])))
-        (is (some #(= {:decision-type "restart-policy"
-                       :allowed true
-                       :mode "restarting"
-                       :failure-phase "llm"
-                       :worker-phase "llm"}
-                      (select-keys (:data %)
-                                   [:decision-type :allowed :mode :failure-phase :worker-phase]))
-                  policy-items))))
+               (-> restarting-item
+                   :data
+                   (select-keys [:attempt :max-restarts :failure-phase :worker-phase]))))
+        (is (= 1 (count restart-lineage)))
+        (is (= {:attempt 1
+                :max-restarts 1
+                :failure-phase :llm
+                :worker-phase :llm}
+               (-> restart-lineage
+                   first
+                   (select-keys [:attempt :max-restarts :failure-phase :worker-phase]))))
+        (is (some (fn [item]
+                    (= {:decision-type "restart-policy"
+                        :allowed true
+                        :mode "restarting"
+                        :failure-phase "llm"
+                        :worker-phase "llm"}
+                       (select-keys (:data item)
+                                    [:decision-type :allowed :mode :failure-phase :worker-phase])))
+                  policy-items)))
       (is (= {:state :done
               :phase :complete
               :message "Ready"}

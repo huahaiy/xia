@@ -1028,6 +1028,11 @@
                                                        :progress-status :in-progress
                                                        :agenda [{:item "Read the attachment list"
                                                                  :status :in-progress}]}
+                                          :recovery {:last-stop {:state :paused
+                                                                 :stop-reason :paused
+                                                                 :summary "Paused pending follow-up"}
+                                                     :last-recovery {:source :checkpoint
+                                                                     :summary "Need to review the invoice attachments."}}
                                           :checkpoint-at (java.util.Date.)}})]
     (let [response (#'http/router {:uri            (str "/tasks/" task-id)
                                    :request-method :get
@@ -1036,14 +1041,23 @@
           task     (get body "task")]
       (is (= 200 (:status response)))
       (is (= {"phase" "observing"
-              "summary" "Need to review the invoice attachments."
-              "current-focus" "Review the invoice"
-              "next-step" "Read the attachment list"
-              "progress-status" "in-progress"}
+             "summary" "Need to review the invoice attachments."
+             "current-focus" "Review the invoice"
+             "next-step" "Read the attachment list"
+             "progress-status" "in-progress"}
              (some-> (get task "checkpoint")
                      (select-keys ["phase" "summary" "current-focus" "next-step" "progress-status"]))))
+      (is (= {"last-stop" {"state" "paused"
+                           "stop-reason" "paused"
+                           "summary" "Paused pending follow-up"}
+              "last-recovery" {"source" "checkpoint"
+                               "summary" "Need to review the invoice attachments."}}
+             (some-> (get task "recovery")
+                     (select-keys ["last-stop" "last-recovery"]))))
       (is (string? (get task "checkpoint_at")))
       (is (str/includes? (get task "recovery_brief") "Last checkpoint [observing]"))
+      (is (str/includes? (get task "recovery_brief") "Last stop: Paused pending follow-up"))
+      (is (str/includes? (get task "recovery_brief") "Recovered from: checkpoint"))
       (is (str/includes? (get task "recovery_brief") "Next step: Read the attachment list")))))
 
 (deftest task-detail-route-reconciles-terminal-child-task-tip

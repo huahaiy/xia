@@ -22,7 +22,10 @@
     result))
 
 (declare sanitize-doc-value
+         checkpoint-summary
          emit-task-updated-event!)
+
+(def ^:private restart-lineage-limit 20)
 
 (defn- merge-task-meta!
   [task-id f]
@@ -68,6 +71,92 @@
   [status]
   (or (sanitize-doc-value status) {}))
 
+(defn task-recovery
+  [task-or-id]
+  (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
+    (get-in task [:meta :recovery])))
+
+(defn- update-task-recovery!
+  [task-id f]
+  (when task-id
+    (merge-task-meta! task-id
+                      (fn [meta]
+                        (let [recovery (sanitize-doc-value
+                                        (f (or (:recovery meta) {})))]
+                          (cond-> (or meta {})
+                            recovery (assoc :recovery recovery)
+                            (nil? recovery) (dissoc :recovery)))))
+    (emit-task-updated-event! task-id)))
+
+(defn- stop-recovery-entry
+  [{:keys [state stop-reason summary error finished-at]}]
+  (when (or stop-reason
+            error
+            (contains? #{:paused :cancelled :failed} state))
+    (cond-> {:at (java.util.Date.)}
+      state (assoc :state state)
+      stop-reason (assoc :stop-reason stop-reason)
+      summary (assoc :summary summary)
+      error (assoc :error error)
+      finished-at (assoc :finished-at finished-at))))
+
+(defn- record-task-stop!
+  [task-id attrs]
+  (when-let [entry (stop-recovery-entry attrs)]
+    (update-task-recovery! task-id
+                           (fn [recovery]
+                             (assoc recovery :last-stop entry)))))
+
+(defn- record-task-resume!
+  [task-id operation message]
+  (update-task-recovery! task-id
+                         (fn [recovery]
+                           (assoc recovery
+                                  :last-resume
+                                  (cond-> {:at (java.util.Date.)
+                                           :operation operation}
+                                    message (assoc :message message))))))
+
+(defn- restart-lineage-entry
+  [{:keys [phase attempt max-restarts failure-phase worker-phase message]}]
+  (when (= :restarting phase)
+    (cond-> {:at (java.util.Date.)}
+      attempt (assoc :attempt attempt)
+      max-restarts (assoc :max-restarts max-restarts)
+      failure-phase (assoc :failure-phase failure-phase)
+      worker-phase (assoc :worker-phase worker-phase)
+      message (assoc :message message))))
+
+(defn- restart-lineage-key
+  [entry]
+  (select-keys entry [:attempt :max-restarts :failure-phase :worker-phase :message]))
+
+(defn- record-task-restart!
+  [task-id status]
+  (when-let [entry (restart-lineage-entry status)]
+    (update-task-recovery! task-id
+                           (fn [recovery]
+                             (let [lineage (vec (or (:restart-lineage recovery) []))
+                                   lineage* (if (= (some-> lineage last restart-lineage-key)
+                                                   (restart-lineage-key entry))
+                                              lineage
+                                              (->> (conj lineage entry)
+                                                   (take-last restart-lineage-limit)
+                                                   vec))]
+                               (assoc recovery
+                                      :last-restart entry
+                                      :restart-lineage lineage*))))))
+
+(defn- record-task-recovery-source!
+  [task-id source checkpoint]
+  (update-task-recovery! task-id
+                         (fn [recovery]
+                           (assoc recovery
+                                  :last-recovery
+                                  (cond-> {:at (java.util.Date.)
+                                           :source source}
+                                    checkpoint (assoc :summary (checkpoint-summary checkpoint)))))))
+
 (defn- checkpoint-summary
   [checkpoint]
   (or (:summary checkpoint)
@@ -92,7 +181,8 @@
                         (assoc meta
                                :runtime
                                (clean-runtime-status
-                                (assoc status :updated-at (java.util.Date.))))))))
+                                (assoc status :updated-at (java.util.Date.))))))
+    (record-task-restart! task-id status)))
 
 (defn save-task-checkpoint!
   [task-id checkpoint]
@@ -136,9 +226,17 @@
   (let [task          (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))
         checkpoint    (task-checkpoint task)
         checkpoint-at (task-checkpoint-at task)
+        recovery      (task-recovery task)
+        last-stop     (:last-stop recovery)
+        last-resume   (:last-resume recovery)
+        last-recovery (:last-recovery recovery)
+        restart-lineage (:restart-lineage recovery)
         lines         (cond-> []
                         (:stop-reason task)
                         (conj (str "Stop reason: " (name (:stop-reason task))))
+
+                        (:summary last-stop)
+                        (conj (str "Last stop: " (:summary last-stop)))
 
                         (:error task)
                         (conj (str "Last error: " (:error task)))
@@ -153,6 +251,12 @@
                         checkpoint-at
                         (conj (str "Checkpoint at: " checkpoint-at))
 
+                        (:source last-recovery)
+                        (conj (str "Recovered from: " (name (:source last-recovery))))
+
+                        (:summary last-recovery)
+                        (conj (str "Recovery summary: " (:summary last-recovery)))
+
                         (:next-step checkpoint)
                         (conj (str "Next step: " (:next-step checkpoint)))
 
@@ -162,7 +266,16 @@
                                              (keep :item (:agenda checkpoint)))))
 
                         (seq (:stack checkpoint))
-                        (conj (str "Stack depth: " (count (:stack checkpoint)))))]
+                        (conj (str "Stack depth: " (count (:stack checkpoint))))
+
+                        (:operation last-resume)
+                        (conj (str "Last resume: "
+                                   (name (:operation last-resume))
+                                   (when-let [message (:message last-resume)]
+                                     (str " - " message))))
+
+                        (seq restart-lineage)
+                        (conj (str "Restart attempts: " (count restart-lineage))))]
     (when (seq lines)
       (str/join "\n" lines))))
 
@@ -223,6 +336,8 @@
         wm-state   (wm/autonomy-state session-id)
         base-state (or task-state checkpoint-state wm-state)
         reconciled (some-> base-state autonomous/reconcile-child-task-state)]
+    (when (and task-id checkpoint-state (nil? task-state) (nil? wm-state))
+      (record-task-recovery-source! task-id :checkpoint (task-checkpoint task)))
     (when (and task-id reconciled (not= reconciled task-state))
       (db/update-task! task-id {:autonomy-state reconciled}))
     (when (and session-id reconciled (not= reconciled wm-state))
@@ -361,6 +476,7 @@
   [task-id attrs]
   (when task-id
     (db/update-task! task-id attrs)
+    (record-task-stop! task-id attrs)
     (emit-task-updated-event! task-id)))
 
 (defn sync-runtime-task-turn!
@@ -685,10 +801,10 @@
         :else
         (do
           (record-task-control-turn! task-id :pause "Task paused by user")
-          (db/update-task! task-id
-                           {:state :paused
-                            :stop-reason :paused
-                            :summary "Task paused by user"})
+          (sync-runtime-task! task-id
+                              {:state :paused
+                               :stop-reason :paused
+                               :summary "Task paused by user"})
           {:status :paused
            :task-id task-id
            :session-id session-id
@@ -722,11 +838,11 @@
         :else
         (do
           (record-task-control-turn! task-id :stop "Task stopped by user")
-          (db/update-task! task-id
-                           {:state :cancelled
-                            :stop-reason :stopped
-                            :summary "Task stopped by user"
-                            :finished-at (java.util.Date.)})
+          (sync-runtime-task! task-id
+                              {:state :cancelled
+                               :stop-reason :stopped
+                               :summary "Task stopped by user"
+                               :finished-at (java.util.Date.)})
           {:status :stopped
            :task-id task-id
            :session-id session-id
@@ -769,12 +885,13 @@
                     :runtime-op :resume
                     :persist-message? false))]
           (do
-            (db/update-task! task-id
-                             {:state :running
-                              :stop-reason nil
-                              :error nil
-                              :finished-at nil
-                              :summary "Task resumed"})
+            (sync-runtime-task! task-id
+                                {:state :running
+                                 :stop-reason nil
+                                 :error nil
+                                 :finished-at nil
+                                 :summary "Task resumed"})
+            (record-task-resume! task-id :resume message*)
             {:status :running
              :task-id task-id
              :session-id session-id})
@@ -811,10 +928,10 @@
         :else
         (do
           (record-task-control-turn! task-id :interrupt "Task interrupted by user")
-          (db/update-task! task-id
-                           {:state :paused
-                            :stop-reason :interrupted
-                            :summary "Task interrupted by user"})
+          (sync-runtime-task! task-id
+                              {:state :paused
+                               :stop-reason :interrupted
+                               :summary "Task interrupted by user"})
           {:status :paused
            :task-id task-id
            :session-id session-id
@@ -875,12 +992,13 @@
         (if ((:cancel-session! deps) session-id "task steer requested")
           (if-let [_future (submit-steer! interrupted-turn-id)]
             (do
-              (db/update-task! task-id
-                               {:state :running
-                                :stop-reason nil
-                                :error nil
-                                :finished-at nil
-                                :summary (task-title deps message*)})
+              (sync-runtime-task! task-id
+                                  {:state :running
+                                   :stop-reason nil
+                                   :error nil
+                                   :finished-at nil
+                                   :summary (task-title deps message*)})
+              (record-task-resume! task-id :steer message*)
               {:status :steering
                :task-id task-id
                :session-id session-id})
@@ -899,12 +1017,13 @@
         :else
         (if-let [_future (submit-steer! nil)]
           (do
-            (db/update-task! task-id
-                             {:state :running
-                              :stop-reason nil
-                              :error nil
-                              :finished-at nil
-                              :summary (task-title deps message*)})
+            (sync-runtime-task! task-id
+                                {:state :running
+                                 :stop-reason nil
+                                 :error nil
+                                 :finished-at nil
+                                 :summary (task-title deps message*)})
+            (record-task-resume! task-id :steer message*)
             {:status :steering
              :task-id task-id
              :session-id session-id})
