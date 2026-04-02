@@ -327,6 +327,12 @@
                                       :state :waiting_input
                                       :input "Capture OTP"
                                       :summary "Waiting for OTP"})]
+    (db/add-task-item! turn-id
+                       {:type :input-request
+                        :status :waiting
+                        :summary "Waiting for input: OTP Code"
+                        :data {:label "OTP Code"
+                               :masked false}})
     (with-redefs [xia.agent/process-message (fn [session-id _user-message & _]
                                               (is (= sid session-id))
                                               "ok")]
@@ -341,7 +347,19 @@
         (is (= (str turn-id) (get body "current_turn_id")))
         (is (= "waiting_input" (get-in body ["task" "state"])))
         (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
-        (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))))))
+        (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))
+        (is (= {"task_state" "waiting_input"
+                "phase" "waiting_input"
+                "message" "Waiting for input: OTP Code"
+                "current_focus" "Capture OTP"}
+               (some-> (get-in body ["task" "inspection" "current_state"])
+                       (select-keys ["task_state" "phase" "message" "current_focus"]))))
+        (is (= {"kind" "waiting_input"
+                "label" "OTP Code"
+                "masked" false
+                "summary" "Waiting for input: OTP Code"}
+               (some-> (get-in body ["task" "inspection" "attention"])
+                       (select-keys ["kind" "label" "masked" "summary"]))))))))
 
 (deftest chat-route-resumes-closed-http-session
   (let [sid (db/create-session! :http)]
@@ -930,6 +948,16 @@
                         :role :assistant
                         :summary "Drafted the first reply"})
     (db/add-task-item! turn-id
+                       {:type :system-note
+                        :status :success
+                        :summary "Execution policy allowed for workspace-read"
+                        :tool-id "workspace-read"
+                        :data {:kind "policy-decision"
+                               :decision-type "execution-policy"
+                               :allowed true
+                               :tool-name "workspace-read"
+                               :mode "allowed"}})
+    (db/add-task-item! turn-id
                        {:type :tool-result
                         :status :success
                         :summary "Loaded the billing thread"
@@ -971,8 +999,16 @@
              (get-in inspection ["last_output" "summary"])))
       (is (= "workspace-read"
              (get-in inspection ["last_tool_activity" "tool_id"])))
+      (is (= "execution-policy"
+             (get-in inspection ["last_policy_decision" "decision_type"])))
+      (is (= "tool_completed"
+             (get-in inspection ["last_activity" "kind"])))
+      (is (= "workspace-read"
+             (get-in inspection ["last_activity" "tool_id"])))
       (is (= 2
              (get-in inspection ["budget" "llm_call_count"])))
+      (is (= 1
+             (get-in inspection ["stack_summary" "depth"])))
       (is (= 1
              (get-in inspection ["counts" "assistant_message_count"])))
       (is (= 1
@@ -1123,6 +1159,175 @@
       (is (str/includes? (get task "recovery_brief") "Last stop: Paused pending follow-up"))
       (is (str/includes? (get task "recovery_brief") "Recovered from: checkpoint"))
       (is (str/includes? (get task "recovery_brief") "Next step: Read the attachment list")))))
+
+(deftest task-detail-route-includes-inspection-policy-decisions-and-stack-summary
+  (let [sid      (db/create-session! :http)
+        task-id  (db/create-task! {:session-id sid
+                                   :channel :http
+                                   :type :interactive
+                                   :state :running
+                                   :title "Handle billing issue"
+                                   :summary "Investigating the disputed invoice"
+                                   :autonomy-state {:stack [{:title "Handle billing issue"
+                                                             :summary "Resolve the billing dispute."
+                                                             :progress-status :in-progress}
+                                                            {:title "Archived follow-ups"
+                                                             :summary "Prior review attempts."
+                                                             :compressed? true
+                                                             :compressed-count 3
+                                                             :progress-status :completed}
+                                                            {:title "Review disputed invoice"
+                                                             :summary "Investigating the disputed invoice line item."
+                                                             :next-step "Compare the attached invoice notes"
+                                                             :progress-status :in-progress
+                                                             :agenda [{:item "Compare the attached invoice notes"
+                                                                       :status :in-progress}]}]}})
+        turn-id  (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :running
+                                       :input "review the disputed invoice"
+                                       :summary "Started invoice review"})]
+    (db/add-task-item! turn-id
+                       {:type :system-note
+                        :status :error
+                        :summary "Execution policy blocked for browser-click"
+                        :tool-id "browser-click"
+                        :data {:kind "policy-decision"
+                               :decision-type "execution-policy"
+                               :allowed false
+                               :tool-name "browser-click"
+                               :mode "blocked"
+                               :reason "live browser actions require confirmation"}})
+    (db/add-task-item! turn-id
+                       {:type :status
+                        :status :running
+                        :summary "Comparing the attachment notes"
+                        :data {:phase :tool
+                               :state :running
+                               :current-focus "Review disputed invoice"
+                               :next-step "Compare the attached invoice notes"
+                               :progress-status :in-progress
+                               :tool-name "workspace-read"
+                               :iteration 2
+                               :round 1}})
+    (db/add-task-item! turn-id
+                       {:type :checkpoint
+                        :summary "Need to compare the invoice notes before replying"
+                        :data {:phase :planning
+                               :current-focus "Review disputed invoice"
+                               :next-step "Compare the attached invoice notes"
+                               :progress-status :in-progress
+                               :stack-action :stay}})
+    (let [response   (#'http/router {:uri            (str "/tasks/" task-id)
+                                     :request-method :get
+                                     :headers        (ui-headers)})
+          body       (response-json response)
+          task       (get body "task")
+          inspection (get task "inspection")]
+      (is (= 200 (:status response)))
+      (is (= {"depth" 3
+              "root_title" "Handle billing issue"
+              "tip_title" "Review disputed invoice"
+              "compressed_frame_count" 1
+              "child_task_frame_count" 0}
+             (some-> (get inspection "stack_summary")
+                     (select-keys ["depth" "root_title" "tip_title" "compressed_frame_count" "child_task_frame_count"]))))
+      (is (= {"title" "Archived follow-ups"
+              "summary" "Prior review attempts."
+              "progress_status" "complete"
+              "compressed" true
+              "compressed_count" 3}
+             (some-> (get inspection "stack_summary")
+                     (get "frames")
+                     second
+                     (select-keys ["title" "summary" "progress_status" "compressed" "compressed_count"]))))
+      (is (= {"decision_type" "execution-policy"
+              "allowed" false
+              "mode" "blocked"
+              "target" "browser-click"
+              "reason" "live browser actions require confirmation"}
+             (some-> (get inspection "recent_policy_decisions")
+                     first
+                     (select-keys ["decision_type" "allowed" "mode" "target" "reason"]))))
+      (is (= {"status" "running"
+              "phase" "tool"
+              "state" "running"
+              "current_focus" "Review disputed invoice"
+              "next_step" "Compare the attached invoice notes"
+              "progress_status" "in-progress"
+              "tool_name" "workspace-read"
+              "iteration" 2
+              "round" 1}
+             (some-> (get inspection "recent_status_updates")
+                     first
+                     (select-keys ["status" "phase" "state" "current_focus" "next_step" "progress_status" "tool_name" "iteration" "round"]))))
+      (is (= {"phase" "planning"
+              "current_focus" "Review disputed invoice"
+              "next_step" "Compare the attached invoice notes"
+              "progress_status" "in-progress"
+              "stack_action" "stay"}
+             (some-> (get inspection "recent_checkpoints")
+                     first
+                     (select-keys ["phase" "current_focus" "next_step" "progress_status" "stack_action"]))))
+      (is (= ["checkpoint" "status_update" "policy_decision"]
+             (some->> (get inspection "recent_activity")
+                      (take 3)
+                      (mapv #(get % "kind")))))
+      (is (= 1
+             (get-in inspection ["counts" "policy_decision_count"]))))))
+
+(deftest task-detail-route-includes-inspection-attention-for-waiting-approval
+  (let [sid      (db/create-session! :http)
+        task-id  (db/create-task! {:session-id sid
+                                   :channel :http
+                                   :type :interactive
+                                   :state :waiting_approval
+                                   :title "Send the billing reply"
+                                   :summary "Waiting for sign-off before sending."
+                                   :autonomy-state {:stack [{:title "Send the billing reply"
+                                                             :summary "Prepare and send the response."
+                                                             :next-step "Confirm whether to send the draft"
+                                                             :progress-status :blocked}]}
+                                   :meta {:runtime {:state :waiting_approval
+                                                    :phase :waiting_approval
+                                                    :message "Waiting for approval for email-send"}}})
+        turn-id  (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :waiting_approval
+                                       :input "send the billing reply"
+                                       :summary "Waiting for send approval"})]
+    (db/add-task-item! turn-id
+                       {:type :approval-request
+                        :status :waiting
+                        :summary "Waiting for approval for email-send"
+                        :tool-id "email-send"
+                        :data {:tool-name "email-send"
+                               :description "Send the drafted billing reply"
+                               :policy "on-request"
+                               :reason "Email delivery requires confirmation"}})
+    (let [response   (#'http/router {:uri            (str "/tasks/" task-id)
+                                     :request-method :get
+                                     :headers        (ui-headers)})
+          body       (response-json response)
+          task       (get body "task")
+          inspection (get task "inspection")]
+      (is (= 200 (:status response)))
+      (is (= {"task_state" "waiting_approval"
+              "phase" "waiting_approval"
+              "message" "Waiting for approval for email-send"
+              "current_focus" "Send the billing reply"
+              "next_step" "Confirm whether to send the draft"
+              "progress_status" "blocked"}
+             (some-> (get inspection "current_state")
+                     (select-keys ["task_state" "phase" "message" "current_focus" "next_step" "progress_status"]))))
+      (is (= {"kind" "waiting_approval"
+              "tool_name" "email-send"
+              "policy" "on-request"
+              "description" "Send the drafted billing reply"
+              "reason" "Email delivery requires confirmation"
+              "summary" "Waiting for approval for email-send"}
+             (some-> (get inspection "attention")
+                     (select-keys ["kind" "tool_name" "policy" "description" "reason" "summary"])))))))
 
 (deftest task-detail-route-reconciles-terminal-child-task-tip
   (let [sid           (db/create-session! :http)
