@@ -223,6 +223,7 @@
    :message/tool-id    {:db/valueType :db.type/string}  ; for tool-result messages
    :message/tool-call-id {:db/valueType :db.type/string}
    :message/tool-name   {:db/valueType :db.type/string}
+   :message/external-sender {:db/valueType :db.type/idoc :db/domain "message-external-sender"}
    :message/llm-call-id {:db/valueType :db.type/uuid}
    :message/provider-id {:db/valueType :db.type/keyword}
    :message/model       {:db/valueType :db.type/string}
@@ -1731,12 +1732,13 @@
 (defn add-message!
   [session-id role content & {:keys [tool-calls tool-id tool-call-id tool-name tool-result
                                      llm-call-id provider-id model workload
-                                     local-doc-ids artifact-ids]}]
+                                     local-doc-ids artifact-ids external-sender]}]
   (apply db-session/add-message! (session-deps) session-id role content
          (concat [:tool-calls tool-calls
                   :tool-id tool-id
                   :tool-call-id tool-call-id
                   :tool-name tool-name
+                  :external-sender external-sender
                   :tool-result tool-result
                   :llm-call-id llm-call-id
                   :provider-id provider-id

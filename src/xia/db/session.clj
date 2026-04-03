@@ -469,7 +469,7 @@
 (defn add-message!
   [deps session-id role content & {:keys [tool-calls tool-id tool-call-id tool-name tool-result
                                           llm-call-id provider-id model workload
-                                          local-doc-ids artifact-ids]}]
+                                          local-doc-ids artifact-ids external-sender]}]
   (let [session-eid*   (session-eid deps session-id)
         message-id     (random-uuid)
         doc-ids        (valid-session-local-doc-ids deps session-id local-doc-ids)
@@ -489,6 +489,7 @@
            tool-id (assoc :message/tool-id tool-id)
            tool-call-id (assoc :message/tool-call-id tool-call-id)
            tool-name (assoc :message/tool-name tool-name)
+           (some? external-sender) (assoc :message/external-sender external-sender)
            llm-call-id (assoc :message/llm-call-id llm-call-id)
            provider-id (assoc :message/provider-id provider-id)
            model (assoc :message/model model)
@@ -655,6 +656,7 @@
                              :tool-id      (empty->nil tool-id)
                              :tool-call-id (empty->nil (:message/tool-call-id entity-map))
                              :tool-name    (empty->nil (:message/tool-name entity-map))
+                             :external-sender (:message/external-sender entity-map)
                              :llm-call-id  (:message/llm-call-id entity-map)
                              :provider-id  (:message/provider-id entity-map)
                              :model        (empty->nil (:message/model entity-map))

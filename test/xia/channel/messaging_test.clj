@@ -12,7 +12,15 @@
 (use-fixtures :each with-test-db)
 
 (deftest slack-events-reuse-thread-session-and-persist-history
-  (let [delivered (atom [])]
+  (let [owner-profile-id (db/ensure-user-profile! {:key "owner:default"
+                                                   :name "Owner"})
+        _session        (db/create-session! :slack {:label "Slack C1"
+                                                    :external-key "slack:T1:C1:1710000000.100"
+                                                    :external-meta {:team-id "T1"
+                                                                    :channel-id "C1"
+                                                                    :thread-ts "1710000000.100"}
+                                                    :user-profile-id owner-profile-id})
+        delivered (atom [])]
     (with-redefs [xia.channel.messaging/slack-enabled? (constantly true)
                   xia.async/submit-background! (fn [_description f]
                                                  (f))
@@ -58,16 +66,24 @@
       (is (= "Slack C1" (:label session)))
       (is (= {:team-id "T1"
               :channel-id "C1"
-              :thread-ts "1710000000.100"
-              :user-id "U1"}
+              :thread-ts "1710000000.100"}
              (db/session-external-meta (:id session))))
-      (is (= "slack-user:T1:U1" (:key profile)))
-      (is (= "U1" (:name profile)))
+      (is (= owner-profile-id (:id profile)))
+      (is (= "owner:default" (:key profile)))
       (is (= [:user :user]
              (mapv :role messages)))
       (is (= ["first task"
               "follow up"]
              (mapv :content messages)))
+      (is (= [{:channel :slack
+               :label "Slack C1"
+               :team-id "T1"
+               :user-id "U1"}
+              {:channel :slack
+               :label "Slack C1"
+               :team-id "T1"
+               :user-id "U1"}]
+             (mapv :external-sender messages)))
       (is (= [{:channel :slack
                :session-id (:id session)
                :text (str "ack: first task@" (:id session))}
@@ -115,17 +131,19 @@
       (is (= :telegram (:channel session)))
       (is (= "Ops" (:label session)))
       (is (= {:chat-id 1001
-              :user-id 55
-              :first-name "Alex"
               :message-thread-id 9
               :reply-to-message-id 7}
              (db/session-external-meta (:id session))))
-      (is (= "telegram-user:55" (:key profile)))
-      (is (= "Alex" (:name profile)))
+      (is (nil? profile))
       (is (= [:user]
              (mapv :role messages)))
       (is (= ["status?"]
              (mapv :content messages)))
+      (is (= [{:channel :telegram
+               :label "Ops"
+               :user-id 55
+               :first-name "Alex"}]
+             (mapv :external-sender messages)))
       (is (= [{:channel :telegram
                :session-id (:id session)
                :text (str "handled: status?@" (:id session))}]

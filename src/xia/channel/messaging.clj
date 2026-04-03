@@ -355,61 +355,46 @@
   [{:keys [chat-guid]}]
   (str "imessage:" chat-guid))
 
-(defn- external-user-profile-key
-  [channel {:keys [team-id user-id handle]}]
+(defn- external-sender-identity
+  [channel {:keys [team-id user-id username first-name handle]} label]
   (case channel
-    :slack (when (and team-id user-id)
-             (str "slack-user:" team-id ":" user-id))
-    :telegram (when user-id
-                (str "telegram-user:" user-id))
-    :imessage (when handle
-                (str "imessage-user:" handle))
+    :slack (cond-> {:channel :slack
+                    :label (nonblank-str label)}
+             team-id (assoc :team-id team-id)
+             user-id (assoc :user-id user-id))
+    :telegram (cond-> {:channel :telegram
+                       :label (nonblank-str label)}
+                user-id (assoc :user-id user-id)
+                (nonblank-str username) (assoc :username (nonblank-str username))
+                (nonblank-str first-name) (assoc :first-name (nonblank-str first-name)))
+    :imessage (cond-> {:channel :imessage
+                       :label (nonblank-str label)}
+                (nonblank-str handle) (assoc :handle (nonblank-str handle)))
     nil))
-
-(defn- external-user-profile-name
-  [channel {:keys [user-id username first-name handle]} label]
-  (case channel
-    :telegram (or (nonblank-str first-name)
-                  (nonblank-str username)
-                  (nonblank-str label))
-    :imessage (or (nonblank-str handle)
-                  (nonblank-str label))
-    :slack (or (nonblank-str user-id)
-               (nonblank-str label))
-    (nonblank-str label)))
-
-(defn- ensure-external-user-profile!
-  [channel external-meta label]
-  (when-let [profile-key (external-user-profile-key channel external-meta)]
-    (let [profile-name (external-user-profile-name channel external-meta label)]
-      (db/ensure-user-profile! {:key profile-key
-                                :name profile-name}))))
 
 (defn- ensure-external-session!
   [channel external-key external-meta & {:keys [label]}]
-  (let [profile-id (ensure-external-user-profile! channel external-meta label)
-        existing   (db/find-session-by-external-key external-key)]
+  (let [existing (db/find-session-by-external-key external-key)]
     (if-let [session-id (:id existing)]
       (do
         (db/set-session-active! session-id true)
         (db/save-session-external-meta! session-id external-meta)
-        (when profile-id
-          (db/save-session-user-profile! session-id profile-id))
         session-id)
       (db/create-session! channel {:label label
                                    :external-key external-key
-                                   :external-meta external-meta
-                                   :user-profile-id profile-id}))))
+                                   :external-meta external-meta}))))
 
 (defn- persist-external-user-message!
-  [session-id channel user-message external-message-id]
-  (let [message-id (db/add-message! session-id :user user-message)]
+  [session-id channel user-message external-message-id external-sender]
+  (let [message-id (db/add-message! session-id :user user-message
+                                    :external-sender external-sender)]
     (audit/log! {:session-id session-id
                  :channel channel}
                 {:actor :user
                  :type :user-message
                  :message-id message-id
                  :data (cond-> {:external_message_id external-message-id}
+                         external-sender (assoc :external_sender external-sender)
                          true (assoc :messaging true))})
     message-id))
 
@@ -848,7 +833,7 @@
     true))
 
 (defn- handle-external-message!
-  [{:keys [channel external-key external-meta external-message-id user-message label]}]
+  [{:keys [channel external-key external-meta external-message-id external-sender user-message label]}]
   (when-not (duplicate-external-message? external-message-id)
     (mark-external-message! external-message-id)
     (let [session-id (ensure-external-session! channel
@@ -876,7 +861,11 @@
 
         :else
         (do
-          (persist-external-user-message! session-id channel user-message external-message-id)
+          (persist-external-user-message! session-id
+                                          channel
+                                          user-message
+                                          external-message-id
+                                          external-sender)
           (try
             (agent/process-message session-id
                                    user-message
@@ -929,8 +918,11 @@
                                                  :thread-ts thread-ts})
           :external-meta {:team-id team-id
                           :channel-id channel-id
-                          :thread-ts thread-ts
-                          :user-id user-id}
+                          :thread-ts thread-ts}
+          :external-sender (external-sender-identity :slack
+                                                     {:team-id team-id
+                                                      :user-id user-id}
+                                                     (str "Slack " channel-id))
           :external-message-id (str "slack:" event-id)
           :user-message text
           :label (str "Slack " channel-id)})))))
@@ -961,16 +953,16 @@
        "telegram-message"
        #(handle-external-message!
          {:channel :telegram
-         :external-key (telegram-conversation-key {:chat-id chat-id
+          :external-key (telegram-conversation-key {:chat-id chat-id
                                                     :message-thread-id message-thread-id})
-          :external-meta (cond-> {:chat-id chat-id
-                                  :user-id (get-in message ["from" "id"])
-                                  :message-thread-id message-thread-id
-                                  :reply-to-message-id message-id}
-                           (nonblank-str (get-in message ["from" "username"]))
-                           (assoc :username (nonblank-str (get-in message ["from" "username"])))
-                           (nonblank-str (get-in message ["from" "first_name"]))
-                           (assoc :first-name (nonblank-str (get-in message ["from" "first_name"]))))
+          :external-meta {:chat-id chat-id
+                          :message-thread-id message-thread-id
+                          :reply-to-message-id message-id}
+          :external-sender (external-sender-identity :telegram
+                                                     {:user-id (get-in message ["from" "id"])
+                                                      :username (nonblank-str (get-in message ["from" "username"]))
+                                                      :first-name (nonblank-str (get-in message ["from" "first_name"]))}
+                                                     label)
           :external-message-id (str "telegram:" update-id)
           :user-message text
           :label label})))))
@@ -1046,8 +1038,11 @@
              {:channel :imessage
               :external-key (imessage-conversation-key {:chat-guid chat-guid})
               :external-meta {:chat-guid chat-guid
-                              :handle (nonblank-str (get row "handle"))
                               :service (nonblank-str (get row "service"))}
+              :external-sender (external-sender-identity :imessage
+                                                         {:handle (nonblank-str (get row "handle"))}
+                                                         (or (nonblank-str (get row "handle"))
+                                                             chat-guid))
               :external-message-id (str "imessage:" (get row "message_guid"))
               :user-message text
               :label (or (nonblank-str (get row "handle"))

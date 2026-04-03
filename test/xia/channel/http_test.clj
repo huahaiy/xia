@@ -781,6 +781,10 @@
                                            :kind :json
                                            :data {"topic" "notes"}})]
     (db/add-message! sid :user "hello"
+                     :external-sender {:channel :slack
+                                       :team-id "T1"
+                                       :user-id "U1"
+                                       :label "Slack C1"}
                      :local-doc-ids [(:id doc)]
                      :artifact-ids [(:id report)])
     (db/add-message! sid :assistant "hi there"
@@ -803,6 +807,11 @@
       (is (= 2 (count messages)))
       (is (= "user" (get (first messages) "role")))
       (is (= "hello" (get (first messages) "content")))
+      (is (= {"channel" "slack"
+              "team-id" "T1"
+              "user-id" "U1"
+              "label" "Slack C1"}
+             (get (first messages) "external_sender")))
       (is (= "notes.md" (get-in (first messages) ["local_docs" 0 "name"])))
       (is (= "Summary Report" (get-in (first messages) ["artifacts" 0 "title"])))
       (is (string? (get (first messages) "id")))

@@ -210,7 +210,7 @@
                           (get tool-call "arguments")))))
 
 (defn- session-message->body
-  [deps {:keys [id role content created-at local-docs artifacts tool-calls llm-call-id provider-id model workload]}]
+  [deps {:keys [id role content created-at local-docs artifacts tool-calls llm-call-id provider-id model workload external-sender]}]
   (cond-> {:id         (some-> id str)
            :role       (name role)
            :content    content
@@ -221,6 +221,7 @@
     provider-id (assoc :provider_id (name provider-id))
     model (assoc :model model)
     workload (assoc :workload (name workload))
+    external-sender (assoc :external_sender external-sender)
     (seq tool-calls) (assoc :tool_calls (mapv tool-call->body tool-calls))))
 
 (defn- audit-event->body
