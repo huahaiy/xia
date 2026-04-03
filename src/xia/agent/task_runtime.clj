@@ -521,6 +521,29 @@
   (or (some-> user-message str str/trim not-empty (#(truncate-summary* deps % 240)))
       "Autonomous task"))
 
+(def ^:private default-resume-message
+  "Continue from the current agenda.")
+
+(defn- interactive-task-contract
+  [existing-contract channel goal user-message]
+  (let [message* (some-> user-message str str/trim not-empty)]
+    (cond-> (merge (when (map? existing-contract) existing-contract)
+                   {:kind :interactive
+                    :goal goal
+                    :channel channel})
+      message* (assoc :initial_message message*))))
+
+(defn- refresh-interactive-task-goal?
+  [task operation user-message]
+  (and (= :interactive (:type task))
+       (let [message* (some-> user-message str str/trim not-empty)]
+         (case operation
+           :steer true
+           :resume (and message*
+                        (not= message* default-resume-message))
+           :start true
+           false))))
+
 (defn- resolve-task-operation
   [task-id runtime-op]
   (or runtime-op
@@ -589,10 +612,8 @@
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
   (let [operation        (resolve-task-operation task-id runtime-op)
         title            (task-title deps user-message)
-        contract         {:kind :interactive
-                          :goal title
-                          :initial_message user-message
-                          :channel channel}
+        existing-task    (some-> task-id db/get-task)
+        contract         (interactive-task-contract nil channel title user-message)
         new-task?        (nil? task-id)
         resolved-task-id (or task-id
                              (db/create-task! {:session-id session-id
@@ -605,10 +626,18 @@
                                                :autonomy-state autonomy-state
                                                :started-at (java.util.Date.)}))]
     (when task-id
-      (db/update-task! resolved-task-id
-                       {:state :running
-                        :summary title
-                        :autonomy-state autonomy-state}))
+      (let [refresh-goal? (refresh-interactive-task-goal? existing-task operation user-message)
+            contract*     (when refresh-goal?
+                            (interactive-task-contract (:contract existing-task)
+                                                       channel
+                                                       title
+                                                       user-message))]
+        (db/update-task! resolved-task-id
+                         (cond-> {:state :running
+                                  :autonomy-state autonomy-state}
+                           refresh-goal? (assoc :title title
+                                                :summary title
+                                                :contract contract*)))))
     (let [task-turn-id (db/start-task-turn! resolved-task-id
                                             {:operation operation
                                              :state :running
