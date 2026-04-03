@@ -82,6 +82,9 @@
 (def ^:private approval-note
   " Requires user approval before execution.")
 
+(def ^:private max-tool-result-depth 12)
+(def ^:private max-tool-result-items 1000)
+
 (def ^:private ignored-selection-terms
   #{"a" "an" "and" "any" "for" "from" "get" "how" "i" "in" "into" "is"
     "it" "me" "my" "of" "on" "or" "the" "to" "up" "use" "using" "with"})
@@ -127,6 +130,99 @@
   [^Throwable e]
   (contains? #{:request-cancelled :sci/shutdown}
              (some-> e ex-data :type)))
+
+(defn- safe-result-preview
+  [value]
+  (let [text (try
+               (pr-str value)
+               (catch Throwable _
+                 (str "<" (.getName (class value)) ">")))]
+    (if (> (count text) 240)
+      (str (subs text 0 239) "…")
+      text)))
+
+(declare normalize-tool-result-value)
+
+(defn- unsupported-tool-result-ex
+  [tool-id value reason]
+  (ex-info (str "Tool handler returned an unsupported result value: " reason)
+           {:type :tool/invalid-result
+            :tool-id tool-id
+            :reason reason
+            :result-class (some-> value class .getName)
+            :preview (safe-result-preview value)}))
+
+(defn- normalize-tool-result-key
+  [tool-id key]
+  (cond
+    (string? key) key
+    (keyword? key) key
+    (symbol? key) (str key)
+    (number? key) (str key)
+    (boolean? key) (str key)
+    (nil? key) "null"
+    (instance? java.util.UUID key) (str key)
+    (instance? java.time.Instant key) (str key)
+    (instance? java.util.Date key) (str (.toInstant ^java.util.Date key))
+    :else (throw (unsupported-tool-result-ex tool-id key "unsupported map key type"))))
+
+(defn- normalize-tool-result-coll
+  [tool-id coll depth]
+  (let [items (doall (take (inc max-tool-result-items) coll))]
+    (when (> (count items) max-tool-result-items)
+      (throw (unsupported-tool-result-ex tool-id coll "collection exceeds size limit")))
+    (mapv #(normalize-tool-result-value tool-id % (inc depth)) items)))
+
+(defn- normalize-tool-result-value
+  [tool-id value depth]
+  (when (> depth max-tool-result-depth)
+    (throw (unsupported-tool-result-ex tool-id value "result nesting is too deep")))
+  (cond
+    (or (nil? value)
+        (string? value)
+        (boolean? value)
+        (number? value)
+        (keyword? value))
+    value
+
+    (symbol? value)
+    (str value)
+
+    (instance? java.util.UUID value)
+    value
+
+    (instance? java.time.Instant value)
+    value
+
+    (instance? java.util.Date value)
+    value
+
+    (map? value)
+    (do
+      (when (> (count value) max-tool-result-items)
+        (throw (unsupported-tool-result-ex tool-id value "map exceeds size limit")))
+      (reduce-kv (fn [m k v]
+                   (assoc m
+                          (normalize-tool-result-key tool-id k)
+                          (normalize-tool-result-value tool-id v (inc depth))))
+                 {}
+                 value))
+
+    (vector? value)
+    (normalize-tool-result-coll tool-id value depth)
+
+    (set? value)
+    (normalize-tool-result-coll tool-id (seq value) depth)
+
+    (sequential? value)
+    (normalize-tool-result-coll tool-id value depth)
+
+    :else
+    (throw (unsupported-tool-result-ex tool-id value "unsupported value type"))))
+
+(defn- normalize-tool-result
+  [tool-id value]
+  (normalize-tool-result-value tool-id value 0))
 
 (defn registered-tools
   "Return all currently loaded tool handlers."
@@ -596,7 +692,8 @@
                                   :tool-id  tool-id
                                   :tool-name tool-name})
                  (try
-                   (let [result (sci-env/call-fn handler arguments)]
+                   (let [result (normalize-tool-result tool-id
+                                                      (sci-env/call-fn handler arguments))]
                      (audit-entry! context tool-id tool arguments
                                    {:status          "success"
                                     :approval-policy (name policy)

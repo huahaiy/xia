@@ -202,6 +202,7 @@
   [session-id]
   (try
     (let [topics (:topics (wm/get-wm session-id))]
+      (wm/clear-autonomy-state! session-id)
       (wm/snapshot! session-id)
       (hippo/record-conversation! session-id :scheduler :topics topics))
     (catch Exception e

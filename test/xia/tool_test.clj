@@ -41,6 +41,28 @@
   (is (= {"status" "ok"}
          (tool/execute-tool :safe-tool {} {:channel :scheduler}))))
 
+(deftest sci-handler-crash-recovers-as-tool-error
+  (db/install-tool! {:id          :crashy-tool
+                     :name        "crashy-tool"
+                     :description "Crashy tool"
+                     :approval    :auto
+                     :handler     "(fn [_] (throw (ex-info \"boom\" {:kind :test})))"})
+  (tool/load-tool! :crashy-tool)
+  (let [result (tool/execute-tool :crashy-tool {} {:channel :scheduler})]
+    (is (= "Tool crashy-tool failed: boom"
+           (:error result)))))
+
+(deftest malformed-sci-result-recovers-as-tool-error
+  (db/install-tool! {:id          :malformed-tool
+                     :name        "malformed-tool"
+                     :description "Malformed tool"
+                     :approval    :auto
+                     :handler     "(fn [_] (fn [] 1))"})
+  (tool/load-tool! :malformed-tool)
+  (let [result (tool/execute-tool :malformed-tool {} {:channel :scheduler})]
+    (is (str/includes? (:error result)
+                       "Tool malformed-tool failed: Tool handler returned an unsupported result value"))))
+
 (deftest privileged-tool-blocks-without-approval-handler
   (db/install-tool! {:id          :privileged-tool
                      :name        "privileged-tool"

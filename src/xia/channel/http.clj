@@ -290,6 +290,7 @@
   (when-let [sid (get @ws-sessions ch)]
     (try
       (let [topics (:topics (wm/get-wm sid))]
+        (wm/clear-autonomy-state! sid)
         (wm/snapshot! sid)
         (hippo/record-conversation! sid :websocket
                                     :topics topics
@@ -1034,6 +1035,13 @@
            (try
              (when was-active?
                (let [topics (:topics (wm/get-wm sid))]
+                 (try
+                   (wm/clear-autonomy-state! sid)
+                   (catch Exception e
+                     (log/error e "Failed to clear session autonomy state during finalization"
+                                sid-str
+                                "channel" (name channel)
+                                "reason" (name reason))))
                  (try
                    (wm/snapshot! sid)
                    (catch Exception e

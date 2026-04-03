@@ -160,6 +160,14 @@
                               :parent-session-id parent-session-id}
                              branch-trace))))
         (try
+          (wm/clear-autonomy-state! child-session-id)
+          (catch Throwable t
+            (log/warn t "Failed to clear branch worker autonomy state"
+                      (merge {:task task
+                              :session-id child-session-id
+                              :parent-session-id parent-session-id}
+                             branch-trace))))
+        (try
           (wm/clear-wm! child-session-id)
           (catch Throwable t
             (log/warn t "Failed to clear branch worker working memory"

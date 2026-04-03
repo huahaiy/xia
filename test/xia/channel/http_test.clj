@@ -21,6 +21,7 @@
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
             [xia.scheduler :as scheduler]
+            [xia.working-memory :as wm]
             [xia.workspace :as workspace]
             [xia.test-helpers :as th :refer [minimal-pdf-bytes with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream File]
@@ -640,6 +641,8 @@
                   xia.working-memory/get-wm (fn [session-id]
                                               (is (= sid session-id))
                                               {:topics "release planning"})
+                  xia.working-memory/clear-autonomy-state! (fn [session-id]
+                                                             (swap! lifecycle conj [:clear-autonomy session-id]))
                   xia.working-memory/snapshot! (fn [session-id]
                                                 (swap! lifecycle conj [:snapshot session-id]))
                   xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics consolidation-mode]}]
@@ -650,8 +653,9 @@
       ((:on-open @handlers) ch)
       (is (= sid (get @sessions ch)))
       ((:on-close @handlers) ch 1000)
-      (is (= 4 (count @lifecycle)))
+      (is (= 5 (count @lifecycle)))
       (is (some #{[:ensure sid]} @lifecycle))
+      (is (some #{[:clear-autonomy sid]} @lifecycle))
       (is (some #{[:snapshot sid]} @lifecycle))
       (is (some #{[:record sid :websocket "release planning" :sync]} @lifecycle))
       (is (some #{[:clear sid]} @lifecycle))
@@ -665,6 +669,8 @@
                   xia.working-memory/get-wm (fn [session-id]
                                               (is (= sid session-id))
                                               {:topics "release planning"})
+                  xia.working-memory/clear-autonomy-state! (fn [session-id]
+                                                             (swap! lifecycle conj [:clear-autonomy session-id]))
                   xia.working-memory/snapshot! (fn [session-id]
                                                 (swap! lifecycle conj [:snapshot session-id]))
                   xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics consolidation-mode]}]
@@ -678,7 +684,8 @@
         (is (= 200 (:status response)))
         (is (= "closed" (get body "status")))
         (is (= false (get body "already_closed")))
-        (is (= 4 (count @lifecycle)))
+        (is (= 5 (count @lifecycle)))
+        (is (some #{[:clear-autonomy sid]} @lifecycle))
         (is (some #{[:snapshot sid]} @lifecycle))
         (is (some #{[:record sid :http "release planning" :sync]} @lifecycle))
         (is (some #{[:clear sid]} @lifecycle))
@@ -699,6 +706,8 @@
                   xia.working-memory/get-wm (fn [session-id]
                                               (is (= sid session-id))
                                               {:topics "release planning"})
+                  xia.working-memory/clear-autonomy-state! (fn [session-id]
+                                                             (swap! lifecycle conj [:clear-autonomy session-id]))
                   xia.working-memory/snapshot! (fn [session-id]
                                                 (swap! lifecycle conj [:snapshot session-id]))
                   xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics consolidation-mode]}]
@@ -712,7 +721,8 @@
         (is (= 200 (:status response)))
         (is (= "closed" (get body "status")))
         (is (= false (get body "already_closed")))
-        (is (= 4 (count @lifecycle)))
+        (is (= 5 (count @lifecycle)))
+        (is (some #{[:clear-autonomy sid]} @lifecycle))
         (is (some #{[:snapshot sid]} @lifecycle))
         (is (some #{[:record sid :command "release planning" :sync]} @lifecycle))
         (is (some #{[:clear sid]} @lifecycle))
@@ -723,6 +733,25 @@
                                [?s :session/id ?sid]
                                [(get-else $ ?s :session/active? false) ?active]]
                              sid))))))))
+
+(deftest close-session-route-clears-durable-autonomy-snapshot
+  (let [sid   (db/create-session! :http)
+        state (autonomous/initial-state "Review the billing discrepancy")]
+    (wm/ensure-wm! sid)
+    (wm/set-autonomy-state! sid state)
+    (wm/snapshot! sid)
+    (is (= state
+           (some-> (db/load-wm-snapshot sid)
+                   :autonomy-state
+                   autonomous/normalize-state)))
+    (with-redefs [xia.hippocampus/record-conversation! (fn [& _] nil)]
+      (let [response (#'http/router {:uri            (str "/sessions/" sid)
+                                     :request-method :delete
+                                     :headers        (ui-headers)})
+            body     (response-json response)]
+        (is (= 200 (:status response)))
+        (is (= "closed" (get body "status")))))
+    (is (nil? (:autonomy-state (db/load-wm-snapshot sid))))))
 
 (deftest close-session-route-cancels-busy-rest-session
   (let [sid       (db/create-session! :http)

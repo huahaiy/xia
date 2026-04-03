@@ -55,6 +55,8 @@
                   xia.working-memory/get-wm (fn [session-id]
                                               (swap! lifecycle conj [:get-wm session-id])
                                               {:topics "nightly summary"})
+                  xia.working-memory/clear-autonomy-state! (fn [session-id]
+                                                             (swap! lifecycle conj [:clear-autonomy session-id]))
                   xia.working-memory/snapshot! (fn [session-id]
                                                  (swap! lifecycle conj [:snapshot session-id]))
                   xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
@@ -93,6 +95,7 @@
             [:process sid :scheduler "summarize the week" :nightly-review true]
             [:task-success :nightly-review "done"]
             [:get-wm sid]
+            [:clear-autonomy sid]
             [:snapshot sid]
             [:record sid :scheduler "nightly summary"]
             [:clear sid]]
@@ -126,6 +129,8 @@
                   xia.working-memory/get-wm (fn [session-id]
                                               (swap! lifecycle conj [:get-wm session-id])
                                               {:topics "failed run"})
+                  xia.working-memory/clear-autonomy-state! (fn [session-id]
+                                                             (swap! lifecycle conj [:clear-autonomy session-id]))
                   xia.working-memory/snapshot! (fn [session-id]
                                                  (swap! lifecycle conj [:snapshot session-id]))
                   xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
@@ -149,6 +154,7 @@
             [:process sid :scheduler "summarize the week"]
             [:task-failure :nightly-review "Reached the scheduled run LLM call budget (1/1)"]
             [:get-wm sid]
+            [:clear-autonomy sid]
             [:snapshot sid]
             [:record sid :scheduler "failed run"]
             [:clear sid]]
@@ -175,6 +181,8 @@
                   xia.working-memory/get-wm (fn [session-id]
                                               (swap! lifecycle conj [:get-wm session-id])
                                               {:topics "failed run"})
+                  xia.working-memory/clear-autonomy-state! (fn [session-id]
+                                                             (swap! lifecycle conj [:clear-autonomy session-id]))
                   xia.working-memory/snapshot! (fn [session-id]
                                                  (swap! lifecycle conj [:snapshot session-id]))
                   xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
@@ -194,6 +202,7 @@
             [:process sid]
             [:task-failure :nightly-review "boom"]
             [:get-wm sid]
+            [:clear-autonomy sid]
             [:snapshot sid]
             [:record sid :scheduler "failed run"]
             [:clear sid]]
