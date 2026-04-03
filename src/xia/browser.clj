@@ -23,6 +23,7 @@
             [xia.prompt :as prompt]
             [xia.ssrf :as ssrf])
   (:import [datalevin.db DB]
+           [java.net URI]
            [datalevin.storage Store]))
 
 ;; ---------------------------------------------------------------------------
@@ -108,6 +109,171 @@
   (some-> (or (get snapshot "backend")
               (name legacy-htmlunit-backend-id))
           keyword))
+
+(defn- parse-uri-safe
+  [url]
+  (when-let [url* (some-> url str str/trim not-empty)]
+    (try
+      (URI. url*)
+      (catch Exception _
+        nil))))
+
+(defn- default-port
+  [scheme]
+  (case (some-> scheme str/lower-case)
+    "http" 80
+    "https" 443
+    nil))
+
+(defn- uri-origin
+  [uri-or-url]
+  (when-let [^URI uri (if (instance? URI uri-or-url)
+                        uri-or-url
+                        (parse-uri-safe uri-or-url))]
+    (let [scheme (some-> (.getScheme uri) str/lower-case)
+          host   (some-> (.getHost uri) str/lower-case)
+          port   (.getPort uri)
+          port*  (if (neg? port)
+                   (default-port scheme)
+                   port)]
+      (when (and scheme host)
+        (str scheme "://" host
+             (when (and port*
+                        (not= port* (default-port scheme)))
+               (str ":" port*)))))))
+
+(defn- parse-storage-state
+  [storage-state]
+  (cond
+    (nil? storage-state) nil
+    (map? storage-state) storage-state
+    (string? storage-state)
+    (let [text (str/trim storage-state)]
+      (when (seq text)
+        (try
+          (json/read-json text)
+          (catch Exception _
+            ::invalid))))
+    :else
+    ::invalid))
+
+(defn- cookie-expiry-ms
+  [cookie]
+  (let [expires (or (get cookie "expires")
+                    (:expires cookie))]
+    (cond
+      (nil? expires) nil
+      (number? expires)
+      (when-not (neg? (double expires))
+        (long (* 1000.0 (double expires))))
+      (string? expires)
+      (try
+        (let [parsed (Double/parseDouble expires)]
+          (when-not (neg? parsed)
+            (long (* 1000.0 parsed))))
+        (catch Exception _
+          nil))
+      :else
+      nil)))
+
+(defn- cookie-expired?
+  [cookie]
+  (when-let [expiry-ms (cookie-expiry-ms cookie)]
+    (<= expiry-ms (long (now-ms)))))
+
+(defn- cookie-domain-matches?
+  [cookie-domain host]
+  (let [domain (some-> cookie-domain str str/lower-case (str/replace #"^\." ""))
+        host*  (some-> host str str/lower-case)]
+    (boolean
+     (and (seq domain)
+          (seq host*)
+          (or (= host* domain)
+              (str/ends-with? host* (str "." domain)))))))
+
+(defn- cookie-path-matches?
+  [cookie-path request-path]
+  (let [cookie-path* (or (some-> cookie-path str not-empty) "/")
+        path*        (or (some-> request-path str not-empty) "/")]
+    (or (= "/" cookie-path*)
+        (= cookie-path* path*)
+        (str/starts-with? path* cookie-path*))))
+
+(defn- cookie-matches-uri?
+  [cookie ^URI uri]
+  (let [scheme (some-> (.getScheme uri) str/lower-case)
+        host   (.getHost uri)
+        path   (or (.getPath uri) "/")
+        secure? (boolean (or (get cookie "secure")
+                             (:secure cookie)))]
+    (and (cookie-domain-matches? (or (get cookie "domain")
+                                     (:domain cookie))
+                                 host)
+         (cookie-path-matches? (or (get cookie "path")
+                                   (:path cookie))
+                               path)
+         (or (not secure?)
+             (= "https" scheme)))))
+
+(defn- storage-state-validation
+  [snapshot target-url]
+  (let [storage-state   (get snapshot "browser_state")
+        parsed-state    (parse-storage-state storage-state)
+        target-uri      (parse-uri-safe target-url)
+        target-origin   (uri-origin target-uri)
+        snapshot-origin (uri-origin (get snapshot "current_url"))]
+    (cond
+      (nil? storage-state)
+      {:ok? true
+       :reason :no-storage-state}
+
+      (= ::invalid parsed-state)
+      {:ok? false
+       :reason :invalid-storage-state
+       :message "Browser session snapshot has invalid storage state."}
+
+      (nil? target-uri)
+      {:ok? true
+       :reason :unparseable-target-url}
+
+      :else
+      (let [cookies                 (into [] (filter map?) (or (get parsed-state "cookies") []))
+            origins                 (into [] (filter map?) (or (get parsed-state "origins") []))
+            target-cookies          (into [] (filter #(cookie-matches-uri? % target-uri)) cookies)
+            live-target-cookies     (into [] (remove cookie-expired?) target-cookies)
+            target-origin-entry?    (boolean
+                                     (some #(= target-origin
+                                               (uri-origin (or (get % "origin")
+                                                               (:origin %))))
+                                           origins))
+            state-present?          (or (seq cookies) (seq origins))
+            target-state-present?   (or (seq target-cookies) target-origin-entry?)
+            same-origin-target?     (= snapshot-origin target-origin)]
+        (cond
+          (not state-present?)
+          {:ok? true
+           :reason :empty-storage-state}
+
+          (or (seq live-target-cookies) target-origin-entry?)
+          {:ok? true
+           :reason :target-state-present}
+
+          (and same-origin-target?
+               (seq target-cookies)
+               (empty? live-target-cookies))
+          {:ok? false
+           :reason :stale-cookies
+           :message "Browser session snapshot only has expired cookies for the current URL."}
+
+          (and (not same-origin-target?)
+               (not target-state-present?))
+          {:ok? false
+           :reason :target-origin-changed
+           :message "Browser session snapshot does not contain state for the requested URL."}
+
+          :else
+          {:ok? true
+           :reason :best-effort-allowed})))))
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -197,6 +363,7 @@
      :write-snapshot! write-session-snapshot!
      :delete-snapshot! delete-session-snapshot!
      :all-snapshots all-session-snapshots
+     :snapshot-usable? storage-state-validation
      :snapshot-expired? snapshot-expired?
      :validate-url! validate-url!
      :resolve-url! resolve-url!})))
@@ -380,11 +547,19 @@
                        (get snapshot "current_url")
                        (throw (ex-info "Browser session snapshot has no current URL"
                                        {:session-id session-id})))
+        validation (storage-state-validation snapshot target-url)
         js-enabled (if (nil? js)
                      (if (contains? snapshot "js_enabled")
                        (boolean (get snapshot "js_enabled"))
                        true)
                      js)]
+    (when-not (:ok? validation)
+      (delete-session-snapshot! session-id)
+      (throw (ex-info (or (:message validation)
+                          "Browser session snapshot is no longer usable.")
+                      {:session-id session-id
+                       :target-url target-url
+                       :reason (:reason validation)})))
     (browser.backend/open-session* (backend-by-id (session-backend-id session-id))
                                    target-url
                                    {:js js-enabled

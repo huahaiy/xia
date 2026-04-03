@@ -912,6 +912,14 @@
       (not= backend-id (snapshot-backend-id snapshot))
       nil
 
+      (and (:snapshot-usable? ops)
+           (not (:ok? ((:snapshot-usable? ops)
+                       snapshot
+                       (get snapshot "current_url")))))
+      (do
+        ((:delete-snapshot! ops) session-id)
+        nil)
+
       :else
       (let [sess (create-session! ops
                                   session-id

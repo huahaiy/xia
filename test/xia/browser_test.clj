@@ -1,5 +1,6 @@
 (ns xia.browser-test
-  (:require [clojure.string :as str]
+  (:require [charred.api :as json]
+            [clojure.string :as str]
             [clojure.test :refer :all]
             [org.httpkit.server :as http-server]
             [taoensso.timbre :as timbre]
@@ -30,6 +31,10 @@
 (defn- playwright-var
   [sym]
   (ns-resolve 'xia.browser.playwright sym))
+
+(defn- browser-var
+  [sym]
+  (ns-resolve 'xia.browser sym))
 
 (defn- call-playwright-private
   [sym & args]
@@ -434,6 +439,50 @@
       (finally
         (.remove sessions* session-id)))))
 
+(deftest clone-session-rejects-changed-auth-url-without-matching-stored-state
+  (let [deleted (atom nil)
+        opened  (atom false)
+        snapshot {"backend" "playwright"
+                  "current_url" "https://auth.old.example/login"
+                  "browser_state"
+                  (json/write-json-str
+                   {"cookies" [{"name" "sid"
+                                "domain" "auth.old.example"
+                                "path" "/"
+                                "expires" (+ (quot (System/currentTimeMillis) 1000) 3600)}]})}
+        backend
+        (reify browser.backend/BrowserBackend
+          (backend-id [_] :playwright)
+          (runtime-status* [_] nil)
+          (bootstrap-runtime!* [_ _opts] nil)
+          (install-browser-deps!* [_ _opts] nil)
+          (open-session* [_ _url _opts]
+            (reset! opened true)
+            {:session-id "unexpected"})
+          (navigate* [_ _session-id _url] nil)
+          (click* [_ _session-id _selector] nil)
+          (fill-selector* [_ _session-id _selector _value _opts] nil)
+          (fill-form* [_ _session-id _fields _opts] nil)
+          (read-page* [_ _session-id] nil)
+          (query-elements* [_ _session-id _opts] nil)
+          (screenshot* [_ _session-id _opts] nil)
+          (wait-for-page* [_ _session-id _opts] nil)
+          (close-session* [_ _session-id] nil)
+          (close-all-sessions!* [_] nil)
+          (list-sessions* [_] []))]
+    (with-redefs [xia.browser/read-session-snapshot (fn [_] snapshot)
+                  xia.browser/delete-session-snapshot! (fn [session-id]
+                                                         (reset! deleted session-id))
+                  xia.browser/session-backend-id (constantly :playwright)
+                  xia.browser/backend-by-id (constantly backend)]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo
+            #"does not contain state for the requested URL"
+            (browser/clone-session "browser-session-1"
+                                   :url "https://auth.new.example/login")))
+      (is (= "browser-session-1" @deleted))
+      (is (= false @opened)))))
+
 (deftest playwright-driver-resource-fs-recovers-existing-filesystem
   (let [existing-fs (FileSystems/getDefault)
         resource-uri (URI. "resource:/playwright-driver")]
@@ -471,6 +520,31 @@
            (fn []
              (call-playwright-private 'stop-runtime!)))
          (is (empty? @closed))))))
+
+(deftest playwright-restore-session-drops-stale-cookie-snapshot
+  (let [deleted      (atom nil)
+        created?     (atom false)
+        validate!    (var-get (browser-var 'storage-state-validation))
+        stale-cookie {"name" "sid"
+                      "domain" "example.com"
+                      "path" "/"
+                      "expires" 1}
+        snapshot     {"backend" "playwright"
+                      "current_url" "https://example.com/account"
+                      "browser_state" (json/write-json-str {"cookies" [stale-cookie]})}
+        ops          {:read-snapshot (fn [_] snapshot)
+                      :delete-snapshot! (fn [session-id]
+                                          (reset! deleted session-id))
+                      :snapshot-expired? (constantly false)
+                      :snapshot-usable? validate!}]
+    (with-redefs-fn {(playwright-var 'create-session!)
+                     (fn [& _]
+                       (reset! created? true)
+                       (throw (ex-info "should not create session" {})))}
+      #(do
+         (is (nil? (call-playwright-private 'restore-session! ops "browser-session-2")))
+         (is (= "browser-session-2" @deleted))
+         (is (= false @created?))))))
 
 (deftest ^:integration read-page-restores-from-snapshot
   (let [result (browser/open-session "https://example.com")
