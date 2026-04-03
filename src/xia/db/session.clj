@@ -689,6 +689,52 @@
        (mapv :eid)
        (session-messages-by-eids deps)))
 
+(defn session-history-data
+  [deps session-ids]
+  (let [session-ids* (->> session-ids
+                          (keep identity)
+                          distinct
+                          vec)]
+    (if-not (seq session-ids*)
+      {}
+      (let [summaries
+            (reduce (fn [acc [sid eid created-at role]]
+                      (if-not (contains? #{:user :assistant} role)
+                        acc
+                        (let [current     (get acc sid)
+                              current-key [(long (or (:last-created-at current) -1))
+                                           (long (or (:last-eid current) -1))]
+                              row-key     [(long (or created-at 0))
+                                           (long eid)]
+                              replace?    (pos? (compare row-key current-key))]
+                          (assoc acc sid
+                                 {:message-count   (inc (long (or (:message-count current) 0)))
+                                  :last-created-at (if replace? created-at (:last-created-at current))
+                                  :last-eid        (if replace? eid (:last-eid current))}))))
+                    {}
+                    (q* deps '[:find ?sid ?m ?created-at ?role
+                               :in $ [?sid ...]
+                               :where
+                               [?s :session/id ?sid]
+                               [?m :message/session ?s]
+                               [?m :message/role ?role]
+                               [(get-else $ ?m :db/created-at 0) ?created-at]]
+                        session-ids*))
+            latest-by-eid
+            (->> summaries
+                 vals
+                 (keep :last-eid)
+                 distinct
+                 vec
+                 ((fn [latest-eids]
+                    (zipmap latest-eids
+                            (session-messages-by-eids deps latest-eids)))))]
+        (into {}
+              (map (fn [[sid {:keys [message-count last-eid]}]]
+                     [sid {:message-count message-count
+                           :last-message  (get latest-by-eid last-eid)}]))
+              summaries)))))
+
 (defn- prune-llm-log!
   [deps]
   (let [cutoff (java.util.Date. (- (.getTime (java.util.Date.)) llm-log-retention-ms))

@@ -311,8 +311,8 @@
 
 (defn- current-session-task-state
   [task]
-  (or (:state task)
-      (get-in task [:meta :runtime :state])))
+  (or (get-in task [:meta :runtime :state])
+      (:state task)))
 
 (defn- current-session-task-state-rank
   [task]

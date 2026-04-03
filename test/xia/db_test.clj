@@ -200,6 +200,22 @@
     (is (= paused-task-id
            (:id (db/current-session-task sid))))))
 
+(deftest current-session-task-prefers-live-runtime-state-over-stale-durable-state
+  (let [sid              (db/create-session! :terminal)
+        live-running-id  (db/create-task! {:session-id sid
+                                           :channel :terminal
+                                           :type :interactive
+                                           :state :completed
+                                           :title "Live task"
+                                           :meta {:runtime {:state :running}}})
+        _paused-task-id  (db/create-task! {:session-id sid
+                                           :channel :terminal
+                                           :type :interactive
+                                           :state :paused
+                                           :title "Paused task"})]
+    (is (= live-running-id
+           (:id (db/current-session-task sid))))))
+
 (deftest close-records-debug-event-when-runtime-is-running
   (runtime-state/mark-running!)
   (try

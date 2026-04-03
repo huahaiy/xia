@@ -291,20 +291,25 @@
 (declare user-profile->body history-user-profile->body stack->body)
 
 (defn- history-session->body
-  [deps session]
-  (let [messages     (->> (db/session-messages (:id session))
-                          (filter #(#{:user :assistant} (:role %)))
-                          vec)
-        last-message (last messages)
-        user-profile (:user-profile session)]
-    {:id              (some-> (:id session) str)
-     :channel         (some-> (:channel session) name)
-     :created_at      (instant->str* deps (:created-at session))
-     :active          (boolean (:active? session))
-     :message_count   (count messages)
-     :last_message_at (instant->str* deps (:created-at last-message))
-     :preview         (truncate-text* deps (:content last-message) 160)
-     :user_profile    (history-user-profile->body deps user-profile)}))
+  ([deps session]
+   (history-session->body deps session nil))
+  ([deps session history-data]
+   (let [{:keys [message-count last-message]}
+         (or history-data
+             (let [messages (->> (db/session-messages (:id session))
+                                 (filter #(#{:user :assistant} (:role %)))
+                                 vec)]
+               {:message-count (count messages)
+                :last-message  (last messages)}))
+         user-profile (:user-profile session)]
+     {:id              (some-> (:id session) str)
+      :channel         (some-> (:channel session) name)
+      :created_at      (instant->str* deps (:created-at session))
+      :active          (boolean (:active? session))
+      :message_count   (long (or message-count 0))
+      :last_message_at (instant->str* deps (:created-at last-message))
+      :preview         (truncate-text* deps (:content last-message) 160)
+      :user_profile    (history-user-profile->body deps user-profile)})))
 
 (defn- task-item->body
   [deps item]
@@ -1017,11 +1022,15 @@
 
 (defn handle-history-sessions
   [deps]
-  (json-response* deps 200
-                  {:sessions (->> (db/list-sessions)
-                                  (into [] (comp (filter #(contains? history-session-channels
-                                                                    (:channel %)))
-                                                 (map #(history-session->body deps %)))))}))
+  (let [sessions      (->> (db/list-sessions)
+                           (into [] (filter #(contains? history-session-channels
+                                                        (:channel %)))))
+        history-data  (db/session-history-data (map :id sessions))]
+    (json-response* deps 200
+                    {:sessions (->> sessions
+                                    (into [] (map #(history-session->body deps
+                                                                          %
+                                                                          (get history-data (:id %))))))})))
 
 (defn handle-history-tasks
   [deps]

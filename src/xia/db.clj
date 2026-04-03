@@ -1803,6 +1803,10 @@
   [session-id]
   (db-session/session-messages (session-deps) session-id))
 
+(defn session-history-data
+  [session-ids]
+  (db-session/session-history-data (session-deps) session-ids))
+
 ;; ---------------------------------------------------------------------------
 ;; Tasks
 ;; ---------------------------------------------------------------------------

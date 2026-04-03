@@ -652,6 +652,41 @@
               :constraints ["Use the approved tone"]}
              (:contract task))))))
 
+(deftest ensure-runtime-task-preserves-interactive-contract-on-resume-with-guidance
+  (let [session-id      (db/create-session! :terminal)
+        task-id         (db/create-task! {:session-id session-id
+                                          :channel :terminal
+                                          :type :interactive
+                                          :state :paused
+                                          :title "Review the invoice"
+                                          :summary "Task resumed"
+                                          :contract {:kind :interactive
+                                                     :goal "Review the invoice"
+                                                     :initial_message "Review the invoice"
+                                                     :channel :terminal}})
+        autonomy-state  (autonomous/initial-state "Review the invoice")
+        task-runtime-deps {:truncate-summary (fn [text max-chars]
+                                               (let [text (str text)]
+                                                 (if (> (count text) max-chars)
+                                                   (subs text 0 max-chars)
+                                                   text)))}]
+    (task-runtime/ensure-runtime-task! task-runtime-deps
+                                       session-id
+                                       :terminal
+                                       "Continue reviewing the invoice, keep it concise."
+                                       autonomy-state
+                                       task-id
+                                       :resume
+                                       nil)
+    (let [task (db/get-task task-id)]
+      (is (= "Review the invoice" (:title task)))
+      (is (= "Task resumed" (:summary task)))
+      (is (= {:kind :interactive
+              :goal "Review the invoice"
+              :initial_message "Review the invoice"
+              :channel :terminal}
+             (:contract task))))))
+
 (deftest steer-task-restarts-a-task-with-a-new-instruction
   (let [session-id     (db/create-session! :terminal)
         task-id        (db/create-task! {:session-id session-id

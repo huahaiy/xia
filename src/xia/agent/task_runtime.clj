@@ -536,13 +536,8 @@
 (defn- refresh-interactive-task-goal?
   [task operation user-message]
   (and (= :interactive (:type task))
-       (let [message* (some-> user-message str str/trim not-empty)]
-         (case operation
-           :steer true
-           :resume (and message*
-                        (not= message* default-resume-message))
-           :start true
-           false))))
+       (= :steer operation)
+       (some-> user-message str str/trim not-empty)))
 
 (defn- resolve-task-operation
   [task-id runtime-op]

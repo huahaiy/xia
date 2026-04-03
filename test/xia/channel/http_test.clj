@@ -899,27 +899,34 @@
     (db/add-message! visible-sid :user "hello")
     (db/add-message! visible-sid :assistant "latest reply")
     (db/add-message! hidden-sid :user "should stay hidden")
-    (let [response (#'http/router {:uri            "/history/sessions"
-                                   :request-method :get
-                                   :headers        (ui-headers)})
-          body     (response-json response)
-          sessions (get body "sessions")
-          session  (first sessions)]
-      (is (= 200 (:status response)))
-      (is (= 1 (count sessions)))
-      (is (= (str visible-sid) (get session "id")))
-      (is (= "http" (get session "channel")))
-      (is (= true (get session "active")))
-      (is (= 2 (get session "message_count")))
-      (is (= "latest reply" (get session "preview")))
-      (is (= {"id" (str profile-id)
-              "key" "http-user:test"
-              "name" "Test User"}
-             (select-keys (get session "user_profile")
-                          ["id" "key" "name"])))
-      (is (nil? (get-in session ["user_profile" "preferences"])))
-      (is (string? (get session "created_at")))
-      (is (string? (get session "last_message_at"))))))
+    (let [original-session-history-data db/session-history-data]
+      (with-redefs [xia.db/session-history-data (fn [session-ids]
+                                                  (is (= [visible-sid] (vec session-ids)))
+                                                  (original-session-history-data session-ids))
+                    xia.db/session-messages     (fn [& _]
+                                                  (throw (ex-info "history sessions route should use preloaded session history data"
+                                                                  {})))]
+        (let [response (#'http/router {:uri            "/history/sessions"
+                                       :request-method :get
+                                       :headers        (ui-headers)})
+              body     (response-json response)
+              sessions (get body "sessions")
+              session  (first sessions)]
+          (is (= 200 (:status response)))
+          (is (= 1 (count sessions)))
+          (is (= (str visible-sid) (get session "id")))
+          (is (= "http" (get session "channel")))
+          (is (= true (get session "active")))
+          (is (= 2 (get session "message_count")))
+          (is (= "latest reply" (get session "preview")))
+          (is (= {"id" (str profile-id)
+                  "key" "http-user:test"
+                  "name" "Test User"}
+                 (select-keys (get session "user_profile")
+                              ["id" "key" "name"])))
+          (is (nil? (get-in session ["user_profile" "preferences"])))
+          (is (string? (get session "created_at")))
+          (is (string? (get session "last_message_at"))))))))
 
 (deftest history-sessions-route-includes-messaging-channels
   (let [slack-sid (db/create-session! :slack {:label "Slack channel"})
