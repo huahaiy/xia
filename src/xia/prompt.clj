@@ -390,44 +390,57 @@
    - `:cancel-session!`
    - `:busy?`
    - `:finalize-session!`"
-  [handlers session-id intent & {:keys [reason]}]
-  (if-not session-id
-    {:status :missing}
-    (case intent
-      :interrupt
-      (if ((:cancel-session! handlers) session-id (or reason "session cancel requested"))
-        {:status :cancelling
-         :session-id session-id}
-        {:status :busy
-         :session-id session-id
-         :error "session is still processing a request"})
+  [handlers session-id intent & {:keys [reason context]}]
+  (let [audit-ctx (merge (select-keys *interaction-context* [:session-id :channel])
+                         (select-keys context [:session-id :channel]))
+        result
+        (if-not session-id
+          {:status :missing}
+          (case intent
+            :interrupt
+            (if ((:cancel-session! handlers) session-id (or reason "session cancel requested"))
+              {:status :cancelling
+               :session-id session-id}
+              {:status :busy
+               :session-id session-id
+               :error "session is still processing a request"})
 
-      :close
-      (let [busy? (boolean (when-let [f (:busy? handlers)]
-                             (f session-id)))
-            finalize! (:finalize-session! handlers)]
-        (cond
-          busy?
-          (if ((:cancel-session! handlers) session-id (or reason "session close requested"))
-            {:status :cancelling
+            :close
+            (let [busy? (boolean (when-let [f (:busy? handlers)]
+                                   (f session-id)))
+                  finalize! (:finalize-session! handlers)]
+              (cond
+                busy?
+                (if ((:cancel-session! handlers) session-id (or reason "session close requested"))
+                  {:status :cancelling
+                   :session-id session-id
+                   :closing true}
+                  {:status :busy
+                   :session-id session-id
+                   :error "session is still processing a request"})
+
+                (nil? finalize!)
+                {:status :invalid
+                 :session-id session-id
+                 :error "Session finalization is unavailable"}
+
+                :else
+                {:status (if (finalize! session-id) :closed :already-closed)
+                 :session-id session-id}))
+
+            {:status :invalid
              :session-id session-id
-             :closing true}
-            {:status :busy
-             :session-id session-id
-             :error "session is still processing a request"})
-
-          (nil? finalize!)
-          {:status :invalid
-           :session-id session-id
-           :error "Session finalization is unavailable"}
-
-          :else
-          {:status (if (finalize! session-id) :closed :already-closed)
-           :session-id session-id}))
-
-      {:status :invalid
-       :session-id session-id
-       :error (str "Unsupported session control intent: " intent)})))
+             :error (str "Unsupported session control intent: " intent)}))]
+    (audit/log! audit-ctx
+                {:actor :user
+                 :type :session-control
+                 :data (cond-> {:kind "session-control"
+                                :intent (name intent)
+                                :session-id (some-> session-id str)
+                                :status (some-> (:status result) name)}
+                         reason (assoc :reason reason)
+                         (:closing result) (assoc :closing true))})
+    result))
 
 (defn apply-task-control-intent!
   "Dispatch a control intent to the supplied task-control handlers.
@@ -439,18 +452,31 @@
    - `:interrupt-task!`
    - `:steer-task!`
    - `:fork-task!`"
-  [handlers task-id intent & {:keys [message]}]
-  (if-not task-id
-    {:status :missing}
-    (case intent
-      :pause ((:pause-task! handlers) task-id)
-      :resume ((:resume-task! handlers) task-id :message message)
-      :stop ((:stop-task! handlers) task-id)
-      :interrupt ((:interrupt-task! handlers) task-id)
-      :steer ((:steer-task! handlers) task-id message)
-      :fork ((:fork-task! handlers) task-id message)
-      {:status :invalid
-       :error (str "Unsupported control intent: " intent)})))
+  [handlers task-id intent & {:keys [message context]}]
+  (let [audit-ctx (merge (select-keys *interaction-context* [:session-id :channel])
+                         (select-keys context [:session-id :channel]))
+        result
+        (if-not task-id
+          {:status :missing}
+          (case intent
+            :pause ((:pause-task! handlers) task-id)
+            :resume ((:resume-task! handlers) task-id :message message)
+            :stop ((:stop-task! handlers) task-id)
+            :interrupt ((:interrupt-task! handlers) task-id)
+            :steer ((:steer-task! handlers) task-id message)
+            :fork ((:fork-task! handlers) task-id message)
+            {:status :invalid
+             :error (str "Unsupported control intent: " intent)}))]
+    (audit/log! audit-ctx
+                {:actor :user
+                 :type :task-control
+                 :data (cond-> {:kind "task-control"
+                                :intent (name intent)
+                                :task-id (some-> task-id str)
+                                :status (some-> (:status result) name)}
+                         (:session-id result) (assoc :task-session-id (str (:session-id result)))
+                         (some-> message str not-empty) (assoc :message-provided true))})
+    result))
 
 (defn clear-pending-interaction!
   "Remove a pending interaction by selector."

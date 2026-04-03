@@ -352,6 +352,14 @@
 
 (declare stack->body)
 
+(defn- session-link->body
+  [deps current-session-id {:keys [session-id role created-at updated-at]}]
+  (cond-> {:session_id (some-> session-id str)
+           :current    (= session-id current-session-id)}
+    role (assoc :role (name role))
+    created-at (assoc :created_at (instant->str* deps created-at))
+    updated-at (assoc :updated_at (instant->str* deps updated-at))))
+
 (defn- task->body
   ([deps task]
    (task->body deps
@@ -369,6 +377,8 @@
                           task
                           autonomy-state)
          state           (or (:state runtime) (:state task))
+         session-links   (not-empty (mapv #(session-link->body deps (:session-id task) %)
+                                          (:session-links task)))
          stack           (stack->body deps autonomy-state)]
      (cond-> {:id         (some-> (:id task) str)
               :session_id (some-> (:session-id task) str)
@@ -389,6 +399,7 @@
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
        recovery-brief (assoc :recovery_brief recovery-brief)
        inspection (assoc :inspection inspection)
+       session-links (assoc :session_links session-links)
        (:meta task) (assoc :meta (:meta task))
        autonomy-state (assoc :autonomy_state autonomy-state)
        stack (assoc :stack stack)
@@ -437,6 +448,8 @@
                       autonomy-state
                       true)
          state       (or (:state runtime) (:state task))
+         session-links (not-empty (mapv #(session-link->body deps (:session-id task) %)
+                                        (:session-links task)))
          stack       (stack->body deps autonomy-state)]
      (cond-> {:id          (some-> (:id task) str)
               :session_id  (some-> (:session-id task) str)
@@ -455,6 +468,7 @@
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
        recovery-brief (assoc :recovery_brief recovery-brief)
        inspection (assoc :inspection inspection)
+       session-links (assoc :session_links session-links)
        stack (assoc :stack stack)
        latest-turn (assoc :latest_turn_state (some-> (:state latest-turn) name))
        latest-turn (assoc :latest_turn_summary (truncate-text* deps (:summary latest-turn) 160))
@@ -910,7 +924,9 @@
                                          (finalize-rest-session!* deps session-id :explicit))}
                    sid
                    :close
-                   :reason "session close requested")
+                   :reason "session close requested"
+                   :context {:session-id sid
+                             :channel (or expected-channel :http)})
            {:keys [response-kind status status-key message]} (prompt/session-control-result-view :close result)]
        (case response-kind
          :accepted
@@ -1120,12 +1136,16 @@
 (defn- handle-task-control-intent
   [deps task-id intent & {:keys [message]}]
   (try
-    (task-control-response deps
-                           intent
-                           (prompt/apply-task-control-intent! task-control-handlers
-                                                              (java.util.UUID/fromString task-id)
-                                                              intent
-                                                              :message message))
+    (let [uuid (java.util.UUID/fromString task-id)
+          task (db/get-task uuid)]
+      (task-control-response deps
+                             intent
+                             (prompt/apply-task-control-intent! task-control-handlers
+                                                                uuid
+                                                                intent
+                                                                :message message
+                                                                :context {:session-id (:session-id task)
+                                                                          :channel :http})))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 

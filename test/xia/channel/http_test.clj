@@ -19,6 +19,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.runtime :as runtime]
             [xia.schedule :as schedule]
+            [xia.scheduler :as scheduler]
             [xia.workspace :as workspace]
             [xia.test-helpers :as th :refer [minimal-pdf-bytes with-test-db]])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream File]
@@ -1113,6 +1114,32 @@
       (is (= "user" (get item "role")))
       (is (= {"text" "review the invoice"} (get item "data"))))))
 
+(deftest task-detail-route-includes-linked-sessions
+  (let [sid-a   (db/create-session! :http)
+        sid-b   (db/create-session! :command)
+        task-id (db/create-task! {:session-id sid-a
+                                  :channel :http
+                                  :type :interactive
+                                  :state :paused
+                                  :title "Review the invoice"})]
+    (db/update-task! task-id {:session-id sid-b
+                              :session-role :resumed
+                              :channel :command})
+    (let [response      (#'http/router {:uri            (str "/tasks/" task-id)
+                                        :request-method :get
+                                        :headers        (ui-headers)})
+          body          (response-json response)
+          task          (get body "task")
+          session-links (get task "session_links")]
+      (is (= 200 (:status response)))
+      (is (= (str sid-b) (get task "session_id")))
+      (is (= "command" (get task "channel")))
+      (is (= 2 (count session-links)))
+      (is (= #{{"session_id" (str sid-a) "role" "origin" "current" false}
+               {"session_id" (str sid-b) "role" "resumed" "current" true}}
+             (set (map #(select-keys % ["session_id" "role" "current"])
+                       session-links)))))))
+
 (deftest task-detail-route-returns-durable-checkpoint-and-recovery-brief
   (let [sid      (db/create-session! :http)
         task-id  (db/create-task! {:session-id sid
@@ -1440,6 +1467,61 @@
       (is (= {"arguments" "{\"path\":\"invoice.md\"}"}
              (get tool-event "data"))))))
 
+(deftest scheduled-tool-run-appears-through-shared-task-history-and-events
+  (schedule/create-schedule!
+    {:id :nightly-tool-http
+     :name "Nightly tool"
+     :spec {:minute #{0} :hour #{9}}
+     :type :tool
+     :tool-id :web-fetch
+     :tool-args {:url "https://example.com"}})
+  (with-redefs [xia.tool/execute-tool
+                (fn [tool-id args _context]
+                  (is (= :web-fetch tool-id))
+                  (is (= {:url "https://example.com"} args))
+                  {:summary "Fetched the nightly page."
+                   :content "Fetched the nightly page."})]
+    (#'scheduler/execute-tool-schedule (schedule/get-schedule :nightly-tool-http)))
+  (let [task-id          (schedule/schedule-task-id :nightly-tool-http)
+        history-response (#'http/router {:uri            "/history/tasks"
+                                         :request-method :get
+                                         :headers        (ui-headers)})
+        history-body     (response-json history-response)
+        task             (some #(when (= (str task-id) (get % "id")) %)
+                               (get history-body "tasks"))
+        inspection       (get task "inspection")
+        events-response  (#'http/router {:uri            (str "/tasks/" task-id "/events")
+                                         :request-method :get
+                                         :headers        (ui-headers)})
+        events-body      (response-json events-response)
+        events           (get events-body "events")
+        types            (mapv #(get % "type") events)]
+    (is (= 200 (:status history-response)))
+    (is (= (str task-id) (get task "id")))
+    (is (= "scheduler" (get task "channel")))
+    (is (= "schedule" (get task "type")))
+    (is (= "completed" (get task "state")))
+    (is (= "Fetched the nightly page." (get task "summary")))
+    (is (= "web-fetch" (get-in inspection ["last_tool_activity" "tool_id"])))
+    (is (= "Fetched the nightly page." (get-in inspection ["last_tool_activity" "summary"])))
+    (is (= "tool_completed" (get-in inspection ["last_activity" "kind"])))
+    (is (= 200 (:status events-response)))
+    (is (= (str task-id) (get events-body "task_id")))
+    (is (= ["task.started"
+            "turn.started"
+            "tool.requested"
+            "tool.completed"
+            "turn.completed"
+            "task.completed"]
+           types))
+    (let [completed-event (some #(when (= "task.completed" (get % "type")) %) events)]
+      (is (= {"state" "completed"
+              "channel" "scheduler"
+              "task-type" "schedule"}
+             (some-> completed-event
+                     (get "data")
+                     (select-keys ["state" "channel" "task-type"])))))))
+
 (deftest live-task-events-route-returns-buffered-runtime-events
   (let [sid     (db/create-session! :http)
         task-id (db/create-task! {:session-id sid
@@ -1556,13 +1638,21 @@
                                    :headers        (ui-headers)})
           body     (response-json response)
           task     (db/get-task task-id)
-          turns    (db/task-turns task-id)]
+          turns    (db/task-turns task-id)
+          events   (db/session-audit-events sid)]
       (is (= 200 (:status response)))
       (is (= "paused" (get body "status")))
       (is (= "paused" (get-in body ["task" "state"])))
       (is (= "paused" (get-in body ["task" "stop_reason"])))
       (is (= :paused (:state task)))
-      (is (= :pause (:operation (last turns)))))))
+      (is (= :pause (:operation (last turns))))
+      (is (= :task-control (:type (last events))))
+      (is (= {"kind" "task-control"
+              "intent" "pause"
+              "task-id" (str task-id)
+              "status" "paused"
+              "task-session-id" (str sid)}
+             (:data (last events)))))))
 
 (deftest stop-task-route-updates-task
   (let [sid     (db/create-session! :http)

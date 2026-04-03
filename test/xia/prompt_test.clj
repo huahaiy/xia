@@ -222,3 +222,48 @@
       (finally
         (prompt/clear-pending-interaction! {:task-id (:task-id prompt-a)})
         (prompt/clear-pending-interaction! {:task-id (:task-id prompt-b)})))))
+
+(deftest task-and-session-control-intents-are-audited-when-context-is-provided
+  (let [session-id (db/create-session! :http)
+        task-id    (random-uuid)]
+    (is (= {:status :paused
+            :task-id task-id
+            :session-id session-id}
+           (select-keys (prompt/apply-task-control-intent!
+                         {:pause-task! (fn [tid]
+                                         {:status :paused
+                                          :task-id tid
+                                          :session-id session-id})}
+                         task-id
+                         :pause
+                         :context {:session-id session-id
+                                   :channel :http})
+                        [:status :task-id :session-id])))
+    (is (= {:status :cancelling
+            :session-id session-id}
+           (select-keys (prompt/apply-session-control-intent!
+                         {:cancel-session! (fn [sid reason]
+                                             (is (= session-id sid))
+                                             (is (= "session cancel requested" reason))
+                                             true)}
+                         session-id
+                         :interrupt
+                         :reason "session cancel requested"
+                         :context {:session-id session-id
+                                   :channel :http})
+                        [:status :session-id])))
+    (let [events (db/session-audit-events session-id)]
+      (is (= [:task-control :session-control]
+             (mapv :type events)))
+      (is (= {"kind" "task-control"
+              "intent" "pause"
+              "task-id" (str task-id)
+              "status" "paused"
+              "task-session-id" (str session-id)}
+             (:data (first events))))
+      (is (= {"kind" "session-control"
+              "intent" "interrupt"
+              "session-id" (str session-id)
+              "status" "cancelling"
+              "reason" "session cancel requested"}
+             (:data (second events)))))))

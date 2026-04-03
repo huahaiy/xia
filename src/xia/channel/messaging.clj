@@ -753,13 +753,17 @@
                      :steer-task! agent/steer-task!
                      :fork-task! agent/fork-task!}
                     (some-> task :id)
-                    intent)
+                    intent
+                    :context {:session-id session-id
+                              :channel channel})
                    (if (= :interrupt intent)
                      (prompt/apply-session-control-intent!
                       {:cancel-session! agent/cancel-session!}
                       session-id
                       :interrupt
-                      :reason "session cancel requested")
+                      :reason "session cancel requested"
+                      :context {:session-id session-id
+                                :channel channel})
                      {:status :missing}))
           text   (if task
                    (prompt/control-result-text intent result)
