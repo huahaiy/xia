@@ -288,7 +288,7 @@
      :latest_status (some-> (:status latest-run) name)
      :latest_error  (truncate-text* deps (:error latest-run) 160)}))
 
-(declare user-profile->body stack->body)
+(declare user-profile->body history-user-profile->body stack->body)
 
 (defn- history-session->body
   [deps session]
@@ -304,7 +304,7 @@
      :message_count   (count messages)
      :last_message_at (instant->str* deps (:created-at last-message))
      :preview         (truncate-text* deps (:content last-message) 160)
-     :user_profile    (user-profile->body deps user-profile)}))
+     :user_profile    (history-user-profile->body deps user-profile)}))
 
 (defn- task-item->body
   [deps item]
@@ -389,6 +389,28 @@
       (:name user-profile) (assoc :name (:name user-profile))
       (:summary user-profile) (assoc :summary (:summary user-profile))
       (:preferences user-profile) (assoc :preferences (:preferences user-profile)))))
+
+(defn- history-user-profile->body
+  [deps user-profile]
+  (when user-profile
+    (cond-> {:id (some-> (:id user-profile) str)}
+      (:key user-profile) (assoc :key (:key user-profile))
+      (:name user-profile) (assoc :name (:name user-profile))
+      (:summary user-profile) (assoc :summary (:summary user-profile)))))
+
+(defn- history-contract->body
+  [contract]
+  (when (map? contract)
+    (let [kind (:kind contract)]
+      (cond-> {}
+        kind (assoc :kind kind)
+        (:goal contract) (assoc :goal (:goal contract))
+        (and (= kind :branch) (:objective contract)) (assoc :objective (:objective contract))
+        (and (= kind :branch) (:parent-task-id contract)) (assoc :parent-task-id (:parent-task-id contract))
+        (and (= kind :schedule) (:schedule-id contract)) (assoc :schedule-id (:schedule-id contract))
+        (and (= kind :schedule) (:schedule-type contract)) (assoc :schedule-type (:schedule-type contract))
+        (and (= kind :schedule) (contains? contract :trusted?)) (assoc :trusted? (:trusted? contract))
+        (and (= kind :schedule) (:tool-id contract)) (assoc :tool-id (:tool-id contract))))))
 
 (defn- task->body
   ([deps task]
@@ -484,7 +506,7 @@
          checkpoint-at (task-runtime/task-checkpoint-at task)
          resume-hint (task-runtime/task-resume-hint task)
          recovery-brief (task-runtime/task-recovery-brief task)
-         contract    (:contract task)
+         contract    (history-contract->body (:contract task))
          inspection  (task-inspection/task-inspection
                       {:instant->str #(instant->str* deps %)
                        :truncate-text #(truncate-text* deps %1 %2)}

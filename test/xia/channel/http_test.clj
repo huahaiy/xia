@@ -914,10 +914,10 @@
       (is (= "latest reply" (get session "preview")))
       (is (= {"id" (str profile-id)
               "key" "http-user:test"
-              "name" "Test User"
-              "preferences" {"verbosity" "brief"}}
+              "name" "Test User"}
              (select-keys (get session "user_profile")
-                          ["id" "key" "name" "preferences"])))
+                          ["id" "key" "name"])))
+      (is (nil? (get-in session ["user_profile" "preferences"])))
       (is (string? (get session "created_at")))
       (is (string? (get session "last_message_at"))))))
 
@@ -950,7 +950,9 @@
                                   :state :resumable
                                   :title "Reply to the billing emails"
                                   :summary "Waiting on the next follow up"
-                                  :contract {:goal "Reply to the billing emails"
+                                  :contract {:kind :interactive
+                                             :goal "Reply to the billing emails"
+                                             :initial_message "reply to the billing emails"
                                              :constraints ["Preserve friendly tone"]
                                              :deliverables ["Send next reply"]}
                                   :autonomy-state (autonomous/initial-state "Reply to the billing emails")
@@ -1022,10 +1024,12 @@
                          (select-keys ["task_state" "phase" "message"]))))
           (is (= "Reply to the billing emails" (get task "title")))
           (is (= "Waiting on the next follow up" (get task "summary")))
-          (is (= {"goal" "Reply to the billing emails"
-                  "constraints" ["Preserve friendly tone"]
-                  "deliverables" ["Send next reply"]}
+          (is (= {"kind" "interactive"
+                  "goal" "Reply to the billing emails"}
                  (get task "contract")))
+          (is (nil? (get-in task ["contract" "initial_message"])))
+          (is (nil? (get-in task ["contract" "constraints"])))
+          (is (nil? (get-in task ["contract" "deliverables"])))
           (is (= {"depth" 1
                   "current_focus" "Reply to the billing emails"
                   "root_goal" "Reply to the billing emails"}
@@ -1053,6 +1057,47 @@
                  (get-in inspection ["counts" "assistant_message_count"])))
           (is (= 1
                  (get-in inspection ["counts" "tool_result_count"]))))))))
+
+(deftest history-tasks-route-compacts-schedule-contracts
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :scheduler
+                                  :type :schedule
+                                  :state :paused
+                                  :title "Run scheduled tool workspace-read"
+                                  :summary "Waiting for the next scheduled run"
+                                  :contract {:kind :schedule
+                                             :goal "Run scheduled tool workspace-read"
+                                             :schedule-id :nightly-summary
+                                             :schedule-type :tool
+                                             :trusted? true
+                                             :tool-id "workspace-read"
+                                             :prompt "Read the entire repo and summarize it."
+                                             :tool-args {:path "." :deep true}}})]
+    (let [response (#'http/router {:uri            "/history/tasks"
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (some #(when (= (str task-id) (get % "id")) %) (get body "tasks"))]
+      (is (= 200 (:status response)))
+      (is (= {"kind" "schedule"
+              "goal" "Run scheduled tool workspace-read"
+              "schedule-id" "nightly-summary"
+              "schedule-type" "tool"
+              "trusted?" true
+              "tool-id" "workspace-read"}
+             (get task "contract")))
+      (is (nil? (get-in task ["contract" "prompt"])))
+      (is (nil? (get-in task ["contract" "tool-args"])))
+      (let [detail-response (#'http/router {:uri            (str "/tasks/" task-id)
+                                            :request-method :get
+                                            :headers        (ui-headers)})
+            detail-body     (response-json detail-response)]
+        (is (= 200 (:status detail-response)))
+        (is (= "Read the entire repo and summarize it."
+               (get-in detail-body ["task" "contract" "prompt"])))
+        (is (= {"path" "." "deep" true}
+               (get-in detail-body ["task" "contract" "tool-args"])))))))
 
 (deftest task-detail-route-returns-turns-and-items
   (let [sid      (db/create-session! :http)
