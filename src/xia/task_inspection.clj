@@ -254,14 +254,14 @@
   [opts item]
   (let [kind (get-in item [:data :kind])]
     (case kind
-      "policy-decision" (assoc (policy-decision-entry opts item) :kind "policy_decision")
-      "input-response" (interaction-entry opts "input_received" item)
-      "approval-decision" (interaction-entry opts "approval_decided" item)
-      "budget-exhausted" {:kind "budget_exhausted"
+      "policy-decision" (assoc (policy-decision-entry opts item) :kind "task.policy-decision")
+      "input-response" (interaction-entry opts "input.received" item)
+      "approval-decision" (interaction-entry opts "approval.decided" item)
+      "budget-exhausted" {:kind "task.budget-exhausted"
                           :turn_id (uuid->str (:turn-id item))
                           :created_at (instant->str* opts (:created-at item))
                           :summary (truncate-text* opts (:summary item) 240)}
-      {:kind "note"
+      {:kind "task.note"
        :turn_id (uuid->str (:turn-id item))
        :created_at (instant->str* opts (:created-at item))
        :summary (truncate-text* opts (:summary item) 240)})))
@@ -269,13 +269,13 @@
 (defn- activity-entry
   [opts item]
   (case (:type item)
-    :assistant-message (assoc (assistant-output-entry opts item) :kind "assistant_output")
-    :tool-call (assoc (tool-activity-entry opts item) :kind "tool_requested")
-    :tool-result (assoc (tool-activity-entry opts item) :kind "tool_completed")
-    :status (assoc (status-update-entry opts item) :kind "status_update")
-    :checkpoint (assoc (checkpoint-entry opts item) :kind "checkpoint")
-    :input-request (interaction-entry opts "input_requested" item)
-    :approval-request (interaction-entry opts "approval_requested" item)
+    :assistant-message (assoc (assistant-output-entry opts item) :kind "message.assistant")
+    :tool-call (assoc (tool-activity-entry opts item) :kind "tool.requested")
+    :tool-result (assoc (tool-activity-entry opts item) :kind "tool.completed")
+    :status (assoc (status-update-entry opts item) :kind "task.status")
+    :checkpoint (assoc (checkpoint-entry opts item) :kind "task.checkpoint")
+    :input-request (interaction-entry opts "input.requested" item)
+    :approval-request (interaction-entry opts "approval.requested" item)
     :system-note (note-entry opts item)
     nil))
 

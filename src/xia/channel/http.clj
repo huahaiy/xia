@@ -1004,7 +1004,7 @@
 
 (defn- terminal-status-state?
   [state]
-  (contains? #{:done :error :cancelled} state))
+  (contains? #{:completed :done :error :cancelled} state))
 
 (defn- http-status-handler
   [{:keys [session-id state] :as status}]

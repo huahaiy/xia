@@ -746,15 +746,16 @@ function createTaskMetaItem(label, value) {
 function createTaskActivityItem(entry) {
   const item = document.createElement('div');
   item.className = 'task-list-item';
+  const kindLabel = taskActivityKindLabel(entry.kind);
   const head = document.createElement('div');
   head.className = 'task-list-item-head';
   const title = document.createElement('div');
   title.className = 'task-list-title';
-  title.textContent = firstPresentText(entry.summary, titleizeToken(entry.kind), 'Activity');
+  title.textContent = firstPresentText(entry.summary, kindLabel, 'Activity');
   const badge = document.createElement('span');
   badge.className = 'task-state-badge';
   badge.dataset.tone = taskBadgeTone(firstPresentText(entry.status, entry.kind));
-  badge.textContent = titleizeToken(entry.kind);
+  badge.textContent = kindLabel;
   head.appendChild(title);
   head.appendChild(badge);
   item.appendChild(head);
@@ -1447,6 +1448,7 @@ function applyRuntimeEvent(event) {
     case 'turn.completed':
     case 'turn.failed':
     case 'turn.cancelled':
+    case 'task.resumable':
     case 'task.completed':
     case 'task.failed':
     case 'task.cancelled':
@@ -1460,19 +1462,6 @@ function applyRuntimeEvent(event) {
       state.liveStatus = null;
       syncStatus();
       break;
-    case 'task.updated': {
-      const taskState = firstNonEmpty(event.data && event.data.state, '');
-      if (['completed', 'cancelled', 'failed', 'paused', 'resumable'].includes(taskState)) {
-        closeTaskEventStream();
-        state.pendingInput = null;
-        renderInputRequest();
-        state.pendingApproval = null;
-        renderApproval();
-        state.liveStatus = null;
-        syncStatus();
-      }
-      break;
-    }
     default:
       break;
   }
@@ -1596,9 +1585,40 @@ function asArray(value) {
 }
 
 function titleizeToken(value) {
-  const text = firstPresentText(value).replace(/[_-]+/g, ' ');
+  const text = firstPresentText(value).replace(/[._-]+/g, ' ');
   if (!text) return '';
   return text.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function taskActivityKindLabel(kind) {
+  switch (firstPresentText(kind)) {
+    case 'message.assistant':
+      return 'Output';
+    case 'tool.requested':
+      return 'Tool requested';
+    case 'tool.completed':
+      return 'Tool completed';
+    case 'task.status':
+      return 'Status';
+    case 'task.checkpoint':
+      return 'Checkpoint';
+    case 'input.requested':
+      return 'Input requested';
+    case 'approval.requested':
+      return 'Approval requested';
+    case 'input.received':
+      return 'Input received';
+    case 'approval.decided':
+      return 'Approval decided';
+    case 'task.policy-decision':
+      return 'Policy';
+    case 'task.budget-exhausted':
+      return 'Budget';
+    case 'task.note':
+      return 'Note';
+    default:
+      return titleizeToken(kind);
+  }
 }
 
 function providerDisplayName(provider) {

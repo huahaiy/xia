@@ -97,28 +97,10 @@
    :data       {:channel (:channel task)
                 :task-type (:type task)}})
 
-(defn task-updated-event
-  [task]
-  {:id         (event-id "task" (:id task) "updated"
-                         (or (some-> (:updated-at task) .getTime)
-                             (some-> (:finished-at task) .getTime)
-                             0))
-   :type       :task.updated
-   :task-id    (:id task)
-   :created-at (or (:updated-at task)
-                   (:finished-at task)
-                   (:created-at task))
-   :summary    (or (:summary task) (:title task))
-   :data       (cond-> {:state (:state task)}
-                 (:channel task) (assoc :channel (:channel task))
-                 (:type task) (assoc :task-type (:type task))
-                 (:stop-reason task) (assoc :stop-reason (:stop-reason task))
-                 (:current-turn-id task) (assoc :current-turn-id (:current-turn-id task))
-                 (:error task) (assoc :error (:error task)))})
-
 (defn task-state-event
   [task]
   (when-let [event-type (case (:state task)
+                          :resumable :task.resumable
                           :completed :task.completed
                           :failed :task.failed
                           :cancelled :task.cancelled

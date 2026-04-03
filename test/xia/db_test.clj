@@ -139,7 +139,7 @@
              (set (map :role links))))
       (is (= [task-id] (mapv :id tasks-a)))
       (is (= [task-id] (mapv :id tasks-b)))
-      (is (nil? (db/current-session-task sid-a)))
+      (is (= task-id (:id (db/current-session-task sid-a))))
       (is (= task-id (:id (db/current-session-task sid-b)))))))
 
 (deftest close-records-debug-event-when-runtime-is-running

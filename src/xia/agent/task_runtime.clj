@@ -24,7 +24,7 @@
 (declare sanitize-doc-value
          checkpoint-summary
          sync-runtime-task!
-         emit-task-updated-event!)
+         emit-task-state-event!)
 
 (def ^:private restart-lineage-limit 20)
 (def ^:private startup-recovery-task-limit 100000)
@@ -89,7 +89,7 @@
                           (cond-> (or meta {})
                             recovery (assoc :recovery recovery)
                             (nil? recovery) (dissoc :recovery)))))
-    (emit-task-updated-event! task-id)))
+    (emit-task-state-event! task-id)))
 
 (defn- stop-recovery-entry
   [{:keys [state stop-reason summary error finished-at]}]
@@ -202,7 +202,7 @@
                         (assoc meta
                                :checkpoint checkpoint*
                                :checkpoint-at (java.util.Date.))))
-    (emit-task-updated-event! task-id)))
+    (emit-task-state-event! task-id)))
 
 (defn task-checkpoint
   [task-or-id]
@@ -355,10 +355,9 @@
   [task-id]
   (some-> task-id db/get-task task-event/task-started-event emit-runtime-event!))
 
-(defn- emit-task-updated-event!
+(defn- emit-task-state-event!
   [task-id]
   (when-let [task (some-> task-id db/get-task)]
-    (emit-runtime-event! (task-event/task-updated-event task))
     (some-> (task-event/task-state-event task)
             emit-runtime-event!)))
 
@@ -395,21 +394,40 @@
         :resume
         :start)))
 
-(defn runtime-autonomy-state
+(defn- resolved-runtime-autonomy-state
   [session-id task-id]
-  (let [task       (some-> task-id db/get-task)
-        task-state (:autonomy-state task)
-        checkpoint-state (checkpoint->autonomy-state (task-checkpoint task))
-        wm-state   (wm/autonomy-state session-id)
-        base-state (or task-state checkpoint-state wm-state)
-        reconciled (some-> base-state autonomous/reconcile-child-task-state)]
-    (when (and task-id checkpoint-state (nil? task-state) (nil? wm-state))
-      (record-task-recovery-source! task-id :checkpoint (task-checkpoint task)))
-    (when (and task-id reconciled (not= reconciled task-state))
-      (db/update-task! task-id {:autonomy-state reconciled}))
-    (when (and session-id reconciled (not= reconciled wm-state))
-      (wm/set-autonomy-state! session-id reconciled))
-    reconciled))
+  (let [task             (some-> task-id db/get-task)
+        task-state       (:autonomy-state task)
+        checkpoint       (task-checkpoint task)
+        checkpoint-state (checkpoint->autonomy-state checkpoint)
+        wm-state         (wm/autonomy-state session-id)
+        base-state       (or task-state checkpoint-state wm-state)
+        reconciled       (some-> base-state autonomous/reconcile-child-task-state)]
+    {:task task
+     :task-state task-state
+     :checkpoint checkpoint
+     :checkpoint-state checkpoint-state
+     :wm-state wm-state
+     :reconciled reconciled}))
+
+(defn runtime-autonomy-state
+  ([session-id task-id]
+   (runtime-autonomy-state session-id task-id {:persist? true}))
+  ([session-id task-id {:keys [persist?] :or {persist? true}}]
+   (let [{:keys [task task-state checkpoint checkpoint-state wm-state reconciled]}
+         (resolved-runtime-autonomy-state session-id task-id)]
+     (when persist?
+       (when (and task-id checkpoint-state (nil? task-state) (nil? wm-state))
+         (record-task-recovery-source! task-id :checkpoint checkpoint))
+       (when (and task-id reconciled (not= reconciled task-state))
+         (db/update-task! task-id {:autonomy-state reconciled}))
+       (when (and session-id reconciled (not= reconciled wm-state))
+         (wm/set-autonomy-state! session-id reconciled)))
+     reconciled)))
+
+(defn inspect-runtime-autonomy-state
+  [session-id task-id]
+  (runtime-autonomy-state session-id task-id {:persist? false}))
 
 (defn task-llm-budget-state
   [task-id]
@@ -461,7 +479,7 @@
       (when new-task?
         (emit-task-started-event! resolved-task-id))
       (when-not new-task?
-        (emit-task-updated-event! resolved-task-id))
+        (emit-task-state-event! resolved-task-id))
       (emit-turn-open-event! task-turn-id)
       {:task-id resolved-task-id
        :task-turn-id task-turn-id
@@ -544,7 +562,7 @@
   (when task-id
     (db/update-task! task-id attrs)
     (record-task-stop! task-id attrs)
-    (emit-task-updated-event! task-id)))
+    (emit-task-state-event! task-id)))
 
 (defn sync-runtime-task-turn!
   [task-turn-id attrs]

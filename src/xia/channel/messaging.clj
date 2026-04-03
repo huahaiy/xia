@@ -430,7 +430,7 @@
    (current-task-context session-id true))
   ([session-id compact?]
    (when-let [task (db/current-session-task session-id)]
-     (let [autonomy-state (task-runtime/runtime-autonomy-state session-id (:id task))
+     (let [autonomy-state (task-runtime/inspect-runtime-autonomy-state session-id (:id task))
            inspection     (task-inspection/task-inspection
                            {:truncate-text truncate-summary}
                            task
@@ -519,18 +519,18 @@
 (defn- activity-kind-label
   [kind]
   (case kind
-    "assistant_output" "Output"
-    "tool_requested" "Tool requested"
-    "tool_completed" "Tool completed"
-    "status_update" "Status"
-    "checkpoint" "Checkpoint"
-    "input_requested" "Input requested"
-    "approval_requested" "Approval requested"
-    "input_received" "Input received"
-    "approval_decided" "Approval decided"
-    "policy_decision" "Policy"
-    "budget_exhausted" "Budget"
-    "note" "Note"
+    "message.assistant" "Output"
+    "tool.requested" "Tool requested"
+    "tool.completed" "Tool completed"
+    "task.status" "Status"
+    "task.checkpoint" "Checkpoint"
+    "input.requested" "Input requested"
+    "approval.requested" "Approval requested"
+    "input.received" "Input received"
+    "approval.decided" "Approval decided"
+    "task.policy-decision" "Policy"
+    "task.budget-exhausted" "Budget"
+    "task.note" "Note"
     "Activity"))
 
 (defn- task-output-text

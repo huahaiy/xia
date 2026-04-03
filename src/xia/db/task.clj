@@ -286,19 +286,35 @@
          (mapv (fn [[task-id _]]
                  (get-task deps task-id))))))
 
+(defn- session-link-role
+  [task session-id]
+  (some (fn [{:keys [role] :as link}]
+          (when (= session-id (:session-id link))
+            role))
+        (:session-links task)))
+
+(defn- current-session-task-rank
+  [session-id task]
+  (let [updated-at (or (:updated-at task) (:created-at task))
+        updated-ms (if (instance? java.util.Date updated-at)
+                     (.getTime ^java.util.Date updated-at)
+                     0)
+        role       (session-link-role task session-id)]
+    [(if (:current-turn-id task) 0 1)
+     (if (= session-id (:session-id task)) 0 1)
+     (case role
+       :resumed 0
+       :origin 1
+       :attached 2
+       3)
+     (- updated-ms)]))
+
 (defn current-session-task
   [deps session-id]
   (first
-   (sort-by (fn [task]
-              [(if (:current-turn-id task) 0 1)
-               (or (:updated-at task) (:created-at task))])
-            (fn [[a-priority a-time] [b-priority b-time]]
-              (let [priority (compare a-priority b-priority)]
-                (if (zero? priority)
-                  (compare b-time a-time)
-                  priority)))
-            (filter #(= session-id (:session-id %))
-                    (list-tasks deps {:session-id session-id})))))
+   (sort-by #(current-session-task-rank session-id %)
+            compare
+            (list-tasks deps {:session-id session-id}))))
 
 (defn attach-task-session!
   [deps task-id session-id & [{:keys [role primary?]

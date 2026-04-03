@@ -141,8 +141,13 @@
 (defn- runtime-status-value
   [value]
   (cond
-    (and (string? value) (#{"running" "done" "error" "cancelled"} value))
-    (keyword value)
+    (= value :done)
+    :completed
+
+    (and (string? value) (#{"running" "completed" "done" "error" "cancelled"} value))
+    (if (= "done" value)
+      :completed
+      (keyword value))
 
     (and (string? value) (#{"understanding" "working-memory" "planning" "llm" "tool-plan"
                             "tool" "approval" "finalizing" "observing" "updating"
@@ -364,7 +369,7 @@
   ([deps task]
    (task->body deps
                task
-               (task-runtime/runtime-autonomy-state (:session-id task) (:id task))))
+               (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))))
   ([deps task autonomy-state]
    (let [runtime         (get-in task [:meta :runtime])
          recovery        (task-runtime/task-recovery task)
@@ -432,7 +437,7 @@
   ([deps task]
    (history-task->body deps
                        task
-                       (task-runtime/runtime-autonomy-state (:session-id task) (:id task))))
+                       (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))))
   ([deps task autonomy-state]
    (let [turns       (db/task-turns (:id task))
          latest-turn (last turns)

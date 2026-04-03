@@ -1003,7 +1003,7 @@
              (get-in inspection ["last_tool_activity" "tool_id"])))
       (is (= "execution-policy"
              (get-in inspection ["last_policy_decision" "decision_type"])))
-      (is (= "tool_completed"
+      (is (= "tool.completed"
              (get-in inspection ["last_activity" "kind"])))
       (is (= "workspace-read"
              (get-in inspection ["last_activity" "tool_id"])))
@@ -1223,12 +1223,15 @@
           inspection       (get detail-task "inspection")]
       (is (= 200 (:status history-response)))
       (is (= "paused" (get history-task "state")))
+      (is (str/includes? (get history-task "recovery_brief")
+                         "Recovered from: runtime-restart"))
       (is (= 200 (:status detail-response)))
       (is (= "paused" (get detail-task "state")))
       (is (= "runtime-restart" (get detail-task "stop_reason")))
-      (is (= {"source" "checkpoint"}
+      (is (= {"source" "runtime-restart"
+              "interrupted-state" "waiting_input"}
              (some-> (get-in detail-task ["recovery" "last-recovery"])
-                     (select-keys ["source"]))))
+                     (select-keys ["source" "interrupted-state"]))))
       (is (= {"task_state" "paused"
               "phase" "recovered"}
              (some-> (get inspection "current_state")
@@ -1236,7 +1239,7 @@
       (is (str/includes? (get detail-task "recovery_brief")
                          "Stop reason: runtime-restart"))
       (is (str/includes? (get detail-task "recovery_brief")
-                         "Recovered from: checkpoint"))
+                         "Recovered from: runtime-restart"))
       (is (str/includes? (get detail-task "recovery_brief")
                          "Last checkpoint [observing]")))))
 
@@ -1349,7 +1352,7 @@
              (some-> (get inspection "recent_checkpoints")
                      first
                      (select-keys ["phase" "current_focus" "next_step" "progress_status" "stack_action"]))))
-      (is (= ["checkpoint" "status_update" "policy_decision"]
+      (is (= ["task.checkpoint" "task.status" "task.policy-decision"]
              (some->> (get inspection "recent_activity")
                       (take 3)
                       (mapv #(get % "kind")))))
@@ -1520,6 +1523,44 @@
       (is (= {"arguments" "{\"path\":\"invoice.md\"}"}
              (get tool-event "data"))))))
 
+(deftest task-events-route-returns-task-resumable-for-resumable-tasks
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :interactive
+                                  :state :running
+                                  :title "Review the invoice"
+                                  :summary "Review in progress"})
+        turn-id (db/start-task-turn! task-id
+                                     {:operation :start
+                                      :state :running
+                                      :input "review the invoice"
+                                      :summary "Finished the current turn"})]
+    (db/update-task-turn! turn-id
+                          {:state :completed
+                           :summary "Finished the current turn"})
+    (db/update-task! task-id
+                     {:state :resumable
+                      :summary "Paused after reaching the task budget"})
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id "/events")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          events   (get body "events")
+          types    (mapv #(get % "type") events)]
+      (is (= 200 (:status response)))
+      (is (= ["task.started"
+              "turn.started"
+              "turn.completed"
+              "task.resumable"]
+             types))
+      (is (= {"state" "resumable"
+              "channel" "http"
+              "task-type" "interactive"}
+             (some-> events last
+                     (get "data")
+                     (select-keys ["state" "channel" "task-type"])))))))
+
 (deftest scheduled-tool-run-appears-through-shared-task-history-and-events
   (schedule/create-schedule!
     {:id :nightly-tool-http
@@ -1557,7 +1598,7 @@
     (is (= "Fetched the nightly page." (get task "summary")))
     (is (= "web-fetch" (get-in inspection ["last_tool_activity" "tool_id"])))
     (is (= "Fetched the nightly page." (get-in inspection ["last_tool_activity" "summary"])))
-    (is (= "tool_completed" (get-in inspection ["last_activity" "kind"])))
+    (is (= "tool.completed" (get-in inspection ["last_activity" "kind"])))
     (is (= 200 (:status events-response)))
     (is (= (str task-id) (get events-body "task_id")))
     (is (= ["task.started"
@@ -1628,14 +1669,14 @@
           (is (= (str child-task-id) (get task "id")))
           (is (= "branch" (get task "channel")))
           (is (= "branch" (get task "type")))
-          (is (#{"done" "completed"} (get task "state")))
+          (is (= "completed" (get task "state")))
           (is (= 200 (:status detail-response)))
           (is (= (str child-task-id) (get detail-task "id")))
           (is (= (str parent-task-id) (get detail-task "parent_id")))
-          (is (#{"done" "completed"} (get detail-task "state")))
+          (is (= "completed" (get detail-task "state")))
           (is (str/includes? (or (get-in inspection ["recent_output" 0 "text"]) "")
                              "Invoice attachment mismatch"))
-          (is (some #{"assistant_output"}
+          (is (some #{"message.assistant"}
                     (map #(get % "kind") (get inspection "recent_activity"))))
           (is (= 200 (:status events-response)))
           (is (= (str child-task-id) (get events-body "task_id")))
@@ -2138,6 +2179,40 @@
       (is (= "waiting_input" (get-in body ["task" "state"])))
       (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
       (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))))) 
+
+(deftest session-task-route-resolves-linked-task-for-nonprimary-session
+  (let [sid-a   (db/create-session! :http)
+        sid-b   (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid-a
+                                  :channel :http
+                                  :type :interactive
+                                  :state :waiting_input
+                                  :title "Capture OTP"
+                                  :meta {:runtime {:state :waiting_input
+                                                   :phase :waiting_input
+                                                   :message "Waiting for input: OTP Code"}}})
+        turn-id (db/start-task-turn! task-id
+                                     {:operation :start
+                                      :state :waiting_input
+                                      :input "Capture OTP"
+                                      :summary "Waiting for OTP"})]
+    (db/update-task! task-id {:session-id sid-b
+                              :session-role :resumed})
+    (let [response (#'http/router {:uri            (str "/sessions/" sid-a "/task")
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= (str sid-a) (get body "session_id")))
+      (is (= (str task-id) (get body "task_id")))
+      (is (= true (get body "task_live")))
+      (is (= (str turn-id) (get body "current_turn_id")))
+      (is (= "waiting_input" (get-in body ["task" "state"])))
+      (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
+      (is (= #{{"session_id" (str sid-a) "role" "origin" "current" false}
+               {"session_id" (str sid-b) "role" "resumed" "current" true}}
+             (set (map #(select-keys % ["session_id" "role" "current"])
+                       (get-in body ["task" "session_links"]))))))))
 
 (deftest session-status-route-clears-terminal-error-status
   (let [sid (str (db/create-session! :http))]

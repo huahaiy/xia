@@ -69,7 +69,7 @@
                          "Iteration 1/6: Understanding hello"))
       (is (str/includes? (:message (nth @statuses 5))
                          "Iteration 1/6: Observed hello"))
-      (is (= {:state :done
+      (is (= {:state :completed
               :phase :complete
               :message "Ready"}
              (last @statuses)))
@@ -188,6 +188,40 @@
       (is (= recovered (:autonomy-state persisted)))
       (is (= recovered (wm/autonomy-state session-id)))
       (is (= :checkpoint
+             (get-in persisted [:meta :recovery :last-recovery :source]))))))
+
+(deftest inspect-runtime-autonomy-state-does-not-persist-recovery-or-wm
+  (let [session-id  (db/create-session! :terminal)
+        checkpoint  {:phase :observing
+                     :summary "Need to review the invoice attachments."
+                     :current-focus "Review the invoice"
+                     :next-step "Read the attachment list"
+                     :stack [{:title "Review the invoice"
+                              :summary "Need to review the invoice attachments."
+                              :next-step "Read the attachment list"}]}
+        task-id     (db/create-task! {:session-id session-id
+                                      :channel :terminal
+                                      :type :interactive
+                                      :state :paused
+                                      :title "Review the invoice"
+                                      :summary "Paused after runtime restart"
+                                      :stop-reason :runtime-restart
+                                      :meta {:checkpoint checkpoint
+                                             :checkpoint-at (java.util.Date.)
+                                             :recovery {:last-recovery {:source :runtime-restart
+                                                                        :summary "Paused after restart"}}}})]
+    (wm/ensure-wm! session-id)
+    (wm/clear-autonomy-state! session-id)
+    (db/update-task! task-id {:autonomy-state nil})
+    (let [inspected (task-runtime/inspect-runtime-autonomy-state session-id task-id)
+          persisted (db/get-task task-id)]
+      (is (= "Review the invoice"
+             (some-> inspected :stack first :title)))
+      (is (= "Read the attachment list"
+             (some-> inspected :stack first :next-step)))
+      (is (nil? (:autonomy-state persisted)))
+      (is (nil? (wm/autonomy-state session-id)))
+      (is (= :runtime-restart
              (get-in persisted [:meta :recovery :last-recovery :source]))))))
 
 (deftest recover-interrupted-tasks-pauses-orphaned-running-tasks-after-runtime-restart
@@ -2463,7 +2497,7 @@
                        (select-keys (:data item)
                                     [:decision-type :allowed :mode :failure-phase :worker-phase])))
                   policy-items)))
-      (is (= {:state :done
+      (is (= {:state :completed
               :phase :complete
               :message "Ready"}
              (last @statuses)))
@@ -2553,7 +2587,7 @@
                      :message "Restarting iteration after transient model failure (attempt 1/1)"}
                     %)
                 @statuses))
-      (is (= {:state :done
+      (is (= {:state :completed
               :phase :complete
               :message "Ready"}
              (last @statuses)))

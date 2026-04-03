@@ -2506,7 +2506,7 @@
                                 :progress-status (some-> updated-tip :progress-status)
                                 :agenda (some-> updated-tip :agenda)
                                 :stack (some-> updated-autonomy-state :stack)})
-                              (prompt/status! (merge {:state :done
+                              (prompt/status! (merge {:state :completed
                                                       :phase :complete
                                                       :message (str "Paused after reaching the "
                                                                     (llm-budget-summary budget-status))}
@@ -2540,7 +2540,7 @@
                                                                           fact-eids*
                                                                           user-message
                                                                           text)
-                              (prompt/status! {:state :done
+                              (prompt/status! {:state :completed
                                                :phase :complete
                                                :message "Ready"})
                               text)
@@ -2582,7 +2582,7 @@
                                 :progress-status (some-> updated-tip :progress-status)
                                 :agenda (some-> updated-tip :agenda)
                                 :stack (some-> updated-autonomy-state :stack)})
-                              (prompt/status! (merge {:state :done
+                              (prompt/status! (merge {:state :completed
                                                       :phase :complete
                                                       :message (str "Paused after reaching iteration limit ("
                                                                     max-iterations*

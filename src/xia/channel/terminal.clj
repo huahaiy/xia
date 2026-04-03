@@ -55,7 +55,7 @@
         display-message (or partial-content message)
         next {:state state :message display-message}]
     (cond
-      (= :done state)
+      (contains? #{:completed :done} state)
       (swap! terminal-statuses dissoc sid)
 
       (str/blank? display-message)
