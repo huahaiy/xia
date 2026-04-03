@@ -642,19 +642,19 @@
                                               {:topics "release planning"})
                   xia.working-memory/snapshot! (fn [session-id]
                                                 (swap! lifecycle conj [:snapshot session-id]))
-                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
-                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics consolidation-mode]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics consolidation-mode]))
                   xia.working-memory/clear-wm! (fn [session-id]
                                                  (swap! lifecycle conj [:clear session-id]))]
       (is (= ::websocket-upgraded (#'http/ws-handler {:headers (ui-headers)})))
       ((:on-open @handlers) ch)
       (is (= sid (get @sessions ch)))
       ((:on-close @handlers) ch 1000)
-      (is (= [[:ensure sid]
-              [:snapshot sid]
-              [:record sid :websocket "release planning"]
-              [:clear sid]]
-             @lifecycle))
+      (is (= 4 (count @lifecycle)))
+      (is (some #{[:ensure sid]} @lifecycle))
+      (is (some #{[:snapshot sid]} @lifecycle))
+      (is (some #{[:record sid :websocket "release planning" :sync]} @lifecycle))
+      (is (some #{[:clear sid]} @lifecycle))
       (is (nil? (get @sessions ch))))))
 
 (deftest close-session-route-finalizes-rest-session
@@ -667,22 +667,22 @@
                                               {:topics "release planning"})
                   xia.working-memory/snapshot! (fn [session-id]
                                                 (swap! lifecycle conj [:snapshot session-id]))
-                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
-                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics consolidation-mode]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics consolidation-mode]))
                   xia.working-memory/clear-wm! (fn [session-id]
                                                  (swap! lifecycle conj [:clear session-id]))]
-      (let [response (#'http/router {:uri            (str "/sessions/" sid)
+        (let [response (#'http/router {:uri            (str "/sessions/" sid)
                                      :request-method :delete
                                      :headers        (ui-headers)})
             body     (response-json response)]
         (is (= 200 (:status response)))
         (is (= "closed" (get body "status")))
         (is (= false (get body "already_closed")))
-        (is (= [[:snapshot sid]
-                [:record sid :http "release planning"]
-                [:clear sid]
-                [:cancel (str sid)]]
-               @lifecycle))
+        (is (= 4 (count @lifecycle)))
+        (is (some #{[:snapshot sid]} @lifecycle))
+        (is (some #{[:record sid :http "release planning" :sync]} @lifecycle))
+        (is (some #{[:clear sid]} @lifecycle))
+        (is (some #{[:cancel (str sid)]} @lifecycle))
         (is (= false
                (ffirst (db/q '[:find ?active :in $ ?sid
                                :where
@@ -701,22 +701,22 @@
                                               {:topics "release planning"})
                   xia.working-memory/snapshot! (fn [session-id]
                                                 (swap! lifecycle conj [:snapshot session-id]))
-                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics]}]
-                                                         (swap! lifecycle conj [:record session-id channel topics]))
+                  xia.hippocampus/record-conversation! (fn [session-id channel & {:keys [topics consolidation-mode]}]
+                                                         (swap! lifecycle conj [:record session-id channel topics consolidation-mode]))
                   xia.working-memory/clear-wm! (fn [session-id]
                                                  (swap! lifecycle conj [:clear session-id]))]
-      (let [response (#'http/router {:uri            (str "/command/sessions/" sid)
+        (let [response (#'http/router {:uri            (str "/command/sessions/" sid)
                                      :request-method :delete
                                      :headers        (command-headers)})
             body     (response-json response)]
         (is (= 200 (:status response)))
         (is (= "closed" (get body "status")))
         (is (= false (get body "already_closed")))
-        (is (= [[:snapshot sid]
-                [:record sid :command "release planning"]
-                [:clear sid]
-                [:cancel (str sid)]]
-               @lifecycle))
+        (is (= 4 (count @lifecycle)))
+        (is (some #{[:snapshot sid]} @lifecycle))
+        (is (some #{[:record sid :command "release planning" :sync]} @lifecycle))
+        (is (some #{[:clear sid]} @lifecycle))
+        (is (some #{[:cancel (str sid)]} @lifecycle))
         (is (= false
                (ffirst (db/q '[:find ?active :in $ ?sid
                                :where

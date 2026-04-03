@@ -123,7 +123,9 @@
             (do (println "consolidating memories...")
                 (let [topics (:topics (wm/get-wm session-id))]
                   (wm/snapshot! session-id)
-                  (hippo/record-conversation! session-id :terminal :topics topics)
+                  (hippo/record-conversation! session-id :terminal
+                                              :topics topics
+                                              :consolidation-mode :sync)
                   (wm/clear-wm! session-id))
                 (println "goodbye.")
                 (System/exit 0))

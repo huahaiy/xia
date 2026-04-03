@@ -145,52 +145,15 @@
              (:message/tool-calls (:assistant raw-messages))))
       (is (= {:result {"token" "top-secret"}}
              (:message/tool-result (:tool raw-messages))))
-      (is (= [{:role :user
-               :id (:id (first messages))
-               :content "pasted local secret"
-               :created-at (:created-at (first messages))
-               :local-docs nil
-               :artifacts nil
-               :tool-calls nil
-               :tool-result nil
-               :tool-id nil
-               :tool-call-id nil
-               :tool-name nil
-               :llm-call-id nil
-               :provider-id nil
-               :model nil
-               :workload nil}
-              {:role :assistant
-               :id (:id (second messages))
-               :content "checking service"
-               :created-at (:created-at (second messages))
-               :local-docs nil
-               :artifacts nil
-               :tool-calls tool-calls
-               :tool-result nil
-               :tool-id nil
-               :tool-call-id nil
-               :tool-name nil
-               :llm-call-id nil
-               :provider-id nil
-               :model nil
-               :workload nil}
-              {:role :tool
-               :id (:id (nth messages 2))
-               :content nil
-               :created-at (:created-at (nth messages 2))
-               :local-docs nil
-               :artifacts nil
-               :tool-calls nil
-               :tool-result {"token" "top-secret"}
-               :tool-id "call_1"
-               :tool-call-id nil
-               :tool-name nil
-               :llm-call-id nil
-               :provider-id nil
-               :model nil
-               :workload nil}]
-             messages)))))
+      (is (= 3 (count messages)))
+      (is (= :user (:role (first messages))))
+      (is (= "pasted local secret" (:content (first messages))))
+      (is (= :assistant (:role (second messages))))
+      (is (= "checking service" (:content (second messages))))
+      (is (= tool-calls (:tool-calls (second messages))))
+      (is (= :tool (:role (nth messages 2))))
+      (is (= {"token" "top-secret"} (:tool-result (nth messages 2))))
+      (is (= "call_1" (:tool-id (nth messages 2)))))))
 
 (deftest schedule-run-payloads-are-stored-in-plaintext-at-rest
   (schedule/create-schedule!

@@ -11,7 +11,15 @@
             [xia.test-helpers :refer [with-test-db]]
             [xia.working-memory]))
 
-(use-fixtures :each with-test-db)
+(defn- with-clean-scheduler-runtime
+  [f]
+  (scheduler/reset-runtime!)
+  (try
+    (f)
+    (finally
+      (scheduler/reset-runtime!))))
+
+(use-fixtures :each with-test-db with-clean-scheduler-runtime)
 
 (deftest execute-prompt-schedule-records-conversation-on-success
   (let [sid (db/create-session! :scheduler)
@@ -53,9 +61,9 @@
                                                          (swap! lifecycle conj [:record session-id channel topics]))
                   xia.working-memory/clear-wm! (fn [session-id]
                                                  (swap! lifecycle conj [:clear session-id]))]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :prompt "summarize the week"
-                                            :trusted? true}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :prompt "summarize the week"
+                                       :trusted? true}))
     (is (= {:schedule-id :nightly-review
             :run {:status :success
                   :actions []
@@ -124,9 +132,9 @@
                                                          (swap! lifecycle conj [:record session-id channel topics]))
                   xia.working-memory/clear-wm! (fn [session-id]
                                                  (swap! lifecycle conj [:clear session-id]))]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :prompt "summarize the week"
-                                            :trusted? false}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :prompt "summarize the week"
+                                       :trusted? false}))
     (is (= {:schedule-id :nightly-review
             :run {:status :budget-exhausted}}
            (update @run* :run #(select-keys % [:status]))))
@@ -173,9 +181,9 @@
                                                          (swap! lifecycle conj [:record session-id channel topics]))
                   xia.working-memory/clear-wm! (fn [session-id]
                                                  (swap! lifecycle conj [:clear session-id]))]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :prompt "summarize the week"
-                                            :trusted? false}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :prompt "summarize the week"
+                                       :trusted? false}))
     (is (= {:schedule-id :nightly-review
             :run {:status :error
                   :actions []
@@ -211,9 +219,9 @@
                   xia.working-memory/snapshot! (fn [_session-id] nil)
                   xia.hippocampus/record-conversation! (fn [& _] nil)
                   xia.working-memory/clear-wm! (fn [_session-id] nil)]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :prompt "summarize the week"
-                                            :trusted? true}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :prompt "summarize the week"
+                                       :trusted? true}))
     (is (= "summarize the week\n\nRecovery context" @seen-prompt))))
 
 (deftest execute-prompt-schedule-reuses-resumable-session
@@ -242,9 +250,9 @@
                   xia.working-memory/snapshot! (fn [_session-id] nil)
                   xia.hippocampus/record-conversation! (fn [& _] nil)
                   xia.working-memory/clear-wm! (fn [_session-id] nil)]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :prompt "summarize the week"
-                                            :trusted? true}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :prompt "summarize the week"
+                                       :trusted? true}))
     (is (false? @created?))
     (is (= [[sid true]] @activated?))
     (is (some #(true? (:resumed? %)) @checkpoints))
@@ -279,10 +287,10 @@
                   xia.working-memory/snapshot! (fn [_session-id] nil)
                   xia.hippocampus/record-conversation! (fn [& _] nil)
                   xia.working-memory/clear-wm! (fn [_session-id] nil)]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :name "Nightly review"
-                                            :prompt "summarize the week"
-                                            :trusted? true}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :name "Nightly review"
+                                       :prompt "summarize the week"
+                                       :trusted? true}))
     (is (= {:session-id sid
             :task-id task-id
             :runtime-op :resume
@@ -318,10 +326,10 @@
                   xia.working-memory/snapshot! (fn [_session-id] nil)
                   xia.hippocampus/record-conversation! (fn [& _] nil)
                   xia.working-memory/clear-wm! (fn [_session-id] nil)]
-      (#'scheduler/execute-prompt-schedule {:id :nightly-review
-                                            :name "Nightly review"
-                                            :prompt "summarize the week"
-                                            :trusted? true}))
+      (scheduler/run-prompt-schedule! {:id :nightly-review
+                                       :name "Nightly review"
+                                       :prompt "summarize the week"
+                                       :trusted? true}))
     (let [task (db/get-task task-id)]
       (is (= {:session-id sid-b
               :task-id task-id
@@ -348,7 +356,7 @@
                                                :context context})
                     {:summary "Fetched the nightly page."
                      :content "Fetched the nightly page."})]
-      (#'scheduler/execute-tool-schedule (schedule/get-schedule :nightly-tool))
+      (scheduler/run-tool-schedule! (schedule/get-schedule :nightly-tool))
       (let [first-task-id (schedule/schedule-task-id :nightly-tool)
             first-task    (db/get-task first-task-id)
             first-turns   (db/task-turns first-task-id)
@@ -364,7 +372,7 @@
                (mapv :type first-items)))
         (is (= first-task-id (get-in first-run [:meta :task-id])))
         (is (= first-task-id (get-in (first @seen-contexts) [:context :task-id]))))
-      (#'scheduler/execute-tool-schedule (schedule/get-schedule :nightly-tool))
+      (scheduler/run-tool-schedule! (schedule/get-schedule :nightly-tool))
       (let [task-id (schedule/schedule-task-id :nightly-tool)
             turns   (db/task-turns task-id)
             last-run (first (schedule/schedule-history :nightly-tool 1))]
@@ -375,79 +383,55 @@
                (mapv #(get-in % [:context :task-id]) @seen-contexts)))))))
 
 (deftest tick-submits-due-schedules-through-worker-pool
-  (let [submitted (atom [])
-        maintenance-atom @#'scheduler/last-maintenance-at
-        original-last @maintenance-atom]
-    (reset! maintenance-atom (java.util.Date.))
-    (try
-      (with-redefs [xia.schedule/due-schedules (fn [_now]
-                                                 [{:id :alpha}
-                                                  {:id :beta}])
-                    xia.backup/backup-due? (fn [] false)
-                    xia.hippocampus/consolidate-if-pending! (fn [] nil)
-                    xia.hippocampus/maintain-knowledge! (fn [_now] nil)
-                    xia.scheduler/submit-work! (fn [kind _f]
-                                                 (swap! submitted conj kind)
-                                                 true)]
-        (#'scheduler/tick!)
-        (is (= ["schedule alpha" "schedule beta"] @submitted)))
-      (finally
-        (reset! maintenance-atom original-last)))))
+  (let [submitted (atom [])]
+    (with-redefs [xia.schedule/due-schedules (fn [_now]
+                                               [{:id :alpha}
+                                                {:id :beta}])
+                  xia.backup/backup-due? (fn [] false)
+                  xia.hippocampus/consolidate-if-pending! (fn [] nil)
+                  xia.hippocampus/maintain-knowledge! (fn [_now] nil)
+                  xia.scheduler/submit-work! (fn [kind _f]
+                                               (swap! submitted conj kind)
+                                               true)]
+      (scheduler/tick-once!)
+      (is (every? (set @submitted) ["schedule alpha" "schedule beta"])))))
 
 (deftest tick-starts-scheduled-backup-when-due
-  (let [called (promise)
-        maintenance-atom @#'scheduler/last-maintenance-at
-        original-last @maintenance-atom]
-    (reset! maintenance-atom (java.util.Date.))
-    (try
-      (with-redefs [xia.schedule/due-schedules (fn [_now] [])
-                    xia.backup/backup-due? (fn [] true)
-                    xia.scheduler/submit-work! (fn [kind f]
-                                                 (is (= "automatic backup" kind))
-                                                 (f)
-                                                 true)
-                    xia.backup/run-scheduled-backup! (fn []
-                                                       (deliver called :ran)
-                                                       {:status :success})
-                    xia.hippocampus/consolidate-if-pending! (fn [] nil)
-                    xia.hippocampus/maintain-knowledge! (fn [_now] nil)]
-        (#'scheduler/tick!)
-        (is (= :ran (deref called 1000 nil))))
-      (finally
-        (reset! maintenance-atom original-last)))))
+  (let [called (promise)]
+    (with-redefs [xia.schedule/due-schedules (fn [_now] [])
+                  xia.backup/backup-due? (fn [] true)
+                  xia.scheduler/submit-work! (fn [kind f]
+                                               (when (= "automatic backup" kind)
+                                                 (f))
+                                               true)
+                  xia.backup/run-scheduled-backup! (fn []
+                                                     (deliver called :ran)
+                                                     {:status :success})
+                  xia.hippocampus/consolidate-if-pending! (fn [] nil)
+                  xia.hippocampus/maintain-knowledge! (fn [_now] nil)]
+      (scheduler/tick-once!)
+      (is (= :ran (deref called 1000 nil))))))
 
 (deftest execute-schedule-proactively-refreshes-oauth-before-run
-  (let [calls (atom [])
-        running-atom @#'scheduler/running-schedules
-        original @running-atom]
-    (reset! running-atom #{})
-    (try
-      (with-redefs [xia.oauth/refresh-autonomous-accounts! (fn []
-                                                             (swap! calls conj :refresh)
-                                                             {:status :ok
-                                                              :checked 1
-                                                              :refreshed [:github]
-                                                              :errors []})
-                    xia.scheduler/execute-tool-schedule (fn [_sched]
-                                                          (swap! calls conj :execute))
-                    xia.schedule/trim-history! (fn [& _] nil)]
-        (#'scheduler/execute-schedule! {:id :nightly :type :tool})
-        (is (= [:refresh :execute] @calls)))
-      (finally
-        (reset! running-atom original)))))
+  (let [calls (atom [])]
+    (with-redefs [xia.oauth/refresh-autonomous-accounts! (fn []
+                                                           (swap! calls conj :refresh)
+                                                           {:status :ok
+                                                            :checked 1
+                                                            :refreshed [:github]
+                                                            :errors []})
+                  xia.scheduler/execute-tool-schedule (fn [_sched]
+                                                        (swap! calls conj :execute))
+                  xia.schedule/trim-history! (fn [& _] nil)]
+      (scheduler/run-schedule! {:id :nightly :type :tool})
+      (is (= [:refresh :execute] @calls)))))
 
 (deftest execute-schedule-continues-when-proactive-oauth-refresh-fails
-  (let [executed? (atom false)
-        running-atom @#'scheduler/running-schedules
-        original @running-atom]
-    (reset! running-atom #{})
-    (try
-      (with-redefs [xia.oauth/refresh-autonomous-accounts! (fn []
-                                                             (throw (ex-info "refresh boom" {})))
-                    xia.scheduler/execute-tool-schedule (fn [_sched]
-                                                          (reset! executed? true))
-                    xia.schedule/trim-history! (fn [& _] nil)]
-        (#'scheduler/execute-schedule! {:id :nightly :type :tool})
-        (is (true? @executed?)))
-      (finally
-        (reset! running-atom original)))))
+  (let [executed? (atom false)]
+    (with-redefs [xia.oauth/refresh-autonomous-accounts! (fn []
+                                                           (throw (ex-info "refresh boom" {})))
+                  xia.scheduler/execute-tool-schedule (fn [_sched]
+                                                        (reset! executed? true))
+                  xia.schedule/trim-history! (fn [& _] nil)]
+      (scheduler/run-schedule! {:id :nightly :type :tool})
+      (is (true? @executed?)))))

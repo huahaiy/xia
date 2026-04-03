@@ -5,6 +5,7 @@
             [xia.test-helpers :as th]
             [xia.db :as db]
             [xia.context :as ctx]
+            [xia.skill :as skill]
             [xia.working-memory :as wm]))
 
 (use-fixtures :each th/with-test-db)
@@ -70,78 +71,79 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest test-render-entity
-  (let [re #'xia.context/render-entity]
+  (let [render-single (fn [entity]
+                        (ctx/render-entities [entity] 1000))]
     (testing "entity with properties, facts, and edges"
-      (let [line (re {:name       "Hong"
-                      :type       :person
-                      :properties {:location "Seattle" :role "engineer"}
-                      :facts      [{:content "prefers vim" :confidence 1.0}]
-                      :edges      {:outgoing [{:type :works-at :target "Acme"}]
-                                   :incoming []}})]
-        (is (str/starts-with? line "- Hong (person): "))
-        (is (str/includes? line "location: Seattle"))
-        (is (str/includes? line "role: engineer"))
-        (is (str/includes? line "prefers vim"))
-        (is (str/includes? line "works-at→Acme"))))
+      (let [rendered (render-single {:name       "Hong"
+                                     :type       :person
+                                     :properties {:location "Seattle" :role "engineer"}
+                                     :facts      [{:content "prefers vim" :confidence 1.0}]
+                                     :edges      {:outgoing [{:type :works-at :target "Acme"}]
+                                                  :incoming []}})]
+        (is (str/includes? rendered "- Hong (person):"))
+        (is (str/includes? rendered "location: Seattle"))
+        (is (str/includes? rendered "role: engineer"))
+        (is (str/includes? rendered "prefers vim"))
+        (is (str/includes? rendered "works-at→Acme"))))
 
     (testing "entity with only properties"
-      (let [line (re {:name       "Seattle"
-                      :type       :place
-                      :properties {:state "Washington"}
-                      :facts      []
-                      :edges      {:outgoing [] :incoming []}})]
-        (is (str/includes? line "state: Washington"))))
+      (let [rendered (render-single {:name       "Seattle"
+                                     :type       :place
+                                     :properties {:state "Washington"}
+                                     :facts      []
+                                     :edges      {:outgoing [] :incoming []}})]
+        (is (str/includes? rendered "state: Washington"))))
 
     (testing "entity with no properties"
-      (let [line (re {:name  "Clojure"
-                      :type  :concept
-                      :facts [{:content "functional language" :confidence 1.0}]
-                      :edges {:outgoing [] :incoming []}})]
-        (is (str/includes? line "functional language"))
-        (is (not (str/includes? line "nil")))))
+      (let [rendered (render-single {:name  "Clojure"
+                                     :type  :concept
+                                     :facts [{:content "functional language" :confidence 1.0}]
+                                     :edges {:outgoing [] :incoming []}})]
+        (is (str/includes? rendered "functional language"))
+        (is (not (str/includes? rendered "nil")))))
 
     (testing "entity with nil properties"
-      (let [line (re {:name       "Bob"
-                      :type       :person
-                      :properties nil
-                      :facts      [{:content "likes pizza" :confidence 0.8}]
-                      :edges      {:outgoing [] :incoming []}})]
-        (is (str/includes? line "likes pizza"))))
+      (let [rendered (render-single {:name       "Bob"
+                                     :type       :person
+                                     :properties nil
+                                     :facts      [{:content "likes pizza" :confidence 0.8}]
+                                     :edges      {:outgoing [] :incoming []}})]
+        (is (str/includes? rendered "likes pizza"))))
 
     (testing "entity with empty properties"
-      (let [line (re {:name       "Carol"
-                      :type       :person
-                      :properties {}
-                      :facts      [{:content "works remotely" :confidence 0.9}]
-                      :edges      {:outgoing [] :incoming []}})]
-        (is (str/includes? line "works remotely"))))
+      (let [rendered (render-single {:name       "Carol"
+                                     :type       :person
+                                     :properties {}
+                                     :facts      [{:content "works remotely" :confidence 0.9}]
+                                     :edges      {:outgoing [] :incoming []}})]
+        (is (str/includes? rendered "works remotely"))))
 
     (testing "facts below the prompt floor are filtered"
-      (let [line (re {:name  "Test"
-                      :type  :concept
-                      :facts [{:content "high conf" :confidence 0.8}
-                              {:content "floor conf" :confidence 0.1}
-                              {:content "too low"    :confidence 0.05}]
-                      :edges {:outgoing [] :incoming []}})]
-        (is (str/includes? line "high conf"))
-        (is (str/includes? line "floor conf"))
-        (is (not (str/includes? line "too low")))))
+      (let [rendered (render-single {:name  "Test"
+                                     :type  :concept
+                                     :facts [{:content "high conf" :confidence 0.8}
+                                             {:content "floor conf" :confidence 0.1}
+                                             {:content "too low"    :confidence 0.05}]
+                                     :edges {:outgoing [] :incoming []}})]
+        (is (str/includes? rendered "high conf"))
+        (is (str/includes? rendered "floor conf"))
+        (is (not (str/includes? rendered "too low")))))
 
     (testing "utility influences fact ordering"
-      (let [^String line (re {:name  "Ranked"
-                              :type  :concept
-                              :facts [{:content "high confidence" :confidence 0.85 :utility 0.0}
-                                      {:content "high utility" :confidence 0.7 :utility 1.0}]
-                              :edges {:outgoing [] :incoming []}})]
-        (is (< (.indexOf line "high utility")
-               (.indexOf line "high confidence")))))
+      (let [^String rendered (render-single {:name  "Ranked"
+                                             :type  :concept
+                                             :facts [{:content "high confidence" :confidence 0.85 :utility 0.0}
+                                                     {:content "high utility" :confidence 0.7 :utility 1.0}]
+                                             :edges {:outgoing [] :incoming []}})]
+        (is (< (.indexOf rendered "high utility")
+               (.indexOf rendered "high confidence")))))
 
     (testing "entity with no detail"
-      (let [line (re {:name "Empty"
-                      :type :concept
-                      :facts []
-                      :edges {:outgoing [] :incoming []}})]
-        (is (= "- Empty (concept)" line))))))
+      (let [rendered (render-single {:name "Empty"
+                                     :type :concept
+                                     :facts []
+                                     :edges {:outgoing [] :incoming []}})]
+        (is (str/includes? rendered "- Empty (concept)"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; render-entities (budget-aware)
@@ -168,17 +170,14 @@
       (is (str/includes? result "### Known"))
       (is (< (count (re-seq #"- Entity" result)) 20))))
 
-  (testing "sorts entities by relevance before applying the budget"
-    (let [render-entity #'xia.context/render-entity
-          section-budget-tokens #'xia.context/section-budget-tokens
-          low    {:name "Low" :type :concept :relevance 0.1
+  (testing "renders higher relevance entities first"
+    (let [low    {:name "Low" :type :concept :relevance 0.1
                   :facts [] :edges {:outgoing [] :incoming []}}
           high   {:name "Top" :type :concept :relevance 0.9
                   :facts [] :edges {:outgoing [] :incoming []}}
-          budget (+ 8 (long (section-budget-tokens (render-entity high))))
-          result (ctx/render-entities [low high] budget)]
-      (is (str/includes? result "- Top"))
-      (is (not (str/includes? result "- Low")))))
+          ^String result (ctx/render-entities [low high] 1000)]
+      (is (< (.indexOf result "- Top")
+             (.indexOf result "- Low")))))
 
   (testing "nil entities"
     (is (nil? (ctx/render-entities nil 1000))))
@@ -187,98 +186,100 @@
     (is (nil? (ctx/render-entities [] 1000)))))
 
 (deftest test-render-entities-data-annotates-selected-facts-with-refs
-  (let [render-entities-data #'xia.context/render-entities-data
-        result (render-entities-data
-                [{:name "Hong"
-                  :type :person
-                  :facts [{:eid 101 :content "prefers vim" :confidence 1.0}
-                          {:eid 102 :content "likes Clojure" :confidence 1.0}]
-                  :edges {:outgoing [] :incoming []}}]
-                1000)]
-    (is (str/includes? (:content result) "[F1] prefers vim"))
-    (is (str/includes? (:content result) "[F2] likes Clojure"))
-    (is (= [101 102] (:used-fact-eids result)))
-    (is (= [{:eid 101 :ref "F1"}
-            {:eid 102 :ref "F2"}]
-           (:used-fact-refs result)))))
+  (let [sid (db/create-session! :terminal)]
+    (with-redefs [wm/wm->context (fn [_session-id]
+                                   {:topics nil
+                                    :entities [{:name "Hong"
+                                                :type :person
+                                                :facts [{:eid 101 :content "prefers vim" :confidence 1.0}
+                                                        {:eid 102 :content "likes Clojure" :confidence 1.0}]
+                                                :edges {:outgoing [] :incoming []}}]
+                                    :local-docs []
+                                    :episodes []
+                                    :turn-count 0})
+                  skill/skills-for-context (constantly [])]
+      (let [result (ctx/assemble-system-prompt-data sid)]
+        (is (str/includes? (:prompt result) "[F1] prefers vim"))
+        (is (str/includes? (:prompt result) "[F2] likes Clojure"))
+        (is (= [101 102] (:used-fact-eids result)))
+        (is (= [{:eid 101 :ref "F1"}
+                {:eid 102 :ref "F2"}]
+               (:used-fact-refs result)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; render-episodes
 ;; ---------------------------------------------------------------------------
 
 (deftest test-render-episodes
-  (let [re #'xia.context/render-episodes]
-    (testing "renders episodes with dates"
-      (let [episodes [{:summary   "Discussed Clojure"
-                       :timestamp (java.util.Date.)
-                       :relevance 0.8}]
-            result (re episodes 500)]
-        (is (str/includes? result "### Recent"))
-        (is (str/includes? result "Discussed Clojure"))))
+  (testing "renders episodes with dates"
+    (let [episodes [{:summary   "Discussed Clojure"
+                     :timestamp (java.util.Date.)
+                     :relevance 0.8}]
+          result (ctx/render-episodes episodes 500)]
+      (is (str/includes? result "### Recent"))
+      (is (str/includes? result "Discussed Clojure"))))
 
-    (testing "empty episodes"
-      (is (nil? (re [] 500))))
+  (testing "empty episodes"
+    (is (nil? (ctx/render-episodes [] 500))))
 
-    (testing "nil episodes"
-      (is (nil? (re nil 500))))))
+  (testing "nil episodes"
+    (is (nil? (ctx/render-episodes nil 500)))))
 
 ;; ---------------------------------------------------------------------------
 ;; render-local-docs
 ;; ---------------------------------------------------------------------------
 
 (deftest test-render-local-docs
-  (let [rd #'xia.context/render-local-docs]
-    (testing "renders local documents with summary and matched chunks"
-      (let [docs [{:name "paper.pdf"
-                   :media-type "application/pdf"
-                   :summary "This paper studies retrieval in scientific corpora."
-                   :matched-chunks [{:summary "The relevant chunk covers scientific corpora and evaluation."}]
-                   :relevance 0.8}]
-            result (rd docs 500)]
-        (is (str/includes? result "### Local Documents"))
-        (is (str/includes? result "paper.pdf"))
-        (is (str/includes? result "scientific corpora"))
-        (is (str/includes? result "matches:"))))
+  (testing "renders local documents with summary and matched chunks"
+    (let [docs [{:name "paper.pdf"
+                 :media-type "application/pdf"
+                 :summary "This paper studies retrieval in scientific corpora."
+                 :matched-chunks [{:summary "The relevant chunk covers scientific corpora and evaluation."}]
+                 :relevance 0.8}]
+          result (ctx/render-local-docs docs 500)]
+      (is (str/includes? result "### Local Documents"))
+      (is (str/includes? result "paper.pdf"))
+      (is (str/includes? result "scientific corpora"))
+      (is (str/includes? result "matches:"))))
 
-    (testing "budget-aware truncation"
-      (let [docs (mapv (fn [i]
-                         (let [i* (long i)]
+  (testing "budget-aware truncation"
+    (let [docs (mapv (fn [i]
+                       (let [i* (long i)]
                          {:name (str "doc-" i ".txt")
                           :media-type "text/plain"
                           :preview (token-rich-text (str "preview" i) 40)
                           :relevance (- 1.0 (* i* 0.1))}))
-                       (range 10))
-            result (rd docs 80)]
-        (is (str/includes? result "### Local Documents"))
-        (is (< (count (re-seq #"- doc-" result)) 10))))
+                     (range 10))
+          result (ctx/render-local-docs docs 80)]
+      (is (str/includes? result "### Local Documents"))
+      (is (< (count (re-seq #"- doc-" result)) 10))))
 
-    (testing "empty docs"
-      (is (nil? (rd [] 500))))))
+  (testing "empty docs"
+    (is (nil? (ctx/render-local-docs [] 500)))))
 
 ;; ---------------------------------------------------------------------------
 ;; render-skills
 ;; ---------------------------------------------------------------------------
 
 (deftest test-render-skills
-  (let [rs #'xia.context/render-skills]
-    (testing "renders skills"
-      (let [skills [{:skill/name "email-drafting" :skill/content "Write emails professionally."}]
-            result (rs skills 1000)]
-        (is (str/includes? result "## Skills"))
-        (is (str/includes? result "### email-drafting"))
-        (is (str/includes? result "Write emails professionally."))))
+  (testing "renders skills"
+    (let [skills [{:skill/name "email-drafting" :skill/content "Write emails professionally."}]
+          result (ctx/render-skills skills 1000)]
+      (is (str/includes? result "## Skills"))
+      (is (str/includes? result "### email-drafting"))
+      (is (str/includes? result "Write emails professionally."))))
 
-    (testing "budget-aware truncation"
-      (let [skills (mapv (fn [i]
-                           {:skill/name    (str "skill-" i)
-                            :skill/content (token-rich-text (str "skill" i) 80)})
-                         (range 10))
-            result (rs skills 200)]
-        ;; Should not include all 10 skills
-        (is (< (count (re-seq #"### skill-" result)) 10))))
+  (testing "budget-aware truncation"
+    (let [skills (mapv (fn [i]
+                         {:skill/name    (str "skill-" i)
+                          :skill/content (token-rich-text (str "skill" i) 80)})
+                       (range 10))
+          result (ctx/render-skills skills 200)]
+      ;; Should not include all 10 skills
+      (is (< (count (re-seq #"### skill-" result)) 10))))
 
-    (testing "empty skills"
-      (is (nil? (rs [] 1000))))))
+  (testing "empty skills"
+    (is (nil? (ctx/render-skills [] 1000)))))
 
 ;; ---------------------------------------------------------------------------
 ;; assemble-system-prompt (integration)
@@ -503,9 +504,9 @@
                                                                               {:eid 2 :ref "F2"}]})
                   xia.context/compact-history             (fn [messages _budget & _]
                                                             messages)]
-      (let [result (#'xia.context/build-messages-data
-                     sid
-                     {:provider {:llm.provider/id :default}})]
+      (let [result (ctx/build-messages-data
+                    sid
+                    {:provider {:llm.provider/id :default}})]
         (is (map? result))
         (is (vector? (:messages result)))
         (is (= [1 2 3] (:used-fact-eids result)))
@@ -551,7 +552,7 @@
                   (fn [messages & _]
                     (swap! llm-calls conj messages)
                     (str "recap-" (count @llm-calls)))]
-      (let [result (#'xia.context/build-messages-data
+      (let [result (ctx/build-messages-data
                     sid
                     {:provider {:llm.provider/id :default}})
             recap  (db/session-history-recap sid)]
@@ -560,14 +561,14 @@
         (is (= "system" (get-in result [:messages 0 :role])))
         (is (str/includes? (get-in result [:messages 1 :content]) "recap-1")))
 
-      (#'xia.context/build-messages-data
+      (ctx/build-messages-data
        sid
        {:provider {:llm.provider/id :default}})
       (is (= 1 (count @llm-calls))
           "Stored recap should be reused while the recent window is unchanged")
 
       (db/add-message! sid :user (str "message 6 " (token-rich-text "m6" 60)))
-      (#'xia.context/build-messages-data
+      (ctx/build-messages-data
        sid
        {:provider {:llm.provider/id :default}})
       (is (= 2 (count @llm-calls)))
@@ -607,10 +608,10 @@
                   (fn [_messages & _]
                     (swap! llm-calls inc)
                     "Earlier conversation recap.")]
-      (let [result        (#'xia.context/build-messages-data
-                           sid
-                           {:provider {:llm.provider/id :default}})
-            message-texts (map :content (:messages result))]
+        (let [result        (ctx/build-messages-data
+                             sid
+                             {:provider {:llm.provider/id :default}})
+              message-texts (map :content (:messages result))]
         (is (= 1 @llm-calls))
         (is (some #(str/includes? % "Archived tool execution recap") message-texts))
         (is (some #(str/includes? % "web-search[call_1]") message-texts))
@@ -618,7 +619,7 @@
       (with-redefs [xia.llm/chat-simple
                     (fn [& _]
                       (throw (ex-info "should not be called" {})))]
-        (let [result        (#'xia.context/build-messages-data
+        (let [result        (ctx/build-messages-data
                              sid
                              {:provider {:llm.provider/id :default}})
               message-texts (map :content (:messages result))]

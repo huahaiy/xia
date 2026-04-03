@@ -291,7 +291,9 @@
     (try
       (let [topics (:topics (wm/get-wm sid))]
         (wm/snapshot! sid)
-        (hippo/record-conversation! sid :websocket :topics topics))
+        (hippo/record-conversation! sid :websocket
+                                    :topics topics
+                                    :consolidation-mode :sync))
       (catch Exception e
         (log/error e "Failed to finalize WebSocket session"))
       (finally
@@ -1039,8 +1041,10 @@
                                 sid-str
                                 "channel" (name channel)
                                 "reason" (name reason))))
-                 (try
-                   (hippo/record-conversation! sid channel :topics topics)
+                (try
+                   (hippo/record-conversation! sid channel
+                                               :topics topics
+                                               :consolidation-mode :sync)
                    (catch Exception e
                      (log/warn e "Failed to record session conversation during finalization"
                                sid-str

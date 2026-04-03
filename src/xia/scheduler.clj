@@ -316,6 +316,18 @@
         (finally
           (swap! running-schedules disj id))))))
 
+(defn ^:no-doc run-prompt-schedule!
+  [sched]
+  (execute-prompt-schedule sched))
+
+(defn ^:no-doc run-tool-schedule!
+  [sched]
+  (execute-tool-schedule sched))
+
+(defn ^:no-doc run-schedule!
+  [sched]
+  (execute-schedule! sched))
+
 ;; ---------------------------------------------------------------------------
 ;; Tick — the heartbeat
 ;; ---------------------------------------------------------------------------
@@ -351,6 +363,10 @@
                             (reset! maintenance-running? false)))))))
     (catch Exception e
       (log/error e "Scheduler tick failed"))))
+
+(defn ^:no-doc tick-once!
+  []
+  (tick!))
 
 ;; ---------------------------------------------------------------------------
 ;; Lifecycle
@@ -388,6 +404,13 @@
     (reset! maintenance-running? false)
     (reset! last-maintenance-at nil)
     (log/info "Scheduler stopped")))
+
+(defn ^:no-doc reset-runtime!
+  []
+  (reset! running-schedules #{})
+  (reset! maintenance-running? false)
+  (reset! last-maintenance-at nil)
+  nil)
 
 (defn running?
   "Check if the scheduler is currently running."

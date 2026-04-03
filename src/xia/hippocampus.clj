@@ -632,8 +632,14 @@ Rules:
 
 (defn record-conversation!
   "Record a conversation as an episodic memory and trigger consolidation.
-   Includes WM topic summary as episode context for richer consolidation."
-  [session-id channel & {:keys [topics]}]
+   Includes WM topic summary as episode context for richer consolidation.
+
+   Consolidation modes:
+   - :background (default): queue background consolidation when runtime accepts it
+   - :sync: consolidate immediately in the caller thread
+   - :none: record only"
+  [session-id channel & {:keys [topics consolidation-mode]
+                         :or {consolidation-mode :background}}]
   (let [messages (db/session-messages session-id)]
     (when (> (count messages) 1) ; at least one exchange
       (let [summary         (summarize-conversation messages)
@@ -657,8 +663,15 @@ Rules:
            :channel      channel
            :session-id   session-id
            :participants (db/get-config :user/name)})
-        ;; Consolidate in the background when the runtime is accepting new work.
-        (submit-background-consolidation! session-id)))))
+        (case consolidation-mode
+          :sync
+          (consolidate-pending!)
+
+          :none
+          nil
+
+          ;; Consolidate in the background when the runtime is accepting new work.
+          (submit-background-consolidation! session-id))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Knowledge maintenance
