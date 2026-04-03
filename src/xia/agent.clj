@@ -1772,11 +1772,20 @@
                        {:error t}))]
         (if-let [t (:error result)]
           (let [worker-snapshot @worker-state
+                task-id (:task-id execution-context)
+                restart-window-ms (task-policy/task-restart-loop-window-ms)
+                recent-restart-count (if task-id
+                                       (task-runtime/recent-task-restart-count task-id
+                                                                               restart-window-ms)
+                                       0)
                 restart-decision (task-policy/restart-policy-decision
                                   t
                                   worker-snapshot
                                   attempt
-                                  :session-cancelled? (session-cancelled? session-id))
+                                  :session-cancelled? (session-cancelled? session-id)
+                                  :recent-restart-count recent-restart-count
+                                  :recent-restart-limit (task-policy/task-restart-loop-limit)
+                                  :restart-window-ms restart-window-ms)
                 max-restarts (:max-restarts restart-decision)
                 attempt* (:attempt restart-decision)
                 _ (prompt/policy-decision! (merge restart-decision
@@ -1811,7 +1820,26 @@
                                             :failure-phase (some-> t ex-data :phase)})
                 (Thread/sleep (long (:backoff-ms restart-decision)))
                 (recur attempt*))
-              (throw t)))
+              (if (= :restart-loop (:mode restart-decision))
+                (let [summary (str "Task restart loop detected after "
+                                   (:recent-restart-count restart-decision)
+                                   " recent restarts in "
+                                   (quot (long (:restart-window-ms restart-decision)) 1000)
+                                   "s. Investigate before resuming.")]
+                  (when task-id
+                    (task-runtime/record-task-restart-loop! task-id restart-decision summary))
+                  (throw (ex-info summary
+                                  {:type :task-restart-loop
+                                   :task-id task-id
+                                   :session-id session-id
+                                   :channel channel
+                                   :recent-restart-count (:recent-restart-count restart-decision)
+                                   :recent-restart-limit (:recent-restart-limit restart-decision)
+                                   :restart-window-ms (:restart-window-ms restart-decision)
+                                   :failure-phase (:failure-phase restart-decision)
+                                   :worker-phase (:worker-phase restart-decision)}
+                                  t)))
+                (throw t))))
           (:ok result))))))
 
 (defn- iteration-signature
@@ -2781,6 +2809,32 @@
                         (prompt/status! {:state :error
                                          :phase :stalled
                                          :message (str "Supervisor stopped the run: " (.getMessage e))})
+                        (throw e))
+
+                      (= :task-restart-loop (:type data))
+                      (do
+                        (let [{:keys [task-id task-turn-id]} @runtime-task]
+                          (sync-runtime-task-turn! task-turn-id
+                                                   {:state :completed
+                                                    :summary (.getMessage e)
+                                                    :error (.getMessage e)})
+                          (sync-runtime-task! task-id
+                                              {:state :resumable
+                                               :stop-reason :restart-loop
+                                               :summary (.getMessage e)
+                                               :error (.getMessage e)
+                                               :autonomy-state (wm/autonomy-state session-id)
+                                               :finished-at (java.util.Date.)}))
+                        (save-schedule-checkpoint! request-context
+                                                   {:phase :paused
+                                                    :summary (.getMessage e)
+                                                    :session-id session-id
+                                                    :status :restart-loop
+                                                    :failure-phase (:failure-phase data)
+                                                    :worker-phase (:worker-phase data)})
+                        (prompt/status! {:state :paused
+                                         :phase :paused
+                                         :message (.getMessage e)})
                         (throw e))
 
                       :else

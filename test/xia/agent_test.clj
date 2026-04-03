@@ -2712,6 +2712,97 @@
       (finally
         (prompt/register-status! :terminal nil)))))
 
+(deftest process-message-escalates-task-restart-loops-across-recent-runs
+  (let [session-id (db/create-session! :terminal)
+        now        (System/currentTimeMillis)
+        checkpoint {:phase :observing
+                    :summary "Still investigating the invoice."
+                    :next-step "Review the provider retry logs"
+                    :current-focus "Investigate the invoice"}
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :interactive
+                                     :state :paused
+                                     :title "Investigate the invoice"
+                                     :summary "Waiting for the next pass"
+                                     :stop-reason :paused
+                                     :meta {:checkpoint checkpoint
+                                            :recovery {:restart-lineage [{:at (java.util.Date. (- now 1500))
+                                                                         :attempt 1
+                                                                         :max-restarts 3
+                                                                         :failure-phase :llm
+                                                                         :worker-phase :llm
+                                                                         :message "Restarting iteration after transient model failure (attempt 1/3)"}
+                                                                        {:at (java.util.Date. (- now 500))
+                                                                         :attempt 2
+                                                                         :max-restarts 3
+                                                                         :failure-phase :llm
+                                                                         :worker-phase :llm
+                                                                         :message "Restarting iteration after transient model failure (attempt 2/3)"}]}}})
+        statuses   (atom [])
+        llm-calls  (atom 0)]
+    (prompt/register-status! :terminal
+                             (fn [status]
+                               (swap! statuses conj (select-keys status
+                                                                 [:state :phase :message]))))
+    (try
+      (with-redefs [task-policy/task-restart-loop-limit (constantly 2)
+                    task-policy/task-restart-loop-window-ms (constantly 60000)
+                    task-policy/supervisor-max-restarts (constantly 3)
+                    xia.tool/tool-definitions          (constantly [])
+                    xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         (swap! llm-calls inc)
+                                                         (throw (ex-info "transient model failure"
+                                                                         {:type :agent-stalled
+                                                                          :phase :llm})))
+                    xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+        (let [err (try
+                    (agent/process-message session-id
+                                           "Continue from the current agenda."
+                                           :channel :terminal
+                                           :task-id task-id
+                                           :runtime-op :resume
+                                           :persist-message? false)
+                    (catch clojure.lang.ExceptionInfo e
+                      e))
+              task (db/get-task task-id)
+              last-turn (last (db/task-turns task-id))
+              restart-loop (get-in task [:meta :recovery :last-restart-loop])
+              boundary (get-in task [:meta :boundary])]
+          (is (= :task-restart-loop (some-> err ex-data :type)))
+          (is (= task-id (some-> err ex-data :task-id)))
+          (is (re-find #"Task restart loop detected after 2 recent restarts"
+                       (.getMessage ^clojure.lang.ExceptionInfo err)))
+          (is (= 1 @llm-calls))
+          (is (not-any? #(= :restarting (:phase %)) @statuses))
+          (is (= :resumable (:state task)))
+          (is (= :restart-loop (:stop-reason task)))
+          (is (re-find #"Investigate before resuming"
+                       (:summary task)))
+          (is (= :completed (:state last-turn)))
+          (is (= :resume (:operation last-turn)))
+          (is (= 2 (:recent-restart-count restart-loop)))
+          (is (= 2 (:recent-restart-limit restart-loop)))
+          (is (= 60000 (:restart-window-ms restart-loop)))
+          (is (= :llm (:failure-phase restart-loop)))
+          (is (= :llm (:worker-phase restart-loop)))
+          (is (= :pause (:boundary boundary)))
+          (is (= :resumable (:state boundary)))
+          (is (re-find #"investigate the repeated failure before resuming"
+                       (:resume-hint boundary)))
+          (is (= {:state :paused
+                  :phase :paused
+                  :message (.getMessage ^clojure.lang.ExceptionInfo err)}
+                 (last @statuses)))))
+      (finally
+        (prompt/register-status! :terminal nil)))))
+
 (deftest process-message-supervisor-detects-identical-autonomous-iterations
   (let [session-id (db/create-session! :terminal)
         llm-calls  (atom 0)]

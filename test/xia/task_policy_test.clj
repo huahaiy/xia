@@ -10,6 +10,8 @@
                                       :agent/supervisor-max-restarts 5
                                       :agent/supervisor-restart-backoff-ms 250
                                       :agent/supervisor-restart-grace-ms 900
+                                      :agent/task-restart-loop-limit 6
+                                      :agent/task-restart-loop-window-ms 1800000
                                       :autonomous/max-iterations 9
                                       :autonomous/max-stack-depth 48
                                       :agent/max-tool-rounds 14
@@ -66,6 +68,8 @@
     (is (= 5 (task-policy/supervisor-max-restarts)))
     (is (= 250 (task-policy/supervisor-restart-backoff-ms)))
     (is (= 900 (task-policy/supervisor-restart-grace-ms)))
+    (is (= 6 (task-policy/task-restart-loop-limit)))
+    (is (= 1800000 (task-policy/task-restart-loop-window-ms)))
     (is (= 9 (task-policy/autonomous-max-iterations)))
     (is (= 48 (task-policy/autonomous-max-stack-depth)))
     (is (= 14 (task-policy/max-tool-rounds)))
@@ -290,7 +294,9 @@
 (deftest restart-policy-decision-captures-restart-permission
   (with-redefs [task-policy/supervisor-max-restarts (constantly 2)
                 task-policy/supervisor-restart-backoff-ms (constantly 75)
-                task-policy/supervisor-restart-grace-ms (constantly 500)]
+                task-policy/supervisor-restart-grace-ms (constantly 500)
+                task-policy/task-restart-loop-limit (constantly 3)
+                task-policy/task-restart-loop-window-ms (constantly 60000)]
     (let [allowed (task-policy/restart-policy-decision
                    (ex-info "transient model failure" {:type :agent-stalled :phase :llm})
                    {:phase :llm}
@@ -299,6 +305,11 @@
                    (ex-info "still failing" {:type :agent-stalled :phase :llm})
                    {:phase :llm}
                    2)
+          restart-loop (task-policy/restart-policy-decision
+                        (ex-info "flapping worker" {:type :agent-stalled :phase :llm})
+                        {:phase :llm}
+                        0
+                        :recent-restart-count 3)
           tool-risk (task-policy/restart-policy-decision
                      (RuntimeException. "crashed after tool")
                      {:phase :tool
@@ -325,6 +336,19 @@
               :max-restarts 2}
              (select-keys limited
                           [:allowed? :mode :attempt :max-restarts])))
+      (is (= {:allowed? false
+              :mode :restart-loop
+              :attempt 1
+              :recent-restart-count 3
+              :recent-restart-limit 3
+              :restart-window-ms 60000}
+             (select-keys restart-loop
+                          [:allowed?
+                           :mode
+                           :attempt
+                           :recent-restart-count
+                           :recent-restart-limit
+                           :restart-window-ms])))
       (is (= {:allowed? false
               :mode :tool-risk
               :tool-risk? true

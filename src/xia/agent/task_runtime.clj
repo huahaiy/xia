@@ -135,6 +135,16 @@
   [entry]
   (select-keys entry [:attempt :max-restarts :failure-phase :worker-phase :message]))
 
+(defn- recent-restart-lineage*
+  [task window-ms]
+  (let [cutoff (- (System/currentTimeMillis) (long (or window-ms 0)))]
+    (->> (or (get-in task [:meta :recovery :restart-lineage]) [])
+         (filter map?)
+         (filter (fn [entry]
+                   (when-let [^java.util.Date at (:at entry)]
+                     (>= (.getTime at) cutoff))))
+         vec)))
+
 (defn- record-task-restart!
   [task-id status]
   (when-let [entry (restart-lineage-entry status)]
@@ -150,6 +160,27 @@
                                (assoc recovery
                                       :last-restart entry
                                       :restart-lineage lineage*))))))
+
+(defn record-task-restart-loop!
+  [task-id decision summary]
+  (when task-id
+    (update-task-recovery! task-id
+                           (fn [recovery]
+                             (assoc recovery
+                                    :last-restart-loop
+                                    (cond-> {:at (java.util.Date.)
+                                             :recent-restart-count (:recent-restart-count decision)
+                                             :recent-restart-limit (:recent-restart-limit decision)
+                                             :restart-window-ms (:restart-window-ms decision)}
+                                      summary (assoc :summary summary)
+                                      (:failure-phase decision) (assoc :failure-phase (:failure-phase decision))
+                                      (:worker-phase decision) (assoc :worker-phase (:worker-phase decision))
+                                      (:failure-type decision) (assoc :failure-type (:failure-type decision))))))))
+
+(defn recent-task-restart-count
+  [task-or-id window-ms]
+  (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
+    (count (recent-restart-lineage* task window-ms))))
 
 (defn- record-task-recovery-source!
   [task-id source checkpoint]
@@ -253,6 +284,11 @@
 
       :resumable
       (cond
+        (= :restart-loop stop-reason)
+        (if next-step
+          (str "On " target ", investigate the repeated failure before resuming, then continue with: " next-step)
+          (str "On " target ", investigate the repeated failure before resuming."))
+
         next-step
         (str "On " target ", continue with: " next-step)
 

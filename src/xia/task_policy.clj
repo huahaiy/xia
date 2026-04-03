@@ -9,6 +9,8 @@
 (def ^:private default-supervisor-max-restarts 1)
 (def ^:private default-supervisor-restart-backoff-ms 100)
 (def ^:private default-supervisor-restart-grace-ms 1000)
+(def ^:private default-task-restart-loop-limit 3)
+(def ^:private default-task-restart-loop-window-ms (* 30 60 1000))
 (def ^:private default-autonomous-max-iterations 6)
 (def ^:private default-autonomous-max-stack-depth 32)
 (def ^:private default-max-tool-rounds 100)
@@ -201,6 +203,16 @@
   []
   (cfg/positive-long :agent/supervisor-restart-grace-ms
                      default-supervisor-restart-grace-ms))
+
+(defn task-restart-loop-limit
+  []
+  (cfg/positive-long :agent/task-restart-loop-limit
+                     default-task-restart-loop-limit))
+
+(defn task-restart-loop-window-ms
+  []
+  (cfg/positive-long :agent/task-restart-loop-window-ms
+                     default-task-restart-loop-window-ms))
 
 (defn autonomous-max-iterations
   []
@@ -1271,12 +1283,22 @@
     :session-busy})
 
 (defn restart-policy-decision
-  [t worker-state attempt & {:keys [session-cancelled?]}]
+  [t worker-state attempt & {:keys [session-cancelled?
+                                    recent-restart-count
+                                    recent-restart-limit
+                                    restart-window-ms]}]
   (let [failure-type (some-> t ex-data :type)
         next-attempt (inc (long (or attempt 0)))
         max-restarts (long (supervisor-max-restarts))
+        recent-restart-count* (long (or recent-restart-count 0))
+        recent-restart-limit* (long (or recent-restart-limit
+                                        (task-restart-loop-limit)))
+        restart-window-ms* (long (or restart-window-ms
+                                     (task-restart-loop-window-ms)))
+        restart-loop? (>= recent-restart-count* recent-restart-limit*)
         allowed? (cond
                    session-cancelled? false
+                   restart-loop? false
                    (:tool-risk? worker-state) false
                    (instance? InterruptedException t) false
                    (contains? non-restartable-worker-error-types failure-type) false
@@ -1284,6 +1306,7 @@
                    :else true)
         mode (cond
                session-cancelled? :cancelled
+               restart-loop? :restart-loop
                (:tool-risk? worker-state) :tool-risk
                (instance? InterruptedException t) :interrupted
                (contains? non-restartable-worker-error-types failure-type) :non-restartable
@@ -1296,6 +1319,9 @@
      :backoff-ms (when allowed?
                    (long (supervisor-restart-backoff-ms)))
      :grace-ms (long (supervisor-restart-grace-ms))
+     :recent-restart-count recent-restart-count*
+     :recent-restart-limit recent-restart-limit*
+     :restart-window-ms restart-window-ms*
      :failure-type failure-type
      :failure-phase (some-> t ex-data :phase)
      :worker-phase (:phase worker-state)
