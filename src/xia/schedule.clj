@@ -242,6 +242,21 @@
         (str "Run scheduled tool " (clojure.core/name tool-id)))
       (str "Scheduled task " (clojure.core/name id))))
 
+(defn- schedule-task-contract
+  [{:keys [id name type prompt tool-id tool-args trusted?]}]
+  (cond-> {:kind :schedule
+           :schedule-id id
+           :schedule-type type
+           :goal (schedule-task-title {:id id
+                                       :name name
+                                       :type type
+                                       :prompt prompt
+                                       :tool-id tool-id})
+           :trusted? (boolean trusted?)}
+    (some? prompt) (assoc :prompt prompt)
+    tool-id (assoc :tool-id tool-id)
+    (some? tool-args) (assoc :tool-args tool-args)))
+
 (defn ensure-schedule-task!
   "Create or reuse the durable task record bound to a schedule."
   [{:keys [id type trusted?] :as sched} & {:keys [session-id started-at]}]
@@ -249,6 +264,7 @@
         existing-task    (some-> existing-task-id db/get-task)
         title            (schedule-task-title sched)
         summary          title
+        contract         (schedule-task-contract sched)
         meta             (merge (:meta existing-task)
                                 {:schedule-id id
                                  :schedule-type type
@@ -261,6 +277,7 @@
                           :state :running
                           :title title
                           :summary summary
+                          :contract contract
                           :meta meta
                           :stop-reason nil
                           :error nil
@@ -276,6 +293,7 @@
                                       :state :running
                                       :title title
                                       :summary summary
+                                      :contract contract
                                       :meta meta
                                       :started-at (or started-at (java.util.Date.))})]
         (bind-task! id task-id)

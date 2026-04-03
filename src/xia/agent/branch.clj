@@ -95,6 +95,11 @@
                                         :state :running
                                         :title task
                                         :summary task
+                                        :contract {:kind :branch
+                                                   :goal task
+                                                   :prompt prompt
+                                                   :objective objective
+                                                   :parent-task-id parent-task-id}
                                         :meta {:branch-worker true
                                                :parent-session-id parent-session-id
                                                :resource-session-id (or resource-session-id

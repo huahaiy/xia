@@ -129,11 +129,21 @@
    :kg.fact/decayed-at {:db/valueType :db.type/instant}
    :kg.fact/bottomed-at {:db/valueType :db.type/instant}
 
+   ;; --- User Profile ---
+   :user.profile/id   {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :user.profile/key  {:db/valueType :db.type/string  :db/unique :db.unique/identity}
+   :user.profile/name {:db/valueType :db.type/string}
+   :user.profile/summary {:db/valueType :db.type/string}
+   :user.profile/preferences {:db/valueType :db.type/idoc :db/domain "user-profile-preferences"}
+   :user.profile/created-at {:db/valueType :db.type/instant}
+   :user.profile/updated-at {:db/valueType :db.type/instant}
+
    ;; --- Session ---
    :session/id         {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
    :session/channel    {:db/valueType :db.type/keyword} ; :terminal :http
    :session/external-key {:db/valueType :db.type/string :db/unique :db.unique/identity}
    :session/external-meta {:db/valueType :db.type/idoc :db/domain "session-external-meta"}
+   :session/user-profile {:db/valueType :db.type/ref}
    :session/parent-id  {:db/valueType :db.type/uuid}
    :session/worker?    {:db/valueType :db.type/boolean}
    :session/label      {:db/valueType :db.type/string}
@@ -155,6 +165,7 @@
    :task/state         {:db/valueType :db.type/keyword}
    :task/title         {:db/valueType :db.type/string}
    :task/summary       {:db/valueType :db.type/string}
+   :task/contract      {:db/valueType :db.type/idoc :db/domain "task-contract"}
    :task/stop-reason   {:db/valueType :db.type/keyword}
    :task/error         {:db/valueType :db.type/string}
    :task/meta          {:db/valueType :db.type/idoc :db/domain "task-meta"}
@@ -1668,6 +1679,18 @@
 ;; Sessions & Messages
 ;; ---------------------------------------------------------------------------
 
+(defn ensure-user-profile!
+  [profile]
+  (db-session/ensure-user-profile! (session-deps) profile))
+
+(defn get-user-profile
+  [profile-id]
+  (db-session/get-user-profile (session-deps) profile-id))
+
+(defn find-user-profile-by-key
+  [profile-key]
+  (db-session/find-user-profile-by-key (session-deps) profile-key))
+
 (defn create-session!
   ([channel]
    (create-session! channel nil))
@@ -1685,6 +1708,14 @@
 (defn save-session-external-meta!
   [session-id external-meta]
   (db-session/save-session-external-meta! (session-deps) session-id external-meta))
+
+(defn session-user-profile
+  [session-id]
+  (db-session/session-user-profile (session-deps) session-id))
+
+(defn save-session-user-profile!
+  [session-id profile-id]
+  (db-session/save-session-user-profile! (session-deps) session-id profile-id))
 
 (defn list-sessions
   "List all sessions with basic metadata, newest first."
@@ -1816,6 +1847,10 @@
 (defn task-turns
   [task-id]
   (db-task/task-turns (task-deps) task-id))
+
+(defn task-history-data
+  [task-ids]
+  (db-task/task-history-data (task-deps) task-ids))
 
 (defn get-task-turn
   [turn-id]

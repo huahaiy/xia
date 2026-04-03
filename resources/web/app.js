@@ -583,6 +583,8 @@ function currentTaskStateView() {
     message: firstPresentText(live && live.message, currentState.message, runtime && runtime.message, task.summary),
     currentFocus: firstPresentText(live && live.current_focus, currentState.current_focus, currentTip.title, task.title),
     nextStep: firstPresentText(currentState.next_step, currentTip.next_step),
+    boundarySummary: firstPresentText(currentState.boundary_summary, task.boundary_summary && task.boundary_summary.summary),
+    resumeHint: firstPresentText(currentState.resume_hint, task.resume_hint),
     progressStatus: firstPresentText(live && live.progress_status, currentState.progress_status, currentTip.progress_status),
     stackDepth: typeof stackDepth === 'number' ? stackDepth : null,
     compressedFrameCount: typeof currentState.compressed_frame_count === 'number'
@@ -604,6 +606,7 @@ function currentTaskAttentionView() {
         asObject(inspection.attention).summary,
         state.liveStatus && state.liveStatus.message
       ),
+      resumeHint: firstPresentText(asObject(inspection.attention).resume_hint),
       label: firstPresentText(state.pendingInput.label),
       masked: !!state.pendingInput.masked,
       requestedAt: firstPresentText(state.pendingInput.created_at)
@@ -618,6 +621,7 @@ function currentTaskAttentionView() {
         asObject(inspection.attention).summary,
         state.pendingApproval.description
       ),
+      resumeHint: firstPresentText(asObject(inspection.attention).resume_hint),
       toolName: firstPresentText(state.pendingApproval.tool_name, state.pendingApproval.tool_id),
       policy: firstPresentText(state.pendingApproval.policy),
       description: firstPresentText(state.pendingApproval.description),
@@ -629,6 +633,7 @@ function currentTaskAttentionView() {
   return {
     kind: firstPresentText(attention.kind),
     summary: firstPresentText(attention.summary),
+    resumeHint: firstPresentText(attention.resume_hint),
     label: firstPresentText(attention.label),
     masked: !!attention.masked,
     toolName: firstPresentText(attention.tool_name, attention.tool_id),
@@ -680,7 +685,7 @@ function currentTaskControlActions() {
       { intent: 'stop', label: 'Stop', tone: 'secondary' }
     ];
   }
-  if (taskState === 'paused') {
+  if (taskState === 'paused' || taskState === 'resumable') {
     return [
       { intent: 'resume', label: 'Resume', tone: 'primary' },
       { intent: 'stop', label: 'Stop', tone: 'secondary' }
@@ -701,7 +706,9 @@ function currentTaskSummaryText() {
     firstPresentText(currentState.phase) ? ('Phase: ' + titleizeToken(currentState.phase)) : '',
     firstPresentText(currentState.currentFocus) ? ('Focus: ' + currentState.currentFocus) : '',
     firstPresentText(currentState.nextStep) ? ('Next: ' + currentState.nextStep) : '',
+    firstPresentText(currentState.boundarySummary) ? ('Boundary: ' + currentState.boundarySummary) : '',
     firstPresentText(attention.summary) ? ('Needs: ' + attention.summary) : '',
+    firstPresentText(attention.resumeHint, currentState.resumeHint) ? ('Hint: ' + firstPresentText(attention.resumeHint, currentState.resumeHint)) : '',
     firstPresentText(latestOutput.summary, latestOutput.text) ? ('Latest output: ' + firstPresentText(latestOutput.text, latestOutput.summary)) : '',
     agenda.length ? ('Agenda: ' + agenda.map((item) => {
       const label = firstPresentText(item.item, 'item');
@@ -907,6 +914,8 @@ function renderCurrentTaskPanel() {
     ['Phase', titleizeToken(currentState.phase)],
     ['Current Focus', currentState.currentFocus],
     ['Next Step', currentState.nextStep],
+    ['Boundary Summary', currentState.boundarySummary],
+    ['Resume Hint', firstPresentText(attention.resumeHint, currentState.resumeHint)],
     ['Progress', titleizeToken(currentState.progressStatus)],
     ['Last Checkpoint', firstPresentText(checkpoint.summary)]
   ];
@@ -954,6 +963,7 @@ function renderCurrentTaskPanel() {
       ['Policy', attention.policy],
       ['Description', attention.description],
       ['Reason', attention.reason],
+      ['Resume Hint', attention.resumeHint],
       ['Requested At', attention.requestedAt ? formatDateTime(attention.requestedAt) : '']
     ];
     if (attention.masked) {

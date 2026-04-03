@@ -75,6 +75,49 @@
             :thread-ts "1710.1"}
            (db/session-external-meta sid)))))
 
+(deftest sessions-can-link-durable-user-profiles
+  (let [profile-id (db/ensure-user-profile! {:key "telegram-user:55"
+                                             :name "Alex"
+                                             :summary "Prefers concise answers"
+                                             :preferences {:tone :concise}})
+        sid        (db/create-session! :telegram {:external-key "telegram:1001:main"
+                                                  :user-profile-id profile-id
+                                                  :external-meta {:chat-id 1001}})
+        session    (db/find-session-by-external-key "telegram:1001:main")]
+    (is (= profile-id (:id (db/get-user-profile profile-id))))
+    (is (= profile-id (:id (:user-profile session))))
+    (is (= "Alex" (get-in session [:user-profile :name])))
+    (is (= {:tone :concise}
+           (get-in session [:user-profile :preferences])))
+    (is (= profile-id (:id (db/session-user-profile sid))))
+    (let [updated-id (db/ensure-user-profile! {:key "telegram-user:55"
+                                               :summary "Updated profile summary"})]
+      (is (= profile-id updated-id))
+      (is (= "Updated profile summary"
+             (:summary (db/get-user-profile profile-id)))))))
+
+(deftest tasks-persist-durable-contract-separately-from-runtime-meta
+  (let [session-id (db/create-session! :terminal)
+        contract   {:goal "Reply to the billing emails"
+                    :constraints ["Use the approved tone" "Include invoice link"]
+                    :deliverables ["Final reply draft"]}
+        task-id     (db/create-task! {:session-id session-id
+                                      :channel :terminal
+                                      :type :interactive
+                                      :state :running
+                                      :title "Reply to the billing emails"
+                                      :summary "Working the billing inbox"
+                                      :contract contract
+                                      :meta {:runtime {:phase :planning}}})
+        task        (db/get-task task-id)]
+    (is (= contract (:contract task)))
+    (is (= {:runtime {:phase :planning}} (:meta task)))
+    (db/update-task! task-id {:contract {:goal "Reply to the billing emails"
+                                         :constraints ["Use the approved tone"]}})
+    (is (= {:goal "Reply to the billing emails"
+            :constraints ["Use the approved tone"]}
+           (:contract (db/get-task task-id))))))
+
 (deftest tasks-persist-turns-and-items
   (let [session-id (db/create-session! :terminal)
         task-id    (db/create-task! {:session-id session-id
@@ -141,6 +184,21 @@
       (is (= [task-id] (mapv :id tasks-b)))
       (is (= task-id (:id (db/current-session-task sid-a))))
       (is (= task-id (:id (db/current-session-task sid-b)))))))
+
+(deftest current-session-task-prefers-actionable-work-over-recent-completed-task
+  (let [sid            (db/create-session! :terminal)
+        paused-task-id (db/create-task! {:session-id sid
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :paused
+                                         :title "Paused task"})
+        _completed-id  (db/create-task! {:session-id sid
+                                         :channel :terminal
+                                         :type :interactive
+                                         :state :completed
+                                         :title "Completed task"})]
+    (is (= paused-task-id
+           (:id (db/current-session-task sid))))))
 
 (deftest close-records-debug-event-when-runtime-is-running
   (runtime-state/mark-running!)

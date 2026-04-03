@@ -140,8 +140,13 @@
                        :task/updated-at (now)}])))
 
 (defn create-task!
-  [deps {:keys [id session-id session-role parent-id channel type state title summary stop-reason
-                error meta autonomy-state current-turn-id started-at finished-at]}]
+  "Create a durable task.
+
+   `:session-id` is the task's current execution session, not the full set of
+   sessions linked to the task over time. Historical and attached sessions are
+   retained separately in `:session-links`."
+  [deps {:keys [id session-id session-role parent-id channel type state title summary contract
+                stop-reason error meta autonomy-state current-turn-id started-at finished-at]}]
   (let [task-id      (or id (random-uuid))
         created-at   (now)
         session-eid* (when session-id
@@ -160,6 +165,7 @@
         parent-id (assoc :task/parent-id parent-id)
         channel (assoc :task/channel channel)
         (some? summary) (assoc :task/summary summary)
+        (some? contract) (assoc :task/contract contract)
         stop-reason (assoc :task/stop-reason stop-reason)
         (some? error) (assoc :task/error error)
         (some? meta) (assoc :task/meta meta)
@@ -171,7 +177,11 @@
     task-id))
 
 (defn update-task!
-  [deps task-id {:keys [session-id session-role parent-id channel type state title summary stop-reason error
+  "Update a durable task.
+
+   When `:session-id` is supplied, it rebinds the task's current execution
+   session. Prior sessions remain attached through task-session links."
+  [deps task-id {:keys [session-id session-role parent-id channel type state title summary contract stop-reason error
                         meta autonomy-state current-turn-id started-at finished-at]
                  :as attrs}]
   (when-let [eid (task-eid deps task-id)]
@@ -201,6 +211,10 @@
                             (nil? error)
                             (contains? entity-map :task/error))
                        (conj [:db/retract eid :task/error (:task/error entity-map)])
+                       (and (contains? attrs :contract)
+                            (nil? contract)
+                            (contains? entity-map :task/contract))
+                       (conj [:db/retract eid :task/contract (:task/contract entity-map)])
                        (and (contains? attrs :meta)
                             (nil? meta)
                             (contains? entity-map :task/meta))
@@ -229,6 +243,7 @@
                 state (assoc :task/state state)
                 (some? title) (assoc :task/title title)
                 (some? summary) (assoc :task/summary summary)
+                (some? contract) (assoc :task/contract contract)
                 stop-reason (assoc :task/stop-reason stop-reason)
                 (some? error) (assoc :task/error error)
                 (some? meta) (assoc :task/meta meta)
@@ -252,6 +267,7 @@
        :state          (:task/state entity-map)
        :title          (empty->nil (:task/title entity-map))
        :summary        (empty->nil (:task/summary entity-map))
+       :contract       (:task/contract entity-map)
        :stop-reason    (:task/stop-reason entity-map)
        :error          (empty->nil (:task/error entity-map))
        :meta           (:task/meta entity-map)
@@ -293,6 +309,24 @@
             role))
         (:session-links task)))
 
+(defn- current-session-task-state
+  [task]
+  (or (:state task)
+      (get-in task [:meta :runtime :state])))
+
+(defn- current-session-task-state-rank
+  [task]
+  (case (current-session-task-state task)
+    :running 0
+    :waiting_input 0
+    :waiting_approval 0
+    :paused 1
+    :resumable 1
+    :failed 2
+    :completed 4
+    :cancelled 4
+    3))
+
 (defn- current-session-task-rank
   [session-id task]
   (let [updated-at (or (:updated-at task) (:created-at task))
@@ -301,6 +335,7 @@
                      0)
         role       (session-link-role task session-id)]
     [(if (:current-turn-id task) 0 1)
+     (current-session-task-state-rank task)
      (if (= session-id (:session-id task)) 0 1)
      (case role
        :resumed 0
@@ -310,6 +345,12 @@
      (- updated-ms)]))
 
 (defn current-session-task
+  "Return the ambient task for a linked session.
+
+   A task may have many linked sessions, but only one current execution session
+   stored on the task itself. This helper resolves the most relevant linked task
+   for a session while keeping `task.session-id` as the execution-session
+   source of truth."
   [deps session-id]
   (first
    (sort-by #(current-session-task-rank session-id %)
@@ -366,6 +407,25 @@
                             created-at)}])
     turn-id))
 
+(defn- turn-entity->body
+  [deps task-id entity-map]
+  {:id                   (:task.turn/id entity-map)
+   :task-id              task-id
+   :index                (:task.turn/index entity-map)
+   :operation            (:task.turn/operation entity-map)
+   :state                (:task.turn/state entity-map)
+   :input                (empty->nil (:task.turn/input entity-map))
+   :summary              (empty->nil (:task.turn/summary entity-map))
+   :error                (empty->nil (:task.turn/error entity-map))
+   :meta                 (:task.turn/meta entity-map)
+   :interrupting-turn-id (:task.turn/interrupting-turn-id entity-map)
+   :created-at           (or (:task.turn/created-at entity-map)
+                             (entity-created-at* deps entity-map))
+   :updated-at           (or (:task.turn/updated-at entity-map)
+                             (entity-updated-at* deps entity-map))
+   :started-at           (:task.turn/started-at entity-map)
+   :finished-at          (:task.turn/finished-at entity-map)})
+
 (defn update-task-turn!
   [deps turn-id {:keys [state input summary error meta finished-at]}]
   (when-let [eid (turn-eid deps turn-id)]
@@ -407,22 +467,7 @@
          (mapv (fn [[turn-id _ _]]
                  (let [eid        (turn-eid deps turn-id)
                        entity-map (decrypt-entity* deps (raw-entity* deps eid))]
-                   {:id                   (:task.turn/id entity-map)
-                    :task-id              task-id
-                    :index                (:task.turn/index entity-map)
-                    :operation            (:task.turn/operation entity-map)
-                    :state                (:task.turn/state entity-map)
-                    :input                (empty->nil (:task.turn/input entity-map))
-                    :summary              (empty->nil (:task.turn/summary entity-map))
-                    :error                (empty->nil (:task.turn/error entity-map))
-                    :meta                 (:task.turn/meta entity-map)
-                    :interrupting-turn-id (:task.turn/interrupting-turn-id entity-map)
-                    :created-at           (or (:task.turn/created-at entity-map)
-                                              (entity-created-at* deps entity-map))
-                    :updated-at           (or (:task.turn/updated-at entity-map)
-                                              (entity-updated-at* deps entity-map))
-                    :started-at           (:task.turn/started-at entity-map)
-                    :finished-at          (:task.turn/finished-at entity-map)}))))
+                   (turn-entity->body deps task-id entity-map)))))
     []))
 
 (defn get-task-turn
@@ -476,6 +521,23 @@
     (touch-task! deps task-eid*)
     item-id))
 
+(defn- item-entity->body
+  [deps turn-id entity-map]
+  {:id           (:task.item/id entity-map)
+   :turn-id      turn-id
+   :index        (:task.item/index entity-map)
+   :type         (:task.item/type entity-map)
+   :status       (:task.item/status entity-map)
+   :role         (:task.item/role entity-map)
+   :summary      (empty->nil (:task.item/summary entity-map))
+   :data         (:task.item/data entity-map)
+   :message-id   (:task.item/message-id entity-map)
+   :llm-call-id  (:task.item/llm-call-id entity-map)
+   :tool-id      (empty->nil (:task.item/tool-id entity-map))
+   :tool-call-id (empty->nil (:task.item/tool-call-id entity-map))
+   :created-at   (or (:task.item/created-at entity-map)
+                     (entity-created-at* deps entity-map))})
+
 (defn turn-items
   [deps turn-id]
   (if-let [turn-eid* (turn-eid deps turn-id)]
@@ -492,21 +554,61 @@
                                                      :where [?e :task.item/id ?iid]]
                                                item-id))
                        entity-map (decrypt-entity* deps (raw-entity* deps eid))]
-                   {:id           (:task.item/id entity-map)
-                    :turn-id      turn-id
-                    :index        (:task.item/index entity-map)
-                    :type         (:task.item/type entity-map)
-                    :status       (:task.item/status entity-map)
-                    :role         (:task.item/role entity-map)
-                    :summary      (empty->nil (:task.item/summary entity-map))
-                    :data         (:task.item/data entity-map)
-                    :message-id   (:task.item/message-id entity-map)
-                    :llm-call-id  (:task.item/llm-call-id entity-map)
-                    :tool-id      (empty->nil (:task.item/tool-id entity-map))
-                    :tool-call-id (empty->nil (:task.item/tool-call-id entity-map))
-                    :created-at   (or (:task.item/created-at entity-map)
-                                      (entity-created-at* deps entity-map))}))))
+                   (item-entity->body deps turn-id entity-map)))))
     []))
+
+(defn task-history-data
+  "Batch-load task turns and task items for the supplied task ids.
+
+   Returns a map of task-id -> {:turns [...], :items [...]} suitable for
+   compact history inspection and rendering."
+  [deps task-ids]
+  (let [task-ids* (vec (remove nil? task-ids))]
+    (if (empty? task-ids*)
+      {}
+      (let [turn-rows (->> (q* deps '[:find ?task-id ?turn ?index
+                                      :in $ [?task-id ...]
+                                      :where
+                                      [?task :task/id ?task-id]
+                                      [?turn :task.turn/task ?task]
+                                      [?turn :task.turn/index ?index]]
+                                task-ids*)
+                           (sort-by (juxt first #(nth % 2))))
+            turns-by-task
+            (reduce (fn [acc [task-id turn-eid _]]
+                      (let [entity-map (decrypt-entity* deps (raw-entity* deps turn-eid))
+                            turn       (turn-entity->body deps task-id entity-map)]
+                        (update acc task-id (fnil conj []) turn)))
+                    {}
+                    turn-rows)
+            turn-ids*  (mapv :id (mapcat val turns-by-task))
+            item-rows  (if (empty? turn-ids*)
+                         []
+                         (->> (q* deps '[:find ?turn-id ?item ?index
+                                         :in $ [?turn-id ...]
+                                         :where
+                                         [?turn :task.turn/id ?turn-id]
+                                         [?item :task.item/turn ?turn]
+                                         [?item :task.item/index ?index]]
+                                   turn-ids*)
+                              (sort-by (juxt first #(nth % 2)))))
+            items-by-turn
+            (reduce (fn [acc [turn-id item-eid _]]
+                      (let [entity-map (decrypt-entity* deps (raw-entity* deps item-eid))
+                            item       (item-entity->body deps turn-id entity-map)]
+                        (update acc turn-id (fnil conj []) item)))
+                    {}
+                    item-rows)]
+        (into {}
+              (map (fn [task-id]
+                     (let [turns (vec (get turns-by-task task-id []))
+                           items (->> turns
+                                      (mapcat #(get items-by-turn (:id %) []))
+                                      (sort-by (juxt :created-at :turn-id :index) compare)
+                                      vec)]
+                       [task-id {:turns turns
+                                 :items items}])))
+              task-ids*)))))
 
 (defn get-task-item
   [deps item-id]

@@ -23,6 +23,7 @@
 
 (declare sanitize-doc-value
          checkpoint-summary
+         task-checkpoint
          sync-runtime-task!
          emit-task-state-event!)
 
@@ -183,6 +184,131 @@
                :summary
                (checkpoint-summary checkpoint*))))))
 
+(defn- task-boundary-kind
+  [state]
+  (case state
+    :paused :pause
+    :resumable :pause
+    :waiting_input :pause
+    :waiting_approval :pause
+    :completed :completion
+    :cancelled :terminal
+    :failed :terminal
+    nil))
+
+(defn- resume-target-label
+  [task]
+  (if (= :schedule (:type task))
+    "the next scheduled run"
+    "the next turn"))
+
+(defn- boundary-next-step
+  [checkpoint]
+  (some-> checkpoint :next-step str str/trim not-empty))
+
+(defn- boundary-current-focus
+  [task checkpoint]
+  (some-> (or (:current-focus checkpoint)
+              (:summary checkpoint)
+              (:title task))
+          str
+          str/trim
+          not-empty))
+
+(defn- computed-resume-hint
+  [task]
+  (let [state       (or (:state task)
+                        (get-in task [:meta :runtime :state]))
+        checkpoint  (task-checkpoint task)
+        next-step   (boundary-next-step checkpoint)
+        focus       (boundary-current-focus task checkpoint)
+        target      (resume-target-label task)
+        stop-reason (:stop-reason task)]
+    (case state
+      :waiting_input
+      (if next-step
+        (str "On " target ", provide the requested input, then continue with: " next-step)
+        (str "On " target ", provide the requested input to continue the task."))
+
+      :waiting_approval
+      (if next-step
+        (str "On " target ", resolve the pending approval, then continue with: " next-step)
+        (str "On " target ", resolve the pending approval to continue the task."))
+
+      :paused
+      (cond
+        (= :runtime-restart stop-reason)
+        (if next-step
+          (str "On " target ", resume from the latest checkpoint and continue with: " next-step)
+          (str "On " target ", resume from the latest checkpoint."))
+
+        next-step
+        (str "On " target ", continue with: " next-step)
+
+        focus
+        (str "On " target ", continue with: " focus)
+
+        :else
+        (str "Resume on " target "."))
+
+      :resumable
+      (cond
+        next-step
+        (str "On " target ", continue with: " next-step)
+
+        focus
+        (str "On " target ", continue with: " focus)
+
+        :else
+        (str "Resume on " target "."))
+
+      nil)))
+
+(defn- boundary-doc*
+  [task]
+  (let [state      (or (:state task)
+                       (get-in task [:meta :runtime :state]))
+        boundary   (task-boundary-kind state)
+        checkpoint (task-checkpoint task)
+        next-step  (boundary-next-step checkpoint)
+        focus      (boundary-current-focus task checkpoint)
+        summary    (or (:summary task)
+                       (:summary checkpoint)
+                       focus
+                       (:title task))
+        resume-hint (computed-resume-hint task)]
+    (when boundary
+      (cond-> {:at       (or (:finished-at task) (java.util.Date.))
+               :boundary boundary
+               :state    state
+               :summary  summary}
+        (:stop-reason task) (assoc :stop-reason (:stop-reason task))
+        next-step (assoc :next-step next-step)
+        focus (assoc :current-focus focus)
+        checkpoint (assoc :checkpoint-summary (checkpoint-summary checkpoint))
+        resume-hint (assoc :resume-hint resume-hint)))))
+
+(defn task-boundary-summary
+  [task-or-id]
+  (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
+    (or (get-in task [:meta :boundary])
+        (some-> task boundary-doc* sanitize-doc-value))))
+
+(defn task-resume-hint
+  [task-or-id]
+  (or (some-> (task-boundary-summary task-or-id) :resume-hint)
+      (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
+        (some-> task computed-resume-hint))))
+
+(defn- record-task-boundary!
+  [task-id]
+  (when task-id
+    (when-let [task (db/get-task task-id)]
+      (when-let [boundary (boundary-doc* task)]
+        (merge-task-meta! task-id
+                          (fn [meta]
+                            (assoc (or meta {}) :boundary (sanitize-doc-value boundary))))))))
+
 (defn- set-task-runtime-status!
   [task-id status]
   (when task-id
@@ -237,6 +363,8 @@
         checkpoint    (task-checkpoint task)
         checkpoint-at (task-checkpoint-at task)
         recovery      (task-recovery task)
+        boundary      (task-boundary-summary task)
+        resume-hint   (task-resume-hint task)
         last-stop     (:last-stop recovery)
         last-resume   (:last-resume recovery)
         last-recovery (:last-recovery recovery)
@@ -247,6 +375,9 @@
 
                         (:summary last-stop)
                         (conj (str "Last stop: " (:summary last-stop)))
+
+                        (:summary boundary)
+                        (conj (str "Boundary summary: " (:summary boundary)))
 
                         (:error task)
                         (conj (str "Last error: " (:error task)))
@@ -269,6 +400,9 @@
 
                         (:next-step checkpoint)
                         (conj (str "Next step: " (:next-step checkpoint)))
+
+                        resume-hint
+                        (conj (str "Resume hint: " resume-hint))
 
                         (seq (:agenda checkpoint))
                         (conj (str "Agenda: "
@@ -455,6 +589,10 @@
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
   (let [operation        (resolve-task-operation task-id runtime-op)
         title            (task-title deps user-message)
+        contract         {:kind :interactive
+                          :goal title
+                          :initial_message user-message
+                          :channel channel}
         new-task?        (nil? task-id)
         resolved-task-id (or task-id
                              (db/create-task! {:session-id session-id
@@ -463,6 +601,7 @@
                                                :state :running
                                                :title title
                                                :summary title
+                                               :contract contract
                                                :autonomy-state autonomy-state
                                                :started-at (java.util.Date.)}))]
     (when task-id
@@ -562,6 +701,7 @@
   (when task-id
     (db/update-task! task-id attrs)
     (record-task-stop! task-id attrs)
+    (record-task-boundary! task-id)
     (emit-task-state-event! task-id)))
 
 (defn sync-runtime-task-turn!

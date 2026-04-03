@@ -355,17 +355,51 @@
   [{:keys [chat-guid]}]
   (str "imessage:" chat-guid))
 
+(defn- external-user-profile-key
+  [channel {:keys [team-id user-id handle]}]
+  (case channel
+    :slack (when (and team-id user-id)
+             (str "slack-user:" team-id ":" user-id))
+    :telegram (when user-id
+                (str "telegram-user:" user-id))
+    :imessage (when handle
+                (str "imessage-user:" handle))
+    nil))
+
+(defn- external-user-profile-name
+  [channel {:keys [user-id username first-name handle]} label]
+  (case channel
+    :telegram (or (nonblank-str first-name)
+                  (nonblank-str username)
+                  (nonblank-str label))
+    :imessage (or (nonblank-str handle)
+                  (nonblank-str label))
+    :slack (or (nonblank-str user-id)
+               (nonblank-str label))
+    (nonblank-str label)))
+
+(defn- ensure-external-user-profile!
+  [channel external-meta label]
+  (when-let [profile-key (external-user-profile-key channel external-meta)]
+    (let [profile-name (external-user-profile-name channel external-meta label)]
+      (db/ensure-user-profile! {:key profile-key
+                                :name profile-name}))))
+
 (defn- ensure-external-session!
   [channel external-key external-meta & {:keys [label]}]
-  (let [existing (db/find-session-by-external-key external-key)]
+  (let [profile-id (ensure-external-user-profile! channel external-meta label)
+        existing   (db/find-session-by-external-key external-key)]
     (if-let [session-id (:id existing)]
       (do
         (db/set-session-active! session-id true)
         (db/save-session-external-meta! session-id external-meta)
+        (when profile-id
+          (db/save-session-user-profile! session-id profile-id))
         session-id)
       (db/create-session! channel {:label label
                                    :external-key external-key
-                                   :external-meta external-meta}))))
+                                   :external-meta external-meta
+                                   :user-profile-id profile-id}))))
 
 (defn- persist-external-user-message!
   [session-id channel user-message external-message-id]
@@ -455,12 +489,15 @@
           phase-label    (titleize-token (:phase current-state))
           progress-label (titleize-token (or (:progress_status current-state)
                                              (:progress_status current-tip)))
+          resume-hint    (normalize-outbound-text (or (:resume_hint attention)
+                                                      (:resume_hint current-state)))
           control-hint   (case (keyword (or (:state task)
                                             (some-> (:task_state current-state) keyword)))
                            :running "Reply PAUSE or STOP to control it."
                            :waiting_input "Reply with the requested input, or STOP to end the task."
                            :waiting_approval "Reply YES or NO to the approval request, or STOP to end the task."
                            :paused "Reply RESUME or STOP to control it."
+                           :resumable "Reply RESUME or STOP to control it."
                            nil)]
       (str/join
        "\n"
@@ -481,6 +518,8 @@
                   (str "Next: " next-step))
                 (when-let [needs (normalize-outbound-text (:summary attention))]
                   (str "Needs: " needs))
+                (when resume-hint
+                  (str "Hint: " resume-hint))
                 (when-let [recent (normalize-outbound-text (:summary last-activity))]
                   (str "Recent: " recent))
                 control-hint])))
@@ -503,6 +542,7 @@
                 (str "- "
                      (case task-state
                        :paused "RESUME: resume the current task"
+                       :resumable "RESUME: resume the current task"
                        :running "PAUSE: pause the current task"
                        :waiting_input "STOP: stop the current task"
                        :waiting_approval "STOP: stop the current task"
@@ -921,11 +961,16 @@
        "telegram-message"
        #(handle-external-message!
          {:channel :telegram
-          :external-key (telegram-conversation-key {:chat-id chat-id
+         :external-key (telegram-conversation-key {:chat-id chat-id
                                                     :message-thread-id message-thread-id})
-          :external-meta {:chat-id chat-id
-                          :message-thread-id message-thread-id
-                          :reply-to-message-id message-id}
+          :external-meta (cond-> {:chat-id chat-id
+                                  :user-id (get-in message ["from" "id"])
+                                  :message-thread-id message-thread-id
+                                  :reply-to-message-id message-id}
+                           (nonblank-str (get-in message ["from" "username"]))
+                           (assoc :username (nonblank-str (get-in message ["from" "username"])))
+                           (nonblank-str (get-in message ["from" "first_name"]))
+                           (assoc :first-name (nonblank-str (get-in message ["from" "first_name"]))))
           :external-message-id (str "telegram:" update-id)
           :user-message text
           :label label})))))

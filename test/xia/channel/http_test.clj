@@ -345,14 +345,15 @@
                                                                     "session_id" (str sid)})})
             body     (response-json response)]
         (is (= 200 (:status response)))
-        (is (= (str task-id) (get body "task_id")))
-        (is (= (str turn-id) (get body "current_turn_id")))
-        (is (= "waiting_input" (get-in body ["task" "state"])))
-        (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
-        (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))
-        (is (= {"task_state" "waiting_input"
-                "phase" "waiting_input"
-                "message" "Waiting for input: OTP Code"
+      (is (= (str task-id) (get body "task_id")))
+      (is (= (str turn-id) (get body "current_turn_id")))
+      (is (= "waiting_input" (get-in body ["task" "state"])))
+      (is (= nil (get-in body ["task" "runtime"])))
+      (is (= "waiting_input" (get-in body ["task" "inspection" "current_state" "task_state"])))
+      (is (= "Waiting for input: OTP Code" (get-in body ["task" "inspection" "current_state" "message"])))
+      (is (= {"task_state" "waiting_input"
+              "phase" "waiting_input"
+              "message" "Waiting for input: OTP Code"
                 "current_focus" "Capture OTP"}
                (some-> (get-in body ["task" "inspection" "current_state"])
                        (select-keys ["task_state" "phase" "message" "current_focus"]))))
@@ -881,7 +882,10 @@
     (is (= "missing or invalid local session secret" (get body "error")))))
 
 (deftest history-sessions-route-returns-chat-session-summaries
-  (let [visible-sid (db/create-session! :http)
+  (let [profile-id   (db/ensure-user-profile! {:key "http-user:test"
+                                               :name "Test User"
+                                               :preferences {:verbosity :brief}})
+        visible-sid (db/create-session! :http {:user-profile-id profile-id})
         hidden-sid  (db/create-session! :command)]
     (db/add-message! visible-sid :user "hello")
     (db/add-message! visible-sid :assistant "latest reply")
@@ -899,6 +903,12 @@
       (is (= true (get session "active")))
       (is (= 2 (get session "message_count")))
       (is (= "latest reply" (get session "preview")))
+      (is (= {"id" (str profile-id)
+              "key" "http-user:test"
+              "name" "Test User"
+              "preferences" {"verbosity" "brief"}}
+             (select-keys (get session "user_profile")
+                          ["id" "key" "name" "preferences"])))
       (is (string? (get session "created_at")))
       (is (string? (get session "last_message_at"))))))
 
@@ -931,6 +941,9 @@
                                   :state :resumable
                                   :title "Reply to the billing emails"
                                   :summary "Waiting on the next follow up"
+                                  :contract {:goal "Reply to the billing emails"
+                                             :constraints ["Preserve friendly tone"]
+                                             :deliverables ["Send next reply"]}
                                   :autonomy-state (autonomous/initial-state "Reply to the billing emails")
                                   :meta {:runtime {:state :running
                                                    :phase :planning
@@ -966,55 +979,71 @@
                         :tool-id "workspace-read"
                         :tool-call-id "call-1"
                         :data {:summary "Loaded the billing thread"}})
-    (let [response (#'http/router {:uri            "/history/tasks"
-                                   :request-method :get
-                                   :headers        (ui-headers)})
-          body     (response-json response)
-          tasks    (get body "tasks")
-          task     (first tasks)
-          inspection (get task "inspection")]
-      (is (= 200 (:status response)))
-      (is (= 1 (count tasks)))
-      (is (= (str task-id) (get task "id")))
-      (is (= (str sid) (get task "session_id")))
-      (is (= "http" (get task "channel")))
-      (is (= "interactive" (get task "type")))
-      (is (= "running" (get task "state")))
-      (is (= (str turn-id) (get task "current_turn_id")))
-      (is (= {"state" "running"
-              "phase" "planning"
-              "message" "Planning the next reply"}
-             (some-> (get task "runtime")
-                     (select-keys ["state" "phase" "message"]))))
-      (is (= "Reply to the billing emails" (get task "title")))
-      (is (= "Waiting on the next follow up" (get task "summary")))
-      (is (= {"depth" 1
-              "current_focus" "Reply to the billing emails"
-              "root_goal" "Reply to the billing emails"}
-             (some-> (get task "stack")
-                     (select-keys ["depth" "current_focus" "root_goal"]))))
-      (is (= 1 (get task "turn_count")))
-      (is (= "completed" (get task "latest_turn_state")))
-      (is (= "Reply to the billing emails"
-             (get-in inspection ["current_tip" "title"])))
-      (is (= "Drafted the first reply"
-             (get-in inspection ["last_output" "summary"])))
-      (is (= "workspace-read"
-             (get-in inspection ["last_tool_activity" "tool_id"])))
-      (is (= "execution-policy"
-             (get-in inspection ["last_policy_decision" "decision_type"])))
-      (is (= "tool.completed"
-             (get-in inspection ["last_activity" "kind"])))
-      (is (= "workspace-read"
-             (get-in inspection ["last_activity" "tool_id"])))
-      (is (= 2
-             (get-in inspection ["budget" "llm_call_count"])))
-      (is (= 1
-             (get-in inspection ["stack_summary" "depth"])))
-      (is (= 1
-             (get-in inspection ["counts" "assistant_message_count"])))
-      (is (= 1
-             (get-in inspection ["counts" "tool_result_count"]))))))
+    (let [original-task-history-data db/task-history-data]
+      (with-redefs [xia.db/task-history-data (fn [task-ids]
+                                               (is (= [task-id] (vec task-ids)))
+                                               (original-task-history-data task-ids))
+                    xia.db/task-turns        (fn [& _]
+                                               (throw (ex-info "history route should use preloaded task history data"
+                                                               {})))
+                    xia.db/turn-items        (fn [& _]
+                                               (throw (ex-info "history route should use preloaded task history data"
+                                                               {})))]
+        (let [response (#'http/router {:uri            "/history/tasks"
+                                       :request-method :get
+                                       :headers        (ui-headers)})
+              body     (response-json response)
+              tasks    (get body "tasks")
+              task     (first tasks)
+              inspection (get task "inspection")]
+          (is (= 200 (:status response)))
+          (is (= 1 (count tasks)))
+          (is (= (str task-id) (get task "id")))
+          (is (= (str sid) (get task "session_id")))
+          (is (= "http" (get task "channel")))
+          (is (= "interactive" (get task "type")))
+          (is (= "running" (get task "state")))
+          (is (= (str turn-id) (get task "current_turn_id")))
+          (is (nil? (get task "runtime")))
+          (is (= {"task_state" "running"
+                  "phase" "planning"
+                  "message" "Planning the next reply"}
+                 (some-> (get task "inspection")
+                         (get "current_state")
+                         (select-keys ["task_state" "phase" "message"]))))
+          (is (= "Reply to the billing emails" (get task "title")))
+          (is (= "Waiting on the next follow up" (get task "summary")))
+          (is (= {"goal" "Reply to the billing emails"
+                  "constraints" ["Preserve friendly tone"]
+                  "deliverables" ["Send next reply"]}
+                 (get task "contract")))
+          (is (= {"depth" 1
+                  "current_focus" "Reply to the billing emails"
+                  "root_goal" "Reply to the billing emails"}
+                 (some-> (get task "stack")
+                         (select-keys ["depth" "current_focus" "root_goal"]))))
+          (is (= 1 (get task "turn_count")))
+          (is (= "completed" (get task "latest_turn_state")))
+          (is (= "Reply to the billing emails"
+                 (get-in inspection ["current_tip" "title"])))
+          (is (= "Drafted the first reply"
+                 (get-in inspection ["last_output" "summary"])))
+          (is (= "workspace-read"
+                 (get-in inspection ["last_tool_activity" "tool_id"])))
+          (is (= "execution-policy"
+                 (get-in inspection ["last_policy_decision" "decision_type"])))
+          (is (= "tool.completed"
+                 (get-in inspection ["last_activity" "kind"])))
+          (is (= "workspace-read"
+                 (get-in inspection ["last_activity" "tool_id"])))
+          (is (= 2
+                 (get-in inspection ["budget" "llm_call_count"])))
+          (is (= 1
+                 (get-in inspection ["stack_summary" "depth"])))
+          (is (= 1
+                 (get-in inspection ["counts" "assistant_message_count"])))
+          (is (= 1
+                 (get-in inspection ["counts" "tool_result_count"]))))))))
 
 (deftest task-detail-route-returns-turns-and-items
   (let [sid      (db/create-session! :http)
@@ -1075,20 +1104,23 @@
       (is (= (str task-id) (get task "id")))
       (is (= "running" (get task "state")))
       (is (= (str turn-id) (get task "current_turn_id")))
-      (is (= {"state" "running"
+      (is (nil? (get task "runtime")))
+      (is (= {"task_state" "running"
               "phase" "understanding"
               "message" "Understanding the goal"}
-             (some-> (get task "runtime")
-                     (select-keys ["state" "phase" "message"]))))
+             (some-> (get task "inspection")
+                     (get "current_state")
+                     (select-keys ["task_state" "phase" "message"]))))
       (is (= "Review the invoice" (get task "title")))
       (is (= {"depth" 1
               "current_focus" "Review the invoice"
               "root_goal" "Review the invoice"}
              (some-> (get task "stack")
                      (select-keys ["depth" "current_focus" "root_goal"]))))
+      (is (nil? (get task "autonomy_state")))
       (is (= "Review the invoice"
-             (some-> (get task "autonomy_state")
-                     (get "stack")
+             (some-> (get task "stack")
+                     (get "frames")
                      first
                      (get "title"))))
       (is (= "Review the invoice"
@@ -1134,11 +1166,13 @@
           session-links (get task "session_links")]
       (is (= 200 (:status response)))
       (is (= (str sid-b) (get task "session_id")))
+      (is (= (str sid-b) (get task "execution_session_id")))
+      (is (= "resumed" (get task "execution_session_role")))
       (is (= "command" (get task "channel")))
       (is (= 2 (count session-links)))
-      (is (= #{{"session_id" (str sid-a) "role" "origin" "current" false}
-               {"session_id" (str sid-b) "role" "resumed" "current" true}}
-             (set (map #(select-keys % ["session_id" "role" "current"])
+      (is (= #{{"session_id" (str sid-a) "role" "origin" "current" false "execution_current" false}
+               {"session_id" (str sid-b) "role" "resumed" "current" true "execution_current" true}}
+             (set (map #(select-keys % ["session_id" "role" "current" "execution_current"])
                        session-links)))))))
 
 (deftest task-detail-route-returns-durable-checkpoint-and-recovery-brief
@@ -1182,11 +1216,55 @@
                                "summary" "Need to review the invoice attachments."}}
              (some-> (get task "recovery")
                      (select-keys ["last-stop" "last-recovery"]))))
+      (is (= {"boundary" "pause"
+              "state" "paused"
+              "summary" "Paused pending follow-up"
+              "next-step" "Read the attachment list"
+              "current-focus" "Review the invoice"
+              "checkpoint-summary" "Need to review the invoice attachments."
+              "resume-hint" "On the next turn, continue with: Read the attachment list"}
+             (some-> (get task "boundary_summary")
+                     (dissoc "at")
+                     (select-keys ["boundary" "state" "summary" "next-step" "current-focus" "checkpoint-summary" "resume-hint"]))))
+      (is (= "On the next turn, continue with: Read the attachment list"
+             (get task "resume_hint")))
       (is (string? (get task "checkpoint_at")))
       (is (str/includes? (get task "recovery_brief") "Last checkpoint [observing]"))
+      (is (str/includes? (get task "recovery_brief") "Boundary summary: Paused pending follow-up"))
+      (is (str/includes? (get task "recovery_brief") "Resume hint: On the next turn, continue with: Read the attachment list"))
       (is (str/includes? (get task "recovery_brief") "Last stop: Paused pending follow-up"))
       (is (str/includes? (get task "recovery_brief") "Recovered from: checkpoint"))
-      (is (str/includes? (get task "recovery_brief") "Next step: Read the attachment list")))))
+      (is (str/includes? (get task "recovery_brief") "Next step: Read the attachment list"))
+      (is (= "On the next turn, continue with: Read the attachment list"
+             (get-in task ["inspection" "current_state" "resume_hint"])))
+      (is (= "On the next turn, continue with: Read the attachment list"
+             (get-in task ["inspection" "attention" "resume_hint"]))))))
+
+(deftest schedule-task-route-uses-next-scheduled-run-resume-hint
+  (let [sid     (db/create-session! :http)
+        task-id (db/create-task! {:session-id sid
+                                  :channel :http
+                                  :type :schedule
+                                  :state :paused
+                                  :title "Nightly invoice audit"
+                                  :summary "Paused until the next scheduled run"
+                                  :meta {:checkpoint {:phase :observing
+                                                      :summary "Need to audit the newest invoice batch."
+                                                      :current-focus "Nightly invoice audit"
+                                                      :next-step "Load the newest invoice batch"}
+                                         :checkpoint-at (java.util.Date.)}})]
+    (let [response (#'http/router {:uri            (str "/tasks/" task-id)
+                                   :request-method :get
+                                   :headers        (ui-headers)})
+          body     (response-json response)
+          task     (get body "task")]
+      (is (= 200 (:status response)))
+      (is (= "On the next scheduled run, continue with: Load the newest invoice batch"
+             (get task "resume_hint")))
+      (is (= "On the next scheduled run, continue with: Load the newest invoice batch"
+             (get-in task ["inspection" "current_state" "resume_hint"])))
+      (is (= "On the next scheduled run, continue with: Load the newest invoice batch"
+             (get-in task ["inspection" "attention" "resume_hint"]))))))
 
 (deftest recovered-task-routes-show-runtime-restart-recovery-state
   (let [sid      (db/create-session! :http)
@@ -1446,11 +1524,11 @@
       (is (= "Review the invoice"
              (some-> frames first (get "title"))))
       (is (nil? (some-> frames first (get "kind"))))
-      (is (= 1 (count (get-in task ["autonomy_state" "stack"]))))
+      (is (nil? (get task "autonomy_state")))
       (is (= "Review the invoice"
-             (get-in task ["autonomy_state" "stack" 0 "title"])))
+             (some-> frames first (get "title"))))
       (is (= "Child task completed: Investigate the invoice attachments. Found the attachment mismatch"
-             (get-in task ["autonomy_state" "stack" 0 "summary"]))))))
+             (some-> frames first (get "summary")))))))
 
 (deftest task-events-route-returns-normalized-runtime-events
   (let [sid     (db/create-session! :http)
@@ -1813,7 +1891,9 @@
           events   (db/session-audit-events sid)]
       (is (= 200 (:status response)))
       (is (= "paused" (get body "status")))
+      (is (= (str sid) (get body "execution_session_id")))
       (is (= "paused" (get-in body ["task" "state"])))
+      (is (= (str sid) (get-in body ["task" "execution_session_id"])))
       (is (= "paused" (get-in body ["task" "stop_reason"])))
       (is (= :paused (:state task)))
       (is (= :pause (:operation (last turns))))
@@ -1987,6 +2067,7 @@
         (is (= 202 (:status response)))
         (is (= "running" (get body "status")))
         (is (= (str task-id) (get body "task_id")))
+        (is (= (str sid) (get body "execution_session_id")))
         (is (= :running (:state task)))
         (is (fn? @submitted-work))
         (@submitted-work)
@@ -2177,8 +2258,11 @@
       (is (= true (get body "task_live")))
       (is (= (str turn-id) (get body "current_turn_id")))
       (is (= "waiting_input" (get-in body ["task" "state"])))
-      (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
-      (is (= "Waiting for input: OTP Code" (get-in body ["task" "runtime" "message"])))))) 
+      (is (= (str sid) (get-in body ["task" "execution_session_id"])))
+      (is (= "origin" (get-in body ["task" "execution_session_role"])))
+      (is (nil? (get-in body ["task" "runtime"])))
+      (is (= "waiting_input" (get-in body ["task" "inspection" "current_state" "task_state"])))
+      (is (= "Waiting for input: OTP Code" (get-in body ["task" "inspection" "current_state" "message"])))))) 
 
 (deftest session-task-route-resolves-linked-task-for-nonprimary-session
   (let [sid-a   (db/create-session! :http)
@@ -2208,10 +2292,13 @@
       (is (= true (get body "task_live")))
       (is (= (str turn-id) (get body "current_turn_id")))
       (is (= "waiting_input" (get-in body ["task" "state"])))
-      (is (= "waiting_input" (get-in body ["task" "runtime" "state"])))
-      (is (= #{{"session_id" (str sid-a) "role" "origin" "current" false}
-               {"session_id" (str sid-b) "role" "resumed" "current" true}}
-             (set (map #(select-keys % ["session_id" "role" "current"])
+      (is (= (str sid-b) (get-in body ["task" "execution_session_id"])))
+      (is (= "resumed" (get-in body ["task" "execution_session_role"])))
+      (is (nil? (get-in body ["task" "runtime"])))
+      (is (= "waiting_input" (get-in body ["task" "inspection" "current_state" "task_state"])))
+      (is (= #{{"session_id" (str sid-a) "role" "origin" "current" false "execution_current" false}
+               {"session_id" (str sid-b) "role" "resumed" "current" true "execution_current" true}}
+             (set (map #(select-keys % ["session_id" "role" "current" "execution_current"])
                        (get-in body ["task" "session_links"]))))))))
 
 (deftest session-status-route-clears-terminal-error-status

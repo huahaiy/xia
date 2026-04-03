@@ -287,19 +287,23 @@
      :latest_status (some-> (:status latest-run) name)
      :latest_error  (truncate-text* deps (:error latest-run) 160)}))
 
+(declare user-profile->body stack->body)
+
 (defn- history-session->body
   [deps session]
   (let [messages     (->> (db/session-messages (:id session))
                           (filter #(#{:user :assistant} (:role %)))
                           vec)
-        last-message (last messages)]
+        last-message (last messages)
+        user-profile (:user-profile session)]
     {:id              (some-> (:id session) str)
      :channel         (some-> (:channel session) name)
      :created_at      (instant->str* deps (:created-at session))
      :active          (boolean (:active? session))
      :message_count   (count messages)
      :last_message_at (instant->str* deps (:created-at last-message))
-     :preview         (truncate-text* deps (:content last-message) 160)}))
+     :preview         (truncate-text* deps (:content last-message) 160)
+     :user_profile    (user-profile->body deps user-profile)}))
 
 (defn- task-item->body
   [deps item]
@@ -355,15 +359,35 @@
     (:started-at turn) (assoc :started_at (instant->str* deps (:started-at turn)))
     (:finished-at turn) (assoc :finished_at (instant->str* deps (:finished-at turn)))))
 
-(declare stack->body)
+(declare stack->body user-profile->body)
+
+(defn- task-execution-session-role
+  [task]
+  (some (fn [{:keys [session-id role]}]
+          (when (= session-id (:session-id task))
+            role))
+        (:session-links task)))
 
 (defn- session-link->body
-  [deps current-session-id {:keys [session-id role created-at updated-at]}]
-  (cond-> {:session_id (some-> session-id str)
-           :current    (= session-id current-session-id)}
+  [deps execution-session-id {:keys [session-id role created-at updated-at]}]
+  (let [execution-current? (= session-id execution-session-id)]
+    (cond-> {:session_id         (some-> session-id str)
+             :current            execution-current?
+             :execution_current  execution-current?}
     role (assoc :role (name role))
     created-at (assoc :created_at (instant->str* deps created-at))
-    updated-at (assoc :updated_at (instant->str* deps updated-at))))
+    updated-at (assoc :updated_at (instant->str* deps updated-at)))))
+
+(defn- user-profile->body
+  [deps user-profile]
+  (when user-profile
+    (cond-> {:id         (some-> (:id user-profile) str)
+             :created_at (instant->str* deps (:created-at user-profile))
+             :updated_at (instant->str* deps (:updated-at user-profile))}
+      (:key user-profile) (assoc :key (:key user-profile))
+      (:name user-profile) (assoc :name (:name user-profile))
+      (:summary user-profile) (assoc :summary (:summary user-profile))
+      (:preferences user-profile) (assoc :preferences (:preferences user-profile)))))
 
 (defn- task->body
   ([deps task]
@@ -372,10 +396,14 @@
                (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))))
   ([deps task autonomy-state]
    (let [runtime         (get-in task [:meta :runtime])
+         execution-role  (task-execution-session-role task)
          recovery        (task-runtime/task-recovery task)
+         boundary        (task-runtime/task-boundary-summary task)
          checkpoint      (task-runtime/task-checkpoint task)
          checkpoint-at   (task-runtime/task-checkpoint-at task)
+         resume-hint     (task-runtime/task-resume-hint task)
          recovery-brief  (task-runtime/task-recovery-brief task)
+         contract        (:contract task)
          inspection      (task-inspection/task-inspection
                           {:instant->str #(instant->str* deps %)
                            :truncate-text #(truncate-text* deps %1 %2)}
@@ -387,26 +415,28 @@
          stack           (stack->body deps autonomy-state)]
      (cond-> {:id         (some-> (:id task) str)
               :session_id (some-> (:session-id task) str)
+              :execution_session_id (some-> (:session-id task) str)
               :channel    (some-> (:channel task) name)
               :type       (some-> (:type task) name)
               :state      (some-> state name)
               :created_at (instant->str* deps (:created-at task))
               :updated_at (instant->str* deps (:updated-at task))}
+       execution-role (assoc :execution_session_role (name execution-role))
        (:parent-id task) (assoc :parent_id (str (:parent-id task)))
        (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
        (:title task) (assoc :title (:title task))
        (:summary task) (assoc :summary (:summary task))
+       contract (assoc :contract contract)
        (:stop-reason task) (assoc :stop_reason (name (:stop-reason task)))
        (:error task) (assoc :error (:error task))
-       runtime (assoc :runtime runtime)
        recovery (assoc :recovery recovery)
+       boundary (assoc :boundary_summary boundary)
        checkpoint (assoc :checkpoint checkpoint)
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
+       resume-hint (assoc :resume_hint resume-hint)
        recovery-brief (assoc :recovery_brief recovery-brief)
        inspection (assoc :inspection inspection)
        session-links (assoc :session_links session-links)
-       (:meta task) (assoc :meta (:meta task))
-       autonomy-state (assoc :autonomy_state autonomy-state)
        stack (assoc :stack stack)
        (:started-at task) (assoc :started_at (instant->str* deps (:started-at task)))
        (:finished-at task) (assoc :finished_at (instant->str* deps (:finished-at task)))))))
@@ -437,40 +467,53 @@
   ([deps task]
    (history-task->body deps
                        task
-                       (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))))
+                       (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))
+                       nil))
   ([deps task autonomy-state]
-   (let [turns       (db/task-turns (:id task))
+   (history-task->body deps task autonomy-state nil))
+  ([deps task autonomy-state history-data]
+   (let [{:keys [turns]} (or history-data {})
+         turns       (or turns [])
          latest-turn (last turns)
          runtime     (get-in task [:meta :runtime])
+         execution-role (task-execution-session-role task)
          recovery    (task-runtime/task-recovery task)
+         boundary    (task-runtime/task-boundary-summary task)
          checkpoint  (task-runtime/task-checkpoint task)
          checkpoint-at (task-runtime/task-checkpoint-at task)
+         resume-hint (task-runtime/task-resume-hint task)
          recovery-brief (task-runtime/task-recovery-brief task)
+         contract    (:contract task)
          inspection  (task-inspection/task-inspection
                       {:instant->str #(instant->str* deps %)
                        :truncate-text #(truncate-text* deps %1 %2)}
                       task
                       autonomy-state
-                      true)
+                      true
+                      history-data)
          state       (or (:state runtime) (:state task))
          session-links (not-empty (mapv #(session-link->body deps (:session-id task) %)
                                         (:session-links task)))
          stack       (stack->body deps autonomy-state)]
      (cond-> {:id          (some-> (:id task) str)
               :session_id  (some-> (:session-id task) str)
+              :execution_session_id (some-> (:session-id task) str)
               :channel     (some-> (:channel task) name)
               :type        (some-> (:type task) name)
               :state       (some-> state name)
               :turn_count  (count turns)
               :created_at  (instant->str* deps (:created-at task))
               :updated_at  (instant->str* deps (:updated-at task))}
+       execution-role (assoc :execution_session_role (name execution-role))
        (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
        (:title task) (assoc :title (:title task))
        (:summary task) (assoc :summary (:summary task))
-       runtime (assoc :runtime runtime)
+       contract (assoc :contract contract)
        recovery (assoc :recovery recovery)
+       boundary (assoc :boundary_summary boundary)
        checkpoint (assoc :checkpoint checkpoint)
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
+       resume-hint (assoc :resume_hint resume-hint)
        recovery-brief (assoc :recovery_brief recovery-brief)
        inspection (assoc :inspection inspection)
        session-links (assoc :session_links session-links)
@@ -959,9 +1002,16 @@
 
 (defn handle-history-tasks
   [deps]
-  (json-response* deps 200
-                  {:tasks (->> (db/list-tasks)
-                               (into [] (map #(history-task->body deps %))))}))
+  (let [tasks         (db/list-tasks)
+        history-data  (db/task-history-data (map :id tasks))]
+    (json-response* deps 200
+                    {:tasks (->> tasks
+                                 (into [] (map #(history-task->body deps
+                                                                   %
+                                                                   (task-runtime/inspect-runtime-autonomy-state
+                                                                    (:session-id %)
+                                                                    (:id %))
+                                                                   (get history-data (:id %))))))})))
 
 (defn handle-get-task
   [deps task-id]
@@ -1102,18 +1152,21 @@
       :conflict
       (json-response* deps 409 {:error (or (:error result) message)
                                 :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
+                                :session_id (some-> (:session-id result) str)
+                                :execution_session_id (some-> (:session-id result) str)})
 
       :unavailable
       (json-response* deps 503 {:error (or (:error result) message)
                                 :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)})
+                                :session_id (some-> (:session-id result) str)
+                                :execution_session_id (some-> (:session-id result) str)})
 
       :accepted
       (json-response* deps 202
                       (cond-> {:status status-key
                                :task_id (some-> (:task-id result) str)
-                               :session_id (some-> (:session-id result) str)}
+                               :session_id (some-> (:session-id result) str)
+                               :execution_session_id (some-> (:session-id result) str)}
                         (= status :forking)
                         (assoc :task (when-let [task (:task result)]
                                        (task->body deps task)))))
@@ -1121,6 +1174,9 @@
       :completed
       (json-response* deps 200
                       (cond-> {:status status-key}
+                        (:session-id result)
+                        (assoc :execution_session_id (some-> (:session-id result) str))
+
                         (contains? #{:already-paused :already-stopped} status)
                         (assoc :task_id (some-> (:task-id result) str)
                                :session_id (some-> (:session-id result) str))

@@ -88,6 +88,7 @@
     (let [tasks (db/list-tasks {:session-id session-id})
           task-id (:id (first tasks))
           task (db/get-task task-id)
+          boundary (get-in task [:meta :boundary])
           turns (db/task-turns task-id)
           items (db/turn-items (:id (first turns)))
           item-types (set (map :type items))]
@@ -103,6 +104,10 @@
       (is (contains? item-types :assistant-message))
       (is (contains? item-types :status))
       (is (contains? item-types :checkpoint))
+      (is (= :completion (:boundary boundary)))
+      (is (= :completed (:state boundary)))
+      (is (= "All set." (:summary boundary)))
+      (is (nil? (:resume-hint boundary)))
       (is (= :user (:role (first (filter #(= :user-message (:type %)) items)))))
       (is (= :assistant (:role (first (filter #(= :assistant-message (:type %)) items))))))))
 
@@ -385,7 +390,8 @@
           turns        (db/task-turns task-id)
           control-turn (last turns)
           items        (db/turn-items (:id control-turn))
-          last-stop    (get-in task [:meta :recovery :last-stop])]
+          last-stop    (get-in task [:meta :recovery :last-stop])
+          boundary     (get-in task [:meta :boundary])]
       (is (= :paused (:status result)))
       (is (= :paused (:state task)))
       (is (= :paused (:stop-reason task)))
@@ -393,6 +399,11 @@
       (is (= :paused (:state last-stop)))
       (is (= :paused (:stop-reason last-stop)))
       (is (= "Task paused by user" (:summary last-stop)))
+      (is (= :pause (:boundary boundary)))
+      (is (= :paused (:state boundary)))
+      (is (= "Task paused by user" (:summary boundary)))
+      (is (= "On the next turn, continue with: Reply to the billing emails"
+             (:resume-hint boundary)))
       (is (= :pause (:operation control-turn)))
       (is (= :completed (:state control-turn)))
       (is (= [:system-note] (mapv :type items)))

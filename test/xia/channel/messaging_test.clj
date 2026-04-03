@@ -52,7 +52,8 @@
         (finally
           (messaging/stop!))))
     (let [session (db/find-session-by-external-key "slack:T1:C1:1710000000.100")
-          messages (db/session-messages (:id session))]
+          messages (db/session-messages (:id session))
+          profile  (:user-profile session)]
       (is (= :slack (:channel session)))
       (is (= "Slack C1" (:label session)))
       (is (= {:team-id "T1"
@@ -60,6 +61,8 @@
               :thread-ts "1710000000.100"
               :user-id "U1"}
              (db/session-external-meta (:id session))))
+      (is (= "slack-user:T1:U1" (:key profile)))
+      (is (= "U1" (:name profile)))
       (is (= [:user :user]
              (mapv :role messages)))
       (is (= ["first task"
@@ -107,13 +110,18 @@
         (finally
           (messaging/stop!))))
     (let [session (db/find-session-by-external-key "telegram:1001:9")
-          messages (db/session-messages (:id session))]
+          messages (db/session-messages (:id session))
+          profile  (:user-profile session)]
       (is (= :telegram (:channel session)))
       (is (= "Ops" (:label session)))
       (is (= {:chat-id 1001
+              :user-id 55
+              :first-name "Alex"
               :message-thread-id 9
               :reply-to-message-id 7}
              (db/session-external-meta (:id session))))
+      (is (= "telegram-user:55" (:key profile)))
+      (is (= "Alex" (:name profile)))
       (is (= [:user]
              (mapv :role messages)))
       (is (= ["status?"]
@@ -446,6 +454,57 @@
         (is (str/includes? (get-in @delivered [0 :text]) "OUTPUT: show the latest assistant output"))
         (is (str/includes? (get-in @delivered [0 :text]) "ACTIVITY: show recent task actions"))
         (is (str/includes? (get-in @delivered [0 :text]) "RESUME: resume the current task"))
+        (finally
+          (messaging/stop!))))))
+
+(deftest messaging-status-intent-prefers-paused-task-over-more-recent-completed-task
+  (let [session-id    (db/create-session! :telegram {:external-key "telegram:1001:main"
+                                                     :external-meta {:chat-id 1001}})
+        _paused-id    (db/create-task! {:session-id session-id
+                                        :channel :telegram
+                                        :type :interactive
+                                        :state :paused
+                                        :title "Paused billing follow-up"
+                                        :summary "Waiting to resume"
+                                        :meta {:checkpoint {:phase :observing
+                                                            :summary "Need to confirm the refund amount."
+                                                            :current-focus "Paused billing follow-up"
+                                                            :next-step "Confirm the refund amount"}}})
+        _completed-id (db/create-task! {:session-id session-id
+                                        :channel :telegram
+                                        :type :interactive
+                                        :state :completed
+                                        :title "Completed outage summary"})
+        delivered     (atom [])
+        process-calls (atom 0)]
+    (with-redefs [xia.channel.messaging/telegram-enabled? (constantly true)
+                  xia.async/submit-background! (fn [_description f]
+                                                 (f))
+                  agent/process-message (fn [& _]
+                                          (swap! process-calls inc)
+                                          "unexpected")
+                  messaging/send-session-message! (fn [channel sid text]
+                                                    (swap! delivered conj {:channel channel
+                                                                           :session-id sid
+                                                                           :text text})
+                                                    true)]
+      (messaging/start!)
+      (try
+        (messaging/handle-telegram-update!
+         {"update_id" 1005
+          "message" {"message_id" 22
+                      "text" "status"
+                      "chat" {"id" 1001}
+                      "from" {"id" 55
+                              "is_bot" false
+                              "first_name" "Alex"}}})
+        (is (= 0 @process-calls))
+        (is (= [] (db/session-messages session-id)))
+        (is (= 1 (count @delivered)))
+        (is (str/includes? (get-in @delivered [0 :text]) "Task: Paused billing follow-up"))
+        (is (str/includes? (get-in @delivered [0 :text]) "State: Paused"))
+        (is (str/includes? (get-in @delivered [0 :text]) "Hint: On the next turn, continue with: Confirm the refund amount"))
+        (is (str/includes? (get-in @delivered [0 :text]) "Reply RESUME or STOP to control it."))
         (finally
           (messaging/stop!))))))
 

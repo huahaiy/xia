@@ -20,7 +20,10 @@
                                 "data"       {"description" "Optional structured JSON value. Use this instead of `content` for JSON artifacts."}
                                 "meta"       {"type"        "object"
                                              "description" "Optional metadata to store alongside the artifact."}}
-                  "required"   []}
+                  "required"   []
+                  "anyOf"      [{"required" ["content"]}
+                                {"required" ["rows"]}
+                                {"required" ["data"]}]}
  :handler        "(fn [args]
                     (let [artifact (xia.artifact/create-artifact!
                                      {:name    (get args \"name\")

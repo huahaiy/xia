@@ -48,6 +48,47 @@
                      :where [?e :session/id ?sid]]
              session-id)))
 
+(defn- empty->nil
+  [value]
+  (when-not (= "" value) value))
+
+(defn- user-profile-eid
+  [deps profile-id]
+  (when profile-id
+    (ffirst (q* deps '[:find ?e :in $ ?pid
+                       :where [?e :user.profile/id ?pid]]
+                profile-id))))
+
+(defn- user-profile-eid-by-key
+  [deps profile-key]
+  (when profile-key
+    (ffirst (q* deps '[:find ?e :in $ ?pkey
+                       :where [?e :user.profile/key ?pkey]]
+                profile-key))))
+
+(defn- user-profile-id-for-session
+  [deps session-eid*]
+  (when session-eid*
+    (ffirst (q* deps '[:find ?pid :in $ ?session
+                       :where
+                       [?session :session/user-profile ?profile]
+                       [?profile :user.profile/id ?pid]]
+                session-eid*))))
+
+(defn- read-user-profile*
+  [deps profile-eid]
+  (when profile-eid
+    (let [entity-map (decrypt-entity* deps (raw-entity* deps profile-eid))]
+      {:id          (:user.profile/id entity-map)
+       :key         (empty->nil (:user.profile/key entity-map))
+       :name        (empty->nil (:user.profile/name entity-map))
+       :summary     (empty->nil (:user.profile/summary entity-map))
+       :preferences (:user.profile/preferences entity-map)
+       :created-at  (or (:user.profile/created-at entity-map)
+                        (entity-created-at* deps entity-map))
+       :updated-at  (or (:user.profile/updated-at entity-map)
+                        (entity-updated-at* deps entity-map))})))
+
 (defn save-wm-snapshot!
   [deps {:keys [session-id topics slots episode-refs local-doc-refs autonomy-state]}]
   (let [session-eid* (ffirst (q* deps '[:find ?e :in $ ?sid
@@ -136,18 +177,65 @@
                               [?e :episode/timestamp ?ts]
                               [(get-else $ ?e :episode/context "") ?ctx]])))))
 
+(defn ensure-user-profile!
+  [deps {:keys [id key name summary preferences]}]
+  (let [profile-eid (or (user-profile-eid deps id)
+                        (user-profile-eid-by-key deps key))
+        profile-id  (or id
+                        (when profile-eid
+                          (:user.profile/id (raw-entity* deps profile-eid)))
+                        (random-uuid))
+        timestamp   (java.util.Date.)]
+    (if profile-eid
+      (do
+        (transact!*
+          deps
+          [(cond-> {:db/id profile-eid
+                    :user.profile/updated-at timestamp}
+             (some? key) (assoc :user.profile/key key)
+             (some? name) (assoc :user.profile/name name)
+             (some? summary) (assoc :user.profile/summary summary)
+             (some? preferences) (assoc :user.profile/preferences preferences))])
+        profile-id)
+      (do
+        (transact!*
+          deps
+          [(cond-> {:user.profile/id profile-id
+                    :user.profile/created-at timestamp
+                    :user.profile/updated-at timestamp}
+             (some? key) (assoc :user.profile/key key)
+             (some? name) (assoc :user.profile/name name)
+             (some? summary) (assoc :user.profile/summary summary)
+             (some? preferences) (assoc :user.profile/preferences preferences))])
+        profile-id))))
+
+(defn get-user-profile
+  [deps profile-id]
+  (when-let [profile-eid (user-profile-eid deps profile-id)]
+    (read-user-profile* deps profile-eid)))
+
+(defn find-user-profile-by-key
+  [deps profile-key]
+  (when-let [profile-eid (user-profile-eid-by-key deps profile-key)]
+    (read-user-profile* deps profile-eid)))
+
 (defn create-session!
   [deps channel & [opts]]
-  (let [{:keys [parent-session-id worker? label active? external-key external-meta]
+  (let [{:keys [parent-session-id worker? label active? external-key external-meta user-profile-id]
          :or   {worker? false
                 active? true}} opts
-        id (random-uuid)]
+        id (random-uuid)
+        user-profile-eid* (when user-profile-id
+                            (or (user-profile-eid deps user-profile-id)
+                                (throw (ex-info "Cannot create session: user profile not found"
+                                                {:user-profile-id user-profile-id}))))]
     (transact!*
       deps
       [(cond-> {:session/id      id
                 :session/channel channel
                 :session/worker? worker?
                 :session/active? active?}
+         user-profile-eid* (assoc :session/user-profile user-profile-eid*)
          parent-session-id (assoc :session/parent-id parent-session-id)
          (some? label) (assoc :session/label label)
          (some? external-key) (assoc :session/external-key external-key)
@@ -164,6 +252,8 @@
        :channel       (:session/channel entity-map)
        :external-key  (:session/external-key entity-map)
        :external-meta (:session/external-meta entity-map)
+       :user-profile  (when-let [profile-id (user-profile-id-for-session deps eid)]
+                        (get-user-profile deps profile-id))
        :active?       (boolean (:session/active? entity-map))
        :worker?       (boolean (:session/worker? entity-map))
        :parent-id     (:session/parent-id entity-map)
@@ -181,6 +271,34 @@
                        :session/external-meta external-meta}])
     true))
 
+(defn session-user-profile
+  [deps session-id]
+  (when-let [eid (session-eid deps session-id)]
+    (when-let [profile-id (user-profile-id-for-session deps eid)]
+      (get-user-profile deps profile-id))))
+
+(defn save-session-user-profile!
+  [deps session-id profile-id]
+  (when-let [eid (session-eid deps session-id)]
+    (let [current-profile-id (user-profile-id-for-session deps eid)
+          profile-eid*       (when profile-id
+                               (or (user-profile-eid deps profile-id)
+                                   (throw (ex-info "Cannot update session: user profile not found"
+                                                   {:session-id session-id
+                                                    :user-profile-id profile-id}))))
+          retracts           (cond-> []
+                               (and current-profile-id
+                                    (not= current-profile-id profile-id))
+                               (conj [:db/retract eid
+                                      :session/user-profile
+                                      (user-profile-eid deps current-profile-id)]))]
+      (transact!*
+        deps
+        (into retracts
+              [(cond-> {:db/id eid}
+                 profile-eid* (assoc :session/user-profile profile-eid*))]))
+      true)))
+
 (defn list-sessions
   [deps & [opts]]
   (let [{:keys [include-workers?] :or {include-workers? false}} opts]
@@ -194,6 +312,8 @@
                    :channel    channel
                    :external-key (:session/external-key entity-map)
                    :external-meta (:session/external-meta entity-map)
+                   :user-profile (when-let [profile-id (user-profile-id-for-session deps eid)]
+                                   (get-user-profile deps profile-id))
                    :created-at (entity-created-at* deps entity-map)
                    :active?    (boolean (:session/active? entity-map))
                    :worker?    (boolean (:session/worker? entity-map))

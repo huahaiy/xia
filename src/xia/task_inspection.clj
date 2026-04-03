@@ -1,6 +1,7 @@
 (ns xia.task-inspection
   "Compact task-inspection views derived from task state, turns, and items."
   (:require [clojure.string :as str]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.task-policy :as task-policy]))
@@ -57,6 +58,11 @@
                  (mapcat #(db/turn-items (:id %)))
                  (sort-by (juxt :created-at :turn-id :index) compare)
                  vec)}))
+
+(defn- ensure-task-history-data
+  [task history-data]
+  (or history-data
+      (all-task-items (:id task))))
 
 (defn- current-tip-body
   [opts autonomy-state]
@@ -296,6 +302,8 @@
         next-step (or (:next-step runtime)
                       (:next_step current-tip)
                       (:next-step checkpoint))
+        boundary-summary (some-> (task-runtime/task-boundary-summary task) :summary)
+        resume-hint      (task-runtime/task-resume-hint task)
         progress-status (or (some-> (:progress-status runtime) keyword->str)
                             (:progress_status current-tip)
                             (some-> (:progress-status checkpoint) keyword->str))]
@@ -304,6 +312,8 @@
       (:message runtime) (assoc :message (truncate-text* opts (:message runtime) 240))
       current-focus (assoc :current_focus (truncate-text* opts current-focus 180))
       next-step (assoc :next_step (truncate-text* opts next-step 180))
+      boundary-summary (assoc :boundary_summary (truncate-text* opts boundary-summary 240))
+      resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240))
       progress-status (assoc :progress_status progress-status)
       (:stack_depth current-tip) (assoc :stack_depth (:stack_depth current-tip))
       (:compressed_frame_count current-tip) (assoc :compressed_frame_count (:compressed_frame_count current-tip))
@@ -339,21 +349,41 @@
 
 (defn- attention-body
   [opts task runtime items budget]
-  (let [task-state (or (:state runtime) (:state task))]
-    (case task-state
-      :waiting_input (waiting-input-attention opts items task runtime)
-      :waiting_approval (waiting-approval-attention opts items task runtime)
-      :failed (cond-> {:kind "failed"
-                       :summary (truncate-text* opts (or (:error task)
-                                                         (:summary task)
-                                                         "Task failed")
-                                               240)}
-                (:error task) (assoc :error (truncate-text* opts (:error task) 240)))
-      :paused (cond-> {:kind "paused"
-                       :summary (truncate-text* opts (or (:summary task)
-                                                         "Task paused")
-                                               240)}
-                (:stop-reason task) (assoc :stop_reason (keyword->str (:stop-reason task))))
+  (let [task-state  (or (:state runtime) (:state task))
+        resume-hint (task-runtime/task-resume-hint task)]
+    (cond
+      (= :waiting_input task-state)
+      (cond-> (waiting-input-attention opts items task runtime)
+        resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240)))
+
+      (= :waiting_approval task-state)
+      (cond-> (waiting-approval-attention opts items task runtime)
+        resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240)))
+
+      (= :failed task-state)
+      (cond-> {:kind "failed"
+               :summary (truncate-text* opts (or (:error task)
+                                                 (:summary task)
+                                                 "Task failed")
+                                       240)}
+        (:error task) (assoc :error (truncate-text* opts (:error task) 240)))
+
+      (= :paused task-state)
+      (cond-> {:kind "paused"
+               :summary (truncate-text* opts (or (:summary task)
+                                                 "Task paused")
+                                       240)}
+        resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240))
+        (:stop-reason task) (assoc :stop_reason (keyword->str (:stop-reason task))))
+
+      (= :resumable task-state)
+      (cond-> {:kind "resumable"
+               :summary (truncate-text* opts (or (:summary task)
+                                                 "Task can be resumed")
+                                       240)}
+        resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240)))
+
+      :else
       (when-let [budget-status (:status budget)]
         {:kind "budget_exhausted"
          :summary (:summary budget-status)}))))
@@ -412,7 +442,9 @@
   ([opts task autonomy-state]
    (task-inspection opts task autonomy-state false))
   ([opts task autonomy-state compact?]
-   (let [{:keys [turns items]} (all-task-items (:id task))
+   (task-inspection opts task autonomy-state compact? nil))
+  ([opts task autonomy-state compact? history-data]
+   (let [{:keys [turns items]} (ensure-task-history-data task history-data)
          runtime               (get-in task [:meta :runtime])
          checkpoint            (get-in task [:meta :checkpoint])
          output-limit          (if compact? 1 detail-output-limit)
