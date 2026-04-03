@@ -811,6 +811,19 @@
       (get tool "function")
       tool))
 
+(defn- strip-unsupported-schema-keywords
+  "Recursively remove anyOf/oneOf/allOf from a JSON schema map.
+   Anthropic's API rejects these keywords anywhere in input_schema."
+  [schema]
+  (when (map? schema)
+    (-> schema
+        (dissoc "anyOf" "oneOf" "allOf")
+        (update-vals (fn [v]
+                       (cond
+                         (map? v)        (strip-unsupported-schema-keywords v)
+                         (sequential? v) (mapv #(cond-> % (map? %) strip-unsupported-schema-keywords) v)
+                         :else           v))))))
+
 (defn- openai-tool->anthropic-tool
   [tool]
   (let [function    (tool-definition-function tool)
@@ -835,7 +848,7 @@
     (when name
       (cond-> {"name" name
                "input_schema" (if (map? schema)
-                                schema
+                                (strip-unsupported-schema-keywords schema)
                                 {"type" "object"
                                  "properties" {}})}
         description

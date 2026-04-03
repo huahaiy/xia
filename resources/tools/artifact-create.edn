@@ -3,7 +3,7 @@
 
 {:id             :artifact-create
  :name           "artifact-create"
- :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, or plain text that the user can later inspect and download from Xia. Provide one payload source: `content`, `rows`, or `data`. Do not call this tool with an empty payload."
+ :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, or plain text that the user can later inspect and download from Xia. You must provide exactly one of: `content` (raw text), `rows` (CSV array), or `data` (JSON value). Do not call this tool without at least one of these fields."
  :tags           #{:artifact :output :file :export}
  :parameters     {"type"       "object"
                   "properties" {"name"       {"type"        "string"
@@ -20,10 +20,7 @@
                                 "data"       {"description" "Optional structured JSON value. Use this instead of `content` for JSON artifacts."}
                                 "meta"       {"type"        "object"
                                              "description" "Optional metadata to store alongside the artifact."}}
-                  "required"   []
-                  "anyOf"      [{"required" ["content"]}
-                                {"required" ["rows"]}
-                                {"required" ["data"]}]}
+                  "required"   []}
  :handler        "(fn [args]
                     (let [artifact (xia.artifact/create-artifact!
                                      {:name    (get args \"name\")

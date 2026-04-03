@@ -21,9 +21,8 @@
                                              "description" "Literal plain-text email body only. Do not wrap it in JSON, code fences, or an object with nested content fields."}
                              "in_reply_to" {"type"        "string"
                                              "description" "Optional Message-Id of the message being replied to"}
-                             "references"  {"oneOf"       [{"type" "string"}
-                                                           {"type" "array" "items" {"type" "string"}}]
-                                             "description" "Optional References header value or list of message ids"}
+                             "references"  {"type"        "string"
+                                             "description" "Optional References header value. Provide as a single string; if passing multiple message ids, join them with a space."}
                              "thread_id"   {"type"        "string"
                                              "description" "Optional Gmail thread id to attach the send to"}
                              "service_id"  {"type"        "string"
