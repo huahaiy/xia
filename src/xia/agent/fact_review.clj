@@ -10,13 +10,15 @@
 (defonce fact-utility-review-state (atom {}))
 
 (defn- fact-utility-observations
-  [fact-eids user-message assistant-response]
-  (into []
-        (map (fn [fact-eid]
-               {:fact-eid fact-eid
-                :user-message user-message
-                :assistant-response assistant-response}))
-        (distinct fact-eids)))
+  [fact-eids user-message assistant-response explicit-fact-eids]
+  (let [explicit-facts (set explicit-fact-eids)]
+    (into []
+          (map (fn [fact-eid]
+                 {:fact-eid fact-eid
+                  :user-message user-message
+                  :assistant-response assistant-response
+                  :explicitly-used? (contains? explicit-facts fact-eid)}))
+          (distinct fact-eids))))
 
 (declare run-fact-utility-review-worker!)
 
@@ -89,8 +91,11 @@
       [state false])))
 
 (defn- enqueue-fact-utility-review!
-  [session-id fact-eids user-message assistant-response debounce-ms]
-  (let [observations (fact-utility-observations fact-eids user-message assistant-response)]
+  [session-id fact-eids user-message assistant-response explicit-fact-eids debounce-ms]
+  (let [observations (fact-utility-observations fact-eids
+                                                user-message
+                                                assistant-response
+                                                explicit-fact-eids)]
     (when (seq observations)
       (when-let [token (update-fact-utility-review-state!
                         #(enqueue-fact-utility-review-state % session-id observations))]
@@ -137,8 +142,18 @@
 
 (defn schedule-fact-utility-review!
   [session-id fact-eids user-message assistant-response & {:keys [debounce-ms]
+                                                           explicit-fact-eids :explicit-fact-eids
                                                            :or {debounce-ms default-fact-utility-review-debounce-ms}}]
-  (when (and (seq fact-eids)
+  (let [fact-eids* (->> (concat fact-eids explicit-fact-eids)
+                        distinct
+                        vec)]
+    (when (and (seq fact-eids*)
              (seq assistant-response))
-    (wm/apply-fact-utility-heuristic! fact-eids assistant-response)
-    (enqueue-fact-utility-review! session-id fact-eids user-message assistant-response debounce-ms)))
+      (wm/apply-explicit-fact-utility! explicit-fact-eids)
+      (wm/apply-fact-utility-heuristic! fact-eids* assistant-response)
+      (enqueue-fact-utility-review! session-id
+                                    fact-eids*
+                                    user-message
+                                    assistant-response
+                                    explicit-fact-eids
+                                    debounce-ms))))

@@ -675,17 +675,29 @@ Rules:
               0
               facts))))
 
+(defn apply-explicit-fact-utility!
+  [fact-eids]
+  (reduce (fn [updated fact-eid]
+            (if fact-eid
+              (do
+                (memory/update-fact-utility! fact-eid fact-utility-heuristic-utility)
+                (inc updated))
+              updated))
+          0
+          (distinct fact-eids)))
+
 (defn- rate-fact-utility-batch
   [entries]
   (let [user-msg  (str "Fact-use review items:\n\n"
                        (transduce
                          (map-indexed
-                           (fn [idx {:keys [fact user-message assistant-response]}]
+                           (fn [idx {:keys [fact user-message assistant-response explicitly-used?]}]
                              (let [{:keys [content confidence utility]} fact]
                                (str "Fact " idx
                                     "\nUser message: " (or user-message "")
                                     "\nAssistant response: " (or assistant-response "")
                                     "\nContent: " content
+                                    "\nExplicitly used: " (if explicitly-used? "yes" "no")
                                     "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
                                     "\nUtility: " (format "%.3f" (double (or utility 0.5)))))))
                          (completing
@@ -697,7 +709,19 @@ Rules:
                              (.toString sb)))
                          (StringBuilder.)
                          entries))
-        defaults  (fact-utility-defaults (map :fact entries))]
+        defaults  (fact-utility-defaults (map :fact entries))
+        explicit  (reduce (fn [scores {:keys [fact explicitly-used?]}]
+                            (if explicitly-used?
+                              (update scores
+                                      (:eid fact)
+                                      (fn [existing]
+                                        (if (nil? existing)
+                                          fact-utility-heuristic-utility
+                                          (max (double existing)
+                                               fact-utility-heuristic-utility))))
+                              scores))
+                          {}
+                          entries)]
     (if-not (seq entries)
       {}
       (try
@@ -723,10 +747,10 @@ Rules:
                         scores)))
                   {}
                   (get parsed "facts" []))]
-            (merge defaults observed)))
+            (merge defaults observed explicit)))
         (catch Exception e
           (log/warn "Failed to rate fact utility batch:" (.getMessage e))
-          defaults)))))
+          (merge defaults explicit))))))
 
 (defn review-fact-utility-observations!
   [observations]
@@ -734,11 +758,12 @@ Rules:
                            (map (juxt :eid identity))
                            (memory/facts-by-eids (keep :fact-eid observations)))
         entries      (into []
-                           (keep (fn [{:keys [fact-eid user-message assistant-response]}]
+                           (keep (fn [{:keys [fact-eid user-message assistant-response explicitly-used?]}]
                                    (when-let [fact (get facts-by-eid fact-eid)]
                                      {:fact fact
                                       :user-message user-message
-                                      :assistant-response assistant-response})))
+                                      :assistant-response assistant-response
+                                      :explicitly-used? explicitly-used?})))
                            observations)]
     (doseq [batch (partition-all fact-utility-batch-size entries)]
       (let [ratings (rate-fact-utility-batch (vec batch))]

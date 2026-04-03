@@ -303,6 +303,14 @@
                           (double (:kg.fact/utility (db/entity other-fact-eid)))))
            1.0e-6))))
 
+(deftest test-apply-explicit-fact-utility-boosts-explicit-facts
+  (let [node-eid (th/seed-node! "UtilityExplicit" "concept")
+        fact-eid (th/seed-fact! node-eid "prefers vim" :utility 0.5)]
+    (is (= 1 (wm/apply-explicit-fact-utility! [fact-eid])))
+    (is (< (abs-double (- 0.7
+                          (double (:kg.fact/utility (db/entity fact-eid)))))
+           1.0e-6))))
+
 (deftest test-review-fact-utility-observations-batches-across-turns
   (let [node-eid-a (th/seed-node! "UtilityBatchA" "concept")
         node-eid-b (th/seed-node! "UtilityBatchB" "concept")
@@ -329,6 +337,22 @@
            1.0e-6))
     (is (< (abs-double (- 0.3
                           (double (:kg.fact/utility (db/entity fact-b)))))
+           1.0e-6))))
+
+(deftest test-review-fact-utility-observations-keeps-explicitly-used-facts-high
+  (let [node-eid (th/seed-node! "UtilityExplicitReview" "concept")
+        fact-eid (th/seed-fact! node-eid "likes Clojure" :utility 0.5)]
+    (with-redefs [xia.llm/chat-simple
+                  (fn [_messages & _opts]
+                    "{\"facts\":[{\"index\":0,\"utility\":0.0}]}")]
+      (is (= 1
+             (wm/review-fact-utility-observations!
+              [{:fact-eid fact-eid
+                :user-message "What does Hong like?"
+                :assistant-response "Hong likes Clojure."
+                :explicitly-used? true}]))))
+    (is (< (abs-double (- 0.7
+                          (double (:kg.fact/utility (db/entity fact-eid)))))
            1.0e-6))))
 
 ;; ---------------------------------------------------------------------------

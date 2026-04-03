@@ -336,6 +336,25 @@
          :tool-name tool-name
          :tool-args-summary tool-args-summary}))))
 
+(defn- normalize-used-fact-refs
+  [value]
+  (let [values (cond
+                 (sequential? value) value
+                 (some? value) [value]
+                 :else nil)]
+    (some->> values
+             (keep (fn [entry]
+                     (some-> entry
+                             str
+                             str/trim
+                             (str/replace #"^\[" "")
+                             (str/replace #"\]$" "")
+                             str/upper-case
+                             not-empty)))
+             (filter #(re-matches #"F\d+" %))
+             distinct
+             vec)))
+
 (defn- agenda-lines
   [agenda]
   (->> agenda
@@ -1192,7 +1211,7 @@
                             "At the very end of that final response, append the literal marker "
                             control-marker
                             " followed by one valid JSON object with this exact shape:\n"
-                            "{\"status\":\"continue|complete\",\"summary\":\"...\",\"next_step\":\"...\",\"reason\":\"...\",\"goal_complete\":true|false,\"current_focus\":\"...\",\"stack_action\":\"stay|push|pop|replace|clear\",\"progress_status\":\"not_started|pending|in_progress|paused|resumable|diverged|blocked|complete\",\"agenda\":[{\"item\":\"...\",\"status\":\"pending|in_progress|paused|resumable|diverged|completed|blocked|skipped\"}]}\n"
+                            "{\"status\":\"continue|complete\",\"summary\":\"...\",\"next_step\":\"...\",\"reason\":\"...\",\"goal_complete\":true|false,\"current_focus\":\"...\",\"stack_action\":\"stay|push|pop|replace|clear\",\"progress_status\":\"not_started|pending|in_progress|paused|resumable|diverged|blocked|complete\",\"agenda\":[{\"item\":\"...\",\"status\":\"pending|in_progress|paused|resumable|diverged|completed|blocked|skipped\"}],\"used_facts\":[\"F1\",\"F2\"]}\n"
                             "- summary: short factual summary of what changed this iteration.\n"
                             "- next_step: short concrete next action when status=continue, otherwise empty.\n"
                             "- reason: why you are continuing or completing.\n"
@@ -1201,6 +1220,7 @@
                             "- stack_action: stay to keep working the current frame, push to enter a subroutine, pop to return to the parent frame, replace to switch the current frame, clear to discard prior stack state and reset from the current focus.\n"
                             "- progress_status: overall status of the current stack tip.\n"
                             "- agenda: ordered short checklist for the current stack tip only, not the full stack.\n"
+                            "- used_facts: fact refs like F1 or F2 that materially informed this iteration. Use only refs that appear in the prompt, and return [] when none materially mattered.\n"
                             "- Use paused when work should stop for now. Use resumable when it is paused but has a clear restart path. Use diverged when the work has meaningfully branched away from the original plan.\n"
                             (when direct-user?
                               "- For direct user-facing turns, use continue only when another internal iteration can make more progress without waiting on the user.\n")
@@ -1425,6 +1445,13 @@
                             (:current_focus parsed)
                             (get parsed "current-focus")
                             (:current-focus parsed)))
+        used-facts (or (normalize-used-fact-refs
+                         (first-present parsed
+                                        ["used_facts"
+                                         :used_facts
+                                         "used-facts"
+                                         :used-facts]))
+                       [])
         raw-progress-status (first-present parsed
                                           ["progress_status"
                                            :progress_status
@@ -1454,6 +1481,7 @@
                        :goal-complete? goal-complete?
                        :current-focus  current-focus
                        :stack-action   stack-action
+                       :used-facts     used-facts
                        :progress-status-explicit? (not= missing-field raw-progress-status)
                        :progress-status progress-status
                        :agenda         agenda})}))

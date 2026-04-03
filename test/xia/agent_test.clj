@@ -3179,6 +3179,39 @@
             :assistant-response "All set."}
            @reviewed))))
 
+(deftest process-message-schedules-explicit-fact-utility-review
+  (let [session-id (db/create-session! :terminal)
+        reviewed   (atom nil)]
+    (with-redefs [xia.tool/tool-definitions             (constantly [])
+                  xia.working-memory/update-wm!         (fn [& _] nil)
+                  xia.llm/resolve-provider-selection    (constantly {:provider {:llm.provider/id :default}
+                                                                     :provider-id :default})
+                  xia.context/build-messages-data       (fn [_session-id _opts]
+                                                          {:messages [{:role "system" :content "test"}]
+                                                           :used-fact-eids [11 22]
+                                                           :used-fact-refs [{:eid 11 :ref "F1"}
+                                                                            {:eid 22 :ref "F2"}]})
+                  xia.llm/chat-message                  (fn [_messages & _opts]
+                                                          {"content" (str "All set.\n\n"
+                                                                          "AUTONOMOUS_STATUS_JSON:"
+                                                                          "{\"status\":\"complete\",\"summary\":\"Done\",\"reason\":\"Enough\",\"goal_complete\":false,"
+                                                                          "\"used_facts\":[\"F2\"]}")})
+                  xia.agent/schedule-fact-utility-review!
+                  (fn [review-session-id fact-eids user-message assistant-response & {:keys [explicit-fact-eids]}]
+                    (reset! reviewed {:session-id review-session-id
+                                      :fact-eids fact-eids
+                                      :user-message user-message
+                                      :assistant-response assistant-response
+                                      :explicit-fact-eids explicit-fact-eids}))]
+      (is (= "All set."
+             (agent/process-message session-id "hello" :channel :terminal))))
+    (is (= {:session-id session-id
+            :fact-eids [11 22]
+            :user-message "hello"
+            :assistant-response "All set."
+            :explicit-fact-eids [22]}
+           @reviewed))))
+
 (deftest schedule-fact-utility-review-batches-turns-per-session
   (reset! @#'xia.agent/fact-utility-review-state {})
   (try
@@ -3209,13 +3242,59 @@
                @heuristic-calls))
         (is (= [{:fact-eid 11
                  :user-message "hello"
-                 :assistant-response "first response"}
+                 :assistant-response "first response"
+                 :explicitly-used? false}
                 {:fact-eid 22
                  :user-message "follow up"
-                 :assistant-response "second response"}]
+                 :assistant-response "second response"
+                 :explicitly-used? false}]
                (deref reviewed 1000 ::timeout)))
         (is (= ["fact-utility-review"] @submitted))
         (is (= 1 @review-call-count))))
+    (finally
+      (reset! @#'xia.agent/fact-utility-review-state {}))))
+
+(deftest schedule-fact-utility-review-preserves-explicit-usage-in-observations
+  (reset! @#'xia.agent/fact-utility-review-state {})
+  (try
+    (let [session-id        (random-uuid)
+          reviewed          (promise)
+          explicit-calls    (atom [])
+          heuristic-calls   (atom [])]
+      (with-redefs [xia.agent/fact-utility-review-debounce-ms 25
+                    xia.async/submit-background!
+                    (fn [_description f]
+                      (future (f)))
+                    xia.working-memory/apply-explicit-fact-utility!
+                    (fn [fact-eids]
+                      (swap! explicit-calls conj fact-eids)
+                      (count fact-eids))
+                    xia.working-memory/apply-fact-utility-heuristic!
+                    (fn [fact-eids assistant-response]
+                      (swap! heuristic-calls conj {:fact-eids fact-eids
+                                                   :assistant-response assistant-response})
+                      0)
+                    xia.working-memory/review-fact-utility-observations!
+                    (fn [observations]
+                      (deliver reviewed observations)
+                      (count observations))]
+        (agent/schedule-fact-utility-review! session-id
+                                             [11 22]
+                                             "hello"
+                                             "first response"
+                                             :explicit-fact-eids [22])
+        (is (= [[22]] @explicit-calls))
+        (is (= [{:fact-eids [11 22] :assistant-response "first response"}]
+               @heuristic-calls))
+        (is (= [{:fact-eid 11
+                 :user-message "hello"
+                 :assistant-response "first response"
+                 :explicitly-used? false}
+                {:fact-eid 22
+                 :user-message "hello"
+                 :assistant-response "first response"
+                 :explicitly-used? true}]
+               (deref reviewed 1000 ::timeout)))))
     (finally
       (reset! @#'xia.agent/fact-utility-review-state {}))))
 

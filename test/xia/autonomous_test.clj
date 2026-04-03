@@ -140,6 +140,15 @@
     (is (= summary (:summary control)))
     (is (= next-step (:next-step control)))))
 
+(deftest parse-controller-response-parses-used-fact-refs
+  (let [{:keys [control]}
+        (autonomous/parse-controller-response
+         (str "Worked the plan.\n\n"
+              "AUTONOMOUS_STATUS_JSON:"
+              "{\"status\":\"complete\",\"summary\":\"Done\",\"reason\":\"Enough information\",\"goal_complete\":false,"
+              "\"used_facts\":[\"f1\",\"[F2]\",\"ignore-me\",null,\"F2\"]}"))]
+    (is (= ["F1" "F2"] (:used-facts control)))))
+
 (deftest controller-system-message-reserves-control-envelope-for-final-non-tool-response
   (let [content (:content (autonomous/controller-system-message))]
     (is (str/includes? content
@@ -148,6 +157,10 @@
                        "Append AUTONOMOUS_STATUS_JSON: only on the final assistant response of the iteration"))
     (is (str/includes? content
                        "Raw JSON is preferred; fenced ```json blocks are also accepted."))
+    (is (str/includes? content
+                       "\"used_facts\":[\"F1\",\"F2\"]"))
+    (is (str/includes? content
+                       "- used_facts: fact refs like F1 or F2 that materially informed this iteration."))
     (is (not (str/includes? content
                             "with no markdown fencing")))))
 

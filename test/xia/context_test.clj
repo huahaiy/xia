@@ -186,6 +186,22 @@
   (testing "empty entities"
     (is (nil? (ctx/render-entities [] 1000)))))
 
+(deftest test-render-entities-data-annotates-selected-facts-with-refs
+  (let [render-entities-data #'xia.context/render-entities-data
+        result (render-entities-data
+                [{:name "Hong"
+                  :type :person
+                  :facts [{:eid 101 :content "prefers vim" :confidence 1.0}
+                          {:eid 102 :content "likes Clojure" :confidence 1.0}]
+                  :edges {:outgoing [] :incoming []}}]
+                1000)]
+    (is (str/includes? (:content result) "[F1] prefers vim"))
+    (is (str/includes? (:content result) "[F2] likes Clojure"))
+    (is (= [101 102] (:used-fact-eids result)))
+    (is (= [{:eid 101 :ref "F1"}
+            {:eid 102 :ref "F2"}]
+           (:used-fact-refs result)))))
+
 ;; ---------------------------------------------------------------------------
 ;; render-episodes
 ;; ---------------------------------------------------------------------------
@@ -482,7 +498,9 @@
   (let [sid (db/create-session! :terminal)]
     (with-redefs [xia.context/assemble-system-prompt-data (fn [_sid _opts]
                                                             {:prompt "system"
-                                                             :used-fact-eids [1 2 3]})
+                                                             :used-fact-eids [1 2 3]
+                                                             :used-fact-refs [{:eid 1 :ref "F1"}
+                                                                              {:eid 2 :ref "F2"}]})
                   xia.context/compact-history             (fn [messages _budget & _]
                                                             messages)]
       (let [result (#'xia.context/build-messages-data
@@ -490,7 +508,10 @@
                      {:provider {:llm.provider/id :default}})]
         (is (map? result))
         (is (vector? (:messages result)))
-        (is (= [1 2 3] (:used-fact-eids result)))))))
+        (is (= [1 2 3] (:used-fact-eids result)))
+        (is (= [{:eid 1 :ref "F1"}
+                {:eid 2 :ref "F2"}]
+               (:used-fact-refs result)))))))
 
 (deftest test-build-messages-uses-provider-history-budget
   (db/set-identity! :name "TestXia")

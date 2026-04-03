@@ -646,26 +646,45 @@
        (take 5)
        vec))
 
-(defn- render-entity-data [{:keys [name type facts edges properties]}]
-  (let [type-str        (when type (str " (" (clojure.core/name type) ")"))
-        selected-facts  (select-facts-for-entity facts)
-        ^StringBuilder detail-builder (StringBuilder.)]
-    (when (and properties (map? properties) (seq properties))
-      (append-props-to-detail! detail-builder properties nil))
-    (reduce (fn [^StringBuilder sb {:keys [content]}]
-              (append-detail-fragment! sb content))
-            detail-builder
-            selected-facts)
-    (reduce (fn [^StringBuilder sb {:keys [type target]}]
-              (append-detail-fragment! sb
-                                       (str (clojure.core/name type) "→" target)))
-            detail-builder
-            (take 3 (:outgoing edges)))
-    (let [detail (when (pos? (.length detail-builder))
-                   (.toString detail-builder))]
-      {:content        (str "- " name type-str
-                            (when-not (str/blank? detail) (str ": " detail)))
-       :used-fact-eids (into [] (keep :eid) selected-facts)})))
+(defn- fact-ref-label
+  [idx]
+  (str "F" (long idx)))
+
+(defn- render-entity-data
+  ([entity]
+   (render-entity-data entity nil))
+  ([{:keys [name type facts edges properties]} fact-ref-start]
+   (let [type-str        (when type (str " (" (clojure.core/name type) ")"))
+         selected-facts  (select-facts-for-entity facts)
+         ^StringBuilder detail-builder (StringBuilder.)]
+     (when (and properties (map? properties) (seq properties))
+       (append-props-to-detail! detail-builder properties nil))
+     (let [[detail-builder used-fact-refs next-fact-ref]
+           (reduce (fn [[^StringBuilder sb refs next-ref] {:keys [eid content]}]
+                     (let [ref-label  (when next-ref (fact-ref-label next-ref))
+                           content*   (if ref-label
+                                        (str "[" ref-label "] " content)
+                                        content)
+                           refs*      (cond-> refs
+                                        (and ref-label eid)
+                                        (conj {:eid eid :ref ref-label}))
+                           next-ref*  (when next-ref (inc next-ref))]
+                       (append-detail-fragment! sb content*)
+                       [sb refs* next-ref*]))
+                   [detail-builder [] fact-ref-start]
+                   selected-facts)]
+       (reduce (fn [^StringBuilder sb {:keys [type target]}]
+                 (append-detail-fragment! sb
+                                          (str (clojure.core/name type) "→" target)))
+               detail-builder
+               (take 3 (:outgoing edges)))
+       (let [detail (when (pos? (.length detail-builder))
+                      (.toString detail-builder))]
+         {:content        (str "- " name type-str
+                               (when-not (str/blank? detail) (str ": " detail)))
+          :used-fact-eids (into [] (keep :eid) selected-facts)
+          :used-fact-refs used-fact-refs
+          :next-fact-ref  next-fact-ref})))))
 
 (defn- render-entity
   [entity]
@@ -676,30 +695,37 @@
   [entities budget]
   (let [budget* (long budget)]
     (when (seq entities)
-    (loop [ents (sort-by (fn [entity]
-                           (double (or (:relevance entity) 0.0)))
-                         >
-                         entities)
-           lines ["### Known"]
-           tokens 8
-           used-fact-eids []] ; "### Known\n"
-      (if (empty? ents)
-        {:content        (str/join "\n" lines)
-         :tokens         tokens
-         :used-fact-eids used-fact-eids}
-        (let [{:keys [content]
-               entity-used-fact-eids :used-fact-eids}
-              (render-entity-data (first ents))
-              line       content
-              line-tokens (section-budget-tokens line)]
-          (if (> (+ tokens line-tokens) budget*)
-            {:content        (str/join "\n" lines)
-             :tokens         tokens
-             :used-fact-eids used-fact-eids}
-            (recur (rest ents)
-                   (conj lines line)
-                   (+ tokens line-tokens)
-                   (into used-fact-eids entity-used-fact-eids)))))))))
+      (loop [ents (sort-by (fn [entity]
+                             (double (or (:relevance entity) 0.0)))
+                           >
+                           entities)
+             lines ["### Known"]
+             tokens 8
+             used-fact-eids []
+             used-fact-refs []
+             next-fact-ref 1] ; "### Known\n"
+        (if (empty? ents)
+          {:content        (str/join "\n" lines)
+           :tokens         tokens
+           :used-fact-eids used-fact-eids
+           :used-fact-refs used-fact-refs}
+          (let [{:keys [content next-fact-ref]
+                 entity-used-fact-eids :used-fact-eids
+                 entity-used-fact-refs :used-fact-refs}
+                (render-entity-data (first ents) next-fact-ref)
+                line        content
+                line-tokens (section-budget-tokens line)]
+            (if (> (+ tokens line-tokens) budget*)
+              {:content        (str/join "\n" lines)
+               :tokens         tokens
+               :used-fact-eids used-fact-eids
+               :used-fact-refs used-fact-refs}
+              (recur (rest ents)
+                     (conj lines line)
+                     (+ tokens line-tokens)
+                     (into used-fact-eids entity-used-fact-eids)
+                     (into used-fact-refs entity-used-fact-refs)
+                     next-fact-ref))))))))
 
 (defn render-entities
   [entities budget]
@@ -877,7 +903,8 @@
                           (when doc-section (str doc-section "\n\n"))
                           (when ep-section (str ep-section "\n\n"))
                           (when skill-section (str skill-section "\n\n")))
-     :used-fact-eids (:used-fact-eids ent-data)})))
+     :used-fact-eids (:used-fact-eids ent-data)
+     :used-fact-refs (:used-fact-refs ent-data)})))
 
 (defn assemble-system-prompt
   ([session-id]
@@ -1060,7 +1087,7 @@
          compaction-provider-id (:compaction-provider-id opts)
          compaction-workload    (or (:compaction-workload opts)
                                     :history-compaction)
-         {:keys [prompt used-fact-eids] :as system-prompt-data}
+         {:keys [prompt used-fact-eids used-fact-refs] :as system-prompt-data}
          (if (= cache-key (:key cache-entry))
            (:data cache-entry)
            (assemble-system-prompt-data session-id (assoc opts :provider provider)))
@@ -1086,6 +1113,7 @@
      {:messages      (into [{:role "system" :content prompt}]
                            compacted)
       :used-fact-eids used-fact-eids
+      :used-fact-refs used-fact-refs
       :system-prompt-cache-entry {:key cache-key
                                   :data system-prompt-data}})))
 

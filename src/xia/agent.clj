@@ -833,12 +833,14 @@
                           :partial-content preview})))))))
 
 (defn schedule-fact-utility-review!
-  [session-id fact-eids user-message assistant-response]
-  (fact-review/schedule-fact-utility-review! session-id
-                                             fact-eids
-                                             user-message
-                                             assistant-response
-                                             :debounce-ms fact-utility-review-debounce-ms))
+  [session-id fact-eids user-message assistant-response & {:keys [explicit-fact-eids]}]
+  (apply fact-review/schedule-fact-utility-review! session-id
+         fact-eids
+         user-message
+         assistant-response
+         (cond-> [:debounce-ms fact-utility-review-debounce-ms]
+           (seq explicit-fact-eids)
+           (into [:explicit-fact-eids explicit-fact-eids]))))
 
 (defn- best-effort-update-working-memory!
   [session-id user-message channel opts]
@@ -863,23 +865,35 @@
         nil))))
 
 (defn- launch-fact-utility-review!
-  [session-id fact-eids user-message assistant-response]
+  [session-id fact-eids user-message assistant-response & {:keys [explicit-fact-eids]}]
   (try
-    (schedule-fact-utility-review! session-id fact-eids user-message assistant-response)
+    (if (seq explicit-fact-eids)
+      (schedule-fact-utility-review! session-id
+                                     fact-eids
+                                     user-message
+                                     assistant-response
+                                     :explicit-fact-eids explicit-fact-eids)
+      (schedule-fact-utility-review! session-id fact-eids user-message assistant-response))
     (catch Exception e
       (log/warn e "Failed to schedule fact utility review; continuing without it"
                 {:fact-count (count fact-eids)})
       nil)))
 
 (defn- launch-fact-utility-review-without-budget!
-  [session-id fact-eids user-message assistant-response]
+  [session-id fact-eids user-message assistant-response & {:keys [explicit-fact-eids]}]
   (binding [*turn-llm-budget-state* nil
             llm/*request-budget-guard* nil
             llm/*request-observer* nil]
-    (launch-fact-utility-review! session-id
-                                 fact-eids
-                                 user-message
-                                 assistant-response)))
+    (if (seq explicit-fact-eids)
+      (launch-fact-utility-review! session-id
+                                   fact-eids
+                                   user-message
+                                   assistant-response
+                                   :explicit-fact-eids explicit-fact-eids)
+      (launch-fact-utility-review! session-id
+                                   fact-eids
+                                   user-message
+                                   assistant-response))))
 
 (defn- tool-deps
   []
@@ -1883,6 +1897,24 @@
        distinct
        vec))
 
+(defn- explicit-fact-ref->eid
+  [used-fact-refs]
+  (into {}
+        (keep (fn [{:keys [eid ref]}]
+                (when (and eid ref)
+                  [(-> ref str str/trim str/upper-case) eid])))
+        used-fact-refs))
+
+(defn- explicit-used-fact-eids
+  [used-fact-refs parsed-response]
+  (let [fact-refs (explicit-fact-ref->eid used-fact-refs)]
+    (->> (get-in parsed-response [:control :used-facts])
+         (keep (fn [ref]
+                 (get fact-refs
+                      (some-> ref str str/trim str/upper-case))))
+         distinct
+         vec)))
+
 (defn- final-assistant-text
   [parsed response]
   (or (some-> (:assistant-text parsed) str not-empty)
@@ -2014,7 +2046,7 @@
     (throw-if-cancelled! session-id)
     (let [retrieval-version-before (retrieval-state/version retrieval-session-id)
           tools (tool/tool-definitions execution-context)
-          {:keys [messages used-fact-eids system-prompt-cache-entry]}
+          {:keys [messages used-fact-eids used-fact-refs system-prompt-cache-entry]}
           (context/build-messages-data session-id
                                        {:provider assistant-provider
                                         :provider-id assistant-provider-id
@@ -2054,6 +2086,8 @@
               _ (throw-if-cancelled! session-id)
               parsed-response (autonomous/parse-controller-response
                                (response-content response))
+              explicit-used-fact-eids (explicit-used-fact-eids used-fact-refs
+                                                               parsed-response)
               assistant-content (or (:assistant-text parsed-response)
                                     (response-content response))
               budget-status (or (task-policy/task-llm-budget-status (:task-budget-state execution-context))
@@ -2073,6 +2107,7 @@
                 {:response response
                  :parsed-response parsed-response
                  :used-fact-eids used-fact-eids
+                 :explicit-used-fact-eids explicit-used-fact-eids
                  :tool-activity tool-activity
                  :refresh-needed? (retrieval-state/changed? retrieval-version-before
                                                             retrieval-session-id)
@@ -2204,6 +2239,7 @@
               {:response response
                :parsed-response parsed-response
                :used-fact-eids used-fact-eids
+               :explicit-used-fact-eids explicit-used-fact-eids
                :tool-activity tool-activity
                :refresh-needed? (retrieval-state/changed? retrieval-version-before
                                                           retrieval-session-id)
@@ -2328,6 +2364,7 @@
                                                        request)))]
                     (loop [iteration 1
                            fact-eids []
+                           explicit-fact-eids []
                            loop-state nil
                            refresh-working-memory? false
                            system-prompt-cache-entry nil
@@ -2361,7 +2398,7 @@
                                      "Understanding the goal and preparing the first plan."
                                      "Resuming the autonomous loop with the updated plan.")
                           :session-id session-id})
-                        (let [{:keys [response parsed-response used-fact-eids tool-activity refresh-needed?
+                        (let [{:keys [response parsed-response used-fact-eids explicit-used-fact-eids tool-activity refresh-needed?
                                       system-prompt-cache-entry budget-exhausted? budget-status
                                       budget-before-tools?]}
                               (try
@@ -2399,6 +2436,8 @@
                               control (:control parsed)
                               summary (autonomous-iteration-summary parsed)
                               fact-eids* (merge-fact-eids fact-eids used-fact-eids)
+                              explicit-fact-eids* (merge-fact-eids explicit-fact-eids
+                                                                   explicit-used-fact-eids)
                               updated-autonomy-state* (if control
                                                         (let [next-state (autonomous/apply-control autonomy-state
                                                                                                    control)]
@@ -2483,7 +2522,8 @@
                                 (launch-fact-utility-review-without-budget! session-id
                                                                             fact-eids*
                                                                             user-message
-                                                                            text))
+                                                                            text
+                                                                            :explicit-fact-eids explicit-fact-eids*))
                               (save-schedule-checkpoint!
                                iteration-context
                                {:phase :complete
@@ -2539,7 +2579,8 @@
                               (launch-fact-utility-review-without-budget! session-id
                                                                           fact-eids*
                                                                           user-message
-                                                                          text)
+                                                                          text
+                                                                          :explicit-fact-eids explicit-fact-eids*)
                               (prompt/status! {:state :completed
                                                :phase :complete
                                                :message "Ready"})
@@ -2569,7 +2610,8 @@
                               (launch-fact-utility-review-without-budget! session-id
                                                                           fact-eids*
                                                                           user-message
-                                                                          text)
+                                                                          text
+                                                                          :explicit-fact-eids explicit-fact-eids*)
                               (save-schedule-checkpoint!
                                iteration-context
                                {:phase :complete
@@ -2645,6 +2687,7 @@
                                 :stack (some-> updated-autonomy-state :stack)})
                               (recur (inc iteration)
                                      fact-eids*
+                                     explicit-fact-eids*
                                      next-loop-state
                                      next-refresh-working-memory?
                                      system-prompt-cache-entry
