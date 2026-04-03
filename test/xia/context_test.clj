@@ -278,6 +278,25 @@
       ;; Should not include all 10 skills
       (is (< (count (re-seq #"### skill-" result)) 10))))
 
+  (testing "keeps higher relevance skills when the skill budget only fits one"
+    (let [skills [{:skill/name "low-skill"
+                   :skill/relevance 0.1
+                   :skill/content (token-rich-text "low" 40)}
+                  {:skill/name "high-skill"
+                   :skill/relevance 0.9
+                   :skill/content (token-rich-text "high" 40)}]
+          rendered-for-budget (fn [budget]
+                                (ctx/render-skills skills budget))
+          result (first
+                  (keep (fn [budget]
+                          (let [rendered (rendered-for-budget budget)]
+                            (when (= 1 (count (re-seq #"### " (or rendered ""))))
+                              rendered)))
+                        (range 40 200)))]
+        (is result "expected to find a budget that admits exactly one skill")
+        (is (str/includes? result "### high-skill"))
+        (is (not (str/includes? result "### low-skill")))))
+
   (testing "empty skills"
     (is (nil? (ctx/render-skills [] 1000)))))
 
@@ -330,6 +349,59 @@
       (is (str/includes? prompt "notes.md")))
 
     (wm/clear-wm! sid)))
+
+(deftest test-assemble-system-prompt-recovers-when-final-prompt-still-exceeds-budget
+  (db/set-identity! :name "TestXia")
+  (db/set-identity! :personality "Helpful")
+  (db/set-identity! :guidelines "Be nice")
+  (db/set-identity! :description "A test assistant")
+  (let [sid (db/create-session! :terminal)
+        original-estimate ctx/estimate-tokens]
+    (with-redefs [wm/wm->context
+                  (fn [_]
+                    {:topics "urgent topic"
+                     :entities [{:name "Hong"
+                                 :type :person
+                                 :facts [{:eid 101 :content "prefers vim" :confidence 1.0}]
+                                 :edges {:outgoing [] :incoming []}}]
+                     :local-docs [{:name "notes.md"
+                                   :media-type "text/markdown"
+                                   :summary (token-rich-text "doc" 20)
+                                   :matched-chunks [{:summary (token-rich-text "match" 20)}]
+                                   :relevance 0.8}]
+                     :episodes [{:summary (token-rich-text "episode" 20)
+                                 :timestamp (java.util.Date.)
+                                 :relevance 0.8}]
+                     :turn-count 0})
+                  skill/skills-for-context
+                  (constantly [{:skill/name "high-skill"
+                                :skill/relevance 1.0
+                                :skill/content (token-rich-text "skill" 25)}])
+                  xia.context/resolve-system-prompt-budget
+                  (constantly {:total 60
+                               :identity 40
+                               :topic 20
+                               :entities 40
+                               :local-docs 40
+                               :episodes 40
+                               :skills 40})
+                  xia.context/estimate-tokens
+                  (fn [text]
+                    (let [text* (str text)]
+                      (+ (original-estimate text*)
+                         (if (str/includes? text* "### Known") 50 0)
+                         (if (str/includes? text* "### Local Documents") 50 0)
+                         (if (str/includes? text* "### Recent") 50 0)
+                         (if (str/includes? text* "## Skills") 50 0))))]
+      (let [result (ctx/assemble-system-prompt-data sid)
+            prompt (:prompt result)]
+        (is (<= (ctx/estimate-tokens prompt) 60))
+        (is (not (str/includes? prompt "### Known")))
+        (is (not (str/includes? prompt "### Local Documents")))
+        (is (not (str/includes? prompt "### Recent")))
+        (is (not (str/includes? prompt "## Skills")))
+        (is (empty? (:used-fact-eids result)))
+        (is (empty? (:used-fact-refs result)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; compact-history

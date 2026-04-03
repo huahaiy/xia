@@ -24,6 +24,7 @@
    - Markdown files (the file becomes the content)
    - A skill registry (future)"
   (:require [clojure.edn :as edn]
+            [clojure.set :as set]
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [datalevin.core :as d]
@@ -251,44 +252,104 @@
   []
   (filter :skill/enabled? (db/list-skills)))
 
+(def ^:private context-term-split-pattern #"[^\p{L}\p{N}]+")
+
+(defn- context-terms
+  [wm-context]
+  (->> (concat [(or (:topics wm-context) "")]
+               (map :name (:entities wm-context)))
+       (mapcat #(str/split (str/lower-case (str %)) context-term-split-pattern))
+       (remove #(or (str/blank? %)
+                    (< (count %) 2)))
+       set))
+
+(defn- tag-keywords
+  [terms]
+  (->> terms
+       (map keyword)
+       set))
+
+(defn- text-match-count
+  [text terms]
+  (let [haystack (str/lower-case (str text))]
+    (reduce (fn [matches term]
+              (if (str/includes? haystack term)
+                (inc matches)
+                matches))
+            0
+            terms)))
+
+(defn- score-skill-relevance
+  [skill {:keys [terms tag-terms fts-ranks]}]
+  (let [skill-id         (:skill/id skill)
+        tags             (->> (:skill/tags skill)
+                              (map (comp keyword str/lower-case name))
+                              set)
+        tag-matches      (count (set/intersection tags tag-terms))
+        name-matches     (text-match-count (:skill/name skill) terms)
+        description-hits (text-match-count (:skill/description skill) terms)
+        content-hits     (text-match-count (:skill/content skill) terms)
+        fts-rank-score   (long (or (get fts-ranks skill-id) 0))]
+    (+ (* 8 tag-matches)
+       (* 5 name-matches)
+       (* 2 description-hits)
+       content-hits
+       fts-rank-score)))
+
+(defn- sort-skills-by-relevance
+  [skills]
+  (sort-by (fn [skill]
+             [(- (double (or (:skill/relevance skill) 0.0)))
+              (str/lower-case (or (:skill/name skill)
+                                  (some-> (:skill/id skill) name)
+                                  ""))])
+           skills))
+
 (defn skills-for-context
   "Select skills relevant to the current context.
 
    Strategy (in priority order):
    1. FTS search on :skill/content using WM topics + entity names
    2. Tag matching on :skill/tags
-   3. Fall back to all enabled skills
+  3. Fall back to all enabled skills
 
    FTS is the primary mechanism — it searches the full text of every skill's
    markdown content for keywords from the current conversation context."
   ([] (skills-for-context nil))
   ([wm-context]
-   (if-let [topics (:topics wm-context)]
-     (let [;; Build search query from topics + entity names
-           entity-names (->> (:entities wm-context)
-                             (map :name)
-                             (remove nil?))
-           search-query (str/join " " (cons topics entity-names))
-           ;; 1. FTS search on skill content
-           fts-matches (search-skills search-query :top 10)
-           ;; 2. Tag matching as supplement
-           keywords (->> (concat
-                           (str/split (str/lower-case topics) #"[^\w]+")
-                           (map str/lower-case entity-names))
-                         (remove str/blank?)
-                         (map keyword)
-                         set)
-           tag-matches (when (seq keywords)
-                         (db/find-skills-by-tags keywords))
-           ;; Combine, deduplicate by :skill/id
-           combined (->> (concat fts-matches tag-matches)
-                         (group-by :skill/id)
-                         vals
-                         (map first))]
-       (if (seq combined)
-         combined
-         (all-enabled-skills)))
-     (all-enabled-skills))))
+   (let [enabled-skills (vec (all-enabled-skills))
+         terms          (context-terms wm-context)]
+     (if (seq terms)
+       (let [entity-names   (->> (:entities wm-context)
+                                 (map :name)
+                                 (remove nil?))
+             search-query   (str/join " " (cons (or (:topics wm-context) "")
+                                                entity-names))
+             fts-matches    (search-skills search-query :top 10)
+             fts-ranks      (into {}
+                                  (map-indexed (fn [idx skill]
+                                                 [(:skill/id skill)
+                                                  (max 1 (- 12 idx))]))
+                                  fts-matches)
+             tag-terms      (tag-keywords terms)
+             scored-skills  (->> enabled-skills
+                                 (map (fn [skill]
+                                        (assoc skill
+                                               :skill/relevance
+                                               (double
+                                                (score-skill-relevance skill
+                                                                       {:terms terms
+                                                                        :tag-terms tag-terms
+                                                                        :fts-ranks fts-ranks})))))
+                                 sort-skills-by-relevance
+                                 vec)
+             relevant-skills (into []
+                                   (filter #(pos? (double (or (:skill/relevance %) 0.0))))
+                                   scored-skills)]
+         (if (seq relevant-skills)
+           relevant-skills
+           enabled-skills))
+       enabled-skills))))
 
 (defn skills->prompt
   "Format selected skills into a prompt section for the LLM."

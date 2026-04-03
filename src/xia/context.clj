@@ -172,6 +172,12 @@
   ;; tracking; they do not need provider-aware token counting per line/item.
   (long (heuristic-estimate-tokens text)))
 
+(def ^:private final-prompt-truncation-note
+  "\n\n[Context truncated to fit budget.]")
+
+(def ^:private final-prompt-drop-order
+  [:skills :episodes :local-docs :entities :topic])
+
 ;; ============================================================================
 ;; Budget config
 ;; ============================================================================
@@ -823,7 +829,10 @@
   [skills budget]
   (let [budget* (long budget)]
     (when (seq skills)
-      (loop [sks skills
+      (loop [sks (sort-by (fn [skill]
+                            [(- (double (or (:skill/relevance skill) 0.0)))
+                             (str/lower-case (or (:skill/name skill) ""))])
+                          skills)
              parts ["## Skills\nFollow these instructions when relevant.\n"]
              tokens 20]
         (if (empty? sks)
@@ -842,6 +851,87 @@
 (defn render-skills
   [skills budget]
   (:content (render-skills-data skills budget)))
+
+(defn- system-prompt-sections->prompt
+  [sections]
+  (apply str
+         (keep (fn [{:keys [key content]}]
+                 (when (seq content)
+                   (case key
+                     :identity content
+                     :topic    (str "## Context\n" content)
+                     (str content "\n\n"))))
+               sections)))
+
+(defn- drop-system-prompt-section
+  [sections drop-key]
+  (mapv (fn [section]
+          (if (= drop-key (:key section))
+            (assoc section :content nil)
+            section))
+        sections))
+
+(defn- section-present?
+  [sections k]
+  (boolean
+   (some (fn [{:keys [key content]}]
+           (and (= key k) (seq content)))
+         sections)))
+
+(defn- truncate-text-to-budget
+  [text budget]
+  (let [text*         (str text)
+        total-budget  (long-max 0 (long budget))
+        note*         final-prompt-truncation-note
+        note-tokens   (long (estimate-tokens note*))
+        suffix        (if (< note-tokens total-budget) note* "")
+        suffix-tokens (long (estimate-tokens suffix))]
+    (cond
+      (<= (long (estimate-tokens text*)) total-budget)
+      text*
+
+      (zero? (count text*))
+      text*
+
+      :else
+      (loop [lo 0
+             hi (count text*)
+             best ""]
+        (if (> lo hi)
+          (if (seq best)
+            best
+            (let [candidate (if (seq suffix) suffix (subs text* 0 1))]
+              (if (<= (long (estimate-tokens candidate)) total-budget)
+                candidate
+                "")))
+          (let [mid       (quot (+ lo hi) 2)
+                prefix    (subs text* 0 mid)
+                candidate (if (seq suffix)
+                            (str prefix suffix)
+                            prefix)
+                tokens    (long (estimate-tokens candidate))]
+            (if (<= tokens total-budget)
+              (recur (inc mid) hi candidate)
+              (recur lo (dec mid) best))))))))
+
+(defn- recover-system-prompt
+  [sections total-budget]
+  (loop [sections* sections
+         drop-keys final-prompt-drop-order]
+    (let [prompt  (system-prompt-sections->prompt sections*)
+          tokens  (long (estimate-tokens prompt))]
+      (cond
+        (<= tokens (long total-budget))
+        {:sections sections*
+         :prompt   prompt}
+
+        (seq drop-keys)
+        (recur (drop-system-prompt-section sections* (first drop-keys))
+               (rest drop-keys))
+
+        :else
+        {:sections sections*
+         :prompt   (truncate-text-to-budget prompt total-budget)}))))
 
 ;; ============================================================================
 ;; System prompt assembly
@@ -896,15 +986,22 @@
         skill-budget  (long-min (budget-value budget :skills) (long-max 0 remaining))
         skill-data    (render-skills-data skills skill-budget)
         skill-section (:content skill-data)
-        skill-tokens  (long (or (:tokens skill-data) 0))]
-    {:prompt         (str id-section
-                          (when topic-section (str "## Context\n" topic-section))
-                          (when ent-section (str ent-section "\n\n"))
-                          (when doc-section (str doc-section "\n\n"))
-                          (when ep-section (str ep-section "\n\n"))
-                          (when skill-section (str skill-section "\n\n")))
-     :used-fact-eids (:used-fact-eids ent-data)
-     :used-fact-refs (:used-fact-refs ent-data)})))
+        skill-tokens  (long (or (:tokens skill-data) 0))
+        sections      [{:key :identity :content id-section}
+                       {:key :topic :content topic-section}
+                       {:key :entities :content ent-section}
+                       {:key :local-docs :content doc-section}
+                       {:key :episodes :content ep-section}
+                       {:key :skills :content skill-section}]
+        {:keys [sections prompt]} (recover-system-prompt sections (budget-value budget :total))
+        entities-retained? (section-present? sections :entities)]
+    {:prompt         prompt
+     :used-fact-eids (if entities-retained?
+                       (:used-fact-eids ent-data)
+                       [])
+     :used-fact-refs (if entities-retained?
+                       (:used-fact-refs ent-data)
+                       [])})))
 
 (defn assemble-system-prompt
   ([session-id]

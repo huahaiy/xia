@@ -142,7 +142,10 @@
 
   (testing "returns relevant skills when WM context has topics"
     (let [skills (skill/skills-for-context {:topics "drafting an email"})]
-      (is (pos? (count skills))))))
+      (is (pos? (count skills)))
+      (is (= :email-skill (:skill/id (first skills))))
+      (is (> (:skill/relevance (first skills))
+             (or (:skill/relevance (second skills)) 0.0))))))
 
 ;; ---------------------------------------------------------------------------
 ;; skills->prompt
