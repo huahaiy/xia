@@ -4,6 +4,7 @@
             [clojure.test :refer :all]
             [clojure.string :as str]
             [xia.agent]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
             [xia.artifact :as artifact]
             [xia.backup :as backup]
@@ -1187,6 +1188,58 @@
       (is (str/includes? (get task "recovery_brief") "Recovered from: checkpoint"))
       (is (str/includes? (get task "recovery_brief") "Next step: Read the attachment list")))))
 
+(deftest recovered-task-routes-show-runtime-restart-recovery-state
+  (let [sid      (db/create-session! :http)
+        task-id  (db/create-task! {:session-id sid
+                                   :channel :http
+                                   :type :interactive
+                                   :state :running
+                                   :title "Review the invoice"
+                                   :summary "Waiting for input"
+                                   :meta {:runtime {:state :waiting_input
+                                                    :phase :waiting_input
+                                                    :message "Waiting for input"}
+                                          :checkpoint {:phase :observing
+                                                       :summary "Need to review the invoice attachments."
+                                                       :current-focus "Review the invoice"
+                                                       :next-step "Read the attachment list"}}})
+        _turn-id (db/start-task-turn! task-id
+                                      {:operation :start
+                                       :state :waiting_input
+                                       :input "Review the invoice"
+                                       :summary "Waiting for input"})]
+    (task-runtime/recover-interrupted-tasks!)
+    (let [history-response (#'http/router {:uri            "/history/tasks"
+                                           :request-method :get
+                                           :headers        (ui-headers)})
+          history-body     (response-json history-response)
+          history-task     (some #(when (= (str task-id) (get % "id")) %)
+                                 (get history-body "tasks"))
+          detail-response  (#'http/router {:uri            (str "/tasks/" task-id)
+                                           :request-method :get
+                                           :headers        (ui-headers)})
+          detail-body      (response-json detail-response)
+          detail-task      (get detail-body "task")
+          inspection       (get detail-task "inspection")]
+      (is (= 200 (:status history-response)))
+      (is (= "paused" (get history-task "state")))
+      (is (= 200 (:status detail-response)))
+      (is (= "paused" (get detail-task "state")))
+      (is (= "runtime-restart" (get detail-task "stop_reason")))
+      (is (= {"source" "checkpoint"}
+             (some-> (get-in detail-task ["recovery" "last-recovery"])
+                     (select-keys ["source"]))))
+      (is (= {"task_state" "paused"
+              "phase" "recovered"}
+             (some-> (get inspection "current_state")
+                     (select-keys ["task_state" "phase"]))))
+      (is (str/includes? (get detail-task "recovery_brief")
+                         "Stop reason: runtime-restart"))
+      (is (str/includes? (get detail-task "recovery_brief")
+                         "Recovered from: checkpoint"))
+      (is (str/includes? (get detail-task "recovery_brief")
+                         "Last checkpoint [observing]")))))
+
 (deftest task-detail-route-includes-inspection-policy-decisions-and-stack-summary
   (let [sid      (db/create-session! :http)
         task-id  (db/create-task! {:session-id sid
@@ -1521,6 +1574,83 @@
              (some-> completed-event
                      (get "data")
                      (select-keys ["state" "channel" "task-type"])))))))
+
+(deftest branch-run-appears-through-shared-task-history-and-events
+  (let [parent-session-id (db/create-session! :http)
+        parent-task-id    (db/create-task! {:session-id parent-session-id
+                                            :channel :http
+                                            :type :interactive
+                                            :state :running
+                                            :title "Review the invoice"})]
+    (binding [prompt/*interaction-context* {:channel :http
+                                            :session-id parent-session-id
+                                            :task-id parent-task-id}]
+      (with-redefs [xia.tool/tool-definitions          (constantly [])
+                    xia.working-memory/update-wm!      (fn [& _] nil)
+                    xia.llm/resolve-provider-selection (constantly {:provider {:llm.provider/id :default}
+                                                                    :provider-id :default})
+                    xia.context/build-messages-data    (fn [_session-id _opts]
+                                                         {:messages [{:role "system" :content "test"}]
+                                                          :used-fact-eids []})
+                    xia.llm/chat-message               (fn [_messages & _opts]
+                                                         {"content" (str "Findings\n"
+                                                                         "- Invoice attachment mismatch\n\n"
+                                                                         "Evidence\n"
+                                                                         "- The PDF export differs from the portal copy\n\n"
+                                                                         "Open Questions\n"
+                                                                         "- None")})
+                    xia.agent/schedule-fact-utility-review! (fn [& _] nil)]
+        (let [result        (xia.agent/run-branch-tasks
+                             [{:task "Inspect the invoice attachments"
+                               :prompt "Compare the invoice attachments"}]
+                             :session-id parent-session-id
+                             :max-parallel 1)
+              child-task-id (:task-id (first (:results result)))
+              history-response (#'http/router {:uri            "/history/tasks"
+                                               :request-method :get
+                                               :headers        (ui-headers)})
+              history-body     (response-json history-response)
+              task             (some #(when (= (str child-task-id) (get % "id")) %)
+                                     (get history-body "tasks"))
+              detail-response  (#'http/router {:uri            (str "/tasks/" child-task-id)
+                                               :request-method :get
+                                               :headers        (ui-headers)})
+              detail-body      (response-json detail-response)
+              detail-task      (get detail-body "task")
+              inspection       (get detail-task "inspection")
+              events-response  (#'http/router {:uri            (str "/tasks/" child-task-id "/events")
+                                               :request-method :get
+                                               :headers        (ui-headers)})
+              events-body      (response-json events-response)
+              events           (get events-body "events")
+              types            (mapv #(get % "type") events)]
+          (is (= 200 (:status history-response)))
+          (is (= (str child-task-id) (get task "id")))
+          (is (= "branch" (get task "channel")))
+          (is (= "branch" (get task "type")))
+          (is (#{"done" "completed"} (get task "state")))
+          (is (= 200 (:status detail-response)))
+          (is (= (str child-task-id) (get detail-task "id")))
+          (is (= (str parent-task-id) (get detail-task "parent_id")))
+          (is (#{"done" "completed"} (get detail-task "state")))
+          (is (str/includes? (or (get-in inspection ["recent_output" 0 "text"]) "")
+                             "Invoice attachment mismatch"))
+          (is (some #{"assistant_output"}
+                    (map #(get % "kind") (get inspection "recent_activity"))))
+          (is (= 200 (:status events-response)))
+          (is (= (str child-task-id) (get events-body "task_id")))
+          (is (= ["task.started" "turn.started"] (take 2 types)))
+          (is (= "task.completed" (last types)))
+          (is (some #{"message.user"} types))
+          (is (some #{"message.assistant"} types))
+          (is (some #{"turn.completed"} types))
+          (let [completed-event (some #(when (= "task.completed" (get % "type")) %) events)]
+            (is (= {"state" "completed"
+                    "channel" "branch"
+                    "task-type" "branch"}
+                   (some-> completed-event
+                           (get "data")
+                           (select-keys ["state" "channel" "task-type"]))))))))))
 
 (deftest live-task-events-route-returns-buffered-runtime-events
   (let [sid     (db/create-session! :http)
