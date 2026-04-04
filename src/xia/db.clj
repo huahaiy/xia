@@ -647,6 +647,9 @@
   {:embedding-opts      {:provider default-embedding-provider-id
                          :metric-type :cosine}
    :embedding-domains   (default-embedding-domains)
+   ;; Xia uses Datalevin as an embedded local store. Favor faster open/reopen
+   ;; over WAL durability machinery we do not rely on for this workload.
+   :wal?                false
    :validate-data?      true
    :auto-entity-time?   true
    :embedding-providers {default-embedding-provider-id

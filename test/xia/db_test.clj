@@ -25,6 +25,7 @@
            (set (keys domains))))
     (is (every? #(= :llama.cpp (:provider %))
                 (vals domains)))
+    (is (false? (:wal? opts)))
     (is (true? (:validate-data? opts)))
     (is (true? (:auto-entity-time? opts)))))
 
@@ -277,6 +278,24 @@
          (finally
            (db/close!))))
     (is (false? @called?))))
+
+(deftest connect-disables-datalevin-wal-by-default
+  (let [conn-opts (atom nil)]
+    (with-redefs-fn {#'datalevin.core/get-conn (fn [_db-path _schema opts]
+                                                 (reset! conn-opts opts)
+                                                 ::conn)
+                     #'xia.db/download-file! (fn [& _] nil)
+                     #'xia.crypto/configure! (fn [& _] nil)
+                     #'xia.db/init-embedding-provider! (fn [& _] nil)
+                     #'xia.db/init-llm-provider! (fn [& _] nil)
+                     #'datalevin.core/close (fn [_] nil)}
+      #(try
+         (db/connect! "/tmp/xia-dev-connect"
+                      {:local-llm-provider false
+                       :passphrase-provider (constantly "xia-test-passphrase")})
+         (finally
+           (db/close!))))
+    (is (false? (:wal? @conn-opts)))))
 
 (deftest seed-initial-settings-from-db-copies-template-config
   (let [target-path (db/current-db-path)
