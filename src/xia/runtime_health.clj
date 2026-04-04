@@ -7,15 +7,21 @@
             [xia.scheduler :as scheduler]))
 
 (defn idle-status
-  "Return a machine-oriented snapshot of whether Xia is safe to stop.
+  "Return a machine-oriented snapshot of runtime drain/idleness state.
 
    `:idle?` means:
    - runtime phase is `:running`
    - no active agent turns/runs
    - no scheduler executions or maintenance are in flight
-   - no pending hippocampus or async LLM log background work remains"
+   - no pending hippocampus or async LLM log background work remains
+
+   `:shutdown-allowed?` is stronger:
+   - runtime is explicitly draining
+   - and the runtime is idle"
   []
   (let [phase      (runtime-state/phase)
+        drain      (runtime-state/drain-state)
+        draining?  (boolean (:draining? drain))
         agent*     (agent/runtime-activity)
         scheduler* (scheduler/runtime-activity)
         hippo*     (hippo/runtime-activity)
@@ -63,10 +69,15 @@
                             :count (long (:pending-log-write-count llm*))
                             :reason "async LLM log writes are still pending"}))
         idle?      (and (= :running phase)
-                        (empty? blockers))]
+                        (empty? blockers))
+        accepting? (and (= :running phase)
+                        (not draining?))]
     {:phase phase
+     :draining? draining?
+     :drain-requested-at (:requested-at drain)
+     :accepting-new-work? accepting?
      :idle? idle?
-     :shutdown-allowed? idle?
+     :shutdown-allowed? (and draining? idle?)
      :blockers blockers
      :activity {:agent agent*
                 :scheduler scheduler*

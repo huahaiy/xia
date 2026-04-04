@@ -31,6 +31,13 @@
     (is (true? (:validate-data? opts)))
     (is (true? (:auto-entity-time? opts)))))
 
+(deftest test-connect-options-enable-datalevin-nosync
+  (let [opts (th/test-connect-options)
+        datalevin-opts (:datalevin-opts opts)]
+    (is (= false (:local-llm-provider opts)))
+    (is (contains? (set (:flags datalevin-opts)) :nosync))
+    (is (false? (:wal? datalevin-opts)))))
+
 (deftest datalevin-type-coercion-and-auto-entity-time-are-enabled
   (let [session-id (str (random-uuid))]
     (db/transact! [{:session/id      session-id

@@ -36,6 +36,7 @@
 (use-fixtures :each with-test-db)
 
 (def ^:private byte-array-class (class (byte-array 0)))
+(def ^:private cached-local-session-cookie (atom nil))
 
 (defn- request-body [payload]
   (let [^String body (json/write-json-str payload)]
@@ -112,12 +113,23 @@
      "push_token"  push-token}))
 
 (defn- local-session-cookie []
-  (let [response (#'http/router {:uri "/" :request-method :get})]
-    (first (str/split (get-in response [:headers "Set-Cookie"]) #";"))))
+  (or @cached-local-session-cookie
+      (let [response (#'http/router {:uri "/" :request-method :get})
+            cookie   (first (str/split (get-in response [:headers "Set-Cookie"]) #";"))]
+        (reset! cached-local-session-cookie cookie)
+        cookie)))
 
 (defn- ui-headers []
   {"origin" "http://localhost:3008"
    "cookie" (local-session-cookie)})
+
+(use-fixtures :each
+  (fn [f]
+    (reset! cached-local-session-cookie nil)
+    (try
+      (f)
+      (finally
+        (reset! cached-local-session-cookie nil)))))
 
 (defn- command-headers
   ([] (command-headers "command-secret"))
@@ -171,6 +183,27 @@
     (is (re-find #"href=\"favicon/site.webmanifest\"" (:body response)))
     (is (re-find #"src=\"favicon/favicon.svg\"" (:body response)))
     (is (re-find #"alt=\"Xia logo\"" (:body response)))))
+
+(deftest ui-headers-cache-local-session-cookie-per-test
+  (let [calls       (atom 0)
+        orig-router @#'http/router]
+    (with-redefs [xia.channel.http/router
+                  (fn [req]
+                    (if (and (= "/" (:uri req))
+                             (= :get (:request-method req)))
+                      (do
+                        (swap! calls inc)
+                        {:status 200
+                         :headers {"Set-Cookie" "xia-local-session=test-cookie; Path=/; HttpOnly; SameSite=Strict"}
+                         :body ""})
+                      (orig-router req)))]
+      (is (= {"origin" "http://localhost:3008"
+              "cookie" "xia-local-session=test-cookie"}
+             (ui-headers)))
+      (is (= {"origin" "http://localhost:3008"
+              "cookie" "xia-local-session=test-cookie"}
+             (ui-headers)))
+      (is (= 1 @calls)))))
 
 (deftest serves-static-resources
   (testing "serves style.css"
@@ -504,19 +537,39 @@
     (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
       (http/register-command-shutdown-handler! #(deliver called :stopped))
       (try
-        (let [response (#'http/router {:uri            "/command/shutdown"
-                                       :request-method :post
-                                       :headers        (command-headers)})
-              body     (response-json response)]
-          (is (= 202 (:status response)))
-          (is (= "stopping" (get body "status")))
-          (is (= :stopped (deref called 1000 ::timeout))))
+        (with-redefs [xia.runtime-health/idle-status (constantly {:phase :running
+                                                                  :draining? true
+                                                                  :drain-requested-at "2026-04-04T12:00:00Z"
+                                                                  :accepting-new-work? false
+                                                                  :idle? true
+                                                                  :shutdown-allowed? true
+                                                                  :blockers []
+                                                                  :activity {:agent {:active-session-turn-count 0
+                                                                                     :active-session-run-count 0
+                                                                                     :active-task-run-count 0}
+                                                                             :scheduler {:running? true
+                                                                                         :running-schedule-count 0
+                                                                                         :maintenance-running? false}
+                                                                             :hippocampus {:accepting? true
+                                                                                           :pending-background-task-count 0}
+                                                                             :llm {:accepting? true
+                                                                                   :pending-log-write-count 0}}})]
+          (let [response (#'http/router {:uri            "/command/shutdown"
+                                         :request-method :post
+                                         :headers        (command-headers)})
+                body     (response-json response)]
+            (is (= 202 (:status response)))
+            (is (= "stopping" (get body "status")))
+            (is (= :stopped (deref called 1000 ::timeout)))))
         (finally
           (http/clear-command-shutdown-handler!))))))
 
 (deftest command-runtime-status-route-reports-idle-safely
   (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")
                 xia.runtime-health/idle-status (constantly {:phase :running
+                                                            :draining? true
+                                                            :drain-requested-at "2026-04-04T12:00:00Z"
+                                                            :accepting-new-work? false
                                                             :idle? true
                                                             :shutdown-allowed? true
                                                             :blockers []
@@ -536,13 +589,99 @@
           body     (response-json response)]
       (is (= 200 (:status response)))
       (is (= "running" (get body "phase")))
+      (is (= true (get body "draining")))
+      (is (= "2026-04-04T12:00:00Z" (get body "drain_requested_at")))
+      (is (= false (get body "accepting_new_work")))
       (is (= true (get body "idle")))
       (is (= true (get body "shutdown_allowed")))
       (is (= [] (get body "blockers")))
       (is (= {"active_session_turn_count" 0
               "active_session_run_count" 0
               "active_task_run_count" 0}
-             (get-in body ["activity" "agent"])))))) 
+             (get-in body ["activity" "agent"]))))))
+
+(deftest command-routes-accept-db-configured-command-token
+  (db/set-config! :secret/command-channel-token "db-command-secret")
+  (with-redefs [xia.channel.http/env-value (constantly nil)
+                xia.runtime-health/idle-status (constantly {:phase :running
+                                                            :draining? false
+                                                            :drain-requested-at nil
+                                                            :accepting-new-work? true
+                                                            :idle? true
+                                                            :shutdown-allowed? false
+                                                            :blockers []
+                                                            :activity {:agent {:active-session-turn-count 0
+                                                                               :active-session-run-count 0
+                                                                               :active-task-run-count 0}
+                                                                       :scheduler {:running? true
+                                                                                   :running-schedule-count 0
+                                                                                   :maintenance-running? false}
+                                                                       :hippocampus {:accepting? true
+                                                                                     :pending-background-task-count 0}
+                                                                       :llm {:accepting? true
+                                                                             :pending-log-write-count 0}}})]
+    (let [response (#'http/router {:uri "/command/runtime/status"
+                                   :request-method :get
+                                   :headers (command-headers "db-command-secret")})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= "running" (get body "phase"))))))
+
+(deftest command-runtime-drain-and-undrain-routes-toggle-drain-state
+  (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")]
+    (runtime-state/reset-runtime!)
+    (runtime-state/mark-running!)
+    (try
+      (let [drain-response (#'http/router {:uri "/command/runtime/drain"
+                                           :request-method :post
+                                           :headers (command-headers)})
+            drain-body     (response-json drain-response)
+            undrain-response (#'http/router {:uri "/command/runtime/undrain"
+                                             :request-method :post
+                                             :headers (command-headers)})
+            undrain-body   (response-json undrain-response)]
+        (is (= 200 (:status drain-response)))
+        (is (= true (get drain-body "draining")))
+        (is (= false (get drain-body "accepting_new_work")))
+        (is (= true (get drain-body "shutdown_allowed")))
+        (is (string? (get drain-body "drain_requested_at")))
+        (is (= 200 (:status undrain-response)))
+        (is (= false (get undrain-body "draining")))
+        (is (= true (get undrain-body "accepting_new_work")))
+        (is (= nil (get undrain-body "drain_requested_at"))))
+      (finally
+        (runtime-state/reset-runtime!)))))
+
+(deftest command-shutdown-route-requires-draining-and-idle
+  (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")
+                xia.runtime-health/idle-status (constantly {:phase :running
+                                                            :draining? false
+                                                            :drain-requested-at nil
+                                                            :accepting-new-work? true
+                                                            :idle? true
+                                                            :shutdown-allowed? false
+                                                            :blockers []
+                                                            :activity {:agent {:active-session-turn-count 0
+                                                                               :active-session-run-count 0
+                                                                               :active-task-run-count 0}
+                                                                       :scheduler {:running? true
+                                                                                   :running-schedule-count 0
+                                                                                   :maintenance-running? false}
+                                                                       :hippocampus {:accepting? true
+                                                                                     :pending-background-task-count 0}
+                                                                       :llm {:accepting? true
+                                                                             :pending-log-write-count 0}}})]
+    (http/register-command-shutdown-handler! (constantly nil))
+    (try
+      (let [response (#'http/router {:uri "/command/shutdown"
+                                     :request-method :post
+                                     :headers (command-headers)})
+            body     (response-json response)]
+        (is (= 409 (:status response)))
+        (is (= "runtime must be draining and idle before shutdown" (get body "error")))
+        (is (= false (get body "shutdown_allowed"))))
+      (finally
+        (http/clear-command-shutdown-handler!)))))
 
 (deftest chat-route-allows-direct-local-client-with-session-secret
   (with-redefs [xia.agent/process-message (fn [_session-id _user-message & _] "ok")]

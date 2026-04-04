@@ -18,6 +18,7 @@
             [xia.hippocampus :as hippo]
             [xia.llm :as llm]
             [xia.oauth :as oauth]
+            [xia.runtime-state :as runtime-state]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
             [xia.task-policy :as task-policy]
@@ -289,7 +290,8 @@
   "Execute a single schedule, preventing concurrent runs of the same schedule."
   [sched]
   (let [id (:id sched)]
-    (when-not (contains? @running-schedules id)
+    (when (and (runtime-state/accepting-new-work?)
+               (not (contains? @running-schedules id)))
       (swap! running-schedules conj id)
       (try
         (try
@@ -315,7 +317,12 @@
         (catch Exception e
           (log/error e "Schedule execution failed:" (name id)))
         (finally
-          (swap! running-schedules disj id))))))
+          (swap! running-schedules disj id))))
+    (when-not (runtime-state/accepting-new-work?)
+      (log/debug "Skipping schedule execution because runtime is draining"
+                 {:schedule-id id
+                  :phase (runtime-state/phase)
+                  :draining? (runtime-state/draining?)}))))
 
 (defn ^:no-doc run-prompt-schedule!
   [sched]
@@ -337,31 +344,35 @@
   "Find and execute all due schedules."
   []
   (try
-    (let [now (java.util.Date.)
-          due (schedule/due-schedules now)]
-      (when (seq due)
-        (log/info "Scheduler tick:" (count due) "schedule(s) due")
-        (doseq [sched due]
-          ;; Dispatch due schedules onto a bounded worker pool.
-          (submit-work! (str "schedule " (name (:id sched)))
-                        #(execute-schedule! sched))))
-      (when (backup/backup-due?)
-        (submit-work! "automatic backup"
-                      #(backup/run-scheduled-backup!)))
-      (when (and (or (nil? @last-maintenance-at)
-                     (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
-                         (long maintenance-interval-ms)))
-                 (compare-and-set! maintenance-running? false true))
-        (submit-work! "background maintenance"
-                      (fn []
-                        (try
-                          (hippo/consolidate-if-pending!)
-                          (hippo/maintain-knowledge! now)
-                          (reset! last-maintenance-at now)
-                          (catch Exception e
-                            (log/error e "Background maintenance failed"))
-                          (finally
-                            (reset! maintenance-running? false)))))))
+    (if-not (runtime-state/accepting-new-work?)
+      (log/debug "Scheduler tick skipped because runtime is not accepting new work"
+                 {:phase (runtime-state/phase)
+                  :draining? (runtime-state/draining?)})
+      (let [now (java.util.Date.)
+            due (schedule/due-schedules now)]
+        (when (seq due)
+          (log/info "Scheduler tick:" (count due) "schedule(s) due")
+          (doseq [sched due]
+            ;; Dispatch due schedules onto a bounded worker pool.
+            (submit-work! (str "schedule " (name (:id sched)))
+                          #(execute-schedule! sched))))
+        (when (backup/backup-due?)
+          (submit-work! "automatic backup"
+                        #(backup/run-scheduled-backup!)))
+        (when (and (or (nil? @last-maintenance-at)
+                       (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
+                           (long maintenance-interval-ms)))
+                   (compare-and-set! maintenance-running? false true))
+          (submit-work! "background maintenance"
+                        (fn []
+                          (try
+                            (hippo/consolidate-if-pending!)
+                            (hippo/maintain-knowledge! now)
+                            (reset! last-maintenance-at now)
+                            (catch Exception e
+                              (log/error e "Background maintenance failed"))
+                            (finally
+                              (reset! maintenance-running? false))))))))
     (catch Exception e
       (log/error e "Scheduler tick failed"))))
 

@@ -417,6 +417,11 @@
     (keyword? value) (name value)
     :else value))
 
+(defn- tenant-admin-config-value
+  [config-key]
+  (or (some-> (db/tenant-config-value config-key) admin-config-value)
+      ""))
+
 (defn- days-value
   [value]
   (when (some? value)
@@ -653,9 +658,9 @@
 (defn- web-search->admin-body
   []
   (let [resolutions (web/search-config-resolutions)]
-    {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
-     :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
-     :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")
+    {:backend       (tenant-admin-config-value :web/search-backend)
+     :brave_api_key (tenant-admin-config-value :web/search-brave-api-key)
+     :searxng_url   (tenant-admin-config-value :web/search-searxng-url)
      :sources       {:backend (some-> (get-in resolutions [:backend :source]) name)
                      :brave_api_key (some-> (get-in resolutions [:brave-api-key :source]) name)
                      :searxng_url (some-> (get-in resolutions [:searxng-url :source]) name)}
@@ -1060,6 +1065,21 @@
     (json-response* deps 200
                     {:status "stopped"
                      :instance (managed-instance->admin-body deps stopped)})))
+
+(defn handle-reload-runtime-overlay
+  [deps req]
+  (try
+    (let [data         (or (read-body* deps req) {})
+          overlay-path (or (nonblank-str (get data "overlay_path"))
+                           (nonblank-str (get data :overlay_path)))]
+      (if overlay-path
+        (runtime-overlay/reload! overlay-path)
+        (runtime-overlay/reload!))
+      (json-response* deps 200
+                      {:status "reloaded"
+                       :runtime_overlay (runtime-overlay/admin-summary)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))))
 
 (defn handle-admin-config
   [deps _req]

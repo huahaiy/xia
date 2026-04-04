@@ -6,6 +6,7 @@
             [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
+            [xia.config :as cfg]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
             [xia.memory :as memory]
@@ -490,7 +491,7 @@
 (defn- command-channel-token
   []
   (or (some-> (env-value "XIA_COMMAND_TOKEN") nonblank-str)
-      (some-> (db/get-config command-channel-token-config-key) nonblank-str)))
+      (some-> (cfg/string-option command-channel-token-config-key nil) nonblank-str)))
 
 (defn- cookie-map
   [req]
@@ -633,23 +634,33 @@
   (reset! command-shutdown-handler-atom nil)
   nil)
 
+(declare runtime-idle-body)
+
 (defn- handle-command-shutdown
   [_req]
   (if-let [handler @command-shutdown-handler-atom]
-    (do
-      (future
-        (try
-          (handler)
-          (catch Throwable e
-            (log/error e "Command shutdown handler failed"))))
-      (json-response 202 {:status "stopping"}))
+    (let [{:keys [shutdown-allowed?] :as status} (runtime-health/idle-status)]
+      (if shutdown-allowed?
+        (do
+          (future
+            (try
+              (handler)
+              (catch Throwable e
+                (log/error e "Command shutdown handler failed"))))
+          (json-response 202 {:status "stopping"}))
+        (json-response 409
+                       (assoc (runtime-idle-body)
+                              :error "runtime must be draining and idle before shutdown"))))
     (json-response 503 {:error "shutdown control unavailable"})))
 
 (defn- runtime-idle-body
   []
-  (let [{:keys [phase idle? shutdown-allowed? blockers activity]}
+  (let [{:keys [phase draining? drain-requested-at accepting-new-work? idle? shutdown-allowed? blockers activity]}
         (runtime-health/idle-status)]
     {:phase (some-> phase name)
+     :draining draining?
+     :drain_requested_at drain-requested-at
+     :accepting_new_work accepting-new-work?
      :idle idle?
      :shutdown_allowed shutdown-allowed?
      :blockers (mapv (fn [{:keys [component kind count reason]}]
@@ -671,6 +682,16 @@
 
 (defn- handle-command-runtime-status
   [_req]
+  (json-response 200 (runtime-idle-body)))
+
+(defn- handle-command-runtime-drain
+  [_req]
+  (runtime-state/request-drain!)
+  (json-response 200 (runtime-idle-body)))
+
+(defn- handle-command-runtime-undrain
+  [_req]
+  (runtime-state/clear-drain!)
   (json-response 200 (runtime-idle-body)))
 
 (defn- runtime-available?
@@ -1509,6 +1530,8 @@
           command-session-task-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/task" uri)
           command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
           command-runtime-status-match (= uri "/command/runtime/status")
+          command-runtime-drain-match (= uri "/command/runtime/drain")
+          command-runtime-undrain-match (= uri "/command/runtime/undrain")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
           task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
@@ -1594,6 +1617,12 @@
 
         (and (= method :get) command-runtime-status-match)
         (command-route-response req #(handle-command-runtime-status req))
+
+        (and (= method :post) command-runtime-drain-match)
+        (command-route-response req #(handle-command-runtime-drain req))
+
+        (and (= method :post) command-runtime-undrain-match)
+        (command-route-response req #(handle-command-runtime-undrain req))
 
         (and (= method :delete) command-session-close-match)
         (command-route-response req #(handle-close-session (second command-session-close-match) :command))
@@ -1794,6 +1823,9 @@
 
         (and (= method :get) (= uri "/admin/config"))
         (protected-route-response req #(http-admin/handle-admin-config (admin-handler-deps) req))
+
+        (and (= method :post) (= uri "/admin/runtime-overlay/reload"))
+        (protected-route-response req #(http-admin/handle-reload-runtime-overlay (admin-handler-deps) req))
 
         (and (= method :get) (= uri "/admin/managed-instances"))
         (protected-route-response req #(http-admin/handle-list-managed-instances (admin-handler-deps) req))

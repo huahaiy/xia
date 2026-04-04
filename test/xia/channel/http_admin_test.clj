@@ -1,5 +1,6 @@
 (ns xia.channel.http-admin-test
   (:require [charred.api :as json]
+            [clojure.java.io :as io]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.browser :as browser]
             [xia.channel.http.admin :as http-admin]
@@ -13,6 +14,15 @@
 (defn- response-json
   [response]
   (json/read-json (:body response)))
+
+(defn- temp-overlay-file
+  [payload]
+  (let [path (str (java.nio.file.Files/createTempFile
+                    "xia-admin-overlay"
+                    ".edn"
+                    (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (spit (io/file path) (pr-str payload))
+    path))
 
 (defn- admin-deps
   ([] (admin-deps nil))
@@ -142,6 +152,9 @@
       (is (= "runtime-overlay" (get-in web-search ["sources" "backend"])))
       (is (= "tenant-db" (get-in web-search ["sources" "brave_api_key"])))
       (is (= "default" (get-in web-search ["sources" "searxng_url"])))
+      (is (= "" (get web-search "backend")))
+      (is (= "tenant-brave-key" (get web-search "brave_api_key")))
+      (is (= "" (get web-search "searxng_url")))
       (is (= "searxng-json" (get-in web-search ["config_resolution" "backend" "effective_value"])))
       (is (= "replace" (get-in web-search ["config_resolution" "backend" "overlay" "mode"])))
       (is (= "duckduckgo-html" (get-in web-search ["config_resolution" "backend" "default_value"])))
@@ -269,3 +282,45 @@
              (get-in body ["details" "entity-id"]))))
     (finally
       (runtime-overlay/clear!))))
+
+(deftest admin-runtime-overlay-reload-updates-current-file
+  (let [overlay-file (temp-overlay-file
+                       {:overlay/version 1
+                        :snapshot/id "overlay-reload-v1"
+                        :config-overrides {:browser/backend-default :playwright}})]
+    (try
+      (runtime-overlay/load-file! overlay-file)
+      (spit (io/file overlay-file)
+            (pr-str {:overlay/version 1
+                     :snapshot/id "overlay-reload-v2"
+                     :config-overrides {:browser/backend-default :remote}}))
+      (let [response (#'http-admin/handle-reload-runtime-overlay (admin-deps) {})
+            body     (response-json response)
+            overlay  (get body "runtime_overlay")]
+        (is (= 200 (:status response)))
+        (is (= "reloaded" (get body "status")))
+        (is (= "overlay-reload-v2" (get overlay "snapshot_id")))
+        (is (= overlay-file (get overlay "source_path")))
+        (is (= true (get overlay "reloadable")))
+        (is (= 2 (get overlay "reload_count"))))
+      (finally
+        (runtime-overlay/clear!)))))
+
+(deftest admin-runtime-overlay-reload-preserves-current-overlay-on-invalid-update
+  (let [overlay-file (temp-overlay-file
+                       {:overlay/version 1
+                        :snapshot/id "overlay-stable-v1"
+                        :config-overrides {:browser/backend-default :remote}})]
+    (try
+      (runtime-overlay/load-file! overlay-file)
+      (spit (io/file overlay-file)
+            (pr-str {:overlay/version 99
+                     :snapshot/id "overlay-invalid"}))
+      (let [response (#'http-admin/handle-reload-runtime-overlay (admin-deps) {})
+            body     (response-json response)]
+        (is (= 400 (:status response)))
+        (is (= "Unsupported runtime overlay version." (get body "error")))
+        (is (= "overlay-stable-v1" (runtime-overlay/snapshot-id)))
+        (is (= "remote" (runtime-overlay/config-db-value :browser/backend-default))))
+      (finally
+        (runtime-overlay/clear!)))))

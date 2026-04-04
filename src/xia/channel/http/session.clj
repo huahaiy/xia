@@ -8,6 +8,7 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.prompt :as prompt]
+            [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.task-event :as task-event]
             [xia.task-inspection :as task-inspection]
@@ -38,6 +39,14 @@
 (defn- read-body*
   [deps req]
   ((:read-body deps) req))
+
+(defn- runtime-draining-response
+  [deps work-kind]
+  (let [{:keys [error reason]} (runtime-state/reject-new-work-data work-kind)]
+    (json-response* deps
+                    409
+                    {:error error
+                     :reason (some-> reason name)})))
 
 (defn- session-accessible?*
   [deps session-id expected-channel]
@@ -822,6 +831,9 @@
            (not has-value?)
            (json-response* deps 400 {:error "missing value"})
 
+           (not (runtime-state/accepting-new-work?))
+           (runtime-draining-response deps :prompt-reply)
+
            :else
            (let [{:keys [status]}
                  (prompt/deliver-validated-interaction! {:session-id session-id
@@ -853,6 +865,9 @@
          (cond
            (nil? decision*)
            (json-response* deps 400 {:error "invalid decision"})
+
+           (not (runtime-state/accepting-new-work?))
+           (runtime-draining-response deps :approval-reply)
 
            :else
            (let [{:keys [status]}
@@ -897,6 +912,9 @@
           (cond
             (not has-value?)
             (json-response* deps 400 {:error "missing value"})
+
+            (not (runtime-state/accepting-new-work?))
+            (runtime-draining-response deps :prompt-reply)
 
             :else
             (let [{:keys [status]}
@@ -945,6 +963,9 @@
           (cond
             (nil? decision*)
             (json-response* deps 400 {:error "invalid decision"})
+
+            (not (runtime-state/accepting-new-work?))
+            (runtime-draining-response deps :approval-reply)
 
             :else
             (let [{:keys [status]}

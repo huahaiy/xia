@@ -222,11 +222,15 @@
    (let [provider-id (get-in (db/default-datalevin-opts) [:embedding-opts :provider])
          options     (merge {:local-llm-provider false}
                             options)]
-     (update (merge options
-                    {:datalevin-opts
-                     {:embedding-providers {provider-id (test-embedding-provider)}}})
-             :datalevin-opts
-             #(merge (db/default-datalevin-opts) %)))))
+     (-> (merge options
+                {:datalevin-opts
+                 {:embedding-providers {provider-id (test-embedding-provider)}
+                  :flags #{:nosync}}})
+         (update :datalevin-opts
+                 #(merge (db/default-datalevin-opts) %))
+         (update-in [:datalevin-opts :flags]
+                    (fn [flags]
+                      (conj (set (or flags #{})) :nosync)))))))
 
 (defn with-test-db
   "Fixture: create a temp Datalevin DB for the duration of the test."

@@ -5,6 +5,8 @@
 (deftest idle-status-requires-a-running-phase-and-no-active-work
   (testing "running with no blockers is idle and shutdown-safe"
     (with-redefs [xia.runtime-state/phase (constantly :running)
+                  xia.runtime-state/drain-state (constantly {:draining? true
+                                                             :requested-at "2026-04-04T12:00:00Z"})
                   xia.agent/runtime-activity (constantly {:active-session-turn-count 0
                                                          :active-session-run-count 0
                                                          :active-task-run-count 0})
@@ -17,12 +19,16 @@
                                                        :pending-log-write-count 0})]
       (let [status (runtime-health/idle-status)]
         (is (= :running (:phase status)))
+        (is (true? (:draining? status)))
+        (is (= "2026-04-04T12:00:00Z" (:drain-requested-at status)))
+        (is (false? (:accepting-new-work? status)))
         (is (true? (:idle? status)))
         (is (true? (:shutdown-allowed? status)))
         (is (empty? (:blockers status))))))
 
   (testing "active work or a non-running phase blocks idle shutdown"
     (with-redefs [xia.runtime-state/phase (constantly :stopping)
+                  xia.runtime-state/drain-state (constantly nil)
                   xia.agent/runtime-activity (constantly {:active-session-turn-count 0
                                                          :active-session-run-count 1
                                                          :active-task-run-count 0})
@@ -36,6 +42,8 @@
       (let [status (runtime-health/idle-status)
             blockers (set (map (juxt :component :kind) (:blockers status)))]
         (is (= :stopping (:phase status)))
+        (is (false? (:draining? status)))
+        (is (false? (:accepting-new-work? status)))
         (is (false? (:idle? status)))
         (is (false? (:shutdown-allowed? status)))
         (is (contains? blockers [:agent :session-runs]))

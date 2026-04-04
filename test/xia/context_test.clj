@@ -78,6 +78,19 @@
   (is (= 6000 (ctx/history-budget-config)))
   (is (= 30 (ctx/recent-history-message-limit-config))))
 
+(deftest test-system-prompt-budget-config-uses-overlay-aware-custom-reader
+  (db/set-config! :context/budget "{:total 5000 :skills 1200}")
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "snapshot-context-budget-override"
+     :config-overrides {:context/budget {:total 4200
+                                         :entities 700}}})
+  (let [resolution (:system-prompt-budget (ctx/config-resolutions))]
+    (is (= :runtime-overlay (:source resolution)))
+    (is (= 4200 (get-in resolution [:value :total])))
+    (is (= 700 (get-in resolution [:value :entities])))
+    (is (= 1200 (get-in resolution [:tenant-value :skills])))))
+
 ;; ---------------------------------------------------------------------------
 ;; render-entity
 ;; ---------------------------------------------------------------------------

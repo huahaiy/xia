@@ -200,16 +200,23 @@
   (and (map? value)
        (seq value)))
 
+(defn- parse-system-prompt-budget
+  [raw]
+  (let [parsed (cond
+                 (map? raw) raw
+                 (string? raw) (edn/read-string raw)
+                 :else nil)]
+    (when (valid-budget parsed)
+      (merge default-system-prompt-budget parsed))))
+
 (defn- configured-system-prompt-budget []
-  (if-let [custom (db/get-config :context/budget)]
-    (try
-      (let [parsed (edn/read-string custom)]
-        (if (valid-budget parsed)
-          (merge default-system-prompt-budget parsed)
-          default-system-prompt-budget))
-      (catch Exception _
-        default-system-prompt-budget))
-    default-system-prompt-budget))
+  (cfg/custom-option :context/budget
+                     default-system-prompt-budget
+                     (fn [raw]
+                       (try
+                         (parse-system-prompt-budget raw)
+                         (catch Exception _
+                           nil)))))
 
 (defn- configured-history-budget []
   (cfg/positive-long :context/history-budget
@@ -230,7 +237,15 @@
 
 (defn config-resolutions
   []
-  {:recent-history-message-limit
+  {:system-prompt-budget
+   (cfg/custom-option-resolution :context/budget
+                                 default-system-prompt-budget
+                                 (fn [raw]
+                                   (try
+                                     (parse-system-prompt-budget raw)
+                                     (catch Exception _
+                                       nil))))
+   :recent-history-message-limit
    (cfg/positive-long-resolution :context/recent-history-message-limit
                                  default-recent-history-message-limit)
    :history-budget

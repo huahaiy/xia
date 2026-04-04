@@ -11,7 +11,6 @@
   (:require [clojure.string :as str]
             [charred.api :as json]
             [xia.config :as cfg]
-            [xia.db :as db]
             [xia.rate-limit :as rate-limit]
             [xia.ssrf :as ssrf])
    (:import [org.jsoup Jsoup]
@@ -712,13 +711,6 @@
         (str "https:" href)
         href))))
 
-(defn- safe-get-config
-  [config-key]
-  (try
-    (db/get-config config-key)
-    (catch Exception _
-      nil)))
-
 (defn- normalize-search-backend
   [backend]
   (when backend
@@ -733,19 +725,15 @@
       (get supported-search-backends value))))
 
 (defn- configured-search-backend-raw []
-  (safe-get-config :web/search-backend))
+  (cfg/custom-option :web/search-backend nil normalize-search-backend))
 
 (defn- configured-searxng-url []
-  (let [value (some-> (safe-get-config :web/search-searxng-url)
-                      str
-                      str/trim)]
+  (let [value (cfg/string-option :web/search-searxng-url nil)]
     (when (seq value)
       value)))
 
 (defn- configured-brave-api-key []
-  (let [value (some-> (safe-get-config :web/search-brave-api-key)
-                      str
-                      str/trim)]
+  (let [value (cfg/string-option :web/search-brave-api-key nil)]
     (when (seq value)
       value)))
 

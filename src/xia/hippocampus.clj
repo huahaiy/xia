@@ -669,7 +669,7 @@ Rules:
            :context      context
            :channel      channel
            :session-id   session-id
-           :participants (db/get-config :user/name)})
+           :participants (cfg/string-option :user/name nil)})
         (case consolidation-mode
           :sync
           (consolidate-pending!)

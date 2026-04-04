@@ -2298,6 +2298,10 @@
                               :or {channel :terminal
                                    tool-context {}
                                    persist-message? true}}]
+  (runtime-state/throw-if-not-accepting-new-work!
+   (or runtime-op
+       (when task-id :task-turn)
+       :session-message))
   (with-session-turn-lock
     session-id
     (fn []

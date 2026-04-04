@@ -328,6 +328,7 @@
     :missing "No current task to control."
     :invalid (or (:error result) "That control request is not valid right now.")
     :busy (or (:error result) "The current task is busy.")
+    :draining (or (:error result) "Xia is draining and cannot start new task work right now.")
     :unavailable (or (:error result) "Task control is temporarily unavailable.")
     :not-resumable (or (:error result) "This task cannot be resumed.")
     (or (:error result) "I couldn't apply that control request.")))
@@ -344,7 +345,7 @@
                      (name status)))
      :response-kind (case status
                       (:missing :not-found) :missing
-                      (:invalid :busy :already-running :not-resumable) :conflict
+                      (:invalid :busy :already-running :not-resumable :draining) :conflict
                       :unavailable :unavailable
                       (:pausing :stopping :interrupting :steering :forking :running) :accepted
                       (:already-paused :already-stopped :paused :stopped) :completed

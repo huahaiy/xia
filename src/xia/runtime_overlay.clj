@@ -23,6 +23,7 @@
    :site-cred     {:identity :site-cred/id}})
 
 (defonce ^:private overlay-atom (atom nil))
+(defonce ^:private activation-lock (Object.))
 
 (declare clear!)
 
@@ -245,35 +246,61 @@
        :provider-default-id (first provider-default-ids)}
       (:tx-data overlay))))
 
+(defn- activate-overlay!
+  [overlay source-path]
+  (locking activation-lock
+    (let [previous       @overlay-atom
+          source-version (input-overlay-version overlay)
+          normalized     (-> overlay
+                             migrate-overlay
+                             validate-overlay!
+                             (normalize-overlay source-version))
+          overlay-state  (assoc normalized
+                           :overlay/source-path (some-> source-path str str/trim not-empty)
+                           :overlay/loaded-at-ms (System/currentTimeMillis)
+                           :overlay/reload-count (inc (long (or (:overlay/reload-count previous) 0))))]
+      (reset! overlay-atom overlay-state)
+      (log/info "Activated runtime overlay" (:snapshot/id overlay-state))
+      overlay-state)))
+
 (defn activate!
-  [overlay]
-  (let [source-version (input-overlay-version overlay)
-        normalized     (-> overlay
-                           migrate-overlay
-                           validate-overlay!
-                           (normalize-overlay source-version))]
-    (reset! overlay-atom normalized)
-    (log/info "Activated runtime overlay" (:snapshot/id normalized))
-    normalized))
+  ([overlay]
+   (activate-overlay! overlay nil))
+  ([overlay source-path]
+   (activate-overlay! overlay source-path)))
+
+(defn- read-overlay-file
+  [overlay-path]
+  (let [file (io/file overlay-path)]
+    (when-not (.exists file)
+      (throw (ex-info "Runtime overlay file does not exist."
+                      {:overlay-path overlay-path})))
+    (-> file
+        slurp
+        edn/read-string)))
 
 (defn load-file!
   [overlay-path]
   (if (some-> overlay-path str str/trim not-empty)
-    (let [file (io/file overlay-path)]
-      (when-not (.exists file)
-        (throw (ex-info "Runtime overlay file does not exist."
-                        {:overlay-path overlay-path})))
-      (-> file
-          slurp
-          edn/read-string
-          activate!))
+    (activate-overlay! (read-overlay-file overlay-path) overlay-path)
     (do
       (clear!)
       nil)))
 
+(defn reload!
+  ([] (reload! nil))
+  ([overlay-path]
+   (let [resolved-path (or (some-> overlay-path str str/trim not-empty)
+                           (:overlay/source-path @overlay-atom))]
+     (when-not resolved-path
+       (throw (ex-info "No runtime overlay source path is available to reload."
+                       {:type :runtime-overlay/missing-source-path})))
+     (activate-overlay! (read-overlay-file resolved-path) resolved-path))))
+
 (defn clear!
   []
-  (reset! overlay-atom nil))
+  (locking activation-lock
+    (reset! overlay-atom nil)))
 
 (defn current-overlay
   []
@@ -301,6 +328,14 @@
 (defn overlay-version
   []
   (:overlay/version @overlay-atom))
+
+(defn source-path
+  []
+  (:overlay/source-path @overlay-atom))
+
+(defn loaded-at-ms
+  []
+  (:overlay/loaded-at-ms @overlay-atom))
 
 (defn config-override?
   [config-key]
@@ -396,6 +431,10 @@
      :snapshot_id          (:snapshot/id overlay)
      :overlay_version      (:overlay/version overlay)
      :source_overlay_version (:source-overlay/version overlay)
+     :source_path          (:overlay/source-path overlay)
+     :loaded_at_ms         (:overlay/loaded-at-ms overlay)
+     :reloadable           (boolean (:overlay/source-path overlay))
+     :reload_count         (:overlay/reload-count overlay)
      :provider_default_id  (some-> (:provider-default-id overlay) name)
      :config_override_keys (->> (keys (:config-overrides overlay))
                                 (map key->overlay-name)

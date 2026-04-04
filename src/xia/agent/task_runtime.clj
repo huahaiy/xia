@@ -8,6 +8,7 @@
             [xia.prompt :as prompt]
             [xia.task-event :as task-event]
             [xia.task-policy :as task-policy]
+            [xia.runtime-state :as runtime-state]
             [xia.working-memory :as wm]))
 
 (defn- truncate-summary*
@@ -30,6 +31,14 @@
 (def ^:private restart-lineage-limit 20)
 (def ^:private startup-recovery-task-limit 100000)
 (def ^:private startup-recovery-states #{:running :waiting_input :waiting_approval})
+
+(defn- runtime-draining-result
+  [task-id session-id]
+  (let [{:keys [error]} (runtime-state/reject-new-work-data :task-control)]
+    {:status :draining
+     :task-id task-id
+     :session-id session-id
+     :error error}))
 
 (defn- merge-task-meta!
   [task-id f]
@@ -1159,6 +1168,9 @@
          :session-id session-id
          :error "task is not resumable"}
 
+        (not (runtime-state/accepting-new-work?))
+        (runtime-draining-result task-id session-id)
+
         :else
         (if-let [_future
                  (async/submit-background!
@@ -1273,6 +1285,9 @@
         {:status :invalid
          :error "steer message is required"}
 
+        (not (runtime-state/accepting-new-work?))
+        (runtime-draining-result task-id session-id)
+
         (task-active? deps task)
         (if ((:cancel-session! deps) session-id "task steer requested")
           (if-let [_future (submit-steer! interrupted-turn-id)]
@@ -1333,6 +1348,9 @@
         (nil? message*)
         {:status :invalid
          :error "fork message is required"}
+
+        (not (runtime-state/accepting-new-work?))
+        (runtime-draining-result task-id parent-session-id)
 
         :else
         (let [child-session-id (db/create-session! :branch

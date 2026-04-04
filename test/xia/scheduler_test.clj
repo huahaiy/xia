@@ -396,6 +396,9 @@
     (with-redefs [xia.schedule/due-schedules (fn [_now]
                                                [{:id :alpha}
                                                 {:id :beta}])
+                  xia.runtime-state/accepting-new-work? (fn [] true)
+                  xia.runtime-state/phase (fn [] :running)
+                  xia.runtime-state/draining? (fn [] false)
                   xia.backup/backup-due? (fn [] false)
                   xia.hippocampus/consolidate-if-pending! (fn [] nil)
                   xia.hippocampus/maintain-knowledge! (fn [_now] nil)
@@ -408,6 +411,9 @@
 (deftest tick-starts-scheduled-backup-when-due
   (let [called (promise)]
     (with-redefs [xia.schedule/due-schedules (fn [_now] [])
+                  xia.runtime-state/accepting-new-work? (fn [] true)
+                  xia.runtime-state/phase (fn [] :running)
+                  xia.runtime-state/draining? (fn [] false)
                   xia.backup/backup-due? (fn [] true)
                   xia.scheduler/submit-work! (fn [kind f]
                                                (when (= "automatic backup" kind)
@@ -420,6 +426,20 @@
                   xia.hippocampus/maintain-knowledge! (fn [_now] nil)]
       (scheduler/tick-once!)
       (is (= :ran (deref called 1000 nil))))))
+
+(deftest tick-skips-new-work-while-runtime-is-draining
+  (let [submitted (atom [])]
+    (with-redefs [xia.runtime-state/accepting-new-work? (fn [] false)
+                  xia.runtime-state/phase (fn [] :running)
+                  xia.runtime-state/draining? (fn [] true)
+                  xia.schedule/due-schedules (fn [_now]
+                                               [{:id :alpha}])
+                  xia.backup/backup-due? (fn [] true)
+                  xia.scheduler/submit-work! (fn [kind _f]
+                                               (swap! submitted conj kind)
+                                               true)]
+      (scheduler/tick-once!)
+      (is (empty? @submitted)))))
 
 (deftest execute-schedule-proactively-refreshes-oauth-before-run
   (let [calls (atom [])]

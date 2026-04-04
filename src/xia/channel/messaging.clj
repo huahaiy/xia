@@ -12,6 +12,7 @@
             [xia.db :as db]
             [xia.http-client :as http-client]
             [xia.prompt :as prompt]
+            [xia.runtime-state :as runtime-state]
             [xia.task-inspection :as task-inspection])
   (:import [java.nio.charset StandardCharsets]
            [java.util Date]
@@ -886,6 +887,13 @@
 
         (handle-control-intent! session-id channel user-message)
         true
+
+        (not (runtime-state/accepting-new-work?))
+        (do
+          (send-session-message! channel
+                                 session-id
+                                 "Xia is draining and cannot accept new work right now.")
+          true)
 
         :else
         (do
