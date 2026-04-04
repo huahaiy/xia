@@ -8,6 +8,6 @@
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"backend" {"type" "string"
-                                        "description" "Optional backend to bootstrap: auto or playwright."}}}
+                                        "description" "Optional backend to bootstrap: auto, playwright, or remote."}}}
  :handler     "(fn [args]
                  (xia.browser/bootstrap-runtime! :backend (or (get args \"backend\") \"auto\")))"}

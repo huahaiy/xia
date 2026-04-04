@@ -7,6 +7,7 @@
             [xia.browser :as browser]
             [xia.browser.backend :as browser.backend]
             [xia.browser.playwright]
+            [xia.browser.remote]
             [xia.db :as db]
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.net InetAddress ServerSocket URI]
@@ -260,6 +261,23 @@
                            (swap! snapshots dissoc session-id))
        :all-snapshots #(seq @snapshots)
        :snapshot-expired? (constantly false)
+       :validate-url! (fn [_] nil)
+       :resolve-url! (fn [_] nil)})
+     :snapshots snapshots}))
+
+(defn- test-remote-backend
+  []
+  (let [snapshots (atom {})]
+    {:backend
+     ((ns-resolve 'xia.browser.remote 'create-backend)
+      {:read-snapshot #(get @snapshots %)
+       :write-snapshot! (fn [session-id snapshot]
+                          (swap! snapshots assoc session-id snapshot))
+       :delete-snapshot! (fn [session-id]
+                           (swap! snapshots dissoc session-id))
+       :all-snapshots #(seq @snapshots)
+       :snapshot-expired? (constantly false)
+       :snapshot-usable? (constantly {:ok? true})
        :validate-url! (fn [_] nil)
        :resolve-url! (fn [_] nil)})
      :snapshots snapshots}))
@@ -755,6 +773,123 @@
     (is (= "Example Domain" (:title page)))
     (browser/close-session sid)))
 
+(deftest remote-open-session-persists-local-browser-snapshot
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (let [{:keys [backend snapshots]} (test-remote-backend)
+        requests (atom [])]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj (select-keys req [:method :url :headers :body]))
+                    {:status 200
+                     :headers {"content-type" "application/json"}
+                     :body (json/write-json-str
+                            {"session" {"session_id" "browser-session-1"
+                                        "current_url" "https://example.com"
+                                        "browser_state" "{\"cookies\":[]}"
+                                        "created_at_ms" 100
+                                        "updated_at_ms" 120
+                                        "last_access_ms" 120
+                                        "js_enabled" true}
+                             "result" {"url" "https://example.com"
+                                       "title" "Remote Example"
+                                       "content" "Example content"
+                                       "forms" []
+                                       "links" []
+                                       "truncated?" false}})})]
+      (let [result (browser.backend/open-session* backend "https://example.com" {:js true})
+            session-id (:session-id result)
+            snapshot (get @snapshots session-id)]
+        (is (= :remote (:backend result)))
+        (is (= "Remote Example" (:title result)))
+        (is (= "https://example.com" (:url result)))
+        (is (= "http://browser-pool.internal/v1/sessions"
+               (:url (first @requests))))
+        (is (= :post (:method (first @requests))))
+        (is (= "remote" (get snapshot "backend")))
+        (is (= "https://example.com" (get snapshot "current_url")))
+        (is (= "{\"cookies\":[]}" (get snapshot "browser_state")))
+        (is (= true (get snapshot "js_enabled")))))))
+
+(deftest remote-read-page-restores-session-from-local-snapshot-when-worker-loses-it
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (let [{:keys [backend snapshots]} (test-remote-backend)
+        session-id "browser-session-restore"
+        calls (atom [])]
+    (swap! snapshots assoc session-id
+           {"session_id" session-id
+            "backend" "remote"
+            "current_url" "https://example.com/account"
+            "browser_state" "{\"cookies\":[{\"name\":\"sid\"}]}"
+            "created_at_ms" 10
+            "updated_at_ms" 20
+            "last_access_ms" 20
+            "js_enabled" true})
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! calls conj [(:method req) (:url req)])
+                    (let [request-key [(:method req) (:url req)]
+                          page-key [:get "http://browser-pool.internal/v1/sessions/browser-session-restore/page"]
+                          restored-body (json/write-json-str
+                                         {"session" {"session_id" session-id
+                                                     "current_url" "https://example.com/account"
+                                                     "browser_state" "{\"cookies\":[{\"name\":\"sid2\"}]}"
+                                                     "created_at_ms" 10
+                                                     "updated_at_ms" 40
+                                                     "last_access_ms" 40
+                                                     "js_enabled" true}
+                                          "result" {"url" "https://example.com/account"
+                                                    "title" "Recovered"
+                                                    "content" "Recovered page"
+                                                    "forms" []
+                                                    "links" []
+                                                    "truncated?" false}})
+                          create-body (json/write-json-str
+                                       {"session" {"session_id" session-id
+                                                   "current_url" "https://example.com/account"
+                                                   "browser_state" "{\"cookies\":[{\"name\":\"sid2\"}]}"
+                                                   "created_at_ms" 10
+                                                   "updated_at_ms" 30
+                                                   "last_access_ms" 30
+                                                   "js_enabled" true}
+                                        "result" {"url" "https://example.com/account"
+                                                  "title" "Recovered"
+                                                  "content" "Recovered page"
+                                                  "forms" []
+                                                  "links" []
+                                                  "truncated?" false}})]
+                      (cond
+                        (= request-key page-key)
+                        (if (= 1 (count (filter #(= page-key %) @calls)))
+                          {:status 404
+                           :headers {"content-type" "application/json"}
+                           :body (json/write-json-str {"error" "No browser session"})}
+                          {:status 200
+                           :headers {"content-type" "application/json"}
+                           :body restored-body})
+
+                        (= request-key [:post "http://browser-pool.internal/v1/sessions"])
+                        {:status 200
+                         :headers {"content-type" "application/json"}
+                         :body create-body}
+
+                        :else
+                        (throw (ex-info "Unexpected remote browser request"
+                                        {:request req})))))]
+      (let [result (browser.backend/read-page* backend session-id)
+            snapshot (get @snapshots session-id)]
+        (is (= :remote (:backend result)))
+        (is (= "Recovered" (:title result)))
+        (is (= [[:get "http://browser-pool.internal/v1/sessions/browser-session-restore/page"]
+                [:post "http://browser-pool.internal/v1/sessions"]
+                [:get "http://browser-pool.internal/v1/sessions/browser-session-restore/page"]]
+               @calls))
+        (is (= "{\"cookies\":[{\"name\":\"sid2\"}]}"
+               (get snapshot "browser_state")))
+        (is (= "https://example.com/account"
+               (get snapshot "current_url")))))))
+
 (deftest ^:integration playwright-screenshot-returns-data-url
   (db/set-config! :browser/playwright-enabled? "true")
   (let [result (browser/open-session "https://example.com" :backend :playwright)
@@ -776,11 +911,65 @@
         by-backend (into {} (map (juxt :backend identity) (:backends status)))]
     (is (= :auto (:configured-default-backend status)))
     (is (= :playwright (:selected-auto-backend status)))
-    (is (= #{:playwright} (set (keys by-backend))))
+    (is (= #{:playwright :remote} (set (keys by-backend))))
     (is (= true (:available? (get by-backend :playwright))))
     (is (contains? #{:available :missing-browser}
                    (:status (get by-backend :playwright))))
-    (is (= false (:ready? (get by-backend :playwright))))))
+    (is (= false (:ready? (get by-backend :playwright))))
+    (is (= :disabled (:status (get by-backend :remote))))
+    (is (= false (:available? (get by-backend :remote))))))
+
+(deftest browser-runtime-status-prefers-configured-remote-backend
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (with-redefs [xia.http-client/request
+                (fn [req]
+                  (is (= :get (:method req)))
+                  (is (= "http://browser-pool.internal/v1/runtime/status" (:url req)))
+                  {:status 200
+                   :headers {"content-type" "application/json"}
+                   :body (json/write-json-str {"status" "ready"
+                                               "ready" true
+                                               "running" true
+                                               "leases" 2})})]
+    (let [status (browser/browser-runtime-status)
+          by-backend (into {} (map (juxt :backend identity) (:backends status)))]
+      (is (= :remote (:selected-auto-backend status)))
+      (is (= :ready (:status (get by-backend :remote))))
+      (is (= true (:ready? (get by-backend :remote))))
+      (is (= 2 (get-in by-backend [:remote :service :leases]))))))
+
+(deftest open-session-auto-uses-remote-when-configured
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (let [requests (atom [])]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj (select-keys req [:method :url :body]))
+                    {:status 200
+                     :headers {"content-type" "application/json"}
+                     :body (json/write-json-str
+                            {"session" {"session_id" "browser-session-auto"
+                                        "current_url" "https://example.com"
+                                        "browser_state" "{\"cookies\":[]}"
+                                        "created_at_ms" 100
+                                        "updated_at_ms" 120
+                                        "last_access_ms" 120
+                                        "js_enabled" true}
+                             "result" {"url" "https://example.com"
+                                       "title" "Remote Auto"
+                                       "content" "Example content"
+                                       "forms" []
+                                       "links" []
+                                       "truncated?" false}})})]
+      (let [result (browser/open-session "https://example.com" :backend :auto)]
+        (try
+          (is (= :remote (:backend result)))
+          (is (= "Remote Auto" (:title result)))
+          (is (= "http://browser-pool.internal/v1/sessions"
+                 (:url (first @requests))))
+          (finally
+            (browser/close-session (:session-id result))))))))
 
 (deftest playwright-runtime-status-reports-missing-browser-when-installable
   (with-playwright-runtime-state {:playwright nil
@@ -900,7 +1089,8 @@
     (is (= :playwright (:selected-auto-backend status)))
     (is (= :disabled (:status (get by-backend :playwright))))
     (is (= false (:available? (get by-backend :playwright))))
-    (is (= false (:ready? (get by-backend :playwright))))))
+    (is (= false (:ready? (get by-backend :playwright))))
+    (is (= :disabled (:status (get by-backend :remote))))))
 
 (deftest open-session-explicit-playwright-throws-when-disabled
   (db/set-config! :browser/playwright-enabled? "false")
@@ -914,7 +1104,7 @@
         playwright-result (browser/bootstrap-browser-runtime! :backend :playwright)
         after (browser/browser-runtime-status)]
     (is (= :auto (:requested-backend auto-result)))
-    (is (= #{:playwright}
+    (is (= #{:playwright :remote}
            (set (map :backend (:results auto-result)))))
     (is (= :playwright (:backend playwright-result)))
     (is (= :running (:status playwright-result)))

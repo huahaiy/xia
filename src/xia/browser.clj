@@ -17,6 +17,7 @@
             [xia.autonomous :as autonomous]
             [xia.browser.backend :as browser.backend]
             [xia.browser.playwright :as playwright]
+            [xia.browser.remote :as remote]
             [xia.config :as cfg]
             [xia.crypto :as crypto]
             [xia.db :as db]
@@ -35,7 +36,7 @@
 (def ^:private browser-session-dbi "xia/browser-sessions")
 (def ^:private legacy-htmlunit-backend-id :htmlunit)
 (def ^:private auto-backend-id :auto)
-(def ^:private supported-backend-ids [:playwright])
+(def ^:private supported-backend-ids [:playwright :remote])
 
 (defn- now-ms []
   (System/currentTimeMillis))
@@ -325,7 +326,9 @@
 
 (defn- auto-backend-id*
   []
-  :playwright)
+  (if (remote/configured?)
+    :remote
+    :playwright))
 
 (defn- resolve-open-backend-id
   [requested-backend]
@@ -368,6 +371,18 @@
      :validate-url! validate-url!
      :resolve-url! resolve-url!})))
 
+(def ^:private remote-backend
+  (register-backend!
+   (remote/create-backend
+    {:read-snapshot read-session-snapshot
+     :write-snapshot! write-session-snapshot!
+     :delete-snapshot! delete-session-snapshot!
+     :all-snapshots all-session-snapshots
+     :snapshot-usable? storage-state-validation
+     :snapshot-expired? snapshot-expired?
+     :validate-url! validate-url!
+     :resolve-url! resolve-url!})))
+
 ;; ---------------------------------------------------------------------------
 ;; Public API — exposed to SCI sandbox
 ;; ---------------------------------------------------------------------------
@@ -381,7 +396,7 @@
 
   Options:
      :js — enable JavaScript (default true)
-     :backend — browser backend keyword/string (default :auto)
+     :backend — browser backend keyword/string (default :auto; supports :playwright and :remote)
      :storage-state — optional backend-specific serialized storage state
      :headless — optional backend-specific headless override
      :channel — optional backend-specific browser channel (for Playwright,

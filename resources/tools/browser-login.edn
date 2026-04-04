@@ -11,7 +11,7 @@
                "properties" {"site" {"type"        "string"
                                      "description" "The site id (e.g. \"workportal\", \"jira\", or \":jira\"). Use browser-list-sites to see available sites."}
                              "backend" {"type" "string"
-                                        "description" "Optional browser backend override: auto or playwright."}}
+                                        "description" "Optional browser backend override: auto, playwright, or remote."}}
                "required"   ["site"]}
  :handler     "(fn [args]
                  (xia.browser/login (get args \"site\")
