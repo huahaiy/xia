@@ -58,6 +58,141 @@
     (is (nil? (wm/autonomy-state sid)))
     (wm/clear-wm! sid)))
 
+(deftest test-full-wm-snapshot-restores-entities-episodes-and-local-docs
+  (let [sid      (db/create-session! :terminal)
+        node-eid (th/seed-node! "Hong" "person")
+        _fact    (th/seed-fact! node-eid "likes Clojure")
+        ep-eid   (th/seed-episode! "Discussed the Seattle rollout")
+        episode  (db/entity ep-eid)
+        doc      (local-doc/save-upload! {:session-id sid
+                                          :name "rollout.md"
+                                          :media-type "text/markdown"
+                                          :text "Seattle rollout checklist"})
+        state    (autonomous/normalize-state
+                  {:stack [{:title "Plan the rollout"
+                            :next-step "Review the rollout checklist"}]})]
+    (memory/set-node-property! node-eid [:location] "Seattle")
+    (wm/ensure-wm! sid)
+    (swap! @#'xia.working-memory/wm-atom
+           update sid
+           (fn [current]
+             (assoc current
+                    :topics "Preparing the Seattle rollout"
+                    :autonomy-state state
+                    :slots {node-eid {:node-eid node-eid
+                                      :name "Hong"
+                                      :type :person
+                                      :facts (memory/node-facts node-eid)
+                                      :edges (memory/node-edges node-eid)
+                                      :properties (memory/node-properties node-eid)
+                                      :relevance 0.9
+                                      :pinned? true
+                                      :added-turn 0}}
+                    :episode-refs [{:episode-eid ep-eid
+                                    :summary (:episode/summary episode)
+                                    :timestamp (:episode/timestamp episode)
+                                    :relevance 0.7}]
+                    :local-doc-refs [{:doc-id (:id doc)
+                                      :name (:name doc)
+                                      :media-type (:media-type doc)
+                                      :summary (:summary doc)
+                                      :preview (:preview doc)
+                                      :matched-chunks [{:id "chunk-1"}]
+                                      :relevance 0.6}])))
+    (wm/snapshot! sid)
+    (wm/clear-wm! sid)
+    (wm/ensure-wm! sid)
+    (let [context (wm/wm->context sid)
+          entity  (first (:entities context))
+          episode* (first (:episodes context))
+          doc*    (first (:local-docs context))]
+      (is (= "Preparing the Seattle rollout" (:topics context)))
+      (is (= state (:autonomy context)))
+      (is (= "Hong" (:name entity)))
+      (is (= :person (:type entity)))
+      (is (= "Seattle" (get-in entity [:properties :location])))
+      (is (= "likes Clojure"
+             (some-> entity :facts first :content)))
+      (is (= true (:pinned? entity)))
+      (is (= "Discussed the Seattle rollout" (:summary episode*)))
+      (is (= (:id doc) (:id doc*)))
+      (is (= "rollout.md" (:name doc*)))
+      (is (= [] (:matched-chunks doc*))))
+    (wm/clear-wm! sid)))
+
+(deftest test-active-session-updates-coalesce-into-a-single-debounced-snapshot
+  (let [sid        (db/create-session! :terminal)
+        now-ms     (atom 1000)
+        submissions (atom [])
+        sleep-calls (atom [])
+        snapshots   (atom [])
+        state-a     (autonomous/normalize-state
+                     {:stack [{:title "State A"}]})
+        state-b     (autonomous/normalize-state
+                     {:stack [{:title "State B"}]})]
+    (wm/ensure-wm! sid)
+    (with-redefs [xia.async/submit-background!
+                  (fn [description f]
+                    (swap! submissions conj {:description description :task f})
+                    :submitted)
+                  xia.working-memory/current-time-ms
+                  (fn []
+                    @now-ms)
+                  xia.working-memory/sleep-ms!
+                  (fn [delay-ms]
+                    (swap! sleep-calls conj delay-ms)
+                    (swap! now-ms + delay-ms))
+                  xia.db/save-wm-snapshot!
+                  (fn [wm-state]
+                    (swap! snapshots conj {:topics (:topics wm-state)
+                                           :autonomy-state (:autonomy-state wm-state)}))]
+      (wm/set-autonomy-state! sid state-a)
+      (is (= 1 (count @submissions)))
+      (is (= "wm-snapshot" (:description (first @submissions))))
+      (is (true? (:snapshot-task-scheduled? (wm/get-wm sid))))
+      (reset! now-ms 1500)
+      (wm/set-autonomy-state! sid state-b)
+      (is (= 1 (count @submissions))
+          "Repeated WM writes should reuse the pending snapshot task")
+      ((:task (first @submissions)))
+      (is (= [2000] @sleep-calls)
+          "The snapshot task should wait until the latest dirty deadline")
+      (is (= 1 (count @snapshots)))
+      (is (= state-b (:autonomy-state (first @snapshots)))
+          "The debounced snapshot should persist the latest WM state")
+      (is (= state-b (wm/autonomy-state sid)))
+      (is (false? (:snapshot-task-scheduled? (wm/get-wm sid))))
+      (is (nil? (:last-dirty-at-ms (wm/get-wm sid))))
+      (is (= 3500 (:last-snapshot-at-ms (wm/get-wm sid)))))))
+
+(deftest test-restoring-a-wm-snapshot-does-not-schedule-another-snapshot
+  (let [sid         (random-uuid)
+        submissions (atom [])
+        state       (autonomous/normalize-state
+                     {:stack [{:title "Recovered"}]})]
+    (with-redefs [xia.async/submit-background!
+                  (fn [description f]
+                    (swap! submissions conj {:description description :task f})
+                    :submitted)
+                  xia.db/load-wm-snapshot
+                  (fn [session-id]
+                    (when (= sid session-id)
+                      {:topics "Recovered topics"
+                       :autonomy-state state
+                       :slots {}
+                       :episode-refs []
+                       :local-doc-refs []
+                       :updated-at (java.util.Date. 4200)}))]
+      (wm/ensure-wm! sid)
+      (is (empty? @submissions)
+          "Restoring a persisted snapshot should not schedule another snapshot immediately")
+      (is (= "Recovered topics" (:topics (wm/get-wm sid))))
+      (is (= state (wm/autonomy-state sid)))
+      (is (= 4200 (:last-snapshot-at-ms (wm/get-wm sid))))
+      (is (nil? (:last-dirty-at-ms (wm/get-wm sid))))
+      (is (false? (:snapshot-task-scheduled? (wm/get-wm sid)))))
+    (wm/clear-wm! sid)))
+
 ;; ---------------------------------------------------------------------------
 ;; Keyword extraction
 ;; ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@
             [xia.setup :as setup]
             [xia.skill :as skill]
             [xia.tool :as tool]
+            [xia.working-memory :as wm]
             [xia.channel.http :as http])
   (:import [java.nio.file Files Paths]))
 
@@ -77,6 +78,7 @@
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
+  (wm/snapshot-all!)
   (agent/cancel-all-sessions! "runtime stopping")
   (hippo/prepare-shutdown!)
   (llm/prepare-shutdown!)

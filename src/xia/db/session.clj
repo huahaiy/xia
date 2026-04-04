@@ -154,13 +154,122 @@
       (when-let [wm-eid (ffirst (q* deps '[:find ?e :in $ ?s
                                            :where [?e :wm/session ?s]]
                                      session-eid*))]
-        (let [wm-entity (into {} (d/entity (d/db (conn* deps)) wm-eid))]
+        (let [wm-entity (into {} (d/entity (d/db (conn* deps)) wm-eid))
+              node-facts (fn [node-eid]
+                           (->> (q* deps '[:find ?fact ?content ?confidence ?utility ?updated
+                                           :in $ ?node
+                                           :where
+                                           [?fact :kg.fact/node ?node]
+                                           [?fact :kg.fact/content ?content]
+                                           [?fact :kg.fact/confidence ?confidence]
+                                           [(get-else $ ?fact :kg.fact/utility 0.5) ?utility]
+                                           [?fact :kg.fact/updated-at ?updated]]
+                                     node-eid)
+                                (sort-by #(nth % 4) #(compare %2 %1))
+                                (mapv (fn [[fact-eid content confidence utility _]]
+                                        {:eid fact-eid
+                                         :content content
+                                         :confidence confidence
+                                         :utility (double utility)}))))
+              node-edges (fn [node-eid]
+                           (let [outgoing (q* deps '[:find ?edge ?to-name ?type ?label
+                                                     :in $ ?from
+                                                     :where
+                                                     [?edge :kg.edge/from ?from]
+                                                     [?edge :kg.edge/to ?to]
+                                                     [?to :kg.node/name ?to-name]
+                                                     [?edge :kg.edge/type ?type]
+                                                     [(get-else $ ?edge :kg.edge/label "") ?label]]
+                                            node-eid)
+                                 incoming (q* deps '[:find ?edge ?from-name ?type ?label
+                                                     :in $ ?to
+                                                     :where
+                                                     [?edge :kg.edge/to ?to]
+                                                     [?edge :kg.edge/from ?from]
+                                                     [?from :kg.node/name ?from-name]
+                                                     [?edge :kg.edge/type ?type]
+                                                     [(get-else $ ?edge :kg.edge/label "") ?label]]
+                                            node-eid)]
+                             {:outgoing (mapv (fn [[_ name type label]]
+                                                {:target name
+                                                 :type type
+                                                 :label (empty->nil label)})
+                                              outgoing)
+                              :incoming (mapv (fn [[_ name type label]]
+                                                {:source name
+                                                 :type type
+                                                 :label (empty->nil label)})
+                                              incoming)}))
+              slots (into {}
+                          (keep (fn [[node-eid relevance pinned?]]
+                                  (when-let [node-entity (when node-eid
+                                                           (into {}
+                                                                 (d/entity (d/db (conn* deps))
+                                                                           node-eid)))]
+                                    [node-eid
+                                     {:node-eid node-eid
+                                      :name (:kg.node/name node-entity)
+                                      :type (:kg.node/type node-entity)
+                                      :facts (node-facts node-eid)
+                                      :edges (node-edges node-eid)
+                                      :properties (:kg.node/properties node-entity)
+                                      :relevance (double (or relevance 0.0))
+                                      :pinned? (boolean pinned?)}])))
+                          (q* deps '[:find ?node ?relevance ?pinned
+                                     :in $ ?wm
+                                     :where
+                                     [?slot :wm.slot/wm ?wm]
+                                     [?slot :wm.slot/node ?node]
+                                     [?slot :wm.slot/relevance ?relevance]
+                                     [(get-else $ ?slot :wm.slot/pinned? false) ?pinned]]
+                              wm-eid))
+              episode-refs (->> (q* deps '[:find ?episode ?summary ?timestamp ?relevance
+                                           :in $ ?wm
+                                           :where
+                                           [?ref :wm.episode-ref/wm ?wm]
+                                           [?ref :wm.episode-ref/episode ?episode]
+                                           [?ref :wm.episode-ref/relevance ?relevance]
+                                           [?episode :episode/summary ?summary]
+                                           [?episode :episode/timestamp ?timestamp]]
+                                     wm-eid)
+                                (mapv (fn [[episode-eid summary timestamp relevance]]
+                                        {:episode-eid episode-eid
+                                         :summary summary
+                                         :timestamp timestamp
+                                         :relevance (double (or relevance 0.0))}))
+                                (sort-by :relevance >)
+                                vec)
+              local-doc-refs (->> (q* deps '[:find ?doc-id ?name ?media-type ?summary ?preview ?relevance
+                                             :in $ ?wm
+                                             :where
+                                             [?ref :wm.local-doc-ref/wm ?wm]
+                                             [?ref :wm.local-doc-ref/doc ?doc]
+                                             [?ref :wm.local-doc-ref/relevance ?relevance]
+                                             [?doc :local.doc/id ?doc-id]
+                                             [(get-else $ ?doc :local.doc/name "") ?name]
+                                             [(get-else $ ?doc :local.doc/media-type "") ?media-type]
+                                             [(get-else $ ?doc :local.doc/summary "") ?summary]
+                                             [(get-else $ ?doc :local.doc/preview "") ?preview]]
+                                       wm-eid)
+                                  (mapv (fn [[doc-id name media-type summary preview relevance]]
+                                          {:doc-id doc-id
+                                           :name (empty->nil name)
+                                           :media-type (empty->nil media-type)
+                                           :summary (empty->nil summary)
+                                           :preview (empty->nil preview)
+                                           :matched-chunks []
+                                           :relevance (double (or relevance 0.0))}))
+                                  (sort-by :relevance >)
+                                  vec)]
           {:topics         (:wm/topics wm-entity)
            :autonomy-state (when-let [text (:wm/autonomy-state wm-entity)]
                              (try
                                (json/read-json text)
                                (catch Exception _
                                  nil)))
+           :slots          slots
+           :episode-refs   episode-refs
+           :local-doc-refs local-doc-refs
            :updated-at     (entity-updated-at* deps wm-entity)})))))
 
 (defn latest-session-episode

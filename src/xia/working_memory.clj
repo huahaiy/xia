@@ -5,17 +5,19 @@
    the entire memory system. Can pull in facts from months ago if relevant now.
    Tracks what the agent is 'thinking about.'
 
-   Lifecycle:
+  Lifecycle:
    1. Created on session start (warm start from previous session's topics)
    2. Updated each turn before the LLM call (retrieval pipeline)
-   3. Cleared on session end (topic summary feeds into episodic recording)
+   3. Debounced snapshots persist active-session state during long-running work
+   4. Cleared on session end (topic summary feeds into episodic recording)
 
-  Runtime: in-memory atom. Snapshot to DB only on session events."
+  Runtime: in-memory atom with debounced persistence for crash recovery."
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
+            [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.memory :as memory]))
@@ -30,13 +32,24 @@
 
 (def ^:dynamic *session-op-session-id* nil)
 (def ^:dynamic *session-op-thread* nil)
+(def ^:dynamic *suppress-snapshot-scheduling?* false)
 
 (defonce ^:private wm-atom (atom {}))
 (def ^:private session-op-lock-count 512)
 (defonce ^:private session-op-locks
   (vec (repeatedly session-op-lock-count #(Object.))))
 
-(declare get-wm warm-start!)
+(declare get-wm warm-start! snapshot! snapshot-interval-ms snapshot-debounce-ms)
+
+(def ^:private default-snapshot-interval-ms 30000)
+(def ^:private default-snapshot-debounce-ms 2000)
+
+(defn- current-time-ms []
+  (System/currentTimeMillis))
+
+(defn- sleep-ms!
+  [delay-ms]
+  (Thread/sleep (long delay-ms)))
 
 (defn- default-session-id []
   (when (= 1 (count @wm-atom))
@@ -85,9 +98,55 @@
       (when sid
         (let [states @wm-atom]
           (when-let [wm (get states sid)]
-            (let [updated (-> (f wm)
-                              (assoc :prompt-cache-version
-                                     (inc (long (or (:prompt-cache-version wm) 0)))))]
+            (let [now        (current-time-ms)
+                  schedule?  (atom false)
+                  updated    (cond-> (-> (f wm)
+                                         (assoc :prompt-cache-version
+                                                (inc (long (or (:prompt-cache-version wm) 0)))))
+                               (not *suppress-snapshot-scheduling?*)
+                               (-> (assoc :last-dirty-at-ms now)
+                                   ((fn [next-wm]
+                                      (if (:snapshot-task-scheduled? next-wm)
+                                        next-wm
+                                        (do
+                                          (reset! schedule? true)
+                                          (assoc next-wm :snapshot-task-scheduled? true)))))))]
+              (reset! wm-atom (assoc states sid updated))
+              (when @schedule?
+                (when-not (async/submit-background!
+                           "wm-snapshot"
+                           #(loop []
+                              (let [wm-state (get-wm sid)]
+                                (when wm-state
+                                  (let [dirty-at         (long (or (:last-dirty-at-ms wm-state) 0))
+                                        last-snapshot-at (long (or (:last-snapshot-at-ms wm-state) 0))
+                                        debounce-at      (+ dirty-at (snapshot-debounce-ms))
+                                        interval-at      (if (pos? last-snapshot-at)
+                                                           (+ last-snapshot-at (snapshot-interval-ms))
+                                                           Long/MAX_VALUE)
+                                        due-at           (long (min debounce-at interval-at))
+                                        now*             (current-time-ms)
+                                        delay-ms         (max 0 (- due-at now*))]
+                                    (if (or (zero? dirty-at) (zero? delay-ms))
+                                      (snapshot! sid)
+                                      (do
+                                        (sleep-ms! delay-ms)
+                                        (recur))))))))
+                  (run-session-op! sid
+                    (fn [sid*]
+                      (swap! wm-atom update sid*
+                             #(when %
+                                (assoc % :snapshot-task-scheduled? false)))))))
+              updated)))))))
+
+(defn- update-session-wm-bookkeeping!
+  [session-id f]
+  (run-session-op! session-id
+    (fn [sid]
+      (when sid
+        (let [states @wm-atom]
+          (when-let [wm (get states sid)]
+            (let [updated (f wm)]
               (reset! wm-atom (assoc states sid updated))
               updated)))))))
 
@@ -98,6 +157,16 @@
    :decay-factor          0.85
    :eviction-threshold    0.1
    :topic-update-interval 5})   ; update topic summary every N turns
+
+(defn- snapshot-interval-ms
+  []
+  (cfg/positive-long :wm/snapshot-interval-ms
+                     default-snapshot-interval-ms))
+
+(defn- snapshot-debounce-ms
+  []
+  (cfg/positive-long :wm/snapshot-debounce-ms
+                     default-snapshot-debounce-ms))
 
 (def ^:private fact-utility-batch-size 20)
 (def ^:private fact-utility-heuristic-utility 1.0)
@@ -1000,6 +1069,9 @@ Rules:
                 :topics          nil
                 :prev-topics     nil
                 :prompt-cache-version 0
+                :last-snapshot-at-ms 0
+                :last-dirty-at-ms nil
+                :snapshot-task-scheduled? false
                 :topic-shift-baseline nil
                 :pending-topic-shift nil
                 :autonomy-state  nil
@@ -1017,15 +1089,34 @@ Rules:
   (run-session-op! session-id
     (fn [sid]
       (when-let [snapshot (db/load-wm-snapshot sid)]
-        (update-session-wm! sid
-          (fn [wm]
-            (cond-> wm
-              (contains? snapshot :topics)
-              (assoc :topics (:topics snapshot))
+        (binding [*suppress-snapshot-scheduling?* true]
+          (update-session-wm! sid
+            (fn [wm]
+              (cond-> wm
+                (contains? snapshot :topics)
+                (assoc :topics (:topics snapshot))
 
-              (contains? snapshot :autonomy-state)
-              (assoc :autonomy-state (some-> (:autonomy-state snapshot)
-                                             autonomous/normalize-state)))))
+                (contains? snapshot :autonomy-state)
+                (assoc :autonomy-state (some-> (:autonomy-state snapshot)
+                                               autonomous/normalize-state))
+
+                (contains? snapshot :slots)
+                (assoc :slots (or (:slots snapshot) {}))
+
+                (contains? snapshot :episode-refs)
+                (assoc :episode-refs (vec (or (:episode-refs snapshot) [])))
+
+                (contains? snapshot :local-doc-refs)
+                (assoc :local-doc-refs (vec (or (:local-doc-refs snapshot) [])))
+
+                :always
+                (assoc :last-snapshot-at-ms (some-> (:updated-at snapshot)
+                                                    ^java.util.Date
+                                                    .getTime
+                                                    long
+                                                    (or 0))
+                       :last-dirty-at-ms nil
+                       :snapshot-task-scheduled? false)))))
         (get-wm sid)))))
 
 (defn ensure-wm!
@@ -1183,7 +1274,23 @@ Rules:
    (run-session-op! session-id
      (fn [sid]
        (when-let [wm (session-wm sid)]
+         (let [saved-at-ms (current-time-ms)]
          (try
            (db/save-wm-snapshot! wm)
+           (update-session-wm-bookkeeping! sid
+             #(assoc %
+                     :last-snapshot-at-ms saved-at-ms
+                     :last-dirty-at-ms nil
+                     :snapshot-task-scheduled? false))
            (catch Exception e
-             (log/warn "Failed to save WM snapshot:" (.getMessage e)))))))))
+             (update-session-wm-bookkeeping! sid
+               #(assoc % :snapshot-task-scheduled? false))
+             (log/warn "Failed to save WM snapshot:" (.getMessage e))))))))))
+
+(defn snapshot-all!
+  "Persist every currently live working-memory session to DB."
+  []
+  (let [session-ids (vec (keys @wm-atom))]
+    (doseq [session-id session-ids]
+      (snapshot! session-id))
+    (count session-ids)))

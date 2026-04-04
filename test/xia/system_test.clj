@@ -1,0 +1,32 @@
+(ns xia.system-test
+  (:require [clojure.test :refer [deftest is]]
+            [integrant.core :as ig]
+            [xia.system]
+            [xia.working-memory]))
+
+(deftest runtime-support-halt-snapshots-live-working-memory-before-other-shutdown-work
+  (let [calls (atom [])]
+    (with-redefs [xia.working-memory/snapshot-all! (fn []
+                                                     (swap! calls conj :snapshot-all)
+                                                     2)
+                  xia.agent/cancel-all-sessions! (fn [reason]
+                                                   (swap! calls conj [:cancel-all reason])
+                                                   0)
+                  xia.hippocampus/prepare-shutdown! (fn []
+                                                     (swap! calls conj :hippo-prepare)
+                                                     0)
+                  xia.llm/prepare-shutdown! (fn []
+                                              (swap! calls conj :llm-prepare)
+                                              0)
+                  xia.hippocampus/await-background-tasks! (fn []
+                                                            (swap! calls conj :hippo-await))
+                  xia.llm/await-background-tasks! (fn []
+                                                   (swap! calls conj :llm-await))]
+      (ig/halt-key! :xia/runtime-support nil))
+    (is (= [:snapshot-all
+            [:cancel-all "runtime stopping"]
+            :hippo-prepare
+            :llm-prepare
+            :hippo-await
+            :llm-await]
+           @calls))))
