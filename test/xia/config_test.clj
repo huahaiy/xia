@@ -37,3 +37,19 @@
         clojure.lang.ExceptionInfo
         #"not supported"
         (cfg/string-option :browser/remote-base-url nil))))
+
+(deftest keyword-readers-accept-literal-keyword-overlay-values
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "snapshot-config-keyword-rule"
+     :config-overrides {:browser/backend-default :remote}})
+  (is (= :remote
+         (cfg/keyword-option :browser/backend-default
+                             :auto
+                             #{:auto :remote :playwright}))))
+
+(deftest config-readers-fall-back-to-explicit-get-config-stubs-when-db-is-not-connected
+  (with-redefs [db/tenant-config-value (fn [_]
+                                         (throw (ex-info "Database not connected. Call (xia.db/connect!) first." {})))
+                db/get-config (constantly "true")]
+    (is (true? (cfg/boolean-option :messaging/slack-enabled? false)))))

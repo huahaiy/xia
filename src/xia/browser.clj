@@ -324,6 +324,17 @@
                       auto-backend-id
                       (conj (set supported-backend-ids) auto-backend-id)))
 
+(defn config-resolutions
+  []
+  {:backend-default
+   (cfg/keyword-option-resolution :browser/backend-default
+                                  auto-backend-id
+                                  (conj (set supported-backend-ids) auto-backend-id))
+   :remote
+   (remote/config-resolutions)
+   :playwright
+   (playwright/config-resolutions)})
+
 (defn- auto-backend-id*
   []
   (if (remote/configured?)

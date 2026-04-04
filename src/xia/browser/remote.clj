@@ -24,6 +24,18 @@
                not-empty
                boolean)))
 
+(defn config-resolutions
+  []
+  {:enabled
+   (cfg/boolean-option-resolution :browser/remote-enabled? false)
+   :base-url
+   (cfg/string-option-resolution :browser/remote-base-url nil)
+   :auth-token
+   (cfg/string-option-resolution :browser/remote-auth-token nil)
+   :timeout-ms
+   (cfg/positive-long-resolution :browser/remote-timeout-ms
+                                 default-request-timeout-ms)})
+
 (defn- enabled?
   []
   (cfg/boolean-option :browser/remote-enabled? false))

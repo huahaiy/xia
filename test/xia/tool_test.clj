@@ -1032,9 +1032,13 @@
   (tool/load-tool! :browser-bootstrap-runtime)
   (tool/load-tool! :browser-install-deps)
   (let [status (tool/execute-tool :browser-runtime-status {} {:channel :scheduler})
+        by-backend (into {} (map (juxt :backend identity) (:backends status)))
         session-id (random-uuid)]
-    (is (= #{:playwright}
-           (set (map :backend (:backends status)))))
+    (is (= #{:playwright :remote}
+           (set (keys by-backend))))
+    (is (contains? #{:available :missing-browser :running}
+                   (:status (get by-backend :playwright))))
+    (is (= :disabled (:status (get by-backend :remote))))
     (prompt/register-approval! :terminal (fn [_] true))
     (try
       (let [bootstrap (tool/execute-tool :browser-bootstrap-runtime {"backend" "playwright"}

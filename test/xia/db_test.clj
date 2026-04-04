@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.db :as db]
+            [xia.db-schema :as db-schema]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.test-helpers :as th]))
@@ -507,10 +508,11 @@
                                      #'xia.paths/managed-embed-dir
                                      (fn [_db-path]
                                        (str path "/embed-cache"))
-                                     #'datalevin.core/get-conn
+                     #'datalevin.core/get-conn
                                      (fn [_db-path _schema _opts]
                                        (swap! calls conj :get-conn)
                                        ::conn)
+                                     #'xia.db/ensure-schema-version! (fn [& _] nil)
                                      #'xia.crypto/configure! (fn [& _] nil)
                                      #'xia.db/init-embedding-provider! (fn [& _] nil)
                                      #'xia.db/init-llm-provider! (fn [& _] nil)
@@ -527,6 +529,7 @@
 (deftest connect-does-not-run-secret-migration-on-startup
   (let [called? (atom false)]
     (with-redefs-fn {#'datalevin.core/get-conn (fn [_db-path _schema _opts] ::conn)
+                     #'xia.db/ensure-schema-version! (fn [& _] nil)
                      #'xia.db/download-file! (fn [& _] nil)
                      #'xia.crypto/configure! (fn [& _] nil)
                      #'xia.db/init-embedding-provider! (fn [& _] nil)
@@ -548,6 +551,7 @@
     (with-redefs-fn {#'datalevin.core/get-conn (fn [_db-path _schema opts]
                                                  (reset! conn-opts opts)
                                                  ::conn)
+                     #'xia.db/ensure-schema-version! (fn [& _] nil)
                      #'xia.db/download-file! (fn [& _] nil)
                      #'xia.crypto/configure! (fn [& _] nil)
                      #'xia.db/init-embedding-provider! (fn [& _] nil)
@@ -561,6 +565,74 @@
          (finally
            (db/close!))))
     (is (false? (:wal? @conn-opts)))))
+
+(deftest connect-records-current-schema-version-on-fresh-db
+  (is (= db/current-schema-version
+         (db/schema-version)))
+  (is (= (db-schema/schema-resource-path db/current-schema-version)
+         (db/schema-resource-path)))
+  (is (string? (db/schema-applied-at)))
+  (is (= (mapv (juxt :from-version :to-version)
+               (db-schema/migration-path 0))
+         (mapv (juxt :from-version :to-version)
+               (db/schema-migration-history)))))
+
+(deftest connect-migrates-schema-version-0-forward
+  (let [path         (str (java.nio.file.Files/createTempDirectory
+                            "xia-old-schema"
+                            (make-array java.nio.file.attribute.FileAttribute 0)))
+        connect-opts (th/test-connect-options
+                       {:passphrase-provider (constantly "xia-test-passphrase")})]
+    (db/close!)
+    (db/connect! path connect-opts)
+    (db/transact! [{:xia.meta/key :db/schema-version
+                    :xia.meta/value "0"
+                    :xia.meta/updated-at (java.util.Date.)}])
+    (db/close!)
+    (db/connect! path connect-opts)
+    (is (= db/current-schema-version
+           (db/schema-version)))
+    (is (= (db-schema/schema-resource-path db/current-schema-version)
+           (db/schema-resource-path)))
+    (is (= (mapv (juxt :from-version :to-version)
+                 (db-schema/migration-path 0))
+           (->> (db/schema-migration-history)
+                (take-last db/current-schema-version)
+                (mapv (juxt :from-version :to-version)))))
+    (db/close!)))
+
+(deftest db-schema-registry-loads-future-resource-files
+  (is (= [1 2 3]
+         (mapv :to-version (db-schema/migration-path 0))))
+  (doseq [version (range 1 (inc db/current-schema-version))]
+    (is (map? (db-schema/load-schema version))
+        (str "schema resource should load as a schema map for v" version))
+    (is (seq (db-schema/load-schema version))
+        (str "schema resource should load for v" version))))
+
+(deftest connect-rejects-newer-db-schema-versions
+  (let [path         (str (java.nio.file.Files/createTempDirectory
+                            "xia-new-schema"
+                            (make-array java.nio.file.attribute.FileAttribute 0)))
+        connect-opts (th/test-connect-options
+                       {:passphrase-provider (constantly "xia-test-passphrase")})]
+    (db/close!)
+    (db/connect! path connect-opts)
+    (db/transact! [{:xia.meta/key :db/schema-version
+                    :xia.meta/value "999"
+                    :xia.meta/updated-at (java.util.Date.)}])
+    (db/close!)
+    (let [error (try
+                  (db/connect! path connect-opts)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (= :db/schema-version-too-new
+             (:reason (ex-data error))))
+      (is (= 999
+             (:schema-version (ex-data error))))
+      (is (= db/current-schema-version
+             (:current-schema-version (ex-data error)))))))
 
 (deftest seed-initial-settings-from-db-copies-template-config
   (let [target-path (db/current-db-path)

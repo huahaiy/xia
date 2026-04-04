@@ -217,11 +217,15 @@
 
 (deftest browser-runtime-functions-are-exposed-through-sci
   (let [status (sci-env/eval-string "(xia.browser/runtime-status)")
+        by-backend (into {} (map (juxt :backend identity) (:backends status)))
         bootstrap (sci-env/eval-string "(xia.browser/bootstrap-runtime! :backend :playwright)")
         deps (sci-env/eval-string "(xia.browser/install-browser-deps! :backend :playwright)")]
     (is (= :playwright (:selected-auto-backend status)))
-    (is (= #{:playwright}
-           (set (map :backend (:backends status)))))
+    (is (= #{:playwright :remote}
+           (set (keys by-backend))))
+    (is (contains? #{:available :missing-browser :running}
+                   (:status (get by-backend :playwright))))
+    (is (= :disabled (:status (get by-backend :remote))))
     (is (= :playwright (:backend bootstrap)))
     (is (= :running (:status bootstrap)))
     (is (= :playwright (:backend deps)))

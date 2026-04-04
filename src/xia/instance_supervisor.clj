@@ -98,7 +98,24 @@
   {:instance_management_configured (instance-management-configured?)
    :instance_management_enabled    (instance-management-enabled?)})
 
-(declare shutdown!)
+(defn config-resolutions
+  []
+  {:enabled
+   (cfg/boolean-option-resolution instance-management-config-key
+                                  (default-controller-instance?))})
+
+(declare shutdown! parent-instance-id)
+
+(defn admin-body
+  []
+  (let [capability @capability-state]
+    {:configured (instance-management-configured?)
+     :enabled (instance-management-enabled?)
+     :host_capability_enabled (boolean (:enabled? capability))
+     :command (:command capability)
+     :parent_instance_id (parent-instance-id)
+     :sources {:enabled (some-> (get-in (config-resolutions) [:enabled :source]) name)}
+     :config_resolution {:enabled (get (config-resolutions) :enabled)}}))
 
 (defn set-instance-management-enabled!
   [enabled?]

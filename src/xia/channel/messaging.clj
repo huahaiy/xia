@@ -8,6 +8,7 @@
             [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.audit :as audit]
+            [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http-client]
             [xia.prompt :as prompt]
@@ -53,67 +54,77 @@
   [value]
   (some-> value str str/trim not-empty))
 
-(defn- get-config-safe
-  [config-key]
-  (try
-    (db/get-config config-key)
-    (catch clojure.lang.ExceptionInfo e
-      (if (str/includes? (or (ex-message e) "") "Database not connected")
-        nil
-        (throw e)))))
+(defn- config-resolution->admin
+  ([resolution]
+   (config-resolution->admin resolution identity))
+  ([resolution transform]
+   (let [transform* (or transform identity)]
+     (cond-> {:source (some-> (:source resolution) name)
+              :effective_value (transform* (:value resolution))
+              :default_value (transform* (:default-value resolution))}
+       (:tenant-present? resolution)
+       (assoc :tenant_value (transform* (:tenant-value resolution)))
 
-(defn- boolean-config
-  [config-key default]
-  (let [value (get-config-safe config-key)]
-    (cond
-      (nil? value) default
-      (boolean? value) value
-      :else (contains? #{"true" "1" "yes" "on"}
-                       (some-> value str str/trim str/lower-case)))))
+       (:overlay-present? resolution)
+       (assoc :overlay {:mode (some-> (:overlay-mode resolution) name)
+                        :value (transform* (:overlay-value resolution))})))))
 
-(defn- positive-long-config
-  [config-key default]
-  (let [value (get-config-safe config-key)]
-    (try
-      (let [parsed (some-> value str Long/parseLong)]
-        (if (and parsed (pos? parsed))
-          parsed
-          default))
-      (catch Exception _
-        default))))
+(defn- secret-resolution->admin
+  [resolution]
+  (config-resolution->admin resolution #(boolean (nonblank-str %))))
+
+(defn config-resolutions
+  []
+  {:slack-enabled
+   (cfg/boolean-option-resolution slack-enabled-config-key false)
+   :slack-bot-token
+   (cfg/string-option-resolution slack-bot-token-config-key nil)
+   :slack-signing-secret
+   (cfg/string-option-resolution slack-signing-secret-config-key nil)
+   :telegram-enabled
+   (cfg/boolean-option-resolution telegram-enabled-config-key false)
+   :telegram-bot-token
+   (cfg/string-option-resolution telegram-bot-token-config-key nil)
+   :telegram-webhook-secret
+   (cfg/string-option-resolution telegram-webhook-secret-config-key nil)
+   :imessage-enabled
+   (cfg/boolean-option-resolution imessage-enabled-config-key false)
+   :imessage-poll-interval-ms
+   (cfg/positive-long-resolution imessage-poll-interval-config-key
+                                 default-imessage-poll-interval-ms)})
 
 (defn slack-enabled?
   []
-  (boolean-config slack-enabled-config-key false))
+  (cfg/boolean-option slack-enabled-config-key false))
 
 (defn telegram-enabled?
   []
-  (boolean-config telegram-enabled-config-key false))
+  (cfg/boolean-option telegram-enabled-config-key false))
 
 (defn imessage-enabled?
   []
-  (boolean-config imessage-enabled-config-key false))
+  (cfg/boolean-option imessage-enabled-config-key false))
 
 (defn- imessage-poll-interval-ms
   []
-  (positive-long-config imessage-poll-interval-config-key
-                        default-imessage-poll-interval-ms))
+  (cfg/positive-long imessage-poll-interval-config-key
+                     default-imessage-poll-interval-ms))
 
 (defn- slack-bot-token
   []
-  (nonblank-str (get-config-safe slack-bot-token-config-key)))
+  (nonblank-str (cfg/string-option slack-bot-token-config-key nil)))
 
 (defn- slack-signing-secret
   []
-  (nonblank-str (get-config-safe slack-signing-secret-config-key)))
+  (nonblank-str (cfg/string-option slack-signing-secret-config-key nil)))
 
 (defn- telegram-bot-token
   []
-  (nonblank-str (get-config-safe telegram-bot-token-config-key)))
+  (nonblank-str (cfg/string-option telegram-bot-token-config-key nil)))
 
 (defn- telegram-webhook-secret
   []
-  (nonblank-str (get-config-safe telegram-webhook-secret-config-key)))
+  (nonblank-str (cfg/string-option telegram-webhook-secret-config-key nil)))
 
 (defn- mac-os?
   []
@@ -123,16 +134,33 @@
 
 (defn admin-body
   []
-  {:slack {:enabled (slack-enabled?)
-           :bot_token_configured (boolean (slack-bot-token))
-           :signing_secret_configured (boolean (slack-signing-secret))}
-   :telegram {:enabled (telegram-enabled?)
-              :bot_token_configured (boolean (telegram-bot-token))
-              :webhook_secret_configured (boolean (telegram-webhook-secret))}
-   :imessage {:enabled (imessage-enabled?)
-              :available (boolean (and (mac-os?)
-                                       (.exists (java.io.File. imessage-chat-db-path))))
-              :poll_interval_ms (imessage-poll-interval-ms)}})
+  (let [resolutions (config-resolutions)]
+    {:slack {:enabled (slack-enabled?)
+             :bot_token_configured (boolean (slack-bot-token))
+             :signing_secret_configured (boolean (slack-signing-secret))
+             :sources {:enabled (some-> (get-in resolutions [:slack-enabled :source]) name)
+                       :bot_token (some-> (get-in resolutions [:slack-bot-token :source]) name)
+                       :signing_secret (some-> (get-in resolutions [:slack-signing-secret :source]) name)}
+             :config_resolution {:enabled (config-resolution->admin (:slack-enabled resolutions))
+                                 :bot_token (secret-resolution->admin (:slack-bot-token resolutions))
+                                 :signing_secret (secret-resolution->admin (:slack-signing-secret resolutions))}}
+     :telegram {:enabled (telegram-enabled?)
+                :bot_token_configured (boolean (telegram-bot-token))
+                :webhook_secret_configured (boolean (telegram-webhook-secret))
+                :sources {:enabled (some-> (get-in resolutions [:telegram-enabled :source]) name)
+                          :bot_token (some-> (get-in resolutions [:telegram-bot-token :source]) name)
+                          :webhook_secret (some-> (get-in resolutions [:telegram-webhook-secret :source]) name)}
+                :config_resolution {:enabled (config-resolution->admin (:telegram-enabled resolutions))
+                                    :bot_token (secret-resolution->admin (:telegram-bot-token resolutions))
+                                    :webhook_secret (secret-resolution->admin (:telegram-webhook-secret resolutions))}}
+     :imessage {:enabled (imessage-enabled?)
+                :available (boolean (and (mac-os?)
+                                         (.exists (java.io.File. imessage-chat-db-path))))
+                :poll_interval_ms (imessage-poll-interval-ms)
+                :sources {:enabled (some-> (get-in resolutions [:imessage-enabled :source]) name)
+                          :poll_interval_ms (some-> (get-in resolutions [:imessage-poll-interval-ms :source]) name)}
+                :config_resolution {:enabled (config-resolution->admin (:imessage-enabled resolutions))
+                                    :poll_interval_ms (config-resolution->admin (:imessage-poll-interval-ms resolutions))}}}))
 
 (defn save-admin-config!
   [{:keys [slack telegram imessage]}]

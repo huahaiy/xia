@@ -30,7 +30,18 @@
     (is (= :platform-openai (runtime-overlay/provider-default-id)))
     (is (= "OpenAI (Platform)"
            (get-in (runtime-overlay/entity :provider :platform-openai)
-                   [:llm.provider/name])))))
+                   [:llm.provider/name])))
+    (is (= 1 (runtime-overlay/overlay-version)))
+    (is (= 1 (get (runtime-overlay/admin-summary) :source_overlay_version)))))
+
+(deftest activate-migrates-versionless-legacy-overlay
+  (runtime-overlay/activate!
+    {:snapshot/id "snapshot-legacy"
+     :config-overrides {:browser/backend-default :remote}})
+  (is (= "snapshot-legacy" (runtime-overlay/snapshot-id)))
+  (is (= 1 (runtime-overlay/overlay-version)))
+  (is (= "remote" (runtime-overlay/config-db-value :browser/backend-default)))
+  (is (= 0 (get (runtime-overlay/admin-summary) :source_overlay_version))))
 
 (deftest load-file-rejects-unsupported-overlay-version
   (let [overlay-file (doto (io/file (str (java.nio.file.Files/createTempFile

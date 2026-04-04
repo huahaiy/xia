@@ -66,6 +66,19 @@
 (defn- configured-channel []
   (normalize-channel (cfg/string-option :browser/playwright-channel nil)))
 
+(defn config-resolutions
+  []
+  {:enabled
+   (cfg/boolean-option-resolution :browser/playwright-enabled? true)
+   :headless
+   (cfg/boolean-option-resolution :browser/playwright-headless? true)
+   :auto-install
+   (cfg/boolean-option-resolution :browser/playwright-auto-install? true)
+   :browsers-path
+   (cfg/string-option-resolution :browser/playwright-browsers-path nil)
+   :channel
+   (cfg/string-option-resolution :browser/playwright-channel nil)})
+
 (defn- playwright-env
   []
   (cond-> {}

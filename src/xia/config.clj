@@ -12,6 +12,9 @@
          boolean-option-resolution
          string-option-resolution)
 
+(def ^:private default-db-get-config
+  db/get-config)
+
 (defn- unsupported-merge-mode!
   [config-key merge-mode]
   (throw (ex-info "Runtime overlay merge mode is not supported for this config reader."
@@ -80,7 +83,9 @@
     (db/tenant-config-value config-key)
     (catch clojure.lang.ExceptionInfo ex
       (if (re-find #"Database not connected" (.getMessage ex))
-        (db/get-config config-key)
+        (if (not= (var-get #'db/get-config) default-db-get-config)
+          (db/get-config config-key)
+          nil)
         (throw ex)))))
 
 (defn- overlay-merge-mode
@@ -222,7 +227,10 @@
   (resolve-replace-option config-key
                           default-value
                           (fn [raw]
-                            (let [parsed (some-> raw str keyword)]
+                            (let [parsed (cond
+                                           (keyword? raw) raw
+                                           (string? raw) (keyword raw)
+                                           :else (some-> raw str keyword))]
                               (when (contains? allowed-values parsed)
                                 parsed)))))
 

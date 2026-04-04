@@ -11,7 +11,7 @@
             [xia.sensitive :as sensitive]
             [taoensso.timbre :as log]))
 
-(def ^:private supported-overlay-version 1)
+(def ^:private current-overlay-version 1)
 
 (def ^:private supported-config-merge-modes
   #{:replace :cap :floor})
@@ -25,6 +25,10 @@
 (defonce ^:private overlay-atom (atom nil))
 
 (declare clear!)
+
+(defn- input-overlay-version
+  [overlay]
+  (or (:overlay/version overlay) 0))
 
 (defn- nonblank-string?
   [value]
@@ -108,14 +112,47 @@
             [kind identity]))
         overlay-kinds))
 
+(defn- migrate-v0->v1
+  [overlay]
+  (assoc overlay :overlay/version current-overlay-version))
+
+(def ^:private overlay-migrations
+  {0 migrate-v0->v1})
+
+(defn- migrate-overlay
+  [overlay]
+  (loop [overlay* overlay
+         version  (input-overlay-version overlay)]
+    (cond
+      (= version current-overlay-version)
+      overlay*
+
+      (> version current-overlay-version)
+      (throw (ex-info "Unsupported runtime overlay version."
+                      {:supported-version current-overlay-version
+                       :overlay-version version}))
+
+      :else
+      (if-let [step (get overlay-migrations version)]
+        (let [next-overlay (step overlay*)
+              next-version (input-overlay-version next-overlay)]
+          (when (<= next-version version)
+            (throw (ex-info "Runtime overlay migration did not advance the version."
+                            {:from-version version
+                             :to-version next-version})))
+          (recur next-overlay next-version))
+        (throw (ex-info "Unsupported runtime overlay version."
+                        {:supported-version current-overlay-version
+                         :overlay-version version}))))))
+
 (defn- validate-overlay!
   [overlay]
   (when-not (map? overlay)
     (throw (ex-info "Runtime overlay must be an EDN map."
                     {:overlay overlay})))
-  (when-not (= supported-overlay-version (:overlay/version overlay))
+  (when-not (= current-overlay-version (:overlay/version overlay))
     (throw (ex-info "Unsupported runtime overlay version."
-                    {:supported-version supported-overlay-version
+                    {:supported-version current-overlay-version
                      :overlay-version (:overlay/version overlay)})))
   (when-not (nonblank-string? (:snapshot/id overlay))
     (throw (ex-info "Runtime overlay requires a non-empty :snapshot/id."
@@ -174,7 +211,7 @@
   overlay)
 
 (defn- normalize-overlay
-  [overlay]
+  [overlay source-version]
   (let [provider-default-ids (->> (:tx-data overlay)
                                   (keep (fn [entity]
                                           (when (and (contains? entity :llm.provider/default?)
@@ -196,11 +233,12 @@
                              (if (some #{entity-id} ids*)
                                ids*
                                (conj (vec ids*) entity-id))))))))
-      {:overlay/version supported-overlay-version
+      {:overlay/version current-overlay-version
+       :source-overlay/version source-version
        :snapshot/id (:snapshot/id overlay)
        :config-overrides (into {}
                                (map (fn [[config-key value]]
-                                      [config-key (normalize-config-entry value)]))
+                                     [config-key (normalize-config-entry value)]))
                                (or (:config-overrides overlay) {}))
        :forced-keys (or (:forced-keys overlay) #{})
        :tx-data (or (:tx-data overlay) [])
@@ -209,9 +247,11 @@
 
 (defn activate!
   [overlay]
-  (let [normalized (-> overlay
-                       validate-overlay!
-                       normalize-overlay)]
+  (let [source-version (input-overlay-version overlay)
+        normalized     (-> overlay
+                           migrate-overlay
+                           validate-overlay!
+                           (normalize-overlay source-version))]
     (reset! overlay-atom normalized)
     (log/info "Activated runtime overlay" (:snapshot/id normalized))
     normalized))
@@ -355,6 +395,7 @@
     {:active               (boolean overlay)
      :snapshot_id          (:snapshot/id overlay)
      :overlay_version      (:overlay/version overlay)
+     :source_overlay_version (:source-overlay/version overlay)
      :provider_default_id  (some-> (:provider-default-id overlay) name)
      :config_override_keys (->> (keys (:config-overrides overlay))
                                 (map key->overlay-name)

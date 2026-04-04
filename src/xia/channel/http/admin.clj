@@ -4,10 +4,12 @@
             [charred.api :as json]
             [xia.autonomous :as autonomous]
             [xia.backup :as backup]
+            [xia.browser :as browser]
             [xia.channel.messaging :as messaging]
             [xia.config :as config]
             [xia.context :as context]
             [xia.db :as db]
+            [xia.db-schema :as db-schema]
             [xia.hippocampus :as hippo]
             [xia.identity :as identity]
             [xia.instance-supervisor :as instance-supervisor]
@@ -59,6 +61,14 @@
 (defn- truncate-text*
   [deps value limit]
   ((:truncate-text deps) value limit))
+
+(defn- db-migration->admin-body
+  [{:keys [from-version to-version description applied-at]}]
+  (cond-> {:from_version from-version
+           :to_version to-version
+           :description description}
+    applied-at
+    (assoc :applied_at applied-at)))
 
 (defn- html-response
   [body]
@@ -427,6 +437,10 @@
        (assoc :overlay {:mode (some-> (:overlay-mode resolution) name)
                         :value (transform* (:overlay-value resolution))})))))
 
+(defn- secret-resolution->admin-body
+  [resolution]
+  (config-resolution->admin-body resolution #(boolean (nonblank-str %))))
+
 (defn- provider->admin-body
   [provider]
   (let [provider-id       (some-> (:llm.provider/id provider) name)
@@ -649,6 +663,52 @@
      {:backend (config-resolution->admin-body (:backend resolutions) admin-config-value)
       :brave_api_key (config-resolution->admin-body (:brave-api-key resolutions))
       :searxng_url (config-resolution->admin-body (:searxng-url resolutions))}}))
+
+(defn- browser-runtime->admin-body
+  []
+  (let [runtime-status (browser/browser-runtime-status)
+        resolutions    (browser/config-resolutions)]
+    {:configured_default_backend (some-> (:configured-default-backend runtime-status) name)
+     :selected_auto_backend      (some-> (:selected-auto-backend runtime-status) name)
+     :backends                   (mapv (fn [backend-status]
+                                         (-> backend-status
+                                             (update :backend #(some-> % name))
+                                             (update :status #(some-> % name))))
+                                       (:backends runtime-status))
+     :sources                    {:configured_default_backend (some-> (get-in resolutions [:backend-default :source]) name)
+                                  :remote_enabled (some-> (get-in resolutions [:remote :enabled :source]) name)
+                                  :remote_base_url (some-> (get-in resolutions [:remote :base-url :source]) name)
+                                  :remote_auth_token (some-> (get-in resolutions [:remote :auth-token :source]) name)
+                                  :remote_timeout_ms (some-> (get-in resolutions [:remote :timeout-ms :source]) name)
+                                  :playwright_enabled (some-> (get-in resolutions [:playwright :enabled :source]) name)
+                                  :playwright_headless (some-> (get-in resolutions [:playwright :headless :source]) name)
+                                  :playwright_auto_install (some-> (get-in resolutions [:playwright :auto-install :source]) name)
+                                  :playwright_browsers_path (some-> (get-in resolutions [:playwright :browsers-path :source]) name)
+                                  :playwright_channel (some-> (get-in resolutions [:playwright :channel :source]) name)}
+     :config_resolution          {:configured_default_backend (config-resolution->admin-body
+                                                                (:backend-default resolutions)
+                                                                admin-config-value)
+                                  :remote {:enabled (config-resolution->admin-body (get-in resolutions [:remote :enabled]))
+                                           :base_url (config-resolution->admin-body (get-in resolutions [:remote :base-url]))
+                                           :auth_token (secret-resolution->admin-body (get-in resolutions [:remote :auth-token]))
+                                           :timeout_ms (config-resolution->admin-body (get-in resolutions [:remote :timeout-ms]))}
+                                  :playwright {:enabled (config-resolution->admin-body (get-in resolutions [:playwright :enabled]))
+                                               :headless (config-resolution->admin-body (get-in resolutions [:playwright :headless]))
+                                               :auto_install (config-resolution->admin-body (get-in resolutions [:playwright :auto-install]))
+                                               :browsers_path (config-resolution->admin-body (get-in resolutions [:playwright :browsers-path]))
+                                               :channel (config-resolution->admin-body (get-in resolutions [:playwright :channel]))}}}))
+
+(defn- instance-management->admin-body
+  []
+  (let [state        (instance-supervisor/admin-body)
+        resolutions  (instance-supervisor/config-resolutions)]
+    {:configured              (:configured state)
+     :enabled                 (:enabled state)
+     :host_capability_enabled (:host_capability_enabled state)
+     :command                 (:command state)
+     :parent_instance_id      (:parent_instance_id state)
+     :sources                 {:enabled (some-> (get-in resolutions [:enabled :source]) name)}
+     :config_resolution       {:enabled (config-resolution->admin-body (:enabled resolutions))}}))
 
 (defn- save-config-override!
   [config-key value]
@@ -1020,7 +1080,18 @@
        :instance {:id (or (db/current-instance-id)
                           paths/default-instance-id)
                   :parent_instance_id (instance-supervisor/parent-instance-id)}
+       :db_schema {:schema_version (db/schema-version)
+                   :supported_schema_version db/current-schema-version
+                   :schema_resource_path (db/schema-resource-path)
+                   :supported_schema_resource_path (db-schema/schema-resource-path db/current-schema-version)
+                   :schema_applied_at (db/schema-applied-at)
+                   :migration_history (mapv db-migration->admin-body
+                                            (or (db/schema-migration-history) []))
+                   :available_migrations (mapv db-migration->admin-body
+                                               (db-schema/migration-registry-summary))}
        :capabilities (instance-supervisor/capabilities)
+       :instance_management (instance-management->admin-body)
+       :browser_runtime (browser-runtime->admin-body)
        :runtime_overlay (runtime-overlay/admin-summary)
        :managed_instances (mapv #(managed-instance->admin-body deps %)
                                 (instance-supervisor/list-managed-instances))
