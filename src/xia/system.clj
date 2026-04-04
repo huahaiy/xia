@@ -4,6 +4,7 @@
             [integrant.core :as ig]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.browser :as browser]
             [xia.channel.messaging :as messaging]
             [xia.crypto :as crypto]
             [xia.db :as db]
@@ -80,6 +81,7 @@
   [_ _]
   (wm/snapshot-all!)
   (agent/cancel-all-sessions! "runtime stopping")
+  (browser/release-all-sessions!)
   (hippo/prepare-shutdown!)
   (llm/prepare-shutdown!)
   (hippo/await-background-tasks!)

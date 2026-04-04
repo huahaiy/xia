@@ -25,7 +25,9 @@
           (query-elements* [_ _session-id _opts] nil)
           (screenshot* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
+          (release-session* [_ _session-id] nil)
           (close-session* [_ _session-id] nil)
+          (release-all-sessions!* [_] nil)
           (close-all-sessions!* [_] nil)
           (list-sessions* [_] []))]
     (with-redefs [xia.browser/resolve-open-backend-id (constantly :playwright)

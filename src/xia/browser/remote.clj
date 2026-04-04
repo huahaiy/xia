@@ -15,6 +15,8 @@
 (def ^:private backend-id :remote)
 (def ^:private default-request-timeout-ms 120000)
 
+(declare missing-session-error? session-path)
+
 (defn configured?
   []
   (and (cfg/boolean-option :browser/remote-enabled? false)
@@ -183,6 +185,11 @@
     ((:write-snapshot! ops) session-id snapshot)
     snapshot))
 
+(defn- payload-has-session-state?
+  [payload]
+  (or (some? (lookup payload "session" :session))
+      (some? (lookup payload "browser_state" :browser_state "storage_state" :storage_state))))
+
 (defn- result-from-payload
   [session-id payload]
   (let [result (or (lookup payload "result" :result) payload)]
@@ -291,6 +298,16 @@
                               {:js (lookup snapshot "js_enabled" :js_enabled)
                                :storage-state (lookup snapshot "browser_state" :browser_state)})))))
 
+(defn- export-session!
+  [ops session-id]
+  (try
+    (let [payload (request! :post (session-path session-id "/export") nil)]
+      (persist-snapshot! ops session-id payload {:default-url nil
+                                                 :default-js true}))
+    (catch clojure.lang.ExceptionInfo e
+      (when-not (missing-session-error? e)
+        (throw e)))))
+
 (defn- missing-session-error?
   [e]
   (or (= 404 (:status (ex-data e)))
@@ -320,8 +337,9 @@
     session-id
     (fn []
       (let [payload (request! method (session-path session-id suffix) body)]
-        (persist-snapshot! ops session-id payload {:default-url nil
-                                                   :default-js true})
+        (when (payload-has-session-state? payload)
+          (persist-snapshot! ops session-id payload {:default-url nil
+                                                     :default-js true}))
         (result-from-payload session-id payload)))))
 
 (defn- best-effort-close!
@@ -466,10 +484,24 @@
     (invoke-session-action ops session-id :post "/screenshot" (screenshot-body opts)))
   (wait-for-page* [_ session-id opts]
     (invoke-session-action ops session-id :post "/wait" (wait-body opts)))
+  (release-session* [_ session-id]
+    (export-session! ops session-id)
+    (best-effort-close! session-id)
+    {:status "released"
+     :session-id session-id
+     :resumable? true})
   (close-session* [_ session-id]
     (best-effort-close! session-id)
     ((:delete-snapshot! ops) session-id)
     {:status "closed" :session-id session-id})
+  (release-all-sessions!* [_]
+    (doseq [[session-id _snapshot] (backend-snapshots ops)]
+      (try
+        (export-session! ops session-id)
+        (finally
+          (best-effort-close! session-id))))
+    {:backend backend-id
+     :status "released"})
   (close-all-sessions!* [_]
     (doseq [[session-id _snapshot] (backend-snapshots ops)]
       (best-effort-close! session-id)

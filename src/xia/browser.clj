@@ -525,6 +525,17 @@
       (browser.backend/close-session* (backend-by-id (session-backend-id session-id))
                                       session-id))))
 
+(defn release-session
+  "Release a live browser session while preserving resumable snapshot state.
+   Unlike close-session, this keeps the local snapshot so Xia can restore the
+   session later."
+  [session-id]
+  (let [snapshot-backend (some-> (read-session-snapshot session-id) snapshot-backend-id)]
+    (if (= legacy-htmlunit-backend-id snapshot-backend)
+      {:status "released" :session-id session-id :resumable? true}
+      (browser.backend/release-session* (backend-by-id (session-backend-id session-id))
+                                        session-id))))
+
 (defn close-all-sessions!
   "Close all browser sessions and remove any saved resume snapshots.
    Useful for test cleanup."
@@ -534,6 +545,17 @@
   (doseq [[session-id snapshot] (all-session-snapshots)]
     (when (= legacy-htmlunit-backend-id (snapshot-backend-id snapshot))
       (delete-session-snapshot! session-id))))
+
+(defn release-all-sessions!
+  "Release all browser sessions while preserving resumable snapshots."
+  []
+  (doseq [backend (vals @registered-backends)]
+    (try
+      (browser.backend/release-all-sessions!* backend)
+      (catch Exception e
+        (log/warn e "Failed to release browser sessions for backend"
+                  (browser.backend/backend-id backend)))))
+  nil)
 
 (defn list-sessions
   "List browser sessions, including resumable sessions restored from snapshots."

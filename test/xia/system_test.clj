@@ -12,6 +12,9 @@
                   xia.agent/cancel-all-sessions! (fn [reason]
                                                    (swap! calls conj [:cancel-all reason])
                                                    0)
+                  xia.browser/release-all-sessions! (fn []
+                                                     (swap! calls conj :browser-release-all)
+                                                     nil)
                   xia.hippocampus/prepare-shutdown! (fn []
                                                      (swap! calls conj :hippo-prepare)
                                                      0)
@@ -25,6 +28,7 @@
       (ig/halt-key! :xia/runtime-support nil))
     (is (= [:snapshot-all
             [:cancel-all "runtime stopping"]
+            :browser-release-all
             :hippo-prepare
             :llm-prepare
             :hippo-await

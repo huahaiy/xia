@@ -1232,12 +1232,30 @@
                        :matched false
                        :timed_out true))
               (recur)))))))
+  (release-session* [_ session-id]
+    (when-let [sess (.get sessions session-id)]
+      (persist-session! ops session-id)
+      (close-live-session! session-id))
+    (when (zero? (.size sessions))
+      (stop-runtime!))
+    {:status "released"
+     :session-id session-id
+     :resumable? true})
   (close-session* [_ session-id]
     (close-live-session! session-id)
     ((:delete-snapshot! ops) session-id)
     (when (zero? (.size sessions))
       (stop-runtime!))
     {:status "closed" :session-id session-id})
+  (release-all-sessions!* [_]
+    (doseq [[session-id _snapshot] (backend-snapshots ops)]
+      (when-let [sess (.get sessions session-id)]
+        (persist-session! ops session-id)
+        (close-live-session! session-id)))
+    (when (zero? (.size sessions))
+      (stop-runtime!))
+    {:backend backend-id
+     :status "released"})
   (close-all-sessions!* [_]
     (doseq [[session-id sess] sessions]
       (close-session-value! sess)

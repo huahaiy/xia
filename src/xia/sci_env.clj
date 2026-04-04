@@ -184,6 +184,7 @@
    'query-elements    browser/query-elements
    'screenshot        browser/screenshot
    'wait-for-page     browser/wait-for-page
+   'release-session   browser/release-session
    'close-session     browser/close-session
    'list-sessions     browser/list-sessions
    'runtime-status    browser/browser-runtime-status

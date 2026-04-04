@@ -485,7 +485,9 @@
           (query-elements* [_ _session-id _opts] nil)
           (screenshot* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
+          (release-session* [_ _session-id] nil)
           (close-session* [_ _session-id] nil)
+          (release-all-sessions!* [_] nil)
           (close-all-sessions!* [_] nil)
           (list-sessions* [_] []))]
     (with-redefs [xia.browser/read-session-snapshot (fn [_] snapshot)
@@ -665,7 +667,9 @@
           (query-elements* [_ _session-id _opts] nil)
           (screenshot* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
+          (release-session* [_ _session-id] nil)
           (close-session* [_ _session-id] nil)
+          (release-all-sessions!* [_] nil)
           (close-all-sessions!* [_] nil)
           (list-sessions* [_] []))]
     (with-redefs-fn {(ns-resolve 'xia.browser 'resolve-open-backend-id) (constantly :playwright)
@@ -694,7 +698,9 @@
           (query-elements* [_ _session-id _opts] nil)
           (screenshot* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
+          (release-session* [_ _session-id] nil)
           (close-session* [_ _session-id] nil)
+          (release-all-sessions!* [_] nil)
           (close-all-sessions!* [_] nil)
           (list-sessions* [_] []))]
     (with-redefs-fn {(ns-resolve 'xia.browser 'backend-by-id) (fn [_] backend)
@@ -724,7 +730,9 @@
           (read-page* [_ _session-id] nil)
           (query-elements* [_ _session-id _opts] nil)
           (wait-for-page* [_ _session-id _opts] nil)
+          (release-session* [_ _session-id] nil)
           (close-session* [_ _session-id] nil)
+          (release-all-sessions!* [_] nil)
           (close-all-sessions!* [_] nil)
           (list-sessions* [_] []))]
     (with-redefs-fn {(ns-resolve 'xia.browser 'resolve-open-backend-id) (constantly :playwright)
@@ -970,6 +978,126 @@
                  (:url (first @requests))))
           (finally
             (browser/close-session (:session-id result))))))))
+
+(deftest remote-actions-do-not-require-inline-session-state-on-every-response
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (let [{:keys [backend snapshots]} (test-remote-backend)
+        requests (atom [])
+        session-id* (atom nil)]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj [(:method req) (:url req)])
+                    (let [url (:url req)
+                          current-session-id @session-id*]
+                      (cond
+                        (= [(:method req) url]
+                           [:post "http://browser-pool.internal/v1/sessions"])
+                        (let [payload (json/read-json (:body req))
+                              session-id (get payload "session_id")]
+                          (reset! session-id* session-id)
+                          {:status 200
+                           :headers {"content-type" "application/json"}
+                           :body (json/write-json-str
+                                  {"session" {"session_id" session-id
+                                              "current_url" "https://example.com"
+                                              "browser_state" "{\"cookies\":[{\"name\":\"sid\"}]}"
+                                              "created_at_ms" 100
+                                              "updated_at_ms" 120
+                                              "last_access_ms" 120
+                                              "js_enabled" true}
+                                   "result" {"url" "https://example.com"
+                                             "title" "Opened"
+                                             "content" "Open page"
+                                             "forms" []
+                                             "links" []
+                                             "truncated?" false}})})
+
+                        (= [(:method req) url]
+                           [:get (str "http://browser-pool.internal/v1/sessions/" current-session-id "/page")])
+                        {:status 200
+                         :headers {"content-type" "application/json"}
+                         :body (json/write-json-str
+                                {"url" "https://example.com"
+                                 "title" "Read page"
+                                 "content" "Read page"
+                                 "forms" []
+                                 "links" []
+                                 "truncated?" false})}
+
+                        (= [(:method req) url]
+                           [:delete (str "http://browser-pool.internal/v1/sessions/" current-session-id)])
+                        {:status 204
+                         :headers {}
+                         :body ""}
+
+                        :else
+                        (throw (ex-info "Unexpected remote browser request"
+                                        {:request req})))))]
+      (let [opened (browser.backend/open-session* backend "https://example.com" {:js true})
+            session-id (:session-id opened)
+            original-snapshot (get @snapshots session-id)]
+        (reset! session-id* session-id)
+        (let [page (browser.backend/read-page* backend session-id)]
+          (is (= :remote (:backend page)))
+          (is (= "Read page" (:title page)))
+          (is (= original-snapshot (get @snapshots session-id))
+              "Lightweight action responses should not rewrite the durable snapshot")
+          (is (= [[:post "http://browser-pool.internal/v1/sessions"]
+                  [:get (str "http://browser-pool.internal/v1/sessions/" session-id "/page")]]
+                 @requests))))
+      (when-let [session-id @session-id*]
+        (browser/close-session session-id)))))
+
+(deftest remote-release-session-exports-state-once-then-drops-lease
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (let [{:keys [backend snapshots]} (test-remote-backend)
+        session-id "browser-session-release"
+        requests (atom [])]
+    (swap! snapshots assoc session-id
+           {"session_id" session-id
+            "backend" "remote"
+            "current_url" "https://example.com/start"
+            "browser_state" "{\"cookies\":[{\"name\":\"old\"}]}"
+            "created_at_ms" 10
+            "updated_at_ms" 20
+            "last_access_ms" 20
+            "js_enabled" true})
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj [(:method req) (:url req)])
+                    (case [(:method req) (:url req)]
+                      [:post "http://browser-pool.internal/v1/sessions/browser-session-release/export"]
+                      {:status 200
+                       :headers {"content-type" "application/json"}
+                       :body (json/write-json-str
+                              {"session" {"session_id" session-id
+                                          "current_url" "https://example.com/final"
+                                          "browser_state" "{\"cookies\":[{\"name\":\"new\"}]}"
+                                          "created_at_ms" 10
+                                          "updated_at_ms" 40
+                                          "last_access_ms" 40
+                                          "js_enabled" true}})}
+
+                      [:delete "http://browser-pool.internal/v1/sessions/browser-session-release"]
+                      {:status 204
+                       :headers {}
+                       :body ""}
+
+                      (throw (ex-info "Unexpected remote browser request"
+                                      {:request req}))))]
+      (is (= {:status "released"
+              :session-id session-id
+              :resumable? true}
+             (browser.backend/release-session* backend session-id)))
+      (is (= [[:post "http://browser-pool.internal/v1/sessions/browser-session-release/export"]
+              [:delete "http://browser-pool.internal/v1/sessions/browser-session-release"]]
+             @requests))
+      (is (= "https://example.com/final"
+             (get-in @snapshots [session-id "current_url"])))
+      (is (= "{\"cookies\":[{\"name\":\"new\"}]}"
+             (get-in @snapshots [session-id "browser_state"]))))))      
 
 (deftest playwright-runtime-status-reports-missing-browser-when-installable
   (with-playwright-runtime-state {:playwright nil

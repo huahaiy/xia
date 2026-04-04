@@ -28,8 +28,12 @@
     "Capture a screenshot in an existing session.")
   (wait-for-page* [this session-id opts]
     "Wait for the current page to settle or satisfy a condition.")
+  (release-session* [this session-id]
+    "Release a live session while preserving its resumable snapshot when possible.")
   (close-session* [this session-id]
     "Close a single session.")
+  (release-all-sessions!* [this]
+    "Release all live sessions while preserving resumable snapshots when possible.")
   (close-all-sessions!* [this]
     "Close all sessions for this backend.")
   (list-sessions* [this]
