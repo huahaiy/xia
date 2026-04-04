@@ -7,6 +7,7 @@
     [xia.instance-supervisor :as instance-supervisor]
     [xia.paths :as paths]
     [xia.pack :as pack]
+    [xia.runtime-overlay :as runtime-overlay]
     [xia.runtime-state :as runtime-state]
     [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
@@ -21,6 +22,7 @@
   []
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
   (xia.channel.http/clear-command-shutdown-handler!)
+  (runtime-overlay/clear!)
   (runtime-state/mark-stopped!))
 
 (use-fixtures :each
@@ -90,6 +92,31 @@
       #(core/-main "--mode" "server" "--web-dev"))
     (is (= "server" (:mode @started)))
     (is (= true (:web-dev @started)))))
+
+(deftest main-forwards-runtime-overlay-option
+  (let [started (atom nil)]
+    (with-redefs-fn {#'xia.core/start! (fn [options] (reset! started options))
+                     #'xia.logging/configure! (fn [_] nil)
+                     #'xia.core/register-shutdown-hook! (fn [_] ::hook)
+                     #'xia.core/remove-shutdown-hook! (fn [_] nil)
+                     #'xia.core/make-cleanup (fn [_] (fn [] nil))}
+      #(core/-main "--mode" "server" "--runtime-overlay" "/run/xia/overlay.edn"))
+    (is (= "server" (:mode @started)))
+    (is (= "/run/xia/overlay.edn" (:runtime-overlay @started)))))
+
+(deftest main-falls-back-to-runtime-overlay-env
+  (let [started (atom nil)]
+    (with-redefs-fn {#'xia.core/start! (fn [options] (reset! started options))
+                     #'xia.core/env-value (fn [k]
+                                            (case k
+                                              "XIA_RUNTIME_OVERLAY" "/run/xia/env-overlay.edn"
+                                              nil))
+                     #'xia.logging/configure! (fn [_] nil)
+                     #'xia.core/register-shutdown-hook! (fn [_] ::hook)
+                     #'xia.core/remove-shutdown-hook! (fn [_] nil)
+                     #'xia.core/make-cleanup (fn [_] (fn [] nil))}
+      #(core/-main "--mode" "server"))
+    (is (= "/run/xia/env-overlay.edn" (:runtime-overlay @started)))))
 
 (deftest main-defaults-to-both-mode
   (let [started (atom nil)]

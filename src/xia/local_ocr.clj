@@ -21,6 +21,8 @@
 
 (def ^:private default-command "llama-cli")
 (def ^:private default-model-backend :local)
+(def ^:private default-timeout-ms 120000)
+(def ^:private default-max-tokens 2048)
 (def ^:private spotting-image-max-pixels 1605632)
 (def ^:private default-model-file "PaddleOCR-VL-1.5.gguf")
 (def ^:private default-mmproj-file "PaddleOCR-VL-1.5-mmproj.gguf")
@@ -97,6 +99,23 @@
   []
   (some-> (cfg/string-option :local-doc/ocr-provider-id nil)
           keyword))
+
+(defn config-resolutions
+  []
+  {:enabled
+   (cfg/boolean-option-resolution :local-doc/ocr-enabled? false)
+   :backend
+   (cfg/keyword-option-resolution :local-doc/ocr-backend
+                                  default-model-backend
+                                  supported-backends)
+   :provider-id
+   (cfg/string-option-resolution :local-doc/ocr-provider-id nil)
+   :timeout-ms
+   (cfg/positive-long-resolution :local-doc/ocr-timeout-ms
+                                 default-timeout-ms)
+   :max-tokens
+   (cfg/positive-long-resolution :local-doc/ocr-max-tokens
+                                 default-max-tokens)})
 
 (defn- command-path
   []

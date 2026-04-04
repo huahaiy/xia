@@ -84,6 +84,19 @@
   (cfg/positive-long :backup/retain-count
                      default-backup-retain-count))
 
+(defn config-resolutions
+  []
+  {:enabled
+   (cfg/boolean-option-resolution :backup/enabled? true)
+   :directory
+   (cfg/string-option-resolution :backup/directory nil)
+   :interval-hours
+   (cfg/positive-long-resolution :backup/interval-hours
+                                 default-backup-interval-hours)
+   :retain-count
+   (cfg/positive-long-resolution :backup/retain-count
+                                 default-backup-retain-count)})
+
 (defn running?
   []
   (boolean (:running? @run-state)))

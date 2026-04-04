@@ -96,6 +96,18 @@
          (cfg/positive-long (:retained-decayed-count episode-retention-config-keys)
                             (:retained-decayed-count default-episode-retention-config))))
 
+(defn episode-retention-config-resolutions
+  []
+  {:full-resolution-ms
+   (cfg/positive-long-resolution (:full-resolution-ms episode-retention-config-keys)
+                                 (:full-resolution-ms default-episode-retention-config))
+   :decay-half-life-ms
+   (cfg/positive-long-resolution (:decay-half-life-ms episode-retention-config-keys)
+                                 (:decay-half-life-ms default-episode-retention-config))
+   :retained-decayed-count
+   (cfg/positive-long-resolution (:retained-decayed-count episode-retention-config-keys)
+                                 (:retained-decayed-count default-episode-retention-config))})
+
 (defn- normalize-importance
   ^double
   [importance]

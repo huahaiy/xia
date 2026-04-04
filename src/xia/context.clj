@@ -19,6 +19,7 @@
             [datalevin.embedding :as emb]
             [taoensso.timbre :as log]
             [charred.api :as json]
+            [xia.config :as cfg]
             [xia.db :as db]
             [xia.identity :as identity]
             [xia.skill :as skill]
@@ -211,21 +212,13 @@
     default-system-prompt-budget))
 
 (defn- configured-history-budget []
-  (if-let [custom (db/get-config :context/history-budget)]
-    (try
-      (long (edn/read-string custom))
-      (catch Exception _
-        default-history-budget))
-    default-history-budget))
+  (cfg/positive-long :context/history-budget
+                     default-history-budget))
 
 (defn- configured-recent-history-message-limit []
-  (if-let [custom (db/get-config :context/recent-history-message-limit)]
-    (try
-      (let [parsed (long (edn/read-string custom))]
-        (max 4 parsed))
-      (catch Exception _
-        default-recent-history-message-limit))
-    default-recent-history-message-limit))
+  (max 4
+       (cfg/positive-long :context/recent-history-message-limit
+                          default-recent-history-message-limit)))
 
 (defn recent-history-message-limit-config
   []
@@ -234,6 +227,15 @@
 (defn history-budget-config
   []
   (configured-history-budget))
+
+(defn config-resolutions
+  []
+  {:recent-history-message-limit
+   (cfg/positive-long-resolution :context/recent-history-message-limit
+                                 default-recent-history-message-limit)
+   :history-budget
+   (cfg/positive-long-resolution :context/history-budget
+                                 default-history-budget)})
 
 (defn- scale-budget
   [budget total]

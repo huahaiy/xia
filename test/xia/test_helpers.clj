@@ -6,6 +6,7 @@
             [datalevin.embedding :as emb]
             [datalevin.llm :as llm]
             [xia.db :as db]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.working-memory :as wm])
   (:import [java.io File]
            [java.nio.file Files]
@@ -231,12 +232,14 @@
   "Fixture: create a temp Datalevin DB for the duration of the test."
   [f]
   (let [path (temp-db-path)]
+    (runtime-overlay/clear!)
     (wm/clear-wm!)
     (db/connect! path (test-connect-options
                         {:passphrase-provider (constantly "xia-test-passphrase")}))
     (try
       (f)
       (finally
+        (runtime-overlay/clear!)
         (wm/clear-wm!)
         (db/close!)))))
 

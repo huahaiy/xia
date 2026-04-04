@@ -37,6 +37,11 @@
   "Config key namespace prefixes that are secret."
   #{"credential" "secret" "api-key" "oauth" "token"})
 
+(def secret-config-keys
+  "Specific config keys that are secret even when their namespace does not
+   match the generic secret prefixes."
+  #{:web/search-brave-api-key})
+
 (defn encrypted-attr?
   "True if the given attribute keyword should be encrypted at rest."
   [attr]
@@ -53,5 +58,6 @@
 (defn secret-config-key?
   "True if the given config key should be treated as secret."
   [k]
-  (when-let [ns (namespace k)]
-    (some #(str/starts-with? ns %) secret-config-prefixes)))
+  (or (contains? secret-config-keys k)
+      (when-let [ns (namespace k)]
+        (some #(str/starts-with? ns %) secret-config-prefixes))))

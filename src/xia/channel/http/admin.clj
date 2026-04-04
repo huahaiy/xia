@@ -5,6 +5,7 @@
             [xia.autonomous :as autonomous]
             [xia.backup :as backup]
             [xia.channel.messaging :as messaging]
+            [xia.config :as config]
             [xia.context :as context]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
@@ -17,13 +18,15 @@
             [xia.oauth-template :as oauth-template]
             [xia.paths :as paths]
             [xia.remote-bridge :as remote-bridge]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.schedule :as schedule]
             [xia.service :as service-proxy]
             [xia.setup :as setup]
             [xia.skill :as skill]
             [xia.skill.openclaw :as openclaw-skill]
             [xia.summarizer :as summarizer]
-            [xia.memory :as memory])
+            [xia.memory :as memory]
+            [xia.web :as web])
   (:import [java.net URI]
            [java.util Date]))
 
@@ -398,14 +401,43 @@
                   (str/lower-case (or (:name entry) (:id entry) ""))))
        vec))
 
+(defn- admin-config-value
+  [value]
+  (cond
+    (keyword? value) (name value)
+    :else value))
+
+(defn- days-value
+  [value]
+  (when (some? value)
+    (long (/ (long value) (long ms-per-day)))))
+
+(defn- config-resolution->admin-body
+  ([resolution]
+   (config-resolution->admin-body resolution admin-config-value))
+  ([resolution transform]
+   (let [transform* (or transform identity)]
+     (cond-> {:source (some-> (:source resolution) name)
+              :effective_value (transform* (:value resolution))
+              :default_value (transform* (:default-value resolution))}
+       (:tenant-present? resolution)
+       (assoc :tenant_value (transform* (:tenant-value resolution)))
+
+       (:overlay-present? resolution)
+       (assoc :overlay {:mode (some-> (:overlay-mode resolution) name)
+                        :value (transform* (:overlay-value resolution))})))))
+
 (defn- provider->admin-body
   [provider]
   (let [provider-id       (some-> (:llm.provider/id provider) name)
+        runtime-source    (when-let [provider-key (:llm.provider/id provider)]
+                            (name (runtime-overlay/entity-source :provider provider-key)))
         access-mode       (llm/provider-access-mode provider)
         credential-source (llm/provider-credential-source provider)
         oauth-account     (some-> (:llm.provider/oauth-account provider) db/get-oauth-account)
         health            (llm/provider-health-summary (:llm.provider/id provider))]
     {:id                          provider-id
+     :runtime_source              runtime-source
      :name                        (:llm.provider/name provider)
      :template                    (some-> (:llm.provider/template provider) name)
      :access_mode                 (some-> access-mode name)
@@ -473,41 +505,113 @@
 (defn- memory-retention->admin-body
   [deps]
   (let [{:keys [full-resolution-ms decay-half-life-ms retained-decayed-count]}
-        (memory/episode-retention-settings)]
+        (memory/episode-retention-settings)
+        resolutions (memory/episode-retention-config-resolutions)]
     {:full_resolution_days (long (/ (long full-resolution-ms) (long ms-per-day)))
      :decay_half_life_days (long (/ (long decay-half-life-ms) (long ms-per-day)))
-     :retained_count       (long retained-decayed-count)}))
+     :retained_count       (long retained-decayed-count)
+     :sources              {:full_resolution_days (some-> (get-in resolutions [:full-resolution-ms :source]) name)
+                            :decay_half_life_days (some-> (get-in resolutions [:decay-half-life-ms :source]) name)
+                            :retained_count (some-> (get-in resolutions [:retained-decayed-count :source]) name)}
+     :config_resolution    {:full_resolution_days (config-resolution->admin-body
+                                                    (:full-resolution-ms resolutions)
+                                                    days-value)
+                            :decay_half_life_days (config-resolution->admin-body
+                                                    (:decay-half-life-ms resolutions)
+                                                    days-value)
+                            :retained_count (config-resolution->admin-body
+                                              (:retained-decayed-count resolutions))}}))
 
 (defn- knowledge-decay->admin-body
   []
   (let [{:keys [grace-period-ms half-life-ms min-confidence maintenance-step-ms archive-after-bottom-ms]}
-        (hippo/knowledge-decay-settings)]
+        (hippo/knowledge-decay-settings)
+        resolutions (hippo/knowledge-decay-config-resolutions)]
     {:grace_period_days         (long (/ (long grace-period-ms) (long ms-per-day)))
      :half_life_days            (long (/ (long half-life-ms) (long ms-per-day)))
      :min_confidence            min-confidence
      :maintenance_interval_days (long (/ (long maintenance-step-ms) (long ms-per-day)))
-     :archive_after_bottom_days (long (/ (long archive-after-bottom-ms) (long ms-per-day)))}))
+     :archive_after_bottom_days (long (/ (long archive-after-bottom-ms) (long ms-per-day)))
+     :sources                   {:grace_period_days (some-> (get-in resolutions [:grace-period-ms :source]) name)
+                                 :half_life_days (some-> (get-in resolutions [:half-life-ms :source]) name)
+                                 :min_confidence (some-> (get-in resolutions [:min-confidence :source]) name)
+                                 :maintenance_interval_days (some-> (get-in resolutions [:maintenance-step-ms :source]) name)
+                                 :archive_after_bottom_days (some-> (get-in resolutions [:archive-after-bottom-ms :source]) name)}
+     :config_resolution         {:grace_period_days (config-resolution->admin-body
+                                                     (:grace-period-ms resolutions)
+                                                     days-value)
+                                 :half_life_days (config-resolution->admin-body
+                                                   (:half-life-ms resolutions)
+                                                   days-value)
+                                 :min_confidence (config-resolution->admin-body
+                                                   (:min-confidence resolutions))
+                                 :maintenance_interval_days (config-resolution->admin-body
+                                                              (:maintenance-step-ms resolutions)
+                                                              days-value)
+                                 :archive_after_bottom_days (config-resolution->admin-body
+                                                              (:archive-after-bottom-ms resolutions)
+                                                              days-value)}}))
 
 (defn- conversation-context->admin-body
   []
-  {:recent_history_message_limit (context/recent-history-message-limit-config)
-   :history_budget               (context/history-budget-config)})
+  (let [resolutions (context/config-resolutions)]
+    {:recent_history_message_limit (context/recent-history-message-limit-config)
+     :history_budget               (context/history-budget-config)
+     :sources                      {:recent_history_message_limit (some-> (get-in resolutions [:recent-history-message-limit :source]) name)
+                                    :history_budget (some-> (get-in resolutions [:history-budget :source]) name)}
+     :config_resolution            {:recent_history_message_limit (config-resolution->admin-body
+                                                                   (:recent-history-message-limit resolutions))
+                                    :history_budget (config-resolution->admin-body
+                                                      (:history-budget resolutions))}}))
 
 (defn- local-doc-summarization->admin-body
   []
-  {:model_summaries_enabled   (boolean (summarizer/enabled?))
-   :model_summary_backend     (some-> (summarizer/summary-backend) name)
-   :model_summary_provider_id (some-> (summarizer/external-provider-id) name)
-   :chunk_summary_max_tokens  (summarizer/chunk-summary-max-tokens)
-   :doc_summary_max_tokens    (summarizer/document-summary-max-tokens)})
+  (let [resolutions (summarizer/config-resolutions)]
+    {:model_summaries_enabled   (boolean (summarizer/enabled?))
+     :model_summary_backend     (some-> (summarizer/summary-backend) name)
+     :model_summary_provider_id (some-> (summarizer/external-provider-id) name)
+     :chunk_summary_max_tokens  (summarizer/chunk-summary-max-tokens)
+     :doc_summary_max_tokens    (summarizer/document-summary-max-tokens)
+     :sources                   {:model_summaries_enabled (some-> (get-in resolutions [:enabled :source]) name)
+                                 :model_summary_backend (some-> (get-in resolutions [:backend :source]) name)
+                                 :model_summary_provider_id (some-> (get-in resolutions [:provider-id :source]) name)
+                                 :chunk_summary_max_tokens (some-> (get-in resolutions [:chunk-summary-max-tokens :source]) name)
+                                 :doc_summary_max_tokens (some-> (get-in resolutions [:document-summary-max-tokens :source]) name)}
+     :config_resolution         {:model_summaries_enabled (config-resolution->admin-body
+                                                            (:enabled resolutions))
+                                 :model_summary_backend (config-resolution->admin-body
+                                                          (:backend resolutions))
+                                 :model_summary_provider_id (config-resolution->admin-body
+                                                              (:provider-id resolutions))
+                                 :chunk_summary_max_tokens (config-resolution->admin-body
+                                                             (:chunk-summary-max-tokens resolutions))
+                                 :doc_summary_max_tokens (config-resolution->admin-body
+                                                           (:document-summary-max-tokens resolutions))}}))
 
 (defn- local-doc-ocr->admin-body
   []
-  (local-ocr/admin-body))
+  (let [resolutions (local-ocr/config-resolutions)]
+    (assoc (local-ocr/admin-body)
+           :sources {:enabled (some-> (get-in resolutions [:enabled :source]) name)
+                     :model_backend (some-> (get-in resolutions [:backend :source]) name)
+                     :external_provider_id (some-> (get-in resolutions [:provider-id :source]) name)
+                     :timeout_ms (some-> (get-in resolutions [:timeout-ms :source]) name)
+                     :max_tokens (some-> (get-in resolutions [:max-tokens :source]) name)}
+           :config_resolution {:enabled (config-resolution->admin-body
+                                          (:enabled resolutions))
+                               :model_backend (config-resolution->admin-body
+                                                (:backend resolutions))
+                               :external_provider_id (config-resolution->admin-body
+                                                       (:provider-id resolutions))
+                               :timeout_ms (config-resolution->admin-body
+                                             (:timeout-ms resolutions))
+                               :max_tokens (config-resolution->admin-body
+                                             (:max-tokens resolutions))})))
 
 (defn- database-backup->admin-body
   [deps]
-  (let [settings (backup/admin-body)]
+  (let [settings (backup/admin-body)
+        resolutions (backup/config-resolutions)]
     {:enabled           (boolean (:enabled settings))
      :directory         (:directory settings)
      :interval_hours    (:interval_hours settings)
@@ -518,7 +622,33 @@
      :last_success_at   (instant->str* deps (:last_success_at settings))
      :last_archive_path (:last_archive_path settings)
      :last_error        (:last_error settings)
-     :next_due_at       (instant->str* deps (:next_due_at settings))}))
+     :next_due_at       (instant->str* deps (:next_due_at settings))
+     :sources           {:enabled (some-> (get-in resolutions [:enabled :source]) name)
+                         :directory (some-> (get-in resolutions [:directory :source]) name)
+                         :interval_hours (some-> (get-in resolutions [:interval-hours :source]) name)
+                         :retain_count (some-> (get-in resolutions [:retain-count :source]) name)}
+     :config_resolution {:enabled (config-resolution->admin-body
+                                    (:enabled resolutions))
+                         :directory (config-resolution->admin-body
+                                      (:directory resolutions))
+                         :interval_hours (config-resolution->admin-body
+                                           (:interval-hours resolutions))
+                         :retain_count (config-resolution->admin-body
+                                         (:retain-count resolutions))}}))
+
+(defn- web-search->admin-body
+  []
+  (let [resolutions (web/search-config-resolutions)]
+    {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
+     :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
+     :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")
+     :sources       {:backend (some-> (get-in resolutions [:backend :source]) name)
+                     :brave_api_key (some-> (get-in resolutions [:brave-api-key :source]) name)
+                     :searxng_url (some-> (get-in resolutions [:searxng-url :source]) name)}
+     :config_resolution
+     {:backend (config-resolution->admin-body (:backend resolutions) admin-config-value)
+      :brave_api_key (config-resolution->admin-body (:brave-api-key resolutions))
+      :searxng_url (config-resolution->admin-body (:searxng-url resolutions))}}))
 
 (defn- save-config-override!
   [config-key value]
@@ -528,8 +658,11 @@
 
 (defn- service->admin-body
   [service]
-  (let [oauth-account (some-> (:service/oauth-account service) db/get-oauth-account)]
+  (let [oauth-account  (some-> (:service/oauth-account service) db/get-oauth-account)
+        runtime-source (when-let [service-id (:service/id service)]
+                         (name (runtime-overlay/entity-source :service service-id)))]
     {:id                               (some-> (:service/id service) name)
+     :runtime_source                   runtime-source
      :name                             (:service/name service)
      :base_url                         (:service/base-url service)
      :auth_type                        (some-> (:service/auth-type service) name)
@@ -566,6 +699,8 @@
 (defn- oauth-account->admin-body
   [deps account]
   {:id                       (some-> (:oauth.account/id account) name)
+   :runtime_source           (when-let [account-id (:oauth.account/id account)]
+                               (name (runtime-overlay/entity-source :oauth-account account-id)))
    :name                     (:oauth.account/name account)
    :connection_mode          (some-> (oauth-account-connection-mode account) name)
    :authorize_url            (:oauth.account/authorize-url account)
@@ -638,6 +773,8 @@
 (defn- site->admin-body
   [site]
   {:id                  (some-> (:site-cred/id site) name)
+   :runtime_source      (when-let [site-id (:site-cred/id site)]
+                          (name (runtime-overlay/entity-source :site-cred site-id)))
    :name                (:site-cred/name site)
    :login_url           (:site-cred/login-url site)
    :username_field      (:site-cred/username-field site)
@@ -884,6 +1021,7 @@
                           paths/default-instance-id)
                   :parent_instance_id (instance-supervisor/parent-instance-id)}
        :capabilities (instance-supervisor/capabilities)
+       :runtime_overlay (runtime-overlay/admin-summary)
        :managed_instances (mapv #(managed-instance->admin-body deps %)
                                 (instance-supervisor/list-managed-instances))
        :storage {:db_path        (:db-path storage-layout)
@@ -898,9 +1036,7 @@
        :llm_provider_templates (->> (llm-provider-template/list-templates)
                                     (into [] (map llm-provider-template->admin-body))
                                     sort-by-name)
-       :web_search {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
-                    :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
-                    :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")}
+       :web_search (web-search->admin-body)
        :conversation_context (conversation-context->admin-body)
        :memory_retention (memory-retention->admin-body deps)
        :knowledge_decay (knowledge-decay->admin-body)
@@ -1201,10 +1337,7 @@
       (save-config-override! :web/search-searxng-url
                              (nonblank-str (get data "searxng_url")))
       (json-response* deps 200
-                      {:web_search
-                       {:backend       (or (some-> (db/get-config :web/search-backend) str) "")
-                        :brave_api_key (or (some-> (db/get-config :web/search-brave-api-key) str) "")
-                        :searxng_url   (or (some-> (db/get-config :web/search-searxng-url) str) "")}}))
+                      {:web_search (web-search->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 

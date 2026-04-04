@@ -3,8 +3,9 @@
             [clojure.string :as str]
             [datalevin.embedding :as emb]
             [xia.test-helpers :as th]
-            [xia.db :as db]
             [xia.context :as ctx]
+            [xia.db :as db]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.skill :as skill]
             [xia.working-memory :as wm]))
 
@@ -65,6 +66,17 @@
   (db/set-config! :context/recent-history-message-limit "#=(+ 1 2)")
   (is (= 8000 (ctx/history-budget-config)))
   (is (= 24 (ctx/recent-history-message-limit-config))))
+
+(deftest test-context-config-respects-overlay-cap-and-floor
+  (db/set-config! :context/history-budget 12000)
+  (db/set-config! :context/recent-history-message-limit 8)
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "snapshot-context-config-rules"
+     :config-overrides {:context/history-budget {:merge :cap :value 6000}
+                        :context/recent-history-message-limit {:merge :floor :value 30}}})
+  (is (= 6000 (ctx/history-budget-config)))
+  (is (= 30 (ctx/recent-history-message-limit-config))))
 
 ;; ---------------------------------------------------------------------------
 ;; render-entity

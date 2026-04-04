@@ -28,6 +28,7 @@
   {:instance paths/default-instance-id
    :template-instance nil
    :instance-command nil
+   :runtime-overlay nil
    :db (paths/default-db-path)
    :bind "127.0.0.1"
    :port 3008
@@ -38,6 +39,7 @@
   [["-i" "--instance ID" "Instance id for instance-scoped default storage (or set XIA_INSTANCE)"]
    ["-t" "--template-instance ID" "Seed a new instance from another instance's initial settings (or set XIA_TEMPLATE_INSTANCE)"]
    [nil "--instance-command PATH" "Executable path to use when starting child Xia instances (or set XIA_INSTANCE_COMMAND)"]
+   [nil "--runtime-overlay PATH" "Runtime overlay EDN path (or set XIA_RUNTIME_OVERLAY)"]
    ["-d" "--db PATH" "Database path"]
    ["-b" "--bind HOST" "HTTP/WebSocket bind address (default: 127.0.0.1)"
     :default (:bind default-run-options)]
@@ -76,6 +78,7 @@
   (println "  xia --mode both --web-dev  Live-reload resources/web during UI work")
   (println "  xia --instance ops      Use ~/.xia/instances/ops/db by default")
   (println "  xia --instance qa --template-instance base  Seed qa from base")
+  (println "  xia --runtime-overlay /run/xia/overlay.edn  Apply a managed runtime overlay")
   (println "  xia --log-file xia.log  Write logs to a file")
   (println "  xia --bind 0.0.0.0      Expose server beyond localhost")
   (println "  xia --db /path/to/db    Use a specific database"))
@@ -186,6 +189,8 @@
         instance-command
         (or (:instance-command options)
             (some-> (env-value "XIA_INSTANCE_COMMAND") str/trim not-empty))
+        runtime-overlay       (or (:runtime-overlay options)
+                                  (some-> (env-value "XIA_RUNTIME_OVERLAY") str/trim not-empty))
         _                     (paths/warn-if-instance-id-normalized! (:instance options) instance-id)
         _                     (when template-instance
                                 (paths/warn-if-instance-id-normalized! raw-template-instance
@@ -197,6 +202,7 @@
            {:instance instance-id
             :template-instance template-instance
             :instance-command instance-command
+            :runtime-overlay runtime-overlay
             :db       db-path})))
 
 (def ^:private base-runtime-root-keys
@@ -208,16 +214,20 @@
 
 (defn- system-config
   [{:keys [db mode crypto-opts instance template-instance
-           instance-command bind port web-dev] :as options}]
+           instance-command runtime-overlay bind port web-dev] :as options}]
   (let [connect-options (merge {:passphrase-provider (startup-passphrase-provider mode)
                                 :instance-id instance}
                                crypto-opts)]
-    {:xia/db
+    {:xia/runtime-overlay
+     {:overlay-path runtime-overlay}
+
+     :xia/db
      {:db-path db
       :connect-options connect-options}
 
      :xia/runtime-support
-     {:db (ig/ref :xia/db)}
+     {:db (ig/ref :xia/db)
+      :overlay (ig/ref :xia/runtime-overlay)}
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)}
@@ -229,6 +239,7 @@
 
      :xia/bootstrap
      {:db (ig/ref :xia/db)
+      :overlay (ig/ref :xia/runtime-overlay)
       :runtime-support (ig/ref :xia/runtime-support)
       :instance-supervisor (ig/ref :xia/instance-supervisor)
       :db-path db

@@ -81,6 +81,24 @@
   (some-> (config/string-option :local-doc/model-summary-provider-id nil)
           keyword))
 
+(defn config-resolutions
+  []
+  {:enabled
+   (config/boolean-option-resolution :local-doc/model-summaries-enabled?
+                                     default-enabled?)
+   :backend
+   (config/keyword-option-resolution :local-doc/model-summary-backend
+                                     default-backend
+                                     supported-backends)
+   :provider-id
+   (config/string-option-resolution :local-doc/model-summary-provider-id nil)
+   :chunk-summary-max-tokens
+   (config/positive-long-resolution :local-doc/chunk-summary-max-tokens
+                                    default-chunk-summary-max-tokens)
+   :document-summary-max-tokens
+   (config/positive-long-resolution :local-doc/doc-summary-max-tokens
+                                    default-doc-summary-max-tokens)})
+
 (defn build-chunk-prompt
   [text]
   (str chunk-summary-instructions

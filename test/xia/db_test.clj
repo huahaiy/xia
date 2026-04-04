@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.db :as db]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.test-helpers :as th]))
 
@@ -118,6 +119,269 @@
     (is (= {:goal "Reply to the billing emails"
             :constraints ["Use the approved tone"]}
            (:contract (db/get-task task-id))))))
+
+(deftest runtime-overlay-overrides-config-and-merges-catalog-reads
+  (db/set-config! :browser/backend-default "playwright")
+  (db/upsert-provider! {:id :tenant-openai
+                        :name "Tenant OpenAI"
+                        :base-url "https://tenant-llm.example"
+                        :model "tenant-model"
+                        :default? true})
+  (db/register-service! {:id :tenant-api
+                         :name "Tenant API"
+                         :base-url "https://tenant-api.example"
+                         :auth-type :bearer
+                         :auth-key "tenant-token"
+                         :enabled? true})
+  (db/register-oauth-account! {:id :tenant-oauth
+                               :name "Tenant OAuth"
+                               :scopes "tenant.read"})
+  (db/register-site-cred! {:id :tenant-site
+                           :name "Tenant Site"
+                           :login-url "https://tenant.example/login"
+                           :username "tenant-user"
+                           :password "tenant-pass"})
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "v42"
+     :config-overrides
+     {:browser/backend-default :remote
+      :browser/remote-enabled? true}
+     :forced-keys
+     #{:browser/backend-default
+       :browser/remote-enabled?}
+     :tx-data
+     [{:llm.provider/id :tenant-openai
+       :llm.provider/name "Tenant OpenAI Overlay"
+       :llm.provider/system-prompt-budget 4096}
+      {:llm.provider/id :platform-openai
+       :llm.provider/name "OpenAI (Platform)"
+       :llm.provider/base-url "https://platform-llm.example"
+       :llm.provider/model "platform-model"
+       :llm.provider/default? true}
+      {:service/id :tenant-api
+       :service/name "Tenant API Overlay"
+       :service/enabled? false}
+      {:oauth.account/id :platform-oauth
+       :oauth.account/name "Platform OAuth"
+       :oauth.account/scopes "platform.read"}
+      {:site-cred/id :platform-site
+       :site-cred/name "Platform Site"
+       :site-cred/login-url "https://platform.example/login"
+       :site-cred/username-field "email"
+       :site-cred/password-field "password"
+       :site-cred/username "platform-user"
+       :site-cred/password "platform-pass"}]})
+  (try
+    (is (= "remote" (db/get-config :browser/backend-default)))
+    (is (= "true" (db/get-config :browser/remote-enabled?)))
+    (is (= "playwright"
+           (ffirst (db/q '[:find ?v :in $ ?k
+                           :where
+                           [?e :config/key ?k]
+                           [?e :config/value ?v]]
+                         :browser/backend-default))))
+    (let [providers (db/list-providers)
+          provider-by-id (into {} (map (juxt :llm.provider/id identity) providers))
+          services (db/list-services)
+          service-by-id (into {} (map (juxt :service/id identity) services))
+          oauth-accounts (db/list-oauth-accounts)
+          oauth-by-id (into {} (map (juxt :oauth.account/id identity) oauth-accounts))
+          site-creds (db/list-site-creds)
+          site-by-id (into {} (map (juxt :site-cred/id identity) site-creds))]
+      (is (= "Tenant OpenAI Overlay"
+             (get-in provider-by-id [:tenant-openai :llm.provider/name])))
+      (is (= "https://tenant-llm.example"
+             (get-in provider-by-id [:tenant-openai :llm.provider/base-url])))
+      (is (= 4096
+             (get-in provider-by-id [:tenant-openai :llm.provider/system-prompt-budget])))
+      (is (= :platform-openai (:llm.provider/id (db/get-default-provider))))
+      (is (= #{:tenant-openai :platform-openai}
+             (set (keys provider-by-id))))
+
+      (is (= "Tenant API Overlay"
+             (get-in service-by-id [:tenant-api :service/name])))
+      (is (= false
+             (get-in service-by-id [:tenant-api :service/enabled?])))
+      (is (= #{:tenant-api}
+             (set (keys service-by-id))))
+
+      (is (= #{:tenant-oauth :platform-oauth}
+             (set (keys oauth-by-id))))
+      (is (= "Platform OAuth"
+             (get-in oauth-by-id [:platform-oauth :oauth.account/name])))
+
+      (is (= #{:tenant-site :platform-site}
+             (set (keys site-by-id))))
+      (is (= "Platform Site"
+             (get-in site-by-id [:platform-site :site-cred/name]))))
+    (finally
+      (runtime-overlay/clear!)))
+  (is (= "playwright" (db/get-config :browser/backend-default)))
+  (is (nil? (db/get-config :browser/remote-enabled?)))
+  (is (= :tenant-openai (:llm.provider/id (db/get-default-provider))))
+  (is (nil? (db/get-provider :platform-openai)))
+  (is (nil? (db/get-oauth-account :platform-oauth)))
+  (is (nil? (db/get-site-cred :platform-site))))
+
+(deftest forced-runtime-overlay-config-keys-reject-tenant-writes
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "overlay-locked"
+     :config-overrides {:browser/backend-default :remote}
+     :forced-keys #{:browser/backend-default}})
+  (try
+    (let [set-error (try
+                      (db/set-config! :browser/backend-default "playwright")
+                      nil
+                      (catch clojure.lang.ExceptionInfo e
+                        e))
+          delete-error (try
+                         (db/delete-config! :browser/backend-default)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e
+                           e))]
+      (is (= 409 (:status (ex-data set-error))))
+      (is (= "config key is managed by the active runtime overlay"
+             (:error (ex-data set-error))))
+      (is (= :browser/backend-default
+             (:config-key (ex-data set-error))))
+      (is (= "overlay-locked"
+             (:overlay-snapshot-id (ex-data set-error))))
+      (is (= 409 (:status (ex-data delete-error))))
+      (is (= :browser/backend-default
+             (:config-key (ex-data delete-error))))
+      (is (nil? (ffirst (db/q '[:find ?v :in $ ?k
+                                :where
+                                [?e :config/key ?k]
+                                [?e :config/value ?v]]
+                              :browser/backend-default)))))
+    (finally
+      (runtime-overlay/clear!))))
+
+(deftest overlay-managed-entities-reject-tenant-writes
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "overlay-entities"
+     :tx-data [{:llm.provider/id :platform-openai
+                :llm.provider/name "OpenAI (Platform)"
+                :llm.provider/default? true}
+               {:service/id :platform-search
+                :service/name "Platform Search"}
+               {:oauth.account/id :platform-oauth
+                :oauth.account/name "Platform OAuth"}
+               {:site-cred/id :platform-site
+                :site-cred/name "Platform Site"}]})
+  (try
+    (let [provider-error (try
+                           (db/upsert-provider! {:id :platform-openai
+                                                 :name "Mutated"})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             e))
+          default-error  (try
+                           (db/set-default-provider! :tenant-openai)
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             e))
+          service-error  (try
+                           (db/save-service! {:id :platform-search
+                                              :name "Mutated Service"
+                                              :base-url "https://platform.example"
+                                              :auth-type :bearer})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             e))
+          oauth-error    (try
+                           (db/save-oauth-account! {:id :platform-oauth
+                                                    :name "Mutated OAuth"})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             e))
+          site-error     (try
+                           (db/save-site-cred! {:id :platform-site
+                                                :name "Mutated Site"
+                                                :login-url "https://platform.example/login"})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             e))]
+      (is (= 409 (:status (ex-data provider-error))))
+      (is (= "entity is managed by the active runtime overlay"
+             (:error (ex-data provider-error))))
+      (is (= :provider (:entity-kind (ex-data provider-error))))
+      (is (= :platform-openai (:entity-id (ex-data provider-error))))
+
+      (is (= 409 (:status (ex-data default-error))))
+      (is (= "default provider is managed by the active runtime overlay"
+             (:error (ex-data default-error))))
+      (is (= :platform-openai (:overlay-provider-id (ex-data default-error))))
+
+      (is (= 409 (:status (ex-data service-error))))
+      (is (= :service (:entity-kind (ex-data service-error))))
+      (is (= :platform-search (:entity-id (ex-data service-error))))
+
+      (is (= 409 (:status (ex-data oauth-error))))
+      (is (= :oauth-account (:entity-kind (ex-data oauth-error))))
+      (is (= :platform-oauth (:entity-id (ex-data oauth-error))))
+
+      (is (= 409 (:status (ex-data site-error))))
+      (is (= :site-cred (:entity-kind (ex-data site-error))))
+      (is (= :platform-site (:entity-id (ex-data site-error)))))
+    (finally
+      (runtime-overlay/clear!))))
+
+(deftest runtime-overlay-secret-refs-resolve-through-db-reads
+  (let [provider-secret-file (io/file (str (java.nio.file.Files/createTempFile
+                                             "xia-overlay-provider-secret"
+                                             ".txt"
+                                             (make-array java.nio.file.attribute.FileAttribute 0))))
+        oauth-secret-file    (io/file (str (java.nio.file.Files/createTempFile
+                                             "xia-overlay-oauth-secret"
+                                             ".txt"
+                                             (make-array java.nio.file.attribute.FileAttribute 0))))
+        site-secret-file     (io/file (str (java.nio.file.Files/createTempFile
+                                             "xia-overlay-site-secret"
+                                             ".txt"
+                                             (make-array java.nio.file.attribute.FileAttribute 0))))]
+    (spit provider-secret-file "sk-platform\n")
+    (spit oauth-secret-file "oauth-client-secret\n")
+    (spit site-secret-file "site-password\n")
+    (with-redefs-fn
+      {#'xia.runtime-overlay/read-env-secret
+       (fn [env-name]
+         (case env-name
+           "XIA_BRAVE_API_KEY" "brave-secret"
+           "XIA_SERVICE_TOKEN" "service-token"
+           nil))}
+      (fn []
+        (runtime-overlay/activate!
+          {:overlay/version 1
+           :snapshot/id "overlay-secrets"
+           :config-overrides {:web/search-brave-api-key {:secret-env "XIA_BRAVE_API_KEY"}}
+           :tx-data [{:llm.provider/id :platform-openai
+                      :llm.provider/name "OpenAI (Platform)"
+                      :llm.provider/api-key {:secret-file (.getAbsolutePath provider-secret-file)}}
+                     {:service/id :platform-search
+                      :service/name "Platform Search"
+                      :service/base-url "https://platform.example"
+                      :service/auth-type :bearer
+                      :service/auth-key {:secret-env "XIA_SERVICE_TOKEN"}}
+                     {:oauth.account/id :platform-oauth
+                      :oauth.account/name "Platform OAuth"
+                      :oauth.account/client-secret {:secret-file (.getAbsolutePath oauth-secret-file)}}
+                     {:site-cred/id :platform-site
+                      :site-cred/name "Platform Site"
+                      :site-cred/login-url "https://platform.example/login"
+                      :site-cred/password {:secret-file (.getAbsolutePath site-secret-file)}}]})
+        (try
+          (is (= "brave-secret" (db/get-config :web/search-brave-api-key)))
+          (is (= "sk-platform" (:llm.provider/api-key (db/get-provider :platform-openai))))
+          (is (= "service-token" (:service/auth-key (db/get-service :platform-search))))
+          (is (= "oauth-client-secret"
+                 (:oauth.account/client-secret (db/get-oauth-account :platform-oauth))))
+          (is (= "site-password" (:site-cred/password (db/get-site-cred :platform-site))))
+          (finally
+            (runtime-overlay/clear!)))))))
 
 (deftest tasks-persist-turns-and-items
   (let [session-id (db/create-session! :terminal)

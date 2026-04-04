@@ -10,6 +10,7 @@
    enforce SSRF protection, rate limiting, and content size limits."
   (:require [clojure.string :as str]
             [charred.api :as json]
+            [xia.config :as cfg]
             [xia.db :as db]
             [xia.rate-limit :as rate-limit]
             [xia.ssrf :as ssrf])
@@ -747,6 +748,17 @@
                       str/trim)]
     (when (seq value)
       value)))
+
+(defn search-config-resolutions
+  []
+  {:backend
+   (cfg/custom-option-resolution :web/search-backend
+                                 default-search-backend
+                                 normalize-search-backend)
+   :brave-api-key
+   (cfg/string-option-resolution :web/search-brave-api-key nil)
+   :searxng-url
+   (cfg/string-option-resolution :web/search-searxng-url nil)})
 
 (defn- resolve-search-backend!
   [backend]

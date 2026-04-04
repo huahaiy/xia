@@ -5,6 +5,7 @@
             [xia.artifact :as artifact]
             [xia.test-helpers :as th]
             [xia.db :as db]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.local-doc :as local-doc]
             [xia.memory :as memory]
             [xia.hippocampus :as hippo]))
@@ -541,6 +542,20 @@
     (is (= 0.25 (:min-confidence settings)))
     (is (= (* 3 24 60 60 1000) (:maintenance-step-ms settings)))
     (is (= (* 45 24 60 60 1000) (:archive-after-bottom-ms settings)))))
+
+(deftest test-knowledge-decay-settings-respect-overlay-rules
+  (db/set-config! :memory/knowledge-decay-grace-period-ms (* 7 24 60 60 1000))
+  (db/set-config! :memory/knowledge-decay-min-confidence 0.2)
+  (runtime-overlay/activate!
+    {:overlay/version 1
+     :snapshot/id "snapshot-knowledge-decay-rules"
+     :config-overrides {:memory/knowledge-decay-grace-period-ms {:merge :floor
+                                                                 :value (* 21 24 60 60 1000)}
+                        :memory/knowledge-decay-min-confidence {:merge :floor
+                                                                :value 0.35}}})
+  (let [settings (hippo/knowledge-decay-settings)]
+    (is (= (* 21 24 60 60 1000) (:grace-period-ms settings)))
+    (is (= 0.35 (:min-confidence settings)))))
 
 (deftest test-maintain-knowledge
   (let [settings      (hippo/knowledge-decay-settings)

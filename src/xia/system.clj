@@ -13,6 +13,7 @@
             [xia.instance-supervisor :as instance-supervisor]
             [xia.llm :as llm]
             [xia.paths :as paths]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.sci-env :as sci-env]
             [xia.scheduler :as scheduler]
             [xia.setup :as setup]
@@ -68,14 +69,25 @@
   [_ _]
   (db/close!))
 
+(defmethod ig/init-key :xia/runtime-overlay
+  [_ {:keys [overlay-path]}]
+  (runtime-overlay/load-file! overlay-path)
+  {:overlay-path overlay-path
+   :snapshot-id (runtime-overlay/snapshot-id)})
+
+(defmethod ig/halt-key! :xia/runtime-overlay
+  [_ _]
+  (runtime-overlay/clear!))
+
 (defmethod ig/init-key :xia/runtime-support
-  [_ {:keys [db]}]
+  [_ {:keys [db overlay]}]
   (hippo/reset-runtime!)
   (llm/reset-runtime!)
   (let [recovered (agent/recover-runtime-tasks!)]
     (when (seq recovered)
       (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart")))
-  {:db db})
+  {:db db
+   :overlay overlay})
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
@@ -109,7 +121,7 @@
   (instance-supervisor/shutdown!))
 
 (defmethod ig/init-key :xia/bootstrap
-  [_ {:keys [db runtime-support instance-supervisor db-path instance template-instance
+  [_ {:keys [db overlay runtime-support instance-supervisor db-path instance template-instance
              mode crypto-opts]}]
   (maybe-seed-instance-template! {:db-path db-path
                                   :instance instance
@@ -127,6 +139,7 @@
                 mode
                 "mode; complete provider onboarding in the local web UI.")))
   {:db db
+   :overlay overlay
    :runtime-support runtime-support
    :instance-supervisor instance-supervisor
    :instance instance})

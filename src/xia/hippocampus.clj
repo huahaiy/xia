@@ -698,18 +698,6 @@ Rules:
    :maintenance-step-ms :memory/knowledge-decay-maintenance-step-ms
    :archive-after-bottom-ms :memory/knowledge-decay-archive-after-bottom-ms})
 
-(defn- configured-bounded-double
-  [config-key default-value]
-  (if-let [raw (db/get-config config-key)]
-    (try
-      (let [parsed (Double/parseDouble (str raw))]
-        (if (<= 0.0 parsed 1.0)
-          parsed
-          default-value))
-      (catch Exception _
-        default-value))
-    default-value))
-
 (defn knowledge-decay-settings
   "Return the effective fact-confidence decay settings."
   []
@@ -721,14 +709,32 @@ Rules:
          (cfg/positive-long (:half-life-ms knowledge-decay-config-keys)
                             (:half-life-ms default-knowledge-decay-config))
          :min-confidence
-         (configured-bounded-double (:min-confidence knowledge-decay-config-keys)
-                                    (:min-confidence default-knowledge-decay-config))
+         (cfg/bounded-double (:min-confidence knowledge-decay-config-keys)
+                             (:min-confidence default-knowledge-decay-config))
          :maintenance-step-ms
          (cfg/positive-long (:maintenance-step-ms knowledge-decay-config-keys)
                             (:maintenance-step-ms default-knowledge-decay-config))
          :archive-after-bottom-ms
          (cfg/positive-long (:archive-after-bottom-ms knowledge-decay-config-keys)
                             (:archive-after-bottom-ms default-knowledge-decay-config))))
+
+(defn knowledge-decay-config-resolutions
+  []
+  {:grace-period-ms
+   (cfg/positive-long-resolution (:grace-period-ms knowledge-decay-config-keys)
+                                 (:grace-period-ms default-knowledge-decay-config))
+   :half-life-ms
+   (cfg/positive-long-resolution (:half-life-ms knowledge-decay-config-keys)
+                                 (:half-life-ms default-knowledge-decay-config))
+   :min-confidence
+   (cfg/bounded-double-resolution (:min-confidence knowledge-decay-config-keys)
+                                  (:min-confidence default-knowledge-decay-config))
+   :maintenance-step-ms
+   (cfg/positive-long-resolution (:maintenance-step-ms knowledge-decay-config-keys)
+                                 (:maintenance-step-ms default-knowledge-decay-config))
+   :archive-after-bottom-ms
+   (cfg/positive-long-resolution (:archive-after-bottom-ms knowledge-decay-config-keys)
+                                 (:archive-after-bottom-ms default-knowledge-decay-config))})
 
 (defn- decay-window-ms
   [^java.util.Date updated-at ^java.util.Date as-of decay-config]

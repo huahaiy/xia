@@ -14,6 +14,7 @@
             [xia.db.session :as db-session]
             [xia.db.task :as db-task]
             [xia.paths :as paths]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.sensitive :as sensitive])
   (:import [java.io InputStream]
@@ -1239,20 +1240,68 @@
 ;; Config
 ;; ---------------------------------------------------------------------------
 
+(defn- db-config-value
+  [k]
+  (let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
+    (if (sensitive/secret-config-key? k)
+      (some-> value (crypto/decrypt (config-aad k)))
+      value)))
+
+(defn- ensure-config-mutable!
+  [k]
+  (when (runtime-overlay/forced-key? k)
+    (throw (ex-info "config key is managed by the active runtime overlay"
+                    {:status 409
+                     :error "config key is managed by the active runtime overlay"
+                     :config-key k
+                     :overlay-snapshot-id (runtime-overlay/snapshot-id)}))))
+
+(defn- ensure-overlay-entity-mutable!
+  [kind entity-id]
+  (when (runtime-overlay/entity-managed? kind entity-id)
+    (throw (ex-info "entity is managed by the active runtime overlay"
+                    {:status 409
+                     :error "entity is managed by the active runtime overlay"
+                     :entity-kind kind
+                     :entity-id entity-id
+                     :overlay-snapshot-id (runtime-overlay/snapshot-id)}))))
+
+(defn- ensure-provider-default-mutable!
+  [provider-id]
+  (when-let [overlay-default-id (runtime-overlay/provider-default-id)]
+    (throw (ex-info "default provider is managed by the active runtime overlay"
+                    {:status 409
+                     :error "default provider is managed by the active runtime overlay"
+                     :provider-id provider-id
+                     :overlay-provider-id overlay-default-id
+                     :overlay-snapshot-id (runtime-overlay/snapshot-id)}))))
+
 (defn set-config! [k v]
+  (ensure-config-mutable! k)
   (transact! [{:config/key k :config/value (str v)}]))
 
 (defn delete-config! [k]
+  (ensure-config-mutable! k)
   (when-let [eid (ffirst (q '[:find ?e :in $ ?k
                               :where [?e :config/key ?k]]
                             k))]
     (transact! [[:db/retractEntity eid]])))
 
 (defn get-config [k]
-  (let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
-    (if (sensitive/secret-config-key? k)
-      (some-> value (crypto/decrypt (config-aad k)))
-      value)))
+  (if (runtime-overlay/config-override? k)
+    (runtime-overlay/config-db-value k)
+    (db-config-value k)))
+
+(defn tenant-config-value
+  [k]
+  (db-config-value k))
+
+(defn config-source
+  [k]
+  (cond
+    (runtime-overlay/config-override? k) :runtime-overlay
+    (some? (db-config-value k)) :tenant-db
+    :else :default))
 
 ;; ---------------------------------------------------------------------------
 ;; Identity
@@ -1304,6 +1353,8 @@
          list-providers
          list-services
          list-site-creds
+         catalog-deps
+         provider-deps
          save-oauth-account!
          upsert-provider!
          set-default-provider!
@@ -1312,13 +1363,13 @@
 
 (defn initial-settings-empty?
   []
-  (and (nil? (get-config :setup/complete))
+  (and (nil? (db-config-value :setup/complete))
        (every? #(nil? (get-identity %)) template-identity-keys)
-       (every? #(nil? (get-config %)) template-config-keys)
-       (empty? (list-oauth-accounts))
-       (empty? (list-providers))
-       (empty? (list-services))
-       (empty? (list-site-creds))))
+       (every? #(nil? (db-config-value %)) template-config-keys)
+       (empty? (db-catalog/list-oauth-accounts (catalog-deps)))
+       (empty? (db-provider/list-providers (provider-deps)))
+       (empty? (db-catalog/list-services (catalog-deps)))
+       (empty? (db-catalog/list-site-creds (catalog-deps)))))
 
 (defn- decrypt-template-secret-attr
   [attr value skipped-secret-count]
@@ -1602,23 +1653,46 @@
 ;; ---------------------------------------------------------------------------
 
 (defn upsert-provider! [{:keys [id] :as provider}]
+  (ensure-overlay-entity-mutable! :provider id)
   (db-provider/upsert-provider! (provider-deps) provider))
 
 (defn delete-provider! [provider-id]
+  (ensure-overlay-entity-mutable! :provider provider-id)
   (db-provider/delete-provider! (provider-deps) provider-id))
 
 (defn get-default-provider []
-  (db-provider/get-default-provider (provider-deps)))
+  (let [providers (list-providers)]
+    (some #(when (:llm.provider/default? %) %) providers)))
 
 (defn get-provider [provider-id]
-  (db-provider/get-provider (provider-deps) provider-id))
+  (let [provider (runtime-overlay/merge-entity
+                   :provider
+                   (db-provider/get-provider (provider-deps) provider-id)
+                   provider-id)
+        overlay-default-id (runtime-overlay/provider-default-id)]
+    (cond-> provider
+      (and provider overlay-default-id)
+      (assoc :llm.provider/default? (= overlay-default-id
+                                       (:llm.provider/id provider))))))
 
 (defn list-providers []
-  (db-provider/list-providers (provider-deps)))
+  (let [providers (runtime-overlay/merge-entities
+                    :provider
+                    (db-provider/list-providers (provider-deps)))
+        overlay-default-id (runtime-overlay/provider-default-id)]
+    (if overlay-default-id
+      (mapv (fn [provider]
+              (assoc provider
+                     :llm.provider/default? (= overlay-default-id
+                                               (:llm.provider/id provider))))
+            providers)
+      providers)))
 
 (defn set-default-provider!
   "Mark exactly one provider as the default."
   [provider-id]
+  (ensure-provider-default-mutable! provider-id)
+  (ensure-overlay-entity-mutable! :provider provider-id)
   (db-provider/set-default-provider! (provider-deps) provider-id))
 
 ;; ---------------------------------------------------------------------------
@@ -1913,19 +1987,27 @@
 
 (defn save-site-cred!
   [site-cred]
+  (ensure-overlay-entity-mutable! :site-cred (:id site-cred))
   (db-catalog/save-site-cred! (catalog-deps) site-cred))
 
 (defn register-site-cred!
   [site-cred]
+  (ensure-overlay-entity-mutable! :site-cred (:id site-cred))
   (db-catalog/register-site-cred! (catalog-deps) site-cred))
 
 (defn get-site-cred [site-id]
-  (db-catalog/get-site-cred (catalog-deps) site-id))
+  (runtime-overlay/merge-entity
+    :site-cred
+    (db-catalog/get-site-cred (catalog-deps) site-id)
+    site-id))
 
 (defn list-site-creds []
-  (db-catalog/list-site-creds (catalog-deps)))
+  (runtime-overlay/merge-entities
+    :site-cred
+    (db-catalog/list-site-creds (catalog-deps))))
 
 (defn remove-site-cred! [site-id]
+  (ensure-overlay-entity-mutable! :site-cred site-id)
   (db-catalog/remove-site-cred! (catalog-deps) site-id))
 
 ;; ---------------------------------------------------------------------------
@@ -1934,21 +2016,30 @@
 
 (defn save-service!
   [service]
+  (ensure-overlay-entity-mutable! :service (:id service))
   (db-catalog/save-service! (catalog-deps) service))
 
 (defn register-service! [service]
+  (ensure-overlay-entity-mutable! :service (:id service))
   (db-catalog/register-service! (catalog-deps) service))
 
 (defn get-service [service-id]
-  (db-catalog/get-service (catalog-deps) service-id))
+  (runtime-overlay/merge-entity
+    :service
+    (db-catalog/get-service (catalog-deps) service-id)
+    service-id))
 
 (defn list-services []
-  (db-catalog/list-services (catalog-deps)))
+  (runtime-overlay/merge-entities
+    :service
+    (db-catalog/list-services (catalog-deps))))
 
 (defn remove-service! [service-id]
+  (ensure-overlay-entity-mutable! :service service-id)
   (db-catalog/remove-service! (catalog-deps) service-id))
 
 (defn enable-service! [service-id enabled?]
+  (ensure-overlay-entity-mutable! :service service-id)
   (db-catalog/enable-service! (catalog-deps) service-id enabled?))
 
 ;; ---------------------------------------------------------------------------
@@ -1977,19 +2068,27 @@
 
 (defn save-oauth-account!
   [oauth-account]
+  (ensure-overlay-entity-mutable! :oauth-account (:id oauth-account))
   (db-catalog/save-oauth-account! (catalog-deps) oauth-account))
 
 (defn register-oauth-account!
   [oauth-account]
+  (ensure-overlay-entity-mutable! :oauth-account (:id oauth-account))
   (db-catalog/register-oauth-account! (catalog-deps) oauth-account))
 
 (defn get-oauth-account [account-id]
-  (db-catalog/get-oauth-account (catalog-deps) account-id))
+  (runtime-overlay/merge-entity
+    :oauth-account
+    (db-catalog/get-oauth-account (catalog-deps) account-id)
+    account-id))
 
 (defn list-oauth-accounts []
-  (db-catalog/list-oauth-accounts (catalog-deps)))
+  (runtime-overlay/merge-entities
+    :oauth-account
+    (db-catalog/list-oauth-accounts (catalog-deps))))
 
 (defn remove-oauth-account! [account-id]
+  (ensure-overlay-entity-mutable! :oauth-account account-id)
   (db-catalog/remove-oauth-account! (catalog-deps) account-id))
 
 (defn oauth-account-in-use?
