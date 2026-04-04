@@ -299,6 +299,13 @@
        (cancel-session! session-id reason))
      (count session-ids))))
 
+(defn runtime-activity
+  "Return coarse agent runtime activity counts for control-plane inspection."
+  []
+  {:active-session-turn-count (count @active-session-turns)
+   :active-session-run-count  (count @active-session-runs)
+   :active-task-run-count     (count @active-task-runs)})
+
 (defn session-cancelled?
   [session-id]
   (boolean

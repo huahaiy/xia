@@ -588,9 +588,16 @@ Rules:
                       (first (:tasks @background-consolidation-state)))]
       (try
         @task
-        (catch Exception _
+      (catch Exception _
           nil))
       (recur))))
+
+(defn runtime-activity
+  "Return coarse hippocampus runtime activity for control-plane inspection."
+  []
+  (locking background-consolidation-lock
+    {:accepting? (boolean (:accepting? @background-consolidation-state))
+     :pending-background-task-count (count (:tasks @background-consolidation-state))}))
 
 (defn- submit-background-consolidation!
   [session-id]

@@ -514,6 +514,36 @@
         (finally
           (http/clear-command-shutdown-handler!))))))
 
+(deftest command-runtime-status-route-reports-idle-safely
+  (with-redefs [xia.channel.http/command-channel-token (constantly "command-secret")
+                xia.runtime-health/idle-status (constantly {:phase :running
+                                                            :idle? true
+                                                            :shutdown-allowed? true
+                                                            :blockers []
+                                                            :activity {:agent {:active-session-turn-count 0
+                                                                               :active-session-run-count 0
+                                                                               :active-task-run-count 0}
+                                                                       :scheduler {:running? true
+                                                                                   :running-schedule-count 0
+                                                                                   :maintenance-running? false}
+                                                                       :hippocampus {:accepting? true
+                                                                                     :pending-background-task-count 0}
+                                                                       :llm {:accepting? true
+                                                                             :pending-log-write-count 0}}})]
+    (let [response (#'http/router {:uri "/command/runtime/status"
+                                   :request-method :get
+                                   :headers (command-headers)})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= "running" (get body "phase")))
+      (is (= true (get body "idle")))
+      (is (= true (get body "shutdown_allowed")))
+      (is (= [] (get body "blockers")))
+      (is (= {"active_session_turn_count" 0
+              "active_session_run_count" 0
+              "active_task_run_count" 0}
+             (get-in body ["activity" "agent"])))))) 
+
 (deftest chat-route-allows-direct-local-client-with-session-secret
   (with-redefs [xia.agent/process-message (fn [_session-id _user-message & _] "ok")]
     (let [response (#'http/router {:uri            "/chat"

@@ -417,3 +417,10 @@
   "Check if the scheduler is currently running."
   []
   (some? @tick-executor))
+
+(defn runtime-activity
+  "Return coarse scheduler runtime activity for control-plane inspection."
+  []
+  {:running?               (boolean @tick-executor)
+   :running-schedule-count (count @running-schedules)
+   :maintenance-running?   (boolean @maintenance-running?)})

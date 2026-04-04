@@ -14,6 +14,7 @@
             [xia.channel.http.session :as http-session]
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
+            [xia.runtime-health :as runtime-health]
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
@@ -643,6 +644,34 @@
             (log/error e "Command shutdown handler failed"))))
       (json-response 202 {:status "stopping"}))
     (json-response 503 {:error "shutdown control unavailable"})))
+
+(defn- runtime-idle-body
+  []
+  (let [{:keys [phase idle? shutdown-allowed? blockers activity]}
+        (runtime-health/idle-status)]
+    {:phase (some-> phase name)
+     :idle idle?
+     :shutdown_allowed shutdown-allowed?
+     :blockers (mapv (fn [{:keys [component kind count reason]}]
+                       {:component (some-> component name)
+                        :kind (some-> kind name)
+                        :count count
+                        :reason reason})
+                     blockers)
+     :activity {"agent" {"active_session_turn_count" (get-in activity [:agent :active-session-turn-count] 0)
+                         "active_session_run_count" (get-in activity [:agent :active-session-run-count] 0)
+                         "active_task_run_count" (get-in activity [:agent :active-task-run-count] 0)}
+                "scheduler" {"running" (boolean (get-in activity [:scheduler :running?]))
+                             "running_schedule_count" (get-in activity [:scheduler :running-schedule-count] 0)
+                             "maintenance_running" (boolean (get-in activity [:scheduler :maintenance-running?]))}
+                "hippocampus" {"accepting" (boolean (get-in activity [:hippocampus :accepting?]))
+                               "pending_background_task_count" (get-in activity [:hippocampus :pending-background-task-count] 0)}
+                "llm" {"accepting" (boolean (get-in activity [:llm :accepting?]))
+                       "pending_log_write_count" (get-in activity [:llm :pending-log-write-count] 0)}}}))
+
+(defn- handle-command-runtime-status
+  [_req]
+  (json-response 200 (runtime-idle-body)))
 
 (defn- runtime-available?
   []
@@ -1479,6 +1508,7 @@
           command-session-audit-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/audit" uri)
           command-session-task-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/task" uri)
           command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
+          command-runtime-status-match (= uri "/command/runtime/status")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
           task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
@@ -1561,6 +1591,9 @@
 
         (and (= method :post) (= uri "/command/shutdown"))
         (command-route-response req #(handle-command-shutdown req))
+
+        (and (= method :get) command-runtime-status-match)
+        (command-route-response req #(handle-command-runtime-status req))
 
         (and (= method :delete) command-session-close-match)
         (command-route-response req #(handle-close-session (second command-session-close-match) :command))

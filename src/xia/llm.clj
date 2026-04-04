@@ -103,6 +103,13 @@
   []
   (llm-routing/await-background-tasks! async-log-lock async-log-state))
 
+(defn runtime-activity
+  "Return coarse LLM runtime activity for control-plane inspection."
+  []
+  (locking async-log-lock
+    {:accepting? (boolean (:accepting? @async-log-state))
+     :pending-log-write-count (count (:tasks @async-log-state))}))
+
 (defn- submit-log-write!
   [log-entry]
   (llm-routing/submit-log-write! {:async-log-lock async-log-lock
