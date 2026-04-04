@@ -670,8 +670,9 @@
 
 (defn- resolve-datalevin-opts
   [options]
-  (deep-merge default-datalevin-opts-map
-              (:datalevin-opts options)))
+  (-> (deep-merge default-datalevin-opts-map
+                  (:datalevin-opts options))
+      (assoc :wal? false)))
 
 (defn- resolve-embedding-provider-spec
   [db-path datalevin-opts]

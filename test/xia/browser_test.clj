@@ -979,7 +979,7 @@
           (finally
             (browser/close-session (:session-id result))))))))
 
-(deftest remote-actions-do-not-require-inline-session-state-on-every-response
+(deftest remote-actions-update-snapshot-metadata-without-inline-browser-state
   (db/set-config! :browser/remote-enabled? "true")
   (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
   (let [{:keys [backend snapshots]} (test-remote-backend)
@@ -1018,7 +1018,7 @@
                         {:status 200
                          :headers {"content-type" "application/json"}
                          :body (json/write-json-str
-                                {"url" "https://example.com"
+                                {"url" "https://example.com/next"
                                  "title" "Read page"
                                  "content" "Read page"
                                  "forms" []
@@ -1041,13 +1041,76 @@
         (let [page (browser.backend/read-page* backend session-id)]
           (is (= :remote (:backend page)))
           (is (= "Read page" (:title page)))
-          (is (= original-snapshot (get @snapshots session-id))
-              "Lightweight action responses should not rewrite the durable snapshot")
+          (is (= (get original-snapshot "browser_state")
+                 (get-in @snapshots [session-id "browser_state"]))
+              "Lightweight action responses should preserve the last exported browser state")
+          (is (= "https://example.com/next"
+                 (get-in @snapshots [session-id "current_url"]))
+              "Lightweight action responses should still advance resumable URL metadata")
           (is (= [[:post "http://browser-pool.internal/v1/sessions"]
                   [:get (str "http://browser-pool.internal/v1/sessions/" session-id "/page")]]
                  @requests))))
       (when-let [session-id @session-id*]
         (browser/close-session session-id)))))
+
+(deftest remote-open-session-closes-lease-when-local-snapshot-persist-fails
+  (db/set-config! :browser/remote-enabled? "true")
+  (db/set-config! :browser/remote-base-url "http://browser-pool.internal/v1")
+  (let [requests    (atom [])
+        session-id* (atom nil)
+        backend     ((ns-resolve 'xia.browser.remote 'create-backend)
+                     {:read-snapshot (constantly nil)
+                      :write-snapshot! (fn [_ _]
+                                         (throw (ex-info "snapshot write failed" {})))
+                      :delete-snapshot! (fn [_] nil)
+                      :all-snapshots (constantly nil)
+                      :snapshot-expired? (constantly false)
+                      :snapshot-usable? (constantly {:ok? true})
+                      :validate-url! (fn [_] nil)
+                      :resolve-url! (fn [_] nil)})]
+    (with-redefs [xia.http-client/request
+                  (fn [req]
+                    (swap! requests conj [(:method req) (:url req)])
+                    (let [url (:url req)]
+                      (cond
+                        (= [(:method req) url]
+                           [:post "http://browser-pool.internal/v1/sessions"])
+                        (let [payload (json/read-json (:body req))
+                              session-id (get payload "session_id")]
+                          (reset! session-id* session-id)
+                          {:status 200
+                           :headers {"content-type" "application/json"}
+                           :body (json/write-json-str
+                                  {"session" {"session_id" session-id
+                                              "current_url" "https://example.com"
+                                              "browser_state" "{\"cookies\":[]}"
+                                              "created_at_ms" 100
+                                              "updated_at_ms" 120
+                                              "last_access_ms" 120
+                                              "js_enabled" true}
+                                   "result" {"url" "https://example.com"
+                                             "title" "Opened"
+                                             "content" "Open page"
+                                             "forms" []
+                                             "links" []
+                                             "truncated?" false}})})
+
+                        (= [(:method req) url]
+                           [:delete (str "http://browser-pool.internal/v1/sessions/" @session-id*)])
+                        {:status 204
+                         :headers {}
+                         :body ""}
+
+                        :else
+                        (throw (ex-info "Unexpected remote browser request"
+                                        {:request req})))))]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #"snapshot write failed"
+            (browser.backend/open-session* backend "https://example.com" {:js true})))
+      (is (= [[:post "http://browser-pool.internal/v1/sessions"]
+              [:delete (str "http://browser-pool.internal/v1/sessions/" @session-id*)]]
+             @requests)
+          "Remote lease should be cleaned up if Xia cannot persist the session locally"))))
 
 (deftest remote-release-session-exports-state-once-then-drops-lease
   (db/set-config! :browser/remote-enabled? "true")

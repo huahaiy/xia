@@ -15,7 +15,7 @@
 (def ^:private backend-id :remote)
 (def ^:private default-request-timeout-ms 120000)
 
-(declare missing-session-error? session-path)
+(declare best-effort-close! missing-session-error? session-path)
 
 (defn configured?
   []
@@ -185,10 +185,11 @@
     ((:write-snapshot! ops) session-id snapshot)
     snapshot))
 
-(defn- payload-has-session-state?
+(defn- payload-updates-snapshot?
   [payload]
   (or (some? (lookup payload "session" :session))
-      (some? (lookup payload "browser_state" :browser_state "storage_state" :storage_state))))
+      (some? (lookup payload "browser_state" :browser_state "storage_state" :storage_state))
+      (some? (lookup payload "current_url" :current_url "url" :url))))
 
 (defn- result-from-payload
   [session-id payload]
@@ -262,9 +263,15 @@
 
                             (some? channel)
                             (assoc "channel" channel)))]
-    (persist-snapshot! ops session-id payload {:default-url url
-                                               :default-js (if (nil? js) true (boolean js))})
-    (result-from-payload session-id payload)))
+    (try
+      (persist-snapshot! ops session-id payload {:default-url url
+                                                 :default-js (if (nil? js) true (boolean js))})
+      (result-from-payload session-id payload)
+      (catch Throwable t
+        ;; The remote lease exists now, so clean it up if Xia fails to durably
+        ;; checkpoint the session locally.
+        (best-effort-close! session-id)
+        (throw t)))))
 
 (defn- snapshot-usable?
   [ops snapshot target-url]
@@ -337,7 +344,7 @@
     session-id
     (fn []
       (let [payload (request! method (session-path session-id suffix) body)]
-        (when (payload-has-session-state? payload)
+        (when (payload-updates-snapshot? payload)
           (persist-snapshot! ops session-id payload {:default-url nil
                                                      :default-js true}))
         (result-from-payload session-id payload)))))

@@ -279,7 +279,7 @@
            (db/close!))))
     (is (false? @called?))))
 
-(deftest connect-disables-datalevin-wal-by-default
+(deftest connect-forces-datalevin-wal-disabled
   (let [conn-opts (atom nil)]
     (with-redefs-fn {#'datalevin.core/get-conn (fn [_db-path _schema opts]
                                                  (reset! conn-opts opts)
@@ -292,6 +292,7 @@
       #(try
          (db/connect! "/tmp/xia-dev-connect"
                       {:local-llm-provider false
+                       :datalevin-opts {:wal? true}
                        :passphrase-provider (constantly "xia-test-passphrase")})
          (finally
            (db/close!))))
