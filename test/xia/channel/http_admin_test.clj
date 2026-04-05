@@ -122,17 +122,10 @@
       (is (= (str "xia/schema/" db/current-schema-version ".edn")
              (get db-schema "supported_schema_resource_path")))
       (is (string? (get db-schema "schema_applied_at")))
-      (is (= [[0 1 "Adopt versioned Xia DB schema metadata."]
-              [1 2 "Record the canonical schema resource path and applied-at timestamp."]
-              [2 3 "Advance schema resource provenance to the v3 schema resource."]]
-             (mapv (juxt #(get % "from_version")
-                         #(get % "to_version")
-                         #(get % "description"))
-                   (get db-schema "available_migrations"))))
-      (is (= [[0 1] [1 2] [2 3]]
-             (mapv (juxt #(get % "from_version")
-                         #(get % "to_version"))
-                   (get db-schema "migration_history"))))
+      (is (= []
+             (get db-schema "available_migrations")))
+      (is (= []
+             (get db-schema "migration_history")))
       (is (= true (get overlay "active")))
       (is (= "overlay-debug-v1" (get overlay "snapshot_id")))
       (is (= 1 (get overlay "overlay_version")))

@@ -19,7 +19,7 @@ if not "%GRAALVM_HOME%"=="" (
 if not exist target\native-tmp\.tmp mkdir target\native-tmp\.tmp
 if not exist target\native-image mkdir target\native-image
 
-call clojure -T:build native-uber
+call lein with-profile -dev,+release uberjar
 if errorlevel 1 (
   popd
   exit /b %errorlevel%

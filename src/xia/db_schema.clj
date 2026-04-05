@@ -5,7 +5,7 @@
             [datalevin.core :as d])
   (:import [java.util Date]))
 
-(def current-version 3)
+(def current-version 1)
 
 (def schema-version-meta-key :db/schema-version)
 (def schema-resource-path-meta-key :db/schema-resource-path)
@@ -31,9 +31,10 @@
 
 (defn migration-history-value
   [conn]
-  (some-> (meta-value conn schema-migration-history-meta-key)
-          edn/read-string
-          vec))
+  (or (some-> (meta-value conn schema-migration-history-meta-key)
+              edn/read-string
+              vec)
+      []))
 
 (defn stored-schema-resource-path
   [conn]
@@ -49,28 +50,24 @@
         next-history (conj (or history []) entry)]
     (set-meta! conn schema-migration-history-meta-key (pr-str next-history))))
 
-(defn- adopt-schema-version-metadata!
-  [conn]
-  (when-not (meta-value conn schema-version-meta-key)
-    (set-meta! conn schema-version-meta-key "1")))
-
-(defn- record-schema-resource-metadata!
-  [conn version]
-  (set-meta! conn schema-resource-path-meta-key (schema-resource-path version))
-  (set-meta! conn schema-applied-at-meta-key (.toString (java.time.Instant/now))))
-
 (def ^:private migration-registry
-  {0 {:to-version 1
-      :description "Adopt versioned Xia DB schema metadata."
-      :migrate! adopt-schema-version-metadata!}
-   1 {:to-version 2
-      :description "Record the canonical schema resource path and applied-at timestamp."
-      :migrate! (fn [conn]
-                  (record-schema-resource-metadata! conn 2))}
-   2 {:to-version 3
-      :description "Advance schema resource provenance to the v3 schema resource."
-      :migrate! (fn [conn]
-                  (record-schema-resource-metadata! conn 3))}})
+  {})
+
+(defn ensure-current-metadata!
+  [conn]
+  (let [current-version-str  (str current-version)
+        current-resource-path (schema-resource-path current-version)
+        stored-version        (meta-value conn schema-version-meta-key)
+        stored-resource-path  (stored-schema-resource-path conn)
+        stored-applied-at     (stored-schema-applied-at conn)]
+    (when-not (= stored-version current-version-str)
+      (set-meta! conn schema-version-meta-key current-version-str))
+    (when-not (= stored-resource-path current-resource-path)
+      (set-meta! conn schema-resource-path-meta-key current-resource-path))
+    (when (or (not= stored-version current-version-str)
+              (not= stored-resource-path current-resource-path)
+              (nil? stored-applied-at))
+      (set-meta! conn schema-applied-at-meta-key (.toString (java.time.Instant/now))))))
 
 (defn schema-resource-path
   [version]

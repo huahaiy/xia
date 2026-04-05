@@ -1,5 +1,7 @@
 target/
 .cpcache/
+.lein-env
+.lein-failures
 .nrepl-port
 *.jar
 *.class

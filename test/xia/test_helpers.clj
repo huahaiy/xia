@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [datalevin.embedding :as emb]
             [datalevin.llm :as llm]
+            [taoensso.timbre :as timbre]
             [xia.db :as db]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.working-memory :as wm])
@@ -14,6 +15,9 @@
            [java.nio.charset StandardCharsets]
            [java.util Base64]
            [java.util.concurrent.locks LockSupport]))
+
+;; Keep routine test runs silent unless something truly unrecoverable happens.
+(timbre/merge-config! {:min-level :fatal})
 
 (defn- temp-db-path []
   (str (Files/createTempDirectory "xia-test"

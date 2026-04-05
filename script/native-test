@@ -16,7 +16,7 @@ mkdir -p "$ROOT_DIR/target/native-test-tmp/.tmp" "$ROOT_DIR/target/native-test-i
 
 cd "$ROOT_DIR"
 
-clojure -T:build native-test-uber
+lein with-profile -dev,+native-test uberjar
 
 NATIVE_IMAGE_HEAP="${XIA_NATIVE_IMAGE_HEAP:-10g}"
 NATIVE_IMAGE_FLAGS=(

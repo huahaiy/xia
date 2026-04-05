@@ -447,53 +447,27 @@
                        schema-version-meta-key))
           parse-schema-version))
 
-(defn- record-schema-version!
-  [conn version]
-  (d/transact! conn [{:xia.meta/key schema-version-meta-key
-                      :xia.meta/value (str version)
-                      :xia.meta/updated-at (Date.)}]))
-
-(defn- apply-schema-migration-step!
-  [conn db-path {:keys [from-version to-version description migrate!]}]
-  (log/info "Applying database schema migration"
-            {:db-path db-path
-             :from-version from-version
-             :to-version to-version
-             :description description})
-  (when migrate!
-    (migrate! conn))
-  (db-schema/record-migration-history!
-    conn
-    {:from-version from-version
-     :to-version to-version
-     :description description
-     :applied-at (.toString (java.time.Instant/now))})
-  (record-schema-version! conn to-version))
-
 (defn- ensure-schema-version!
   [conn db-path]
-  (let [stored-version (or (raw-schema-version conn) 0)]
-    (cond
-      (= stored-version current-schema-version)
-      nil
-
-      (< stored-version current-schema-version)
-      (if-let [migration-path (seq (db-schema/migration-path stored-version))]
-        (doseq [step migration-path]
-          (apply-schema-migration-step! conn db-path step))
-        (throw (ex-info "Database schema version requires migration before this Xia binary can open it."
-                        {:db-path db-path
-                         :schema-version stored-version
-                         :current-schema-version current-schema-version
-                         :available-migrations (db-schema/migration-registry-summary)
-                         :reason :db/schema-version-too-old})))
-
-      :else
+  (let [stored-version       (raw-schema-version conn)
+        current-resource-path (db-schema/schema-resource-path current-schema-version)
+        stored-resource-path (db-schema/stored-schema-resource-path conn)
+        stored-applied-at    (db-schema/stored-schema-applied-at conn)]
+    (when (and stored-version
+               (> stored-version current-schema-version))
       (throw (ex-info "Database schema version is newer than this Xia binary supports."
                       {:db-path db-path
                        :schema-version stored-version
                        :current-schema-version current-schema-version
-                       :reason :db/schema-version-too-new})))))
+                       :reason :db/schema-version-too-new})))
+    (when-not (and (= stored-version current-schema-version)
+                   (= stored-resource-path current-resource-path)
+                   (some? stored-applied-at))
+      (log/info "Adopting current database schema metadata"
+                {:db-path db-path
+                 :stored-version stored-version
+                 :current-schema-version current-schema-version})
+      (db-schema/ensure-current-metadata! conn))))
 
 (defn connect!
   "Open (or create) the Datalevin database at `db-path`."
