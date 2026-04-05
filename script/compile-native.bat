@@ -2,6 +2,7 @@
 setlocal
 
 set "ROOT_DIR=%~dp0.."
+set "STAGED_JAR=%TEMP%\xia-release-%RANDOM%%RANDOM%.jar"
 pushd "%ROOT_DIR%"
 
 if not "%GRAALVM_HOME%"=="" (
@@ -16,14 +17,33 @@ if not "%GRAALVM_HOME%"=="" (
   )
 )
 
-if not exist target\native-tmp\.tmp mkdir target\native-tmp\.tmp
-if not exist target\native-image mkdir target\native-image
-
-call lein with-profile -dev,+release uberjar
+call lein clean
 if errorlevel 1 (
+  if exist "%STAGED_JAR%" del /q "%STAGED_JAR%"
   popd
   exit /b %errorlevel%
 )
+call lein with-profile -dev,+release uberjar
+if errorlevel 1 (
+  if exist "%STAGED_JAR%" del /q "%STAGED_JAR%"
+  popd
+  exit /b %errorlevel%
+)
+copy /y target\xia.jar "%STAGED_JAR%" >NUL
+if errorlevel 1 (
+  if exist "%STAGED_JAR%" del /q "%STAGED_JAR%"
+  popd
+  exit /b %errorlevel%
+)
+call lein clean
+if errorlevel 1 (
+  if exist "%STAGED_JAR%" del /q "%STAGED_JAR%"
+  popd
+  exit /b %errorlevel%
+)
+
+if not exist target\native-tmp\.tmp mkdir target\native-tmp\.tmp
+if not exist target\native-image mkdir target\native-image
 
 set "NATIVE_IMAGE_HEAP=%XIA_NATIVE_IMAGE_HEAP%"
 if "%NATIVE_IMAGE_HEAP%"=="" set "NATIVE_IMAGE_HEAP=10g"
@@ -45,9 +65,10 @@ call %NATIVE_IMAGE_CMD% ^
   -H:TempDirectory=target/native-tmp ^
   -H:Path=target/native-image ^
   -H:NativeLinkerOption=legacy_stdio_definitions.lib ^
-  -jar target/xia.jar ^
+  -jar "%STAGED_JAR%" ^
   -H:Name=xia
 
 set "EXIT_CODE=%ERRORLEVEL%"
+if exist "%STAGED_JAR%" del /q "%STAGED_JAR%"
 popd
 exit /b %EXIT_CODE%

@@ -3,6 +3,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xia-native-test.XXXXXX")"
+STAGED_JAR="$STAGING_DIR/xia-tests.jar"
+
+cleanup() {
+  rm -rf "$STAGING_DIR"
+}
+
+trap cleanup EXIT
 
 if [ -n "${GRAALVM_HOME:-}" ]; then
   export JAVA_HOME="$GRAALVM_HOME"
@@ -12,11 +20,14 @@ elif ! command -v native-image >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$ROOT_DIR/target/native-test-tmp/.tmp" "$ROOT_DIR/target/native-test-image"
-
 cd "$ROOT_DIR"
 
+lein clean
 lein with-profile -dev,+native-test uberjar
+cp "$ROOT_DIR/target/xia-tests.jar" "$STAGED_JAR"
+lein clean
+
+mkdir -p "$ROOT_DIR/target/native-test-tmp/.tmp" "$ROOT_DIR/target/native-test-image"
 
 NATIVE_IMAGE_HEAP="${XIA_NATIVE_IMAGE_HEAP:-10g}"
 NATIVE_IMAGE_FLAGS=(
@@ -40,7 +51,7 @@ env TMPDIR="$ROOT_DIR/target/native-test-tmp/.tmp" \
   -H:TempDirectory=target/native-test-tmp \
   -H:Path=target/native-test-image \
   "${NATIVE_IMAGE_FLAGS[@]}" \
-  -jar target/xia-tests.jar \
+  -jar "$STAGED_JAR" \
   -H:Name=xia-tests
 
 exec "$ROOT_DIR/target/native-test-image/xia-tests" "$@"
