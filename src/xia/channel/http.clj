@@ -19,6 +19,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
+            [xia.wake-projection :as wake-projection]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
     [java.net BindException]
@@ -693,6 +694,13 @@
   [_req]
   (runtime-state/clear-drain!)
   (json-response 200 (runtime-idle-body)))
+
+(defn- handle-command-wake-projection
+  [_req]
+  (let [projection (wake-projection/current-snapshot)]
+    (cond-> (json-response 200 projection)
+      (:projection_seq projection)
+      (assoc-in [:headers "ETag"] (str "\"" (:projection_seq projection) "\"")))))
 
 (defn- runtime-available?
   []
@@ -1532,6 +1540,7 @@
           command-runtime-status-match (= uri "/command/runtime/status")
           command-runtime-drain-match (= uri "/command/runtime/drain")
           command-runtime-undrain-match (= uri "/command/runtime/undrain")
+          command-wake-projection-match (= uri "/command/managed/wake-projection")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
           task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
@@ -1623,6 +1632,9 @@
 
         (and (= method :post) command-runtime-undrain-match)
         (command-route-response req #(handle-command-runtime-undrain req))
+
+        (and (= method :get) command-wake-projection-match)
+        (command-route-response req #(handle-command-wake-projection req))
 
         (and (= method :delete) command-session-close-match)
         (command-route-response req #(handle-close-session (second command-session-close-match) :command))
