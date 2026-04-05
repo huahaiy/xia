@@ -11,6 +11,14 @@
 (defn- raw-entity [eid]
   (into {} (d/entity (d/db (db/conn)) eid)))
 
+(defn- reconnect-current-db!
+  []
+  (let [db-path (db/current-db-path)]
+    (db/close!)
+    (db/connect! db-path
+                 (th/test-connect-options
+                   {:passphrase-provider (constantly "xia-test-passphrase")}))))
+
 (deftest service-auth-is-encrypted-at-rest
   (db/register-service! {:id :github
                          :base-url "https://api.github.com"
@@ -194,7 +202,7 @@
                  :service/auth-type :bearer
                  :service/auth-key  "legacy-token"
                  :service/enabled?  true}])
-  (#'xia.db/migrate-secrets!)
+  (reconnect-current-db!)
   (let [eid (ffirst (db/q '[:find ?e :where [?e :service/id :legacy]]))
         raw (raw-entity eid)
         svc (db/get-service :legacy)]
@@ -210,7 +218,7 @@
                  :service/enabled?  true}
                 {:config/key   :token/github
                  :config/value "gho_batch_secret"}])
-  (#'xia.db/migrate-secrets!)
+  (reconnect-current-db!)
   (let [eid       (ffirst (db/q '[:find ?e :where [?e :service/id :legacy-batch]]))
         raw       (raw-entity eid)
         raw-value (ffirst (db/q '[:find ?v :where
@@ -235,7 +243,7 @@
                   (fn [tx-data]
                     (swap! batch-sizes conj (count tx-data))
                     (orig-transact! tx-data))]
-      (#'xia.db/migrate-secrets!))
+      (reconnect-current-db!))
     (is (= [200 200 50] @batch-sizes))
     (is (= "token-0" (:service/auth-key (db/get-service :legacy-batch-0))))
     (is (= "token-449" (:service/auth-key (db/get-service :legacy-batch-449))))))
@@ -253,7 +261,7 @@
                    :message/content    "legacy transcript"
                    :message/tool-calls {:calls [{"id" "call_1"}]}
                    :message/created-at (java.util.Date.)}])
-    (#'xia.db/migrate-secrets!)
+    (reconnect-current-db!)
     (let [eid      (ffirst (db/q '[:find ?e :in $ ?id :where [?e :message/id ?id]]
                                  message-id))
           raw      (raw-entity eid)

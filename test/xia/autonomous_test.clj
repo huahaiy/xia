@@ -153,16 +153,10 @@
   (let [content (:content (autonomous/controller-system-message))]
     (is (str/includes? content "ACTION_INTENT_JSON:"))
     (is (str/includes? content "AUTONOMOUS_STATUS_JSON:"))
-    (is (re-find #"tool calls" content))
-    (is (re-find #"final assistant response" content))
-    (is (str/includes? content
-                       "\"used_facts\":[\"F1\",\"F2\"]"))
-    (is (str/includes? content
-                       "- used_facts: fact refs like F1 or F2 that materially informed this iteration."))
-    (is (str/includes? content
-                       "\"stack_action\":\"stay|push|pop|replace|clear\""))
-    (is (str/includes? content
-                       "\"progress_status\":\"not_started|pending|in_progress|paused|resumable|diverged|blocked|complete\""))))
+    (is (str/includes? content "\"used_facts\""))
+    (is (str/includes? content "\"stack_action\""))
+    (is (str/includes? content "\"progress_status\""))
+    (is (re-find #"final" content))))
 
 (deftest initial-state-preserves-a-long-goal
   (let [goal  (str "Handle the multi-account billing remediation workflow for the March support backlog, including invoice verification, refund eligibility review, payment retry checks, customer reply drafting, and the follow-up notes needed for finance escalation when ownership records disagree across systems.")

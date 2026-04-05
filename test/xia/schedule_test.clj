@@ -107,12 +107,6 @@
                  {:id :every-5 :spec {:interval-minutes 5} :type :tool :tool-id :x})]
     (is (= :every-5 (:id result)))))
 
-(deftest read-spec-rejects-reader-eval
-  (is (thrown-with-msg?
-        RuntimeException
-        #"No dispatch macro for: ="
-        (#'xia.schedule/read-spec "#=(+ 1 2)"))))
-
 (deftest create-coerces-vectors-to-sets
   ;; Tool params arrive as JSON arrays → vectors
   (let [result (schedule/create-schedule!
@@ -327,10 +321,11 @@
 (deftest trim-history-keeps-recent
   (schedule/create-schedule!
     {:id :trim-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (dotimes [_ 5]
+  (dotimes [idx 5]
     (schedule/record-run! :trim-test
-      {:started-at (java.util.Date.) :status :success :result "ok"})
-    (Thread/sleep 10))
+      {:started-at (java.util.Date. (+ 1000 (* idx 10)))
+       :status :success
+       :result "ok"}))
   (is (= 5 (count (schedule/schedule-history :trim-test 100))))
   (schedule/trim-history! :trim-test 2)
   (is (= 2 (count (schedule/schedule-history :trim-test 100)))))

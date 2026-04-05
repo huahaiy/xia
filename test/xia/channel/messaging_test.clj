@@ -7,7 +7,7 @@
             [xia.db :as db]
             [xia.http-client :as http-client]
             [xia.prompt :as prompt]
-            [xia.test-helpers :refer [with-test-db]]))
+            [xia.test-helpers :as th :refer [with-test-db]]))
 
 (use-fixtures :each with-test-db)
 
@@ -218,7 +218,12 @@
                 (binding [prompt/*interaction-context* {:channel :telegram
                                                         :session-id session-id}]
                   (prompt/prompt! "OTP Code" :mask? true)))]
-          (Thread/sleep 50)
+          (is (th/wait-until
+                #(some? (prompt/pending-interaction {:session-id session-id
+                                                     :channel :telegram
+                                                     :kind :prompt}))
+                {:timeout-ms 1000
+                 :interval-ms 10}))
           (messaging/handle-telegram-update!
            {"update_id" 99
             "message" {"message_id" 17
@@ -266,7 +271,12 @@
                                     :description "Send the draft email"
                                     :arguments {:to "ops@example.com"}
                                     :reason "The draft is ready"})))]
-          (Thread/sleep 50)
+          (is (th/wait-until
+                #(some? (prompt/pending-interaction {:session-id session-id
+                                                     :channel :slack
+                                                     :kind :approval}))
+                {:timeout-ms 1000
+                 :interval-ms 10}))
           (messaging/handle-slack-event!
            {"team_id" "T1"
             "event_id" "EVT-approve"

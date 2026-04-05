@@ -85,9 +85,9 @@
       (is (= "report.pdf" (:name download)))
       (is (= "application/pdf" (:media-type download)))
       (is (Arrays/equals ^bytes payload ^bytes (:bytes download))))
-    (is (some? (#'xia.artifact/load-blob-bytes (:blob-id created) (:blob-codec created))))
+    (is (some? (artifact/artifact-download-data sid (:id created))))
     (artifact/delete-artifact! sid (:id created))
-    (is (nil? (#'xia.artifact/load-blob-bytes (:blob-id created) (:blob-codec created))))))
+    (is (nil? (artifact/artifact-download-data sid (:id created))))))
 
 (deftest artifacts-can-create-scratch-pads-and-record-events
   (let [sid     (db/create-session! :http)

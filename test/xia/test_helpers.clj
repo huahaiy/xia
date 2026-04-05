@@ -12,7 +12,8 @@
            [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [java.nio.charset StandardCharsets]
-           [java.util Base64]))
+           [java.util Base64]
+           [java.util.concurrent.locks LockSupport]))
 
 (defn- temp-db-path []
   (str (Files/createTempDirectory "xia-test"
@@ -214,6 +215,37 @@
 (defn test-llm-provider
   []
   (TestLlmProvider.))
+
+(defn pause!
+  [millis]
+  (LockSupport/parkNanos (* 1000000 (long millis))))
+
+(defn block-until-interrupted!
+  "Yield in short intervals until the current thread is interrupted.
+  Useful for timeout/cancellation tests without introducing long wall-clock sleeps."
+  []
+  (loop []
+    (if (.isInterrupted (Thread/currentThread))
+      (throw (InterruptedException.))
+      (do
+        (pause! 5)
+        (recur)))))
+
+(defn wait-until
+  ([pred]
+   (wait-until pred {}))
+  ([pred {:keys [timeout-ms interval-ms]
+          :or {timeout-ms 1000
+               interval-ms 10}}]
+   (let [deadline (+ (System/nanoTime) (* 1000000 (long timeout-ms)))]
+     (loop []
+       (let [result (pred)]
+         (cond
+           result result
+           (>= (System/nanoTime) deadline) nil
+           :else (do
+                   (pause! interval-ms)
+                   (recur))))))))
 
 (defn test-connect-options
   ([]

@@ -510,6 +510,10 @@
        (reset! instance-id-atom instance-id)
        (ensure-schema-version! c db-path)
        (crypto/configure! db-path crypto-opts)
+       ;; Upgrade any legacy plaintext secret fields once the DB is open and
+       ;; the encryption key is configured, before higher-level runtime
+       ;; components begin reading config or provider records.
+       (migrate-secrets!)
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
        (reset! last-connect-event-atom
@@ -528,11 +532,36 @@
            (catch Exception _))
          (throw t))))))
 
+(def ^:private not-connected-message
+  "Database not connected. Call (xia.db/connect!) first.")
+
+(defn connected?
+  []
+  (some? @conn-atom))
+
+(defn- not-connected-ex?
+  [ex]
+  (and (instance? clojure.lang.ExceptionInfo ex)
+       (= not-connected-message (.getMessage ^Exception ex))))
+
+(defn- read-when-connected
+  ([f]
+   (read-when-connected nil f))
+  ([fallback f]
+   (if (connected?)
+     (try
+       (f)
+       (catch clojure.lang.ExceptionInfo ex
+         (if (not-connected-ex? ex)
+           fallback
+           (throw ex))))
+     fallback)))
+
 (defn conn
   "Return the current connection. Throws if not connected."
   []
   (or @conn-atom
-      (throw (ex-info "Database not connected. Call (xia.db/connect!) first." {}))))
+      (throw (ex-info not-connected-message {}))))
 
 (defn current-embedding-provider
   []
@@ -552,23 +581,23 @@
 
 (defn schema-version
   []
-  (some-> (conn)
-          raw-schema-version))
+  (read-when-connected
+    #(raw-schema-version (conn))))
 
 (defn schema-resource-path
   []
-  (some-> (conn)
-          db-schema/stored-schema-resource-path))
+  (read-when-connected
+    #(db-schema/stored-schema-resource-path (conn))))
 
 (defn schema-applied-at
   []
-  (some-> (conn)
-          db-schema/stored-schema-applied-at))
+  (read-when-connected
+    #(db-schema/stored-schema-applied-at (conn))))
 
 (defn schema-migration-history
   []
-  (some-> (conn)
-          db-schema/migration-history-value))
+  (read-when-connected []
+    #(db-schema/migration-history-value (conn))))
 
 (defn close! []
   (let [phase    (runtime-state/phase)
@@ -835,10 +864,11 @@
 
 (defn- db-config-value
   [k]
-  (let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
-    (if (sensitive/secret-config-key? k)
-      (some-> value (crypto/decrypt (config-aad k)))
-      value)))
+  (read-when-connected
+    #(let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
+       (if (sensitive/secret-config-key? k)
+         (some-> value (crypto/decrypt (config-aad k)))
+         value))))
 
 (defn- ensure-config-mutable!
   [k]
@@ -904,7 +934,8 @@
   (transact! [{:identity/key k :identity/value (str v)}]))
 
 (defn get-identity [k]
-  (ffirst (q '[:find ?v :in $ ?k :where [?e :identity/key ?k] [?e :identity/value ?v]] k)))
+  (read-when-connected
+    #(ffirst (q '[:find ?v :in $ ?k :where [?e :identity/key ?k] [?e :identity/value ?v]] k))))
 
 (def ^:private template-identity-keys
   [:name :role :description :personality :guidelines])
@@ -1260,7 +1291,8 @@
 (defn get-provider [provider-id]
   (let [provider (runtime-overlay/merge-entity
                    :provider
-                   (db-provider/get-provider (provider-deps) provider-id)
+                   (read-when-connected
+                     #(db-provider/get-provider (provider-deps) provider-id))
                    provider-id)
         overlay-default-id (runtime-overlay/provider-default-id)]
     (cond-> provider
@@ -1271,7 +1303,8 @@
 (defn list-providers []
   (let [providers (runtime-overlay/merge-entities
                     :provider
-                    (db-provider/list-providers (provider-deps)))
+                    (read-when-connected []
+                      #(db-provider/list-providers (provider-deps))))
         overlay-default-id (runtime-overlay/provider-default-id)]
     (if overlay-default-id
       (mapv (fn [provider]
@@ -1558,10 +1591,12 @@
   (db-catalog/save-skill! (catalog-deps) skill))
 
 (defn get-skill [skill-id]
-  (db-catalog/get-skill (catalog-deps) skill-id))
+  (read-when-connected
+    #(db-catalog/get-skill (catalog-deps) skill-id)))
 
 (defn list-skills []
-  (db-catalog/list-skills (catalog-deps)))
+  (read-when-connected []
+    #(db-catalog/list-skills (catalog-deps))))
 
 (defn remove-skill! [skill-id]
   (db-catalog/remove-skill! (catalog-deps) skill-id))
@@ -1591,13 +1626,15 @@
 (defn get-site-cred [site-id]
   (runtime-overlay/merge-entity
     :site-cred
-    (db-catalog/get-site-cred (catalog-deps) site-id)
+    (read-when-connected
+      #(db-catalog/get-site-cred (catalog-deps) site-id))
     site-id))
 
 (defn list-site-creds []
   (runtime-overlay/merge-entities
     :site-cred
-    (db-catalog/list-site-creds (catalog-deps))))
+    (read-when-connected []
+      #(db-catalog/list-site-creds (catalog-deps)))))
 
 (defn remove-site-cred! [site-id]
   (ensure-overlay-entity-mutable! :site-cred site-id)
@@ -1619,13 +1656,15 @@
 (defn get-service [service-id]
   (runtime-overlay/merge-entity
     :service
-    (db-catalog/get-service (catalog-deps) service-id)
+    (read-when-connected
+      #(db-catalog/get-service (catalog-deps) service-id))
     service-id))
 
 (defn list-services []
   (runtime-overlay/merge-entities
     :service
-    (db-catalog/list-services (catalog-deps))))
+    (read-when-connected []
+      #(db-catalog/list-services (catalog-deps)))))
 
 (defn remove-service! [service-id]
   (ensure-overlay-entity-mutable! :service service-id)
@@ -1672,13 +1711,15 @@
 (defn get-oauth-account [account-id]
   (runtime-overlay/merge-entity
     :oauth-account
-    (db-catalog/get-oauth-account (catalog-deps) account-id)
+    (read-when-connected
+      #(db-catalog/get-oauth-account (catalog-deps) account-id))
     account-id))
 
 (defn list-oauth-accounts []
   (runtime-overlay/merge-entities
     :oauth-account
-    (db-catalog/list-oauth-accounts (catalog-deps))))
+    (read-when-connected []
+      #(db-catalog/list-oauth-accounts (catalog-deps)))))
 
 (defn remove-oauth-account! [account-id]
   (ensure-overlay-entity-mutable! :oauth-account account-id)

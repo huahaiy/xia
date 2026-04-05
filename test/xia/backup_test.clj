@@ -63,19 +63,29 @@
   (let [backup-dir (temp-dir)]
     (db/set-config! :backup/directory backup-dir)
     (db/set-config! :backup/retain-count 1)
-    (let [first-result  (backup/run-backup!)
-          first-archive (:archive-path first-result)]
-      (Thread/sleep 10)
-      (let [second-result  (backup/run-backup!)
-            second-archive (:archive-path second-result)
-            archives       (managed-backup-files backup-dir)]
-        (is (= :success (:status first-result)))
-        (is (= :success (:status second-result)))
-        (is (not= first-archive second-archive))
-        (is (= 1 (count archives)))
-        (is (= [second-archive] (mapv #(.getAbsolutePath ^File %) archives)))
-        (is (false? (.exists (File. ^String first-archive))))
-        (is (= [first-archive] (:pruned-paths second-result)))))))
+    (with-redefs-fn {#'xia.backup/backup-archive-path
+                     (let [calls (atom 0)]
+                       (fn [dir]
+                         (let [n (swap! calls inc)]
+                           (str (File. ^String dir
+                                       (case n
+                                         1 "xia-backup-first.xia"
+                                         2 "xia-backup-second.xia"
+                                         (str "xia-backup-" n ".xia")))))))}
+      #(let [first-result  (backup/run-backup!)
+             first-archive (:archive-path first-result)
+             second-result  (backup/run-backup!)
+             second-archive (:archive-path second-result)
+             archives       (managed-backup-files backup-dir)]
+         (is (= :success (:status first-result)))
+         (is (= :success (:status second-result)))
+         (is (not= first-archive second-archive))
+         (is (= 1 (count archives)))
+         (is (= [second-archive] (mapv (fn [^File file]
+                                         (.getAbsolutePath file))
+                                       archives)))
+         (is (false? (.exists (File. ^String first-archive))))
+         (is (= [first-archive] (:pruned-paths second-result)))))))
 
 (deftest backup-due-respects-configured-interval
   (let [base (Instant/parse "2026-03-19T00:00:00Z")]

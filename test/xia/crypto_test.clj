@@ -176,41 +176,36 @@
          (is (= :key-file (:source (crypto/current-key-source))))
          (is (= key-file (:path (crypto/current-key-source))))))))
 
-(deftest validate-secret-file-warns-when-posix-perms-cannot-be-verified
+(deftest configure-allows-key-file-when-posix-perms-cannot-be-verified
   (let [db-path  (temp-db-path)
         key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
-                          (into-array FileAttribute [])))
-        warnings (atom [])]
+                          (into-array FileAttribute [])))]
     (spit key-file (encode-key 9))
     (with-redefs-fn {#'xia.crypto/get-posix-file-permissions
                      (fn [_]
                        (throw (UnsupportedOperationException. "no posix")))
-                     #'xia.crypto/warn-unverifiable-secret-file-perms!
-                     (fn [label path]
-                       (swap! warnings conj {:label label :path (str path)}))}
+                     #'xia.crypto/env-value (constantly nil)}
       #(do
-         (is (= key-file
-                (str (#'xia.crypto/validate-secret-file! db-path
-                                                        key-file
-                                                        "Encryption key file"
-                                                        false))))
-         (is (= [{:label "Encryption key file"
-                  :path key-file}]
-                @warnings))))))
+         (crypto/configure! db-path {:key-file key-file})
+         (is (= :key-file (:source (crypto/current-key-source))))
+         (is (= key-file (:path (crypto/current-key-source))))))))
 
-(deftest set-owner-only-perms-warns-when-posix-set-is-unavailable
-  (let [secret-file (str (Files/createTempFile "xia-crypto-secret" ".txt"
-                             (into-array FileAttribute [])))
-        warnings    (atom [])]
-    (with-redefs-fn {#'xia.crypto/set-posix-file-permissions!
+(deftest configure-derives-and-reuses-passphrase-key-when-owner-only-perms-cannot-be-set
+  (let [db-path  (temp-db-path)
+        provider (constantly "portable-passphrase")]
+    (with-redefs-fn {#'xia.crypto/env-value (constantly nil)
+                     #'xia.crypto/set-posix-file-permissions!
                      (fn [_ _]
-                       (throw (UnsupportedOperationException. "no posix")))
-                     #'xia.crypto/warn-unset-secret-file-perms!
-                     (fn [path reason]
-                       (swap! warnings conj {:path (str path) :reason reason}))}
-      #(do
-         (#'xia.crypto/set-owner-only-perms! (path-of secret-file))
-         (is (= 1 (count @warnings)))
-         (is (= secret-file (:path (first @warnings))))
-         (is (.contains ^String (:reason (first @warnings))
-                        "POSIX file permissions are unavailable"))))))
+                       (throw (UnsupportedOperationException. "no posix")))}
+      (fn []
+        (let [key-1     (crypto/configure! db-path {:passphrase-provider provider})
+              source-1  (crypto/current-key-source)
+              key-2     (crypto/configure! db-path {:passphrase-provider provider})
+              source-2  (crypto/current-key-source)
+              salt-file (java.io.File. ^String (:salt-path source-2))
+              key-file  (java.io.File. ^String (str db-path ".key"))]
+          (is (bytes= key-1 key-2))
+          (is (= :prompt-passphrase (:source source-1)))
+          (is (= :prompt-passphrase (:source source-2)))
+          (is (.exists salt-file))
+          (is (not (.exists key-file))))))))

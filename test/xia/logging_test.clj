@@ -2,7 +2,8 @@
   (:require [clojure.test :refer :all]
             [clojure.java.io :as io]
             [taoensso.timbre :as timbre]
-            [xia.logging :as logging])
+            [xia.logging :as logging]
+            [xia.test-helpers :as th])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -13,20 +14,15 @@
 
 (defn- wait-for-log-line
   [log-path pattern]
-  (loop [attempt 0]
-    (let [content (when (.exists (io/file log-path))
-                    (slurp log-path))]
-      (cond
-        (and content (re-find pattern content))
-        content
-
-        (>= attempt 49)
-        content
-
-        :else
-        (do
-          (Thread/sleep 20)
-          (recur (inc attempt)))))))
+  (or (th/wait-until
+        #(let [content (when (.exists (io/file log-path))
+                         (slurp log-path))]
+           (when (and content (re-find pattern content))
+             content))
+        {:timeout-ms 1000
+         :interval-ms 20})
+      (when (.exists (io/file log-path))
+        (slurp log-path))))
 
 (deftest resolve-log-file-prefers-cli-over-env
   (with-redefs [xia.logging/env-value (constantly "/tmp/from-env.log")]

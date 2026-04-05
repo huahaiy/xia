@@ -6,11 +6,11 @@
             [xia.summarizer :as summarizer]))
 
 (deftest model-summaries-are-disabled-by-default
-  (with-redefs [db/get-config (constantly nil)]
+  (with-redefs [db/tenant-config-value (constantly nil)]
     (is (false? (summarizer/enabled?)))))
 
 (deftest model-summary-backend-defaults-to-local
-  (with-redefs [db/get-config (constantly nil)]
+  (with-redefs [db/tenant-config-value (constantly nil)]
     (is (= :local (summarizer/summary-backend)))))
 
 (deftest chunk-prompt-is-xia-specific
@@ -32,12 +32,12 @@
 
 (deftest external-summaries-use-chat-provider-when-configured
   (let [seen (atom nil)]
-    (with-redefs [db/get-config (fn [k]
-                                  (case k
-                                    :local-doc/model-summaries-enabled? "true"
-                                    :local-doc/model-summary-backend "external"
-                                    :local-doc/model-summary-provider-id "openai"
-                                    nil))
+    (with-redefs [db/tenant-config-value (fn [k]
+                                           (case k
+                                             :local-doc/model-summaries-enabled? "true"
+                                             :local-doc/model-summary-backend "external"
+                                             :local-doc/model-summary-provider-id "openai"
+                                             nil))
                   db/current-llm-provider (constantly nil)
                   llm/chat-simple (fn [messages & opts]
                                     (reset! seen {:messages messages

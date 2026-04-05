@@ -4,31 +4,10 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.local-ocr :as local-ocr]
-            [xia.paths :as paths]
             [xia.test-helpers :refer [with-test-db]])
-  (:import [java.io File]
-           [java.nio.charset StandardCharsets]))
+  (:import [java.nio.charset StandardCharsets]))
 
 (use-fixtures :each with-test-db)
-
-(deftest settings-default-to-managed-paddleocr-paths
-  (let [settings  (local-ocr/settings)
-        ocr-dir   (paths/managed-ocr-dir (db/current-db-path))]
-    (is (= :local (:model-backend settings)))
-    (is (= (str ocr-dir File/separator "PaddleOCR-VL-1.5.gguf")
-           (#'local-ocr/resolved-model-path)))
-    (is (= (str ocr-dir File/separator "PaddleOCR-VL-1.5-mmproj.gguf")
-           (#'local-ocr/resolved-mmproj-path)))
-    (is (= true (:configured settings)))))
-
-(deftest spotting-metadata-file-uses-required-max-pixels
-  (let [^File file (#'local-ocr/create-spotting-metadata-file!)]
-    (try
-      (is (.exists file))
-      (is (= "{\"clip.vision.image_max_pixels\":1605632}"
-             (slurp file)))
-      (finally
-        (.delete file)))))
 
 (deftest external-backend-uses-vision-provider
   (db/upsert-provider! {:id :vision

@@ -293,20 +293,23 @@
     (is (empty? @calls))))
 
 (deftest stop-runtime-stops-process-components
-  (let [calls (atom [])]
-    (reset! (var-get #'xia.core/runtime-system-atom)
-            {:system {:xia/scheduler :running}
-             :options {:db "/tmp/xia-dev-repl"}
-             :root-keys [:xia/scheduler]})
-    (with-redefs-fn {#'integrant.core/halt! (fn [running-system]
-                                              (swap! calls conj [:ig/halt running-system]))
-                     #'xia.core/save-archive! (fn [options]
-                                                (swap! calls conj [:save-archive (:db options)]))}
-      #(core/stop-runtime! {:db "/tmp/xia-dev-repl"}))
+  (let [calls   (atom [])
+        options {:db "/tmp/xia-dev-repl"
+                 :bind "127.0.0.1"
+                 :port 4011}]
+    (with-redefs-fn {#'integrant.core/init (fn [_config _root-keys]
+                                             {:xia/scheduler :running})
+                     #'integrant.core/halt! (fn [running-system]
+                                              (swap! calls conj [:ig/halt running-system]))}
+      #(do
+         (core/start-server-runtime! options)
+         (core/stop-runtime! options)
+         ;; A fresh start after stop verifies cleanup released the prior runtime.
+         (core/start-server-runtime! options)
+         (core/stop-runtime! options)))
     (is (= [[:ig/halt {:xia/scheduler :running}]
-            [:save-archive "/tmp/xia-dev-repl"]]
+            [:ig/halt {:xia/scheduler :running}]]
            @calls))
     (let [event (core/last-stop-event)]
       (is (= "/tmp/xia-dev-repl" (:db-path event)))
-      (is (seq (:callsite event))))
-    (is (nil? @(var-get #'xia.core/runtime-system-atom)))))
+      (is (seq (:callsite event))))))
