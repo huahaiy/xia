@@ -15,6 +15,7 @@
             [xia.channel.http.session :as http-session]
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
+            [xia.checkpoint :as checkpoint]
             [xia.runtime-health :as runtime-health]
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
@@ -703,6 +704,17 @@
     (cond-> (json-response 200 projection)
       (:projection_seq projection)
       (assoc-in [:headers "ETag"] (str "\"" (:projection_seq projection) "\"")))))
+
+(defn- handle-command-create-checkpoint
+  [req]
+  (let [body         (or (read-body req) {})
+        staging-root (some-> (get body "staging_root")
+                             nonblank-str)
+        checkpoint*  (checkpoint/create-online-checkpoint!
+                       (cond-> {}
+                         staging-root
+                         (assoc :staging-root staging-root)))]
+    (json-response 201 checkpoint*)))
 
 (defn- runtime-available?
   []
@@ -1542,6 +1554,7 @@
           command-runtime-status-match (= uri "/command/runtime/status")
           command-runtime-drain-match (= uri "/command/runtime/drain")
           command-runtime-undrain-match (= uri "/command/runtime/undrain")
+          command-managed-checkpoints-match (= uri "/command/managed/checkpoints")
           command-wake-projection-match (= uri "/command/managed/wake-projection")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
@@ -1633,6 +1646,9 @@
 
         (and (= method :post) command-runtime-undrain-match)
         (command-route-response req #(handle-command-runtime-undrain req))
+
+        (and (= method :post) command-managed-checkpoints-match)
+        (command-route-response req #(handle-command-create-checkpoint req))
 
         (and (= method :get) command-wake-projection-match)
         (command-route-response req #(handle-command-wake-projection req))

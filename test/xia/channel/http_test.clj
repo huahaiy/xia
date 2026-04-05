@@ -4,13 +4,21 @@
             [xia.channel.http :as http]
             [xia.db :as db]
             [xia.schedule :as schedule]
-            [xia.test-helpers :refer [with-test-db]]))
+            [xia.test-helpers :refer [with-test-db]])
+  (:import [java.io File]
+           [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
 
 (use-fixtures :each with-test-db)
 
 (defn- response-json
   [response]
   (json/read-json (:body response)))
+
+(defn- temp-dir
+  []
+  (str (Files/createTempDirectory "xia-http-test"
+                                  (into-array FileAttribute []))))
 
 (deftest command-wake-projection-requires-command-token
   (with-redefs-fn {#'xia.channel.http/command-channel-token (constantly "secret-token")}
@@ -112,3 +120,42 @@
         (is (= "invalid-extraction"
                (get-in body ["memory_consolidation" "stats" "last_error_kind"])))
         (is (= 1 (get-in body ["activity" "hippocampus" "pending_background_task_count"])))))))
+
+(deftest command-managed-checkpoint-requires-command-token
+  (with-redefs-fn {#'xia.channel.http/command-channel-token (constantly "secret-token")}
+    (fn []
+      (let [response (#'http/router* {:request-method :post
+                                      :uri "/command/managed/checkpoints"
+                                      :headers {}})
+            body     (response-json response)]
+        (is (= 401 (:status response)))
+        (is (= "missing or invalid command token"
+               (get body "error")))))))
+
+(deftest command-managed-checkpoint-creates-ready-staged-copy
+  (let [checkpoint-root (temp-dir)
+        support-dir     (str (db/current-db-path) "/.xia")]
+    (spit (File. ^String support-dir "master.key") "do-not-copy")
+    (spit (File. ^String support-dir "master.passphrase") "do-not-copy")
+    (with-redefs-fn {#'xia.channel.http/command-channel-token (constantly "secret-token")}
+      (fn []
+        (let [response (#'http/router* {:request-method :post
+                                        :uri "/command/managed/checkpoints"
+                                        :headers {"authorization" "Bearer secret-token"}
+                                        :body (json/write-json-str {"staging_root" checkpoint-root})})
+              body     (response-json response)
+              staged-db (get body "staged_db_path")]
+          (is (= 201 (:status response)))
+          (is (= "ready" (get body "status")))
+          (is (string? (get body "checkpoint_id")))
+          (is (= "prompt-passphrase" (get body "key_source")))
+          (is (= false (get body "includes_secret_material")))
+          (is (= checkpoint-root
+                 (.getAbsolutePath (.getParentFile (File. ^String (get body "staged_path"))))))
+          (is (.exists (File. ^String (get body "manifest_path"))))
+          (is (.exists (File. ^String (get body "ready_marker_path"))))
+          (is (.exists (File. ^String staged-db)))
+          (is (.exists (File. ^String (str staged-db "/data.mdb"))))
+          (is (.exists (File. ^String (str staged-db "/.xia/master.salt"))))
+          (is (false? (.exists (File. ^String (str staged-db "/.xia/master.key")))))
+          (is (false? (.exists (File. ^String (str staged-db "/.xia/master.passphrase"))))))))))
