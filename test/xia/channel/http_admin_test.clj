@@ -117,6 +117,10 @@
              (get db-schema "schema_version")))
       (is (= db/current-schema-version
              (get db-schema "supported_schema_version")))
+      (is (= db/current-schema-version
+             (get db-schema "released_schema_version")))
+      (is (= [db/current-schema-version]
+             (get db-schema "frozen_schema_versions")))
       (is (= (str "xia/schema/" db/current-schema-version ".edn")
              (get db-schema "schema_resource_path")))
       (is (= (str "xia/schema/" db/current-schema-version ".edn")
@@ -275,6 +279,32 @@
              (get-in body ["details" "entity-id"]))))
     (finally
       (runtime-overlay/clear!))))
+
+(deftest admin-save-provider-persists-model-budget-hints
+  (let [response (#'http-admin/handle-save-provider
+                   (admin-deps {"id" "openai"
+                                "name" "OpenAI"
+                                "base_url" "https://api.example.com/v1"
+                                "model" "gpt-test"
+                                "context_window" "128000"
+                                "context_window_source" "metadata"
+                                "recommended_system_prompt_budget" "24000"
+                                "recommended_history_budget" "72000"
+                                "recommended_input_budget_cap" "96000"})
+                   {})
+        body     (response-json response)
+        provider (db/get-provider :openai)]
+    (is (= 200 (:status response)))
+    (is (= 128000 (:llm.provider/context-window provider)))
+    (is (= :metadata (:llm.provider/context-window-source provider)))
+    (is (= 24000 (:llm.provider/recommended-system-prompt-budget provider)))
+    (is (= 72000 (:llm.provider/recommended-history-budget provider)))
+    (is (= 96000 (:llm.provider/recommended-input-budget-cap provider)))
+    (is (= 128000 (get-in body ["provider" "context_window"])))
+    (is (= "metadata" (get-in body ["provider" "context_window_source"])))
+    (is (= 24000 (get-in body ["provider" "recommended_system_prompt_budget"])))
+    (is (= 72000 (get-in body ["provider" "recommended_history_budget"])))
+    (is (= 96000 (get-in body ["provider" "recommended_input_budget_cap"])))))
 
 (deftest admin-runtime-overlay-reload-updates-current-file
   (let [overlay-file (temp-overlay-file

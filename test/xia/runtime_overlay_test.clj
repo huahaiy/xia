@@ -24,6 +24,7 @@
   (let [overlay-file (temp-overlay-file
                        {:overlay/version 1
                         :snapshot/id "snapshot-42"
+                        :overlay/requires-db-schema-version 1
                         :config-overrides {:browser/backend-default :remote}
                         :forced-keys #{:browser/backend-default}
                         :tx-data [{:llm.provider/id :platform-openai
@@ -40,6 +41,8 @@
     (is (= overlay-file (runtime-overlay/source-path)))
     (is (number? (runtime-overlay/loaded-at-ms)))
     (is (= 1 (get (runtime-overlay/admin-summary) :source_overlay_version)))
+    (is (= 1 (get (runtime-overlay/admin-summary) :required_db_schema_version)))
+    (is (= 1 (get (runtime-overlay/admin-summary) :current_db_schema_version)))
     (is (= true (get (runtime-overlay/admin-summary) :reloadable)))))
 
 (deftest activate-migrates-versionless-legacy-overlay
@@ -131,3 +134,32 @@
           {:overlay/version 1
            :snapshot/id "snapshot-missing-rule-value"
            :config-overrides {:agent/max-turn-llm-calls {:merge :cap}}}))))
+
+(deftest activate-rejects-overlay-attrs-outside-current-db-schema
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo
+        #"not in the current DB schema"
+        (runtime-overlay/activate!
+          {:overlay/version 1
+           :snapshot/id "snapshot-unknown-attr"
+           :tx-data [{:llm.provider/id :platform-openai
+                      :llm.provider/imaginary-flag true}]}))))
+
+(deftest activate-rejects-overlay-attrs-for-the-wrong-entity-kind
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo
+        #"not valid for this entity kind"
+        (runtime-overlay/activate!
+          {:overlay/version 1
+           :snapshot/id "snapshot-wrong-kind"
+           :tx-data [{:service/id :platform-search
+                      :llm.provider/name "wrong"}]}))))
+
+(deftest activate-rejects-overlay-db-schema-version-mismatch
+  (is (thrown-with-msg?
+        clojure.lang.ExceptionInfo
+        #"requires a different Xia DB schema version"
+        (runtime-overlay/activate!
+          {:overlay/version 1
+           :overlay/requires-db-schema-version 99
+           :snapshot/id "snapshot-schema-mismatch"}))))

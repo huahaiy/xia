@@ -1879,6 +1879,58 @@
                  :recommended-input-budget-cap (:input-budget-cap budgets))))
       fallback)))
 
+(defn provider-budget-hints
+  "Return normalized local budget hints for a provider.
+
+   This function is side-effect free. It only reads already-known provider
+   fields and derives recommended budgets from a persisted context window when
+   explicit recommendations are absent."
+  [provider]
+  (let [provider-map                 (or provider {})
+        context-window              (some-> (or (:llm.provider/context-window provider-map)
+                                                (:context-window provider-map))
+                                            parse-positive-long)
+        context-window-source       (or (:llm.provider/context-window-source provider-map)
+                                        (:context-window-source provider-map))
+        recommended-system-budget   (some-> (or (:llm.provider/recommended-system-prompt-budget provider-map)
+                                                (:recommended-system-prompt-budget provider-map))
+                                            parse-positive-long)
+        recommended-history-budget  (some-> (or (:llm.provider/recommended-history-budget provider-map)
+                                                (:recommended-history-budget provider-map))
+                                            parse-positive-long)
+        recommended-input-budget    (some-> (or (:llm.provider/recommended-input-budget-cap provider-map)
+                                                (:recommended-input-budget-cap provider-map))
+                                            parse-positive-long)
+        derived-budgets             (when (and context-window
+                                               (or (nil? recommended-system-budget)
+                                                   (nil? recommended-history-budget)
+                                                   (nil? recommended-input-budget)))
+                                      (recommended-model-budgets context-window))]
+    (cond-> {}
+      context-window
+      (assoc :context-window context-window)
+
+      context-window-source
+      (assoc :context-window-source context-window-source)
+
+      (or recommended-system-budget
+          (:system-prompt-budget derived-budgets))
+      (assoc :recommended-system-prompt-budget
+             (long (or recommended-system-budget
+                       (:system-prompt-budget derived-budgets))))
+
+      (or recommended-history-budget
+          (:history-budget derived-budgets))
+      (assoc :recommended-history-budget
+             (long (or recommended-history-budget
+                       (:history-budget derived-budgets))))
+
+      (or recommended-input-budget
+          (:input-budget-cap derived-budgets))
+      (assoc :recommended-input-budget-cap
+             (long (or recommended-input-budget
+                       (:input-budget-cap derived-budgets)))))))
+
 (defn chat-simple
   "Convenience: send messages, return the assistant's text content."
   [messages & opts]

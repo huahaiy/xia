@@ -3568,6 +3568,7 @@ function scrollCardIntoView(cardEl) {
 }
 
 function captureProviderDraft() {
+  const capability = currentProviderModelCapability() || {};
   return {
     id: providerIdEl.value.trim(),
     name: ensureProviderName(),
@@ -3582,6 +3583,11 @@ function captureProviderDraft() {
     historyBudget: providerHistoryBudgetEl.value,
     systemPromptBudgetAuto: providerSystemPromptBudgetEl.dataset.autoBudget === 'metadata',
     historyBudgetAuto: providerHistoryBudgetEl.dataset.autoBudget === 'metadata',
+    contextWindow: capability.contextWindow || '',
+    contextWindowSource: capability.contextWindowSource || '',
+    recommendedSystemPromptBudget: capability.recommendedSystemPromptBudget || '',
+    recommendedHistoryBudget: capability.recommendedHistoryBudget || '',
+    recommendedInputBudgetCap: capability.recommendedInputBudgetCap || '',
     rateLimitPerMinute: providerRateLimitEl.value,
     vision: currentProviderVision(),
     apiKey: providerApiKeyEl.dataset.reuseStoredKey === 'true' ? '' : providerApiKeyEl.value,
@@ -3616,7 +3622,13 @@ function restoreProviderDraft(draft, options = {}) {
     history: !!draft.historyBudgetAuto
   });
   providerRateLimitEl.value = draft.rateLimitPerMinute || '';
-  setProviderModelVision(draft.model || '', !!draft.vision);
+  setProviderModelVision(draft.model || '', !!draft.vision, {
+    contextWindow: draft.contextWindow,
+    contextWindowSource: draft.contextWindowSource,
+    recommendedSystemPromptBudget: draft.recommendedSystemPromptBudget,
+    recommendedHistoryBudget: draft.recommendedHistoryBudget,
+    recommendedInputBudgetCap: draft.recommendedInputBudgetCap
+  });
   providerApiKeyEl.value = draft.apiKey || '';
   providerDefaultEl.checked = !!draft.default;
   providerStatusEl.textContent = options.statusText || 'Continue configuring the model.';
@@ -4839,7 +4851,13 @@ function selectProvider(provider) {
   providerHistoryBudgetEl.value = provider.history_budget || '';
   clearProviderBudgetAutoFlags();
   providerRateLimitEl.value = provider.rate_limit_per_minute || '';
-  setProviderModelVision(provider.model || '', !!provider.vision);
+  setProviderModelVision(provider.model || '', !!provider.vision, {
+    contextWindow: provider.context_window,
+    contextWindowSource: provider.context_window_source,
+    recommendedSystemPromptBudget: provider.recommended_system_prompt_budget,
+    recommendedHistoryBudget: provider.recommended_history_budget,
+    recommendedInputBudgetCap: provider.recommended_input_budget_cap
+  });
   providerApiKeyEl.value = '';
   providerDefaultEl.checked = !!provider.default;
   if (providerCredentialSource(provider) === 'oauth-account') {
@@ -5745,6 +5763,7 @@ async function saveProvider() {
   providerStatusEl.textContent = 'Saving...';
   updateAdminButtons();
   try {
+    const capability = currentProviderModelCapability() || {};
     const providerId = ensureProviderId();
     const providerName = ensureProviderName();
     const template = providerTemplateById(providerTemplateEl.value);
@@ -5777,6 +5796,11 @@ async function saveProvider() {
           : undefined,
         system_prompt_budget: providerSystemPromptBudgetEl.value,
         history_budget: providerHistoryBudgetEl.value,
+        context_window: capability.contextWindow || undefined,
+        context_window_source: capability.contextWindowSource || undefined,
+        recommended_system_prompt_budget: capability.recommendedSystemPromptBudget || undefined,
+        recommended_history_budget: capability.recommendedHistoryBudget || undefined,
+        recommended_input_budget_cap: capability.recommendedInputBudgetCap || undefined,
         rate_limit_per_minute: providerRateLimitEl.value,
         vision: currentProviderVision(),
         api_key: providerApiKeyValueForRequests() || undefined,

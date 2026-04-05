@@ -294,11 +294,17 @@
 
 (defn- resolve-history-budget
   [provider]
-  (let [override (provider-history-budget provider)]
-    (if (and (number? override)
-             (pos? (long override)))
-      (long override)
-      (configured-history-budget))))
+  (let [override        (provider-history-budget provider)
+        configured      (if (and (number? override)
+                                 (pos? (long override)))
+                          (long override)
+                          (configured-history-budget))
+        recommended-cap (some-> (llm/provider-budget-hints provider)
+                                :recommended-history-budget)]
+    (if (and (number? recommended-cap)
+             (pos? (long recommended-cap)))
+      (long-min configured (long recommended-cap))
+      configured)))
 
 (defn- tool-result->content
   [tool-result content]
@@ -320,6 +326,9 @@
       (if (<= (long (count text)) max*)
         text
         (str (subs text 0 (long-max 1 (- max* 3))) "...")))))
+
+(def ^:private history-message-truncation-note
+  " [truncated to fit history budget]")
 
 (defn- history-role-name
   [role]
@@ -480,6 +489,104 @@
        (string? content)
        (or (str/starts-with? content "[Conversation recap:")
            (str/starts-with? content "[Archived tool execution recap:"))))
+
+(defn- history-message-budget-text
+  [message]
+  (try
+    (json/write-json-str
+      (cond-> {:role (history-role-name (:role message))}
+        (contains? message :content)
+        (assoc :content (:content message))
+
+        (contains? message :tool_calls)
+        (assoc :tool_calls (:tool_calls message))
+
+        (contains? message "tool_calls")
+        (assoc :tool_calls (get message "tool_calls"))
+
+        (contains? message :tool_call_id)
+        (assoc :tool_call_id (:tool_call_id message))
+
+        (contains? message "tool_call_id")
+        (assoc :tool_call_id (get message "tool_call_id"))))
+    (catch Exception _
+      (str message))))
+
+(defn- estimate-history-message-tokens
+  ^long [message]
+  (long (estimate-tokens (history-message-budget-text message))))
+
+(defn- truncate-history-value
+  [value max-chars]
+  (let [text (history-summary-fragment value)
+        max* (long max-chars)]
+    (when text
+      (if (<= (long (count text)) max*)
+        text
+        (str (subs text 0 (long-max 1 (- max* (count history-message-truncation-note))))
+             history-message-truncation-note)))))
+
+(defn- assoc-existing-key
+  [m preferred-key fallback-key value]
+  (assoc m
+         (cond
+           (contains? m preferred-key) preferred-key
+           (contains? m fallback-key)  fallback-key
+           :else                       preferred-key)
+         value))
+
+(defn- truncate-history-tool-call
+  [call max-chars]
+  (let [call-map       (if (map? call) call {})
+        function-key   (cond
+                         (contains? call-map :function) :function
+                         (contains? call-map "function") "function"
+                         :else nil)
+        function-value (when function-key
+                         (get call-map function-key))
+        function-map   (if (map? function-value) function-value {})
+        truncated-args (truncate-history-value
+                        (or (:arguments function-map)
+                            (get function-map "arguments"))
+                        max-chars)]
+    (if (and function-key truncated-args)
+      (assoc call-map
+             function-key
+             (assoc-existing-key function-map :arguments "arguments" truncated-args))
+      call-map)))
+
+(defn- truncate-history-message
+  [message max-tokens]
+  (let [message*            (if (map? message) message {})
+        tool-calls-key      (cond
+                              (contains? message* :tool_calls) :tool_calls
+                              (contains? message* "tool_calls") "tool_calls"
+                              :else nil)
+        tool-calls          (when tool-calls-key
+                              (get message* tool-calls-key))
+        tool-call-count     (long (max 1 (count tool-calls)))
+        max-chars           (long-max 48 (* 4 (long max-tokens)))
+        content-char-budget (if (seq tool-calls)
+                              (long-max 32 (quot (* 2 max-chars) 3))
+                              max-chars)
+        tool-char-budget    (long-max 24 (quot max-chars (long-max 1 tool-call-count)))
+        content-key         (cond
+                              (contains? message* :content) :content
+                              (contains? message* "content") "content"
+                              :else nil)
+        content-value       (when content-key
+                              (get message* content-key))
+        truncated-content   (when content-key
+                              (truncate-history-value content-value content-char-budget))
+        truncated-calls     (when (seq tool-calls)
+                              (mapv #(truncate-history-tool-call % tool-char-budget)
+                                    tool-calls))]
+    (cond-> message*
+      (and content-key truncated-content)
+      (assoc content-key truncated-content)
+
+      (and tool-calls-key truncated-calls)
+      (assoc tool-calls-key truncated-calls))))
 
 (defn- tool-call-info
   [call]
@@ -1043,51 +1150,91 @@
    (compact-history messages budget nil))
   ([messages budget {:keys [provider-id workload allow-summary?]
                      :or {allow-summary? true}}]
-   (let [messages*    (if (vector? messages) messages (vec messages))
-         recap-prefix (into [] (take-while recap-message?) messages*)
-         live-history (subvec messages* (count recap-prefix))
-         total-tokens (long (transduce (map #(estimate-tokens (:content %))) + 0 messages*))
-         msg-count    (long (count live-history))
-         budget*      (long budget)]
-     (if (or (<= total-tokens budget*) (<= msg-count 4))
-       messages*
-       (let [keep-count  (long-max 4 (quot msg-count 2))
-             old-msgs    (subvec live-history 0 (- msg-count keep-count))
-             recent-msgs (subvec live-history (- msg-count keep-count))
-             old-text    (history-summary-text old-msgs)]
-         (if allow-summary?
-           (try
-             (let [recap (summarize-history-text old-text
-                                                 {:provider-id provider-id
-                                                  :workload workload})]
-               (into recap-prefix
-                     (into [(history-recap-message recap)] recent-msgs)))
-             (catch Exception e
-               (log/warn "Failed to compact history:" (.getMessage e))
-               messages))
-           (let [recap-tokens (long (transduce (map #(estimate-tokens (:content %))) + 0 recap-prefix))
-                 live-budget  (long-max 0 (- budget* recap-tokens))
-                 min-keep     (long-min 4 msg-count)
-                 ;; Walk newest->oldest so we can preserve the most recent live
-                 ;; history under budget, but accumulate into a list so kept
-                 ;; messages remain in chronological order without a final
-                 ;; reverse pass.
-                 kept         (:kept
-                               (reduce (fn [{:keys [tokens kept-count kept] :as acc} msg]
-                                         (let [msg-tokens (long (estimate-tokens (:content msg)))
-                                               must-keep? (< kept-count min-keep)
-                                               keep?      (or must-keep?
-                                                              (<= (+ tokens msg-tokens) live-budget))]
-                                           (if keep?
-                                             {:tokens     (+ tokens msg-tokens)
-                                              :kept-count (inc kept-count)
-                                              :kept       (conj kept msg)}
-                                             acc)))
-                                       {:tokens 0
-                                        :kept-count 0
-                                        :kept '()}
-                                       (rseq live-history)))]
-             (into recap-prefix kept))))))))
+   (let [messages* (if (vector? messages) messages (vec messages))
+         budget*   (long budget)]
+     (letfn [(bounded-history-messages [messages']
+               (let [messages'     (if (vector? messages') messages' (vec messages'))
+                     recap-prefix0 (into [] (take-while recap-message?) messages')
+                     live-history0 (subvec messages' (count recap-prefix0))
+                     live-count    (long (count live-history0))
+                     live-divisor  (long-max 1 (long-min 4 live-count))
+                     live-cap      (long-max 8 (quot budget* live-divisor))
+                     recap-cap     (long-max 8 (quot budget* 2))
+                     recap-prefix  (mapv #(truncate-history-message % recap-cap)
+                                         recap-prefix0)
+                     live-history  (mapv #(truncate-history-message % live-cap)
+                                         live-history0)
+                     msg-count     (long (count live-history))
+                     min-keep      (long-min 4 msg-count)
+                     live-result   (reduce (fn [{:keys [tokens kept-count kept] :as acc} msg]
+                                             (let [msg-tokens (estimate-history-message-tokens msg)
+                                                   must-keep? (< kept-count min-keep)
+                                                   keep?      (or must-keep?
+                                                                  (<= (+ tokens msg-tokens) budget*))]
+                                               (if keep?
+                                                 {:tokens     (+ tokens msg-tokens)
+                                                  :kept-count (inc kept-count)
+                                                  :kept       (conj kept msg)}
+                                                 acc)))
+                                           {:tokens 0
+                                            :kept-count 0
+                                            :kept '()}
+                                           (rseq live-history))
+                     live-kept     (vec (:kept live-result))
+                     live-tokens   (long (:tokens live-result))
+                     recap-budget  (long-max 0 (- budget* live-tokens))
+                     recap-kept    (vec
+                                    (:kept
+                                     (reduce (fn [{:keys [tokens kept] :as acc} msg]
+                                               (let [msg-tokens (estimate-history-message-tokens msg)]
+                                                 (if (<= (+ tokens msg-tokens) recap-budget)
+                                                   {:tokens (+ tokens msg-tokens)
+                                                    :kept   (conj kept msg)}
+                                                   acc)))
+                                             {:tokens 0
+                                              :kept '()}
+                                             (rseq recap-prefix))))]
+               (into recap-kept live-kept)))]
+       (let [recap-prefix (into [] (take-while recap-message?) messages*)
+             live-history (subvec messages* (count recap-prefix))
+             total-tokens (long (transduce (map estimate-history-message-tokens) + 0 messages*))
+             msg-count    (long (count live-history))]
+         (if (<= total-tokens budget*)
+           messages*
+           (if (<= msg-count 4)
+             (bounded-history-messages messages*)
+             (let [keep-count  (long-max 4 (quot msg-count 2))
+                   old-msgs    (subvec live-history 0 (- msg-count keep-count))
+                   recent-msgs (subvec live-history (- msg-count keep-count))
+                   old-text    (history-summary-text old-msgs)]
+               (if allow-summary?
+                 (try
+                   (let [recap (summarize-history-text old-text
+                                                       {:provider-id provider-id
+                                                        :workload workload})
+                         candidate (into recap-prefix
+                                         (into [(history-recap-message recap)] recent-msgs))]
+                     (bounded-history-messages candidate))
+                   (catch Exception e
+                     (log/warn "Failed to compact history:" (.getMessage e))
+                     (bounded-history-messages messages*)))
+                 (bounded-history-messages messages*))))))))))
+
+(defn- history-compaction-warning-message
+  []
+  {:role "system"
+   :content "[Older conversation history was omitted because recap generation failed. Ask for clarification if earlier context is needed.]"})
+
+(defn- bounded-history-fallback
+  [recent-history budget {:keys [tool-recap-content recap-content history-archived?]}]
+  (compact-history
+    (cond-> []
+      (seq tool-recap-content) (conj (tool-recap-message tool-recap-content))
+      (seq recap-content)      (conj (history-recap-message recap-content))
+      history-archived?        (conj (history-compaction-warning-message))
+      true                     (into recent-history))
+    budget
+    {:allow-summary? false}))
 
 (defn- recent-history-message-limit
   [opts]
@@ -1097,7 +1244,9 @@
 
 (defn- build-history-with-session-recap
   [session-id opts]
-  (let [recent-limit (long (recent-history-message-limit opts))
+  (let [recent-limit  (long (recent-history-message-limit opts))
+        history-budget (long (or (:history-budget opts)
+                                 (configured-history-budget)))
         total        (db/session-message-count session-id)]
     (if (<= total recent-limit)
       {:messages (into [] (map history-message->llm-message)
@@ -1172,17 +1321,21 @@
                                  true                 (conj (history-recap-message new-recap))
                                  true                 (into recent-history))
                      :history-recap-updated? true})
-                  {:messages (into [] (map history-message->llm-message)
-                                   (restore-history-tool-call-ids
-                                     (db/session-messages session-id)))
+                  {:messages (bounded-history-fallback recent-history
+                                                      history-budget
+                                                      {:tool-recap-content new-tool-recap
+                                                       :recap-content recap-content
+                                                       :history-archived? (seq history-archived-messages)})
                    :history-recap-updated? false}))
               (catch Exception e
                 (log/warn "Failed to update session history recap:" (.getMessage e))
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
-                {:messages (into [] (map history-message->llm-message)
-                                 (restore-history-tool-call-ids
-                                   (db/session-messages session-id)))
+                {:messages (bounded-history-fallback recent-history
+                                                    history-budget
+                                                    {:tool-recap-content new-tool-recap
+                                                     :recap-content recap-content
+                                                     :history-archived? (seq history-archived-messages)})
                  :history-recap-updated? false}))))))))
 
 ;; ============================================================================
@@ -1205,13 +1358,14 @@
          (if (= cache-key (:key cache-entry))
            (:data cache-entry)
            (assemble-system-prompt-data session-id (assoc opts :provider provider)))
+         budget       (resolve-history-budget provider)
          {:keys [messages history-recap-updated?]}
          (build-history-with-session-recap
           session-id
           {:recent-message-limit (:recent-message-limit opts)
+           :history-budget budget
            :compaction-provider-id compaction-provider-id
            :compaction-workload compaction-workload})
-         budget       (resolve-history-budget provider)
          compacted    (compact-history messages
                                       budget
                                       (cond-> {}

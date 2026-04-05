@@ -8,19 +8,26 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [xia.db-schema :as db-schema]
             [xia.sensitive :as sensitive]
             [taoensso.timbre :as log]))
 
 (def ^:private current-overlay-version 1)
+(def ^:private current-db-schema-version db-schema/current-version)
+(def ^:private current-db-schema (db-schema/current-schema))
 
 (def ^:private supported-config-merge-modes
   #{:replace :cap :floor})
 
 (def ^:private overlay-kinds
-  {:provider      {:identity :llm.provider/id}
-   :service       {:identity :service/id}
-   :oauth-account {:identity :oauth.account/id}
-   :site-cred     {:identity :site-cred/id}})
+  {:provider      {:identity :llm.provider/id
+                   :attr-namespaces #{"llm.provider"}}
+   :service       {:identity :service/id
+                   :attr-namespaces #{"service"}}
+   :oauth-account {:identity :oauth.account/id
+                   :attr-namespaces #{"oauth.account"}}
+   :site-cred     {:identity :site-cred/id
+                   :attr-namespaces #{"site-cred"}}})
 
 (defonce ^:private overlay-atom (atom nil))
 (defonce ^:private activation-lock (Object.))
@@ -113,6 +120,33 @@
             [kind identity]))
         overlay-kinds))
 
+(defn- valid-db-schema-version
+  [value]
+  (and (integer? value)
+       (pos? (long value))
+       (long value)))
+
+(defn- validate-overlay-entity-attr!
+  [kind attr entry]
+  (let [{:keys [attr-namespaces]} (get overlay-kinds kind)]
+    (when-not (keyword? attr)
+      (throw (ex-info "Runtime overlay entity attrs must be keywords."
+                      {:entity-kind kind
+                       :attr attr
+                       :entry entry})))
+    (when-not (contains? current-db-schema attr)
+      (throw (ex-info "Runtime overlay entity attr is not in the current DB schema."
+                      {:entity-kind kind
+                       :attr attr
+                       :entry entry
+                       :current-db-schema-version current-db-schema-version})))
+    (when-not (contains? attr-namespaces (namespace attr))
+      (throw (ex-info "Runtime overlay entity attr is not valid for this entity kind."
+                      {:entity-kind kind
+                       :attr attr
+                       :allowed-namespaces (sort attr-namespaces)
+                       :entry entry})))))
+
 (defn- migrate-v0->v1
   [overlay]
   (assoc overlay :overlay/version current-overlay-version))
@@ -158,6 +192,15 @@
   (when-not (nonblank-string? (:snapshot/id overlay))
     (throw (ex-info "Runtime overlay requires a non-empty :snapshot/id."
                     {:snapshot/id (:snapshot/id overlay)})))
+  (when (contains? overlay :overlay/requires-db-schema-version)
+    (let [required-version (:overlay/requires-db-schema-version overlay)]
+      (when-not (valid-db-schema-version required-version)
+        (throw (ex-info "Runtime overlay :overlay/requires-db-schema-version must be a positive integer."
+                        {:value required-version})))
+      (when-not (= (long required-version) current-db-schema-version)
+        (throw (ex-info "Runtime overlay requires a different Xia DB schema version."
+                        {:required-db-schema-version (long required-version)
+                         :current-db-schema-version current-db-schema-version})))))
   (when-not (or (nil? (:config-overrides overlay))
                 (map? (:config-overrides overlay)))
     (throw (ex-info "Runtime overlay :config-overrides must be a map."
@@ -201,6 +244,9 @@
       (throw (ex-info "Runtime overlay contains an unsupported overlay entity."
                       {:entry entity
                        :supported-kinds (sort (keys overlay-kinds))})))
+    (let [[kind _identity-attr] (entity-kind-entry entity)]
+      (doseq [attr (keys entity)]
+        (validate-overlay-entity-attr! kind attr entity)))
     (doseq [[attr value] entity
             :when (and (keyword? attr)
                        (secret-ref? value))]
@@ -236,6 +282,9 @@
                                (conj (vec ids*) entity-id))))))))
       {:overlay/version current-overlay-version
        :source-overlay/version source-version
+       :overlay/requires-db-schema-version
+       (or (:overlay/requires-db-schema-version overlay)
+           current-db-schema-version)
        :snapshot/id (:snapshot/id overlay)
        :config-overrides (into {}
                                (map (fn [[config-key value]]
@@ -431,6 +480,8 @@
      :snapshot_id          (:snapshot/id overlay)
      :overlay_version      (:overlay/version overlay)
      :source_overlay_version (:source-overlay/version overlay)
+     :required_db_schema_version (:overlay/requires-db-schema-version overlay)
+     :current_db_schema_version current-db-schema-version
      :source_path          (:overlay/source-path overlay)
      :loaded_at_ms         (:overlay/loaded-at-ms overlay)
      :reloadable           (boolean (:overlay/source-path overlay))

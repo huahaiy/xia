@@ -472,8 +472,16 @@
                                        vec)
      :vision                      (boolean (:llm.provider/vision? provider))
      :allow_private_network       (boolean (:llm.provider/allow-private-network? provider))
+     :context_window              (:llm.provider/context-window provider)
+     :context_window_source       (some-> (:llm.provider/context-window-source provider) name)
      :system_prompt_budget        (:llm.provider/system-prompt-budget provider)
      :history_budget              (:llm.provider/history-budget provider)
+     :recommended_system_prompt_budget
+     (:llm.provider/recommended-system-prompt-budget provider)
+     :recommended_history_budget
+     (:llm.provider/recommended-history-budget provider)
+     :recommended_input_budget_cap
+     (:llm.provider/recommended-input-budget-cap provider)
      :rate_limit_per_minute       (:llm.provider/rate-limit-per-minute provider)
      :effective_rate_limit_per_minute (llm/effective-rate-limit-per-minute provider)
      :health_status               (name (:status health))
@@ -1017,6 +1025,8 @@
                   :parent_instance_id (instance-supervisor/parent-instance-id)}
        :db_schema {:schema_version (db/schema-version)
                    :supported_schema_version db/current-schema-version
+                   :released_schema_version (db-schema/released-schema-version)
+                   :frozen_schema_versions (db-schema/frozen-schema-versions)
                    :schema_resource_path (db/schema-resource-path)
                    :supported_schema_resource_path (db-schema/schema-resource-path db/current-schema-version)
                    :schema_applied_at (db/schema-applied-at)
@@ -1208,6 +1218,19 @@
                                                                    "system_prompt_budget")
           history-budget             (parse-optional-positive-long (get data "history_budget")
                                                                    "history_budget")
+          context-window             (parse-optional-positive-long (get data "context_window")
+                                                                   "context_window")
+          context-window-source      (when-let [source (nonblank-str (get data "context_window_source"))]
+                                       (keyword source))
+          recommended-system-budget  (parse-optional-positive-long
+                                       (get data "recommended_system_prompt_budget")
+                                       "recommended_system_prompt_budget")
+          recommended-history-budget (parse-optional-positive-long
+                                       (get data "recommended_history_budget")
+                                       "recommended_history_budget")
+          recommended-input-budget   (parse-optional-positive-long
+                                       (get data "recommended_input_budget_cap")
+                                       "recommended_input_budget_cap")
           rate-limit-per-minute      (parse-optional-positive-long (get data "rate_limit_per_minute")
                                                                    "rate_limit_per_minute")
           make-default               (true? (get data "default"))
@@ -1264,6 +1287,16 @@
                                     :system-prompt-budget  system-prompt-budget
                                     :history-budget        history-budget
                                     :rate-limit-per-minute rate-limit-per-minute}
+                             (contains? data "context_window")
+                             (assoc :context-window context-window)
+                             (contains? data "context_window_source")
+                             (assoc :context-window-source context-window-source)
+                             (contains? data "recommended_system_prompt_budget")
+                             (assoc :recommended-system-prompt-budget recommended-system-budget)
+                             (contains? data "recommended_history_budget")
+                             (assoc :recommended-history-budget recommended-history-budget)
+                             (contains? data "recommended_input_budget_cap")
+                             (assoc :recommended-input-budget-cap recommended-input-budget)
                              (contains? data "template")
                              (assoc :template template-id)
                              (contains? data "access_mode")

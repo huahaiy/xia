@@ -62,6 +62,25 @@
            (llm/fetch-provider-model-metadata {:base-url "https://api.example.com/v1"
                                                :model "test-model"})))))
 
+(deftest provider-budget-hints-uses-explicit-recommendations
+  (is (= {:context-window 128000
+          :context-window-source :metadata
+          :recommended-system-prompt-budget 24000
+          :recommended-history-budget 72000
+          :recommended-input-budget-cap 96000}
+         (llm/provider-budget-hints {:llm.provider/context-window 128000
+                                     :llm.provider/context-window-source :metadata
+                                     :llm.provider/recommended-system-prompt-budget 24000
+                                     :llm.provider/recommended-history-budget 72000
+                                     :llm.provider/recommended-input-budget-cap 96000}))))
+
+(deftest provider-budget-hints-derives-recommendations-from-context-window
+  (is (= {:context-window 32000
+          :recommended-system-prompt-budget 6000
+          :recommended-history-budget 18000
+          :recommended-input-budget-cap 24000}
+         (llm/provider-budget-hints {:llm.provider/context-window 32000}))))
+
 (deftest fetch-provider-models-uses-anthropic-native-headers
   (with-redefs [xia.http-client/request
                 (fn [req]

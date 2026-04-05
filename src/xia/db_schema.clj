@@ -3,9 +3,15 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [datalevin.core :as d])
-  (:import [java.util Date]))
+  (:import [java.math BigInteger]
+           [java.nio.charset StandardCharsets]
+           [java.security MessageDigest]
+           [java.util Date]))
 
 (def current-version 1)
+
+(def ^:private frozen-schema-digests
+  {1 "9bde4d7aa57384b041ff356140deeedbd62e4f858b32b1a89d24de98c1caabda"})
 
 (def schema-version-meta-key :db/schema-version)
 (def schema-resource-path-meta-key :db/schema-resource-path)
@@ -13,6 +19,21 @@
 (def schema-migration-history-meta-key :db/schema-migration-history)
 
 (declare schema-resource-path)
+
+(defn frozen-schema-versions
+  []
+  (->> (keys frozen-schema-digests)
+       sort
+       vec))
+
+(defn released-schema-version
+  []
+  (or (last (frozen-schema-versions))
+      0))
+
+(defn schema-frozen?
+  [version]
+  (contains? frozen-schema-digests version))
 
 (defn- meta-value
   [conn meta-key]
@@ -73,7 +94,7 @@
   [version]
   (str "xia/schema/" version ".edn"))
 
-(defn load-schema
+(defn- load-schema-text
   [version]
   (let [resource-path (schema-resource-path version)
         resource      (io/resource resource-path)]
@@ -81,12 +102,43 @@
       (throw (ex-info "Database schema resource is missing."
                       {:version version
                        :resource-path resource-path})))
-    (-> resource
-        slurp
-        edn/read-string)))
+    (slurp resource)))
+
+(defn- sha256-hex
+  [text]
+  (let [digest (MessageDigest/getInstance "SHA-256")
+        bytes  (.digest digest (.getBytes ^String text StandardCharsets/UTF_8))]
+    (format "%064x" (BigInteger. 1 bytes))))
+
+(defn schema-digest
+  [version]
+  (sha256-hex (load-schema-text version)))
+
+(defn ensure-frozen-schema-integrity!
+  []
+  (doseq [[version expected-digest] (sort-by key frozen-schema-digests)]
+    (let [resource-path (schema-resource-path version)
+          actual-digest (schema-digest version)]
+      (when-not (= expected-digest actual-digest)
+        (throw (ex-info "Frozen schema resource was modified. Bump the schema version instead of editing a frozen schema."
+                        {:reason :db-schema/frozen-schema-modified
+                         :version version
+                         :resource-path resource-path
+                         :expected-sha256 expected-digest
+                         :actual-sha256 actual-digest
+                         :released-schema-version (released-schema-version)
+                         :current-schema-version current-version})))))
+  true)
+
+(defn load-schema
+  [version]
+  (-> version
+      load-schema-text
+      edn/read-string))
 
 (defn current-schema
   []
+  (ensure-frozen-schema-integrity!)
   (load-schema current-version))
 
 (defn migration-step

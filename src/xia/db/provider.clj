@@ -42,6 +42,16 @@
                                        (:system-prompt-budget provider))
         history-budget             (or (:llm.provider/history-budget provider)
                                        (:history-budget provider))
+        context-window             (or (:llm.provider/context-window provider)
+                                       (:context-window provider))
+        context-window-source      (or (:llm.provider/context-window-source provider)
+                                       (:context-window-source provider))
+        recommended-system-budget  (or (:llm.provider/recommended-system-prompt-budget provider)
+                                       (:recommended-system-prompt-budget provider))
+        recommended-history-budget (or (:llm.provider/recommended-history-budget provider)
+                                       (:recommended-history-budget provider))
+        recommended-input-budget   (or (:llm.provider/recommended-input-budget-cap provider)
+                                       (:recommended-input-budget-cap provider))
         rate-limit-per-minute      (or (:llm.provider/rate-limit-per-minute provider)
                                        (:rate-limit-per-minute provider))
         vision?                    (or (:llm.provider/vision? provider)
@@ -70,6 +80,16 @@
                                        (contains? provider :system-prompt-budget))
         has-history-budget?        (or (contains? provider :llm.provider/history-budget)
                                        (contains? provider :history-budget))
+        has-context-window?        (or (contains? provider :llm.provider/context-window)
+                                       (contains? provider :context-window))
+        has-context-window-source? (or (contains? provider :llm.provider/context-window-source)
+                                       (contains? provider :context-window-source))
+        has-recommended-system?    (or (contains? provider :llm.provider/recommended-system-prompt-budget)
+                                       (contains? provider :recommended-system-prompt-budget))
+        has-recommended-history?   (or (contains? provider :llm.provider/recommended-history-budget)
+                                       (contains? provider :recommended-history-budget))
+        has-recommended-input?     (or (contains? provider :llm.provider/recommended-input-budget-cap)
+                                       (contains? provider :recommended-input-budget-cap))
         has-rate-limit?            (or (contains? provider :llm.provider/rate-limit-per-minute)
                                        (contains? provider :rate-limit-per-minute))
         provider-tx                (cond-> {:llm.provider/id provider-id}
@@ -120,6 +140,24 @@
                                      (and has-history-budget?
                                           (some? history-budget))
                                      (assoc :llm.provider/history-budget history-budget)
+                                     (and has-context-window?
+                                          (some? context-window))
+                                     (assoc :llm.provider/context-window context-window)
+                                     (and has-context-window-source?
+                                          (some? context-window-source))
+                                     (assoc :llm.provider/context-window-source context-window-source)
+                                     (and has-recommended-system?
+                                          (some? recommended-system-budget))
+                                     (assoc :llm.provider/recommended-system-prompt-budget
+                                            recommended-system-budget)
+                                     (and has-recommended-history?
+                                          (some? recommended-history-budget))
+                                     (assoc :llm.provider/recommended-history-budget
+                                            recommended-history-budget)
+                                     (and has-recommended-input?
+                                          (some? recommended-input-budget))
+                                     (assoc :llm.provider/recommended-input-budget-cap
+                                            recommended-input-budget)
                                      (and has-rate-limit?
                                           (some? rate-limit-per-minute))
                                      (assoc :llm.provider/rate-limit-per-minute rate-limit-per-minute)
@@ -176,6 +214,31 @@
                                           (nil? history-budget))
                                      (conj [:db/retract provider-eid
                                             :llm.provider/history-budget])
+                                     (and provider-eid
+                                          has-context-window?
+                                          (nil? context-window))
+                                     (conj [:db/retract provider-eid
+                                            :llm.provider/context-window])
+                                     (and provider-eid
+                                          has-context-window-source?
+                                          (nil? context-window-source))
+                                     (conj [:db/retract provider-eid
+                                            :llm.provider/context-window-source])
+                                     (and provider-eid
+                                          has-recommended-system?
+                                          (nil? recommended-system-budget))
+                                     (conj [:db/retract provider-eid
+                                            :llm.provider/recommended-system-prompt-budget])
+                                     (and provider-eid
+                                          has-recommended-history?
+                                          (nil? recommended-history-budget))
+                                     (conj [:db/retract provider-eid
+                                            :llm.provider/recommended-history-budget])
+                                     (and provider-eid
+                                          has-recommended-input?
+                                          (nil? recommended-input-budget))
+                                     (conj [:db/retract provider-eid
+                                            :llm.provider/recommended-input-budget-cap])
                                      (and provider-eid
                                           has-rate-limit?
                                           (nil? rate-limit-per-minute))
