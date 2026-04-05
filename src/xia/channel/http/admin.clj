@@ -578,6 +578,10 @@
                                                               (:archive-after-bottom-ms resolutions)
                                                               days-value)}}))
 
+(defn- memory-consolidation->admin-body
+  []
+  (hippo/consolidation-summary))
+
 (defn- conversation-context->admin-body
   []
   (let [resolutions (context/config-resolutions)]
@@ -1056,6 +1060,7 @@
        :conversation_context (conversation-context->admin-body)
        :memory_retention (memory-retention->admin-body deps)
        :knowledge_decay (knowledge-decay->admin-body)
+       :memory_consolidation (memory-consolidation->admin-body)
        :local_doc_summarization (local-doc-summarization->admin-body)
        :local_doc_ocr (local-doc-ocr->admin-body)
        :database_backup (database-backup->admin-body deps)

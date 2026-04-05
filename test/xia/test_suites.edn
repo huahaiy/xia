@@ -10,6 +10,7 @@
   xia.db-security-test
   xia.email-test
   xia.extractive-summary-test
+  xia.hippocampus-test
   xia.identity-test
   xia.instance-supervisor-test
   xia.llm-test

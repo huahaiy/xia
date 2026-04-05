@@ -61,9 +61,31 @@ Rules:
   ;; Fact dedup depends on a current view of node facts. Keep the read/build/write
   ;; window serialized so concurrent consolidations do not fan out duplicates.
   (Object.))
+(defn- runtime-stats-template
+  []
+  {:started-at               (java.util.Date.)
+   :attempted-episode-count  0
+   :successful-episode-count 0
+   :failed-attempt-count     0
+   :invalid-extraction-count 0
+   :exception-count          0
+   :extracted-entity-count   0
+   :extracted-relation-count 0
+   :extracted-fact-count     0
+   :last-attempt-at          nil
+   :last-success-at          nil
+   :last-failure-at          nil
+   :last-error               nil
+   :last-error-kind          nil})
+
+(defn- background-consolidation-state-template
+  []
+  {:accepting? true
+   :tasks #{}
+   :stats (runtime-stats-template)})
+
 (defonce ^:private background-consolidation-state
-  (atom {:accepting? true
-         :tasks #{}}))
+  (atom (background-consolidation-state-template)))
 (defonce ^:private background-consolidation-lock
   (Object.))
 
@@ -189,6 +211,80 @@ Rules:
        (partition-all importance-batch-size)
        (map #(rate-importance-batch (vec %)))
        (reduce merge {})))
+
+(defn- extraction-counts
+  [extraction]
+  (let [entities  (or (get extraction "entities") [])
+        relations (or (get extraction "relations") [])
+        facts     (reduce (fn [count* entity]
+                            (let [facts* (get entity "facts")]
+                              (+ (long count*)
+                                 (if (sequential? facts*)
+                                   (long (count facts*))
+                                   0))))
+                          0
+                          entities)]
+    {:entities  (long (count entities))
+     :relations (long (count relations))
+     :facts     facts}))
+
+(defn- safe-rate
+  [numerator denominator]
+  (when (pos? (long denominator))
+    (/ (double numerator)
+       (double denominator))))
+
+(defn- update-runtime-stats!
+  [f & args]
+  (locking background-consolidation-lock
+    (apply swap! background-consolidation-state update :stats f args)))
+
+(defn- record-success!
+  [{:keys [entities relations facts]}]
+  (let [now (java.util.Date.)]
+    (update-runtime-stats!
+      (fn [stats]
+        (-> stats
+            (update :attempted-episode-count inc)
+            (update :successful-episode-count inc)
+            (update :extracted-entity-count + (long entities))
+            (update :extracted-relation-count + (long relations))
+            (update :extracted-fact-count + (long facts))
+            (assoc :last-attempt-at now
+                   :last-success-at now
+                   :last-error nil
+                   :last-error-kind nil))))))
+
+(defn- record-failure!
+  [error-kind error-message]
+  (let [now        (java.util.Date.)
+        error-kind (keyword (or error-kind :error))]
+    (update-runtime-stats!
+      (fn [stats]
+        (cond-> (-> stats
+                    (update :attempted-episode-count inc)
+                    (update :failed-attempt-count inc)
+                    (assoc :last-attempt-at now
+                           :last-failure-at now
+                           :last-error (some-> error-message str)
+                           :last-error-kind error-kind))
+          (= :invalid-extraction error-kind)
+          (update :invalid-extraction-count inc)
+
+          (= :exception error-kind)
+          (update :exception-count inc))))))
+
+(defn- failed-episode-summary
+  []
+  (let [failed-at-values (->> (db/q '[:find ?failed-at
+                                      :where
+                                      [?e :episode/consolidation-failed-at ?failed-at]])
+                              (map first)
+                              vec)
+        last-failed-at   (when (seq failed-at-values)
+                           (apply max-key #(.getTime ^java.util.Date %) failed-at-values))]
+    {:failed_episode_count   (long (count failed-at-values))
+     :last_failed_episode_at (instant-string last-failed-at)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Knowledge graph merging
@@ -486,6 +582,7 @@ Rules:
     (if-not extraction
       (let [error-message "knowledge extraction returned invalid JSON"]
         (memory/mark-episode-consolidation-failed! eid error-message)
+        (record-failure! :invalid-extraction error-message)
         (log/warn "Skipping episode after invalid extraction:" summary)
         {:status      :invalid-extraction
          :episode-eid eid
@@ -502,23 +599,31 @@ Rules:
                              (java.util.Date.)
                              {:exclude-eids [eid]})]
             (db/transact! (into merge-tx (:tx-data prune-plan)))))
-        (log/info "Consolidated episode, extracted"
-                  (count (get extraction "entities" []))
-                  "entities and"
-                  (count (get extraction "relations" []))
-                  "relations")
-        {:status      :ok
-         :episode-eid eid
-         :summary     summary
-         :entities    (count (get extraction "entities" []))
-         :relations   (count (get extraction "relations" []))}))))
+        (let [{:keys [entities relations facts] :as counts}
+              (extraction-counts extraction)]
+          (record-success! counts)
+          (log/info "Consolidated episode, extracted"
+                    entities
+                    "entities and"
+                    relations
+                    "relations")
+          {:status      :ok
+           :episode-eid eid
+           :summary     summary
+           :entities    entities
+           :relations   relations
+           :facts       facts})))))
 
 (defn consolidate-pending!
   "Process all unprocessed episodes."
   []
   (let [episodes (memory/unprocessed-episodes)]
     (when (seq episodes)
-      (let [importance-by-eid (rate-episode-importance episodes)]
+      (let [importance-by-eid (try
+                                (rate-episode-importance episodes)
+                                (catch Exception e
+                                  (log/warn e "Failed to rate episode importance; using default importance for consolidation batch")
+                                  {}))]
         (log/info "Consolidating" (count episodes) "pending episodes")
         (doseq [ep episodes]
           (try
@@ -527,6 +632,7 @@ Rules:
                                               (:eid ep)
                                               default-episode-importance)))
             (catch Exception e
+              (record-failure! :exception (.getMessage e))
               (log/error e "Failed to consolidate episode:" (:summary ep)))))))))
 
 ;; ---------------------------------------------------------------------------
@@ -566,8 +672,7 @@ Rules:
   []
   (locking background-consolidation-lock
     (reset! background-consolidation-state
-            {:accepting? true
-             :tasks #{}})))
+            (background-consolidation-state-template))))
 
 (defn prepare-shutdown!
   "Stop accepting new background consolidations and return the pending count."
@@ -598,6 +703,48 @@ Rules:
   (locking background-consolidation-lock
     {:accepting? (boolean (:accepting? @background-consolidation-state))
      :pending-background-task-count (count (:tasks @background-consolidation-state))}))
+
+(defn consolidation-summary
+  "Return a small operational summary for memory consolidation observability."
+  []
+  (let [{:keys [accepting? tasks stats]}
+        (locking background-consolidation-lock
+          (let [{:keys [accepting? tasks stats]} @background-consolidation-state]
+            {:accepting? accepting?
+             :tasks tasks
+             :stats stats}))
+        {:keys [attempted-episode-count successful-episode-count failed-attempt-count
+                invalid-extraction-count exception-count extracted-entity-count
+                extracted-relation-count extracted-fact-count started-at
+                last-attempt-at last-success-at last-failure-at
+                last-error last-error-kind]} stats
+        {:keys [failed_episode_count last_failed_episode_at]} (failed-episode-summary)]
+    {:accepting                   (boolean accepting?)
+     :pending_background_task_count (long (count tasks))
+     :backlog                     {:pending_episode_count (long (count (memory/unprocessed-episodes)))
+                                   :failed_episode_count failed_episode_count
+                                   :last_failed_episode_at last_failed_episode_at}
+     :stats                       {:started_at (instant-string started-at)
+                                   :attempted_episode_count (long attempted-episode-count)
+                                   :successful_episode_count (long successful-episode-count)
+                                   :failed_attempt_count (long failed-attempt-count)
+                                   :invalid_extraction_count (long invalid-extraction-count)
+                                   :exception_count (long exception-count)
+                                   :success_rate (safe-rate successful-episode-count attempted-episode-count)
+                                   :extracted_entity_count (long extracted-entity-count)
+                                   :extracted_relation_count (long extracted-relation-count)
+                                   :extracted_fact_count (long extracted-fact-count)
+                                   :avg_extracted_entities_per_success
+                                   (safe-rate extracted-entity-count successful-episode-count)
+                                   :avg_extracted_relations_per_success
+                                   (safe-rate extracted-relation-count successful-episode-count)
+                                   :avg_extracted_facts_per_success
+                                   (safe-rate extracted-fact-count successful-episode-count)
+                                   :last_attempt_at (instant-string last-attempt-at)
+                                   :last_success_at (instant-string last-success-at)
+                                   :last_failure_at (instant-string last-failure-at)
+                                   :last_error last-error
+                                   :last_error_kind (some-> last-error-kind name)}}))
 
 (defn- submit-background-consolidation!
   [session-id]

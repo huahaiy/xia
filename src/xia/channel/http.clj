@@ -657,10 +657,11 @@
 (defn- runtime-idle-body
   []
   (let [{:keys [phase draining? drain-requested-at accepting-new-work? idle? shutdown-allowed? blockers activity]}
-        (runtime-health/idle-status)]
+        (runtime-health/idle-status)
+        memory-consolidation (hippo/consolidation-summary)]
     {:phase (some-> phase name)
      :draining draining?
-     :drain_requested_at drain-requested-at
+     :drain_requested_at (instant->str drain-requested-at)
      :accepting_new_work accepting-new-work?
      :idle idle?
      :shutdown_allowed shutdown-allowed?
@@ -679,7 +680,8 @@
                 "hippocampus" {"accepting" (boolean (get-in activity [:hippocampus :accepting?]))
                                "pending_background_task_count" (get-in activity [:hippocampus :pending-background-task-count] 0)}
                 "llm" {"accepting" (boolean (get-in activity [:llm :accepting?]))
-                       "pending_log_write_count" (get-in activity [:llm :pending-log-write-count] 0)}}}))
+                       "pending_log_write_count" (get-in activity [:llm :pending-log-write-count] 0)}}
+     :memory_consolidation memory-consolidation}))
 
 (defn- handle-command-runtime-status
   [_req]

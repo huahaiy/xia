@@ -207,6 +207,46 @@
     (is (= "duckduckgo-html" (get-in web-search ["config_resolution" "backend" "default_value"])))
     (is (nil? (get-in web-search ["config_resolution" "backend" "overlay"])))))
 
+(deftest admin-config-includes-memory-consolidation-summary
+  (with-redefs [xia.hippocampus/consolidation-summary
+                (constantly {:accepting true
+                             :pending_background_task_count 2
+                             :backlog {:pending_episode_count 4
+                                       :failed_episode_count 1
+                                       :last_failed_episode_at "2026-04-05T10:00:00Z"}
+                             :stats {:started_at "2026-04-05T09:00:00Z"
+                                     :attempted_episode_count 7
+                                     :successful_episode_count 5
+                                     :failed_attempt_count 2
+                                     :invalid_extraction_count 1
+                                     :exception_count 1
+                                     :success_rate 0.7142857142857143
+                                     :extracted_entity_count 11
+                                     :extracted_relation_count 6
+                                     :extracted_fact_count 17
+                                     :avg_extracted_entities_per_success 2.2
+                                     :avg_extracted_relations_per_success 1.2
+                                     :avg_extracted_facts_per_success 3.4
+                                     :last_attempt_at "2026-04-05T10:05:00Z"
+                                     :last_success_at "2026-04-05T10:00:00Z"
+                                     :last_failure_at "2026-04-05T10:05:00Z"
+                                     :last_error "background consolidation failed"
+                                     :last_error_kind "exception"}})]
+    (let [response             (#'http-admin/handle-admin-config (admin-deps) {})
+          body                 (response-json response)
+          memory-consolidation (get body "memory_consolidation")]
+      (is (= 200 (:status response)))
+      (is (= 4 (get-in memory-consolidation ["backlog" "pending_episode_count"])))
+      (is (= 1 (get-in memory-consolidation ["backlog" "failed_episode_count"])))
+      (is (= 7 (get-in memory-consolidation ["stats" "attempted_episode_count"])))
+      (is (= 5 (get-in memory-consolidation ["stats" "successful_episode_count"])))
+      (is (= 0.7142857142857143
+             (get-in memory-consolidation ["stats" "success_rate"])))
+      (is (= "exception"
+             (get-in memory-consolidation ["stats" "last_error_kind"])))
+      (is (= "2026-04-05T09:00:00Z"
+             (get-in memory-consolidation ["stats" "started_at"]))))))
+
 (deftest admin-config-shows-redacted-messaging-config-resolution
   (runtime-overlay/activate!
     {:overlay/version 1
