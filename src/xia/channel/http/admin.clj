@@ -1496,10 +1496,6 @@
       (when (contains? data "external_provider_id")
         (save-config-override! :local-doc/ocr-provider-id
                                (some-> provider-id name)))
-      (save-config-override! :local-doc/ocr-command nil)
-      (save-config-override! :local-doc/ocr-model-path nil)
-      (save-config-override! :local-doc/ocr-mmproj-path nil)
-      (save-config-override! :local-doc/ocr-spotting-mmproj-path nil)
       (when (contains? data "timeout_ms")
         (save-config-override! :local-doc/ocr-timeout-ms timeout-ms))
       (when (contains? data "max_tokens")

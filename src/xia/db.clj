@@ -936,10 +936,6 @@
     :local-doc/ocr-enabled?
     :local-doc/ocr-backend
     :local-doc/ocr-provider-id
-    :local-doc/ocr-command
-    :local-doc/ocr-model-path
-    :local-doc/ocr-mmproj-path
-    :local-doc/ocr-spotting-mmproj-path
     :local-doc/ocr-timeout-ms
     :local-doc/ocr-max-tokens
     :backup/enabled?

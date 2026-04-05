@@ -4,25 +4,25 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.async :as async]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.paths :as paths]
             [xia.task-policy :as task-policy])
-  (:import [java.io File InputStream]
+  (:import [datalevin.dtlvnative DTLV DTLV$dtlv_llama_vision_generator]
+           [java.io File InputStream]
            [java.net URI]
            [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
+           [java.nio.charset StandardCharsets]
            [java.nio.file Files Path Paths StandardCopyOption]
            [java.nio.file.attribute FileAttribute]
            [java.time Duration]
-           [java.util Base64]
-           [java.util.concurrent TimeUnit]))
+           [java.util Base64]))
 
-(def ^:private default-command "llama-cli")
 (def ^:private default-model-backend :local)
 (def ^:private default-timeout-ms 120000)
 (def ^:private default-max-tokens 2048)
+(def ^:private max-native-output-resize-attempts 8)
 (def ^:private spotting-image-max-pixels 1605632)
 (def ^:private default-model-file "PaddleOCR-VL-1.5.gguf")
 (def ^:private default-mmproj-file "PaddleOCR-VL-1.5-mmproj.gguf")
@@ -56,16 +56,14 @@
    :spotting {:id :spotting
               :label "Spotting"
               :prompt "Spotting:"
-              :requires-spotting-mmproj? true
               :image-max-pixels spotting-image-max-pixels}})
 
 (defn supported-modes
   []
-  (mapv (fn [[mode {:keys [label prompt requires-spotting-mmproj? image-max-pixels]}]]
+  (mapv (fn [[mode {:keys [label prompt image-max-pixels]}]]
           {:id mode
            :label label
            :prompt prompt
-           :requires-spotting-mmproj? (boolean requires-spotting-mmproj?)
            :image-max-pixels image-max-pixels})
         ocr-mode-definitions))
 
@@ -117,22 +115,6 @@
    (cfg/positive-long-resolution :local-doc/ocr-max-tokens
                                  default-max-tokens)})
 
-(defn- command-path
-  []
-  (cfg/string-option :local-doc/ocr-command default-command))
-
-(defn- model-path
-  []
-  (cfg/string-option :local-doc/ocr-model-path nil))
-
-(defn- mmproj-path
-  []
-  (cfg/string-option :local-doc/ocr-mmproj-path nil))
-
-(defn- spotting-mmproj-path
-  []
-  (cfg/string-option :local-doc/ocr-spotting-mmproj-path nil))
-
 (defn- timeout-ms
   []
   (task-policy/local-doc-ocr-timeout-ms))
@@ -140,12 +122,6 @@
 (defn- max-tokens
   []
   (task-policy/local-doc-ocr-max-tokens))
-
-(defn- configured?
-  [resolved-model-path resolved-mmproj-path]
-  (and (seq (command-path))
-       (seq resolved-model-path)
-       (seq resolved-mmproj-path)))
 
 (defn- resolved-external-provider
   []
@@ -189,13 +165,11 @@
 
 (defn- resolved-model-path
   []
-  (or (model-path)
-      (managed-model-path)))
+  (managed-model-path))
 
 (defn- resolved-mmproj-path
   []
-  (or (mmproj-path)
-      (managed-mmproj-path)))
+  (managed-mmproj-path))
 
 (defn settings
   []
@@ -211,8 +185,8 @@
                                              (llm/vision-capable? provider)))
      :configured            (boolean (case model-backend*
                                        :external (external-provider-ready?)
-                                       (configured? resolved-model-path*
-                                                    resolved-mmproj-path*)))
+                                       (and (seq resolved-model-path*)
+                                            (seq resolved-mmproj-path*))))
      :timeout-ms            (timeout-ms)
      :max-tokens            (max-tokens)
      :default-mode          :ocr
@@ -239,8 +213,6 @@
                                           (cond-> {:id (name (:id mode))
                                                    :label (:label mode)
                                                    :prompt (:prompt mode)}
-                                            (:requires-spotting-mmproj? mode)
-                                            (assoc :requires_spotting_mmproj true)
                                             (:image-max-pixels mode)
                                             (assoc :image_max_pixels (:image-max-pixels mode))))
                                         supported-modes)}))
@@ -248,11 +220,13 @@
 (defn- missing-config-ex
   []
   (let [missing  (cond-> []
+                   (not (seq (current-db-path)))
+                   (conj :db-path)
                    (not (seq (resolved-model-path)))
                    (conj :model-path)
                    (not (seq (resolved-mmproj-path)))
                    (conj :mmproj-path))]
-    (ex-info "Local OCR is not configured. Xia needs access to its managed PaddleOCR assets or explicit local OCR asset paths."
+    (ex-info "Local OCR is not configured. Xia needs an open database so it can place its managed PaddleOCR assets."
              {:type :local-doc/ocr-not-configured
               :missing-config missing})))
 
@@ -284,7 +258,8 @@
 
         :else nil))
 
-    (when-not (configured? (resolved-model-path) (resolved-mmproj-path))
+    (when-not (and (seq (resolved-model-path))
+                   (seq (resolved-mmproj-path)))
       (throw (missing-config-ex)))))
 
 (defn- create-http-client
@@ -367,10 +342,8 @@
 
 (defn- ensure-managed-runtime-assets!
   []
-  (when-not (model-path)
-    (ensure-managed-asset! (managed-model-path) default-model-url "model"))
-  (when-not (mmproj-path)
-    (ensure-managed-asset! (managed-mmproj-path) default-mmproj-url "mmproj")))
+  (ensure-managed-asset! (managed-model-path) default-model-url "model")
+  (ensure-managed-asset! (managed-mmproj-path) default-mmproj-url "mmproj"))
 
 (defn- image-suffix
   [{:keys [name media-type]}]
@@ -393,67 +366,108 @@
       (.write out ^bytes image-bytes))
     tmp))
 
-(defn- read-stream!
-  [stream]
-    (with-open [reader (io/reader stream :encoding "UTF-8")]
-    (slurp reader)))
+(defn- next-buffer-size
+  [current-size required-size]
+  (when (neg? required-size)
+    (throw (IllegalArgumentException. "required-size must be non-negative")))
+  (let [doubled (if (> current-size (quot Integer/MAX_VALUE 2))
+                  Integer/MAX_VALUE
+                  (* 2 current-size))]
+    (max required-size doubled)))
 
-(defn- create-spotting-metadata-file!
-  []
-  (let [^File tmp (File/createTempFile "xia-local-ocr-spotting-" ".json")]
-    (spit tmp
-          (str "{\"clip.vision.image_max_pixels\":"
-               spotting-image-max-pixels
-               "}")
-          :encoding "UTF-8")
-    tmp))
+(defn- initial-output-buffer-size
+  [max-tokens]
+  (let [estimated-size (max 256 (* 16 (max 1 (long max-tokens))))]
+    (if (>= estimated-size Integer/MAX_VALUE)
+      Integer/MAX_VALUE
+      (int estimated-size))))
 
-(defn- process-result
-  [^Process process timeout-ms]
-  (let [stdout* (async/submit-parallel!
-                 "local-ocr-stdout"
-                 #(read-stream! (.getInputStream process)))
-        stderr* (async/submit-parallel!
-                 "local-ocr-stderr"
-                 #(read-stream! (.getErrorStream process)))]
-    (if (.waitFor process (long timeout-ms) TimeUnit/MILLISECONDS)
-      {:exit   (.exitValue process)
-       :stdout @stdout*
-       :stderr @stderr*}
+(defn- destroy-vision-generator!
+  [^DTLV$dtlv_llama_vision_generator generator]
+  (when generator
+    (DTLV/dtlv_llama_vision_generator_destroy generator)))
+
+(defn- create-vision-generator!
+  [mode]
+  (let [generator        (DTLV$dtlv_llama_vision_generator.)
+        image-max-pixels (long (or (:image-max-pixels mode) 0))
+        rc               (DTLV/dtlv_llama_vision_generator_create generator
+                                                                  (resolved-model-path)
+                                                                  (resolved-mmproj-path)
+                                                                  0
+                                                                  0
+                                                                  0
+                                                                  0
+                                                                  (int image-max-pixels))]
+    (if (zero? (long rc))
+      generator
       (do
-        (.destroyForcibly process)
+        (destroy-vision-generator! generator)
+        (throw (ex-info "Local OCR failed to initialize Datalevin vision runtime."
+                        {:type :local-doc/ocr-failed
+                         :action :initialize-generator
+                         :rc (long rc)
+                         :ocr-mode (:id mode)
+                         :image-max-pixels image-max-pixels}))))))
+
+(defn- run-vision-operation!
+  [^DTLV$dtlv_llama_vision_generator generator {:keys [prompt image-path max-tokens mode]}]
+  (loop [buffer-size (initial-output-buffer-size max-tokens)
+         attempt     0]
+    (when (>= attempt max-native-output-resize-attempts)
+      (throw (ex-info "Local OCR failed after resizing the output buffer."
+                      {:type :local-doc/ocr-failed
+                       :action :generate
+                       :ocr-mode (:id mode)
+                       :max-tokens max-tokens})))
+    (let [buffer      (byte-array buffer-size)
+          actual-size (if (= (:id mode) :ocr)
+                        (DTLV/dtlv_llama_ocr generator image-path (int max-tokens) buffer (long buffer-size))
+                        (DTLV/dtlv_llama_vision_generate generator prompt image-path (int max-tokens) buffer (long buffer-size)))]
+      (cond
+        (and (<= 0 actual-size)
+             (<= actual-size buffer-size))
+        (String. buffer 0 actual-size StandardCharsets/UTF_8)
+
+        (> (Math/abs (long actual-size)) buffer-size)
+        (recur (next-buffer-size buffer-size (Math/abs (long actual-size)))
+               (inc attempt))
+
+        :else
+        (throw (ex-info "Local OCR generation failed."
+                        {:type :local-doc/ocr-failed
+                         :action :generate
+                         :ocr-mode (:id mode)
+                         :prompt prompt
+                         :max-tokens max-tokens
+                         :rc (long actual-size)}))))))
+
+(defn- invoke-local-model!
+  [image-path mode]
+  (let [generator (create-vision-generator! mode)]
+    (try
+      (run-vision-operation! generator {:prompt (:prompt mode)
+                                        :image-path image-path
+                                        :max-tokens (max-tokens)
+                                        :mode mode})
+      (finally
+        (destroy-vision-generator! generator)))))
+
+(def ^:private timeout-sentinel ::timeout)
+
+(defn- run-with-timeout!
+  [timeout-ms thunk]
+  ;; Native llama.cpp work is not interruptible here, so timeout is best-effort
+  ;; at the caller boundary.
+  (let [task   (future (thunk))
+        result (deref task timeout-ms timeout-sentinel)]
+    (if (= timeout-sentinel result)
+      (do
+        (future-cancel task)
         (throw (ex-info "Local OCR timed out."
                         {:type :local-doc/ocr-timeout
-                         :timeout-ms timeout-ms})))))) 
-
-(defn- run-llama-cli!
-  [{:keys [prompt image-path mode metadata-path]}]
-  (let [mmproj (or (when (= (:id mode) :spotting)
-                     (spotting-mmproj-path))
-                   (resolved-mmproj-path))
-        command [(command-path)
-                 "-m" (resolved-model-path)
-                 "--mmproj" mmproj
-                 "--temp" "0"
-                 "-n" (str (max-tokens))
-                 "-p" prompt
-                 "--image" image-path]
-        command (cond-> command
-                  (seq metadata-path)
-                  (into ["--metadata" metadata-path]))
-        process (.start (ProcessBuilder. ^java.util.List command))
-        {:keys [exit stdout stderr]} (process-result process (timeout-ms))]
-    (when-not (zero? (long exit))
-      (throw (ex-info "Local OCR command failed."
-                      {:type :local-doc/ocr-failed
-                       :exit exit
-                       :command command
-                       :stderr (some-> stderr str/trim not-empty)
-                       :stdout-preview (some-> stdout str/trim not-empty
-                                               (#(if (> (count %) 300)
-                                                   (str (subs % 0 297) "...")
-                                                   %)))})))
-    stdout))
+                         :timeout-ms timeout-ms})))
+      result)))
 
 (defn- normalize-output
   [text prompt]
@@ -495,27 +509,18 @@
 (defn- run-local-ocr!
   [image-bytes {:keys [name media-type mode]}]
   (ensure-managed-runtime-assets!)
-  (let [prompt        (:prompt mode)
-        tmp           (create-temp-image-file! image-bytes {:name name :media-type media-type})
-        metadata-file (when (and (= (:id mode) :spotting)
-                                 (not (seq (spotting-mmproj-path))))
-                        (create-spotting-metadata-file!))]
+  (let [prompt     (:prompt mode)
+        tmp        (create-temp-image-file! image-bytes {:name name :media-type media-type})
+        image-path (.getAbsolutePath tmp)]
     (try
-      (-> (run-llama-cli! {:prompt prompt
-                           :image-path (.getAbsolutePath tmp)
-                           :mode mode
-                           :metadata-path (some-> metadata-file .getAbsolutePath)})
+      (-> (run-with-timeout! (timeout-ms)
+            #(invoke-local-model! image-path mode))
           (normalize-output prompt))
       (finally
         (when (.exists tmp)
           (when-not (.delete tmp)
             (log/debug "Failed to delete temp OCR image file"
-                       {:path (.getAbsolutePath tmp)})))
-        (when (and metadata-file
-                   (.exists ^File metadata-file))
-          (when-not (.delete ^File metadata-file)
-            (log/debug "Failed to delete temp OCR metadata file"
-                       {:path (.getAbsolutePath ^File metadata-file)})))))))
+                       {:path image-path})))))))
 
 (defn ocr-image-bytes
   [image-bytes {:keys [name media-type ocr-mode] :as opts}]

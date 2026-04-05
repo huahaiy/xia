@@ -36,3 +36,22 @@
         (is (= "Formula Recognition:" (get-in content [0 "text"])))
         (is (str/starts-with? (get-in content [1 "image_url" "url"])
                               "data:image/png;base64,"))))))
+
+(deftest local-backend-uses-datalevin-runtime
+  (db/set-config! :local-doc/ocr-enabled? true)
+  (let [calls (atom [])]
+    (with-redefs [local-ocr/ensure-managed-runtime-assets! (fn [] nil)
+                  local-ocr/invoke-local-model!            (fn [image-path mode]
+                                                             (swap! calls conj {:image-path image-path
+                                                                                :mode mode})
+                                                             (is (.exists (java.io.File. image-path)))
+                                                             "Formula Recognition:\nE = mc^2")]
+      (let [text (local-ocr/ocr-image-bytes (.getBytes "fake-image" StandardCharsets/UTF_8)
+                                            {:name "formula.png"
+                                             :media-type "image/png"
+                                             :ocr-mode :formula})
+            {:keys [image-path mode]} (first @calls)]
+        (is (= "E = mc^2" text))
+        (is (= :formula (:id mode)))
+        (is (= "Formula Recognition:" (:prompt mode)))
+        (is (= ".png" (subs image-path (- (count image-path) 4))))))))

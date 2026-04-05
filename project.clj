@@ -6,7 +6,7 @@
   :min-lein-version "2.11.2"
   :dependencies [[org.clojure/clojure "1.12.4"]
                  [integrant/integrant "0.13.1"]
-                 [org.datalevin/datalevin-embedded "0.10.13"]
+                 [org.datalevin/datalevin-embedded "0.10.15"]
                  [org.clojure/tools.cli "1.4.256"]
                  [hato/hato "1.0.0"]
                  [com.cnuernber/charred "1.038"]
