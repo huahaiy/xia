@@ -8,6 +8,14 @@
 
 (use-fixtures :each with-test-db)
 
+(defn- reserved-next-run
+  [schedule-id]
+  (ffirst (db/q '[:find ?next :in $ ?sid
+                  :where
+                  [?e :schedule/id ?sid]
+                  [?e :schedule/reserved-next-run ?next]]
+                schedule-id)))
+
 ;; ---------------------------------------------------------------------------
 ;; Create
 ;; ---------------------------------------------------------------------------
@@ -329,6 +337,39 @@
   (is (= 5 (count (schedule/schedule-history :trim-test 100))))
   (schedule/trim-history! :trim-test 2)
   (is (= 2 (count (schedule/schedule-history :trim-test 100)))))
+
+(deftest claim-schedule-run-reserves-next-wake-durably
+  (schedule/create-schedule!
+    {:id :claim-test :spec {:interval-minutes 30} :type :tool :tool-id :x})
+  (db/transact! [{:schedule/id :claim-test
+                  :schedule/next-run (java.util.Date. 0)}])
+  (let [started-at (java.util.Date. 1000)
+        expected   (java.util.Date. (+ (.getTime started-at)
+                                       (* 30 60 1000)))
+        claimed    (schedule/claim-schedule-run! :claim-test started-at)
+        sched      (schedule/get-schedule :claim-test)]
+    (is (= :claim-test (:id claimed)))
+    (is (= expected (:next-run sched)))
+    (is (= expected (reserved-next-run :claim-test)))
+    (is (empty? (schedule/due-schedules started-at)))))
+
+(deftest record-run-consumes-reserved-next-wake-without-double-advance
+  (schedule/create-schedule!
+    {:id :claimed-run :spec {:interval-minutes 30} :type :tool :tool-id :x})
+  (db/transact! [{:schedule/id :claimed-run
+                  :schedule/next-run (java.util.Date. 0)}])
+  (let [started-at (java.util.Date. 1000)]
+    (schedule/claim-schedule-run! :claimed-run started-at)
+    (let [reserved (reserved-next-run :claimed-run)]
+      (schedule/record-run! :claimed-run
+        {:started-at  started-at
+         :finished-at (java.util.Date. (+ (.getTime started-at) 5000))
+         :status      :success
+         :result      "ok"})
+      (let [sched (schedule/get-schedule :claimed-run)]
+        (is (= started-at (:last-run sched)))
+        (is (= reserved (:next-run sched)))
+        (is (nil? (reserved-next-run :claimed-run)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Durable task state / recovery

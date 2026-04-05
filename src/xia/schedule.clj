@@ -192,6 +192,58 @@
                   :where [?e :schedule.state/schedule-id ?sid]]
                 schedule-id)))
 
+(defn- schedule-eid
+  [schedule-id]
+  (ffirst (db/q '[:find ?e :in $ ?id
+                  :where [?e :schedule/id ?id]]
+                schedule-id)))
+
+(defn- schedule-record
+  [schedule-id]
+  (when-let [eid (schedule-eid schedule-id)]
+    (into {} (db/entity eid))))
+
+(declare read-spec)
+
+(defn- schedule->body
+  [record]
+  (when record
+    {:id          (:schedule/id record)
+     :name        (:schedule/name record)
+     :description (:schedule/description record)
+     :spec        (read-spec (:schedule/spec record))
+     :type        (:schedule/type record)
+     :trusted?    (:schedule/trusted? record)
+     :tool-id     (:schedule/tool-id record)
+     :tool-args   (:schedule/tool-args record)
+     :prompt      (:schedule/prompt record)
+     :enabled?    (:schedule/enabled? record)
+     :last-run    (:schedule/last-run record)
+     :next-run    (:schedule/next-run record)
+     :created-at  (:schedule/created-at record)}))
+
+(defn- schedule-timing-tx
+  [schedule-id current-record next-run reserved-next-run]
+  (let [lookup-ref [:schedule/id schedule-id]
+        attr-map   (cond-> {:schedule/id schedule-id}
+                     (some? next-run) (assoc :schedule/next-run next-run)
+                     (some? reserved-next-run) (assoc :schedule/reserved-next-run reserved-next-run))]
+    (cond-> []
+      (> (count attr-map) 1)
+      (conj attr-map)
+
+      (and (nil? next-run)
+           (contains? current-record :schedule/next-run)
+           (some? (:schedule/next-run current-record)))
+      (conj [:db/retract lookup-ref :schedule/next-run (:schedule/next-run current-record)])
+
+      (and (nil? reserved-next-run)
+           (contains? current-record :schedule/reserved-next-run)
+           (some? (:schedule/reserved-next-run current-record)))
+      (conj [:db/retract lookup-ref
+             :schedule/reserved-next-run
+             (:schedule/reserved-next-run current-record)]))))
+
 (defn- normalize-session-id
   [value]
   (cond
@@ -569,23 +621,9 @@
 (defn get-schedule
   "Get a schedule by id. Returns nil if not found."
   [schedule-id]
-  (let [eid (ffirst (db/q '[:find ?e :in $ ?id :where [?e :schedule/id ?id]]
-                          schedule-id))]
-    (when eid
-      (let [e (into {} (db/entity eid))]
-        {:id          (:schedule/id e)
-         :name        (:schedule/name e)
-         :description (:schedule/description e)
-         :spec        (read-spec (:schedule/spec e))
-         :type        (:schedule/type e)
-         :trusted?    (:schedule/trusted? e)
-         :tool-id     (:schedule/tool-id e)
-         :tool-args   (:schedule/tool-args e)
-         :prompt      (:schedule/prompt e)
-         :enabled?    (:schedule/enabled? e)
-         :last-run    (:schedule/last-run e)
-         :next-run    (:schedule/next-run e)
-         :created-at  (:schedule/created-at e)}))))
+  (some-> schedule-id
+          schedule-record
+          schedule->body))
 
 (defn list-schedules
   "List all schedules."
@@ -593,15 +631,7 @@
   (let [eids (db/q '[:find ?e :where [?e :schedule/id _]])]
     (->> eids
          (map (fn [[eid]]
-                (let [e (into {} (db/entity eid))]
-                  {:id        (:schedule/id e)
-                   :name      (:schedule/name e)
-                   :spec      (read-spec (:schedule/spec e))
-                   :type      (:schedule/type e)
-                   :trusted?  (:schedule/trusted? e)
-                   :enabled?  (:schedule/enabled? e)
-                   :last-run  (:schedule/last-run e)
-                   :next-run  (:schedule/next-run e)})))
+                (schedule->body (into {} (db/entity eid)))))
          (sort-by :name)
          vec)))
 
@@ -609,10 +639,12 @@
   "Update a schedule. Supported keys: :name :description :spec :type :tool-id
    :tool-args :prompt :enabled? :trusted?."
   [schedule-id updates]
-  (let [current (or (get-schedule schedule-id)
-                    (throw (ex-info "Schedule not found" {:id schedule-id})))
+  (let [current-record (or (schedule-record schedule-id)
+                           (throw (ex-info "Schedule not found" {:id schedule-id})))
+        current      (schedule->body current-record)
         spec-updated? (contains? updates :spec)
         enabled-updated? (contains? updates :enabled?)
+        timing-reset? (or spec-updated? enabled-updated?)
         type         (or (:type updates) (:type current))
         spec         (if spec-updated?
                        (coerce-spec (:spec updates))
@@ -658,20 +690,24 @@
 
                        :else
                        (:next-run current))
-        tx           (cond-> [{:schedule/id       schedule-id
-                               :schedule/type     type
-                               :schedule/enabled? enabled?
-                               :schedule/trusted? trusted?
-                               :schedule/spec     (pr-str spec)}
-                              (when (contains? updates :name)
-                                {:schedule/id   schedule-id
-                                 :schedule/name (or name (clojure.core/name schedule-id))})
-                              (when (contains? updates :description)
-                                {:schedule/id            schedule-id
-                                 :schedule/description (or description "")})
-                              (when next-run
-                                {:schedule/id schedule-id
-                                 :schedule/next-run next-run})]
+        tx           (cond-> (into (->> [{:schedule/id       schedule-id
+                                          :schedule/type     type
+                                          :schedule/enabled? enabled?
+                                          :schedule/trusted? trusted?
+                                          :schedule/spec     (pr-str spec)}
+                                         (when (contains? updates :name)
+                                           {:schedule/id   schedule-id
+                                            :schedule/name (or name (clojure.core/name schedule-id))})
+                                         (when (contains? updates :description)
+                                           {:schedule/id           schedule-id
+                                            :schedule/description (or description "")})]
+                                        (remove nil?)
+                                        vec)
+                                     (schedule-timing-tx schedule-id
+                                                         current-record
+                                                         next-run
+                                                         (when-not timing-reset?
+                                                           (:schedule/reserved-next-run current-record))))
                        (= type :tool)
                        (conj (cond-> {:schedule/id      schedule-id
                                       :schedule/tool-id tool-id}
@@ -723,6 +759,28 @@
     (log/info "Removed schedule:" (clojure.core/name schedule-id)))
   {:status "removed" :id schedule-id})
 
+(defn claim-schedule-run!
+  "Durably reserve the next wake for a schedule before execution proceeds.
+   Returns the refreshed schedule when the claim succeeds, or nil when the
+   schedule is no longer due/runnable."
+  [schedule-id ^java.util.Date started-at]
+  (let [current-record (schedule-record schedule-id)
+        current        (some-> current-record schedule->body)
+        current-next   (:next-run current)
+        due?           (and current
+                            (:enabled? current)
+                            (some? current-next)
+                            (not (.after ^java.util.Date current-next started-at)))]
+    (when due?
+      (let [reserved-next-run (cron/next-run (:spec current)
+                                             started-at
+                                             :last-run started-at)]
+        (db/transact! (schedule-timing-tx schedule-id
+                                          current-record
+                                          reserved-next-run
+                                          reserved-next-run))
+        (get-schedule schedule-id)))))
+
 (defn pause-schedule!
   "Disable a schedule (stop it from running)."
   [schedule-id]
@@ -731,14 +789,15 @@
 (defn resume-schedule!
   "Re-enable a paused schedule and recalculate next run."
   [schedule-id]
-  (let [sched (get-schedule schedule-id)]
+  (let [current-record (schedule-record schedule-id)
+        sched          (some-> current-record schedule->body)]
     (when-not sched
       (throw (ex-info "Schedule not found" {:id schedule-id})))
     (let [next-run (cron/next-run (:spec sched) (java.util.Date.)
                                   :last-run (:last-run sched))]
-      (db/transact! [{:schedule/id       schedule-id
-                      :schedule/enabled? true
-                      :schedule/next-run next-run}])
+      (db/transact! (into [{:schedule/id       schedule-id
+                            :schedule/enabled? true}]
+                          (schedule-timing-tx schedule-id current-record next-run nil)))
       (get-schedule schedule-id))))
 
 ;; ---------------------------------------------------------------------------
@@ -765,12 +824,16 @@
        (some? actions) (assoc :schedule-run/actions (actions-doc actions))
        (some? meta) (assoc :schedule-run/meta (meta-doc meta)))])
   ;; Update schedule's last-run and next-run
-  (let [now      (java.util.Date.)
-        sched    (get-schedule schedule-id)
-        next-run (cron/next-run (:spec sched) now :last-run started-at)]
-    (db/transact! [(cond-> {:schedule/id       schedule-id
-                            :schedule/last-run started-at}
-                     next-run (assoc :schedule/next-run next-run))])))
+  (let [now             (java.util.Date.)
+        current-record  (or (schedule-record schedule-id)
+                            (throw (ex-info "Schedule not found" {:id schedule-id})))
+        sched           (schedule->body current-record)
+        reserved-next   (:schedule/reserved-next-run current-record)
+        next-run        (or reserved-next
+                            (cron/next-run (:spec sched) now :last-run started-at))]
+    (db/transact! (into [{:schedule/id       schedule-id
+                          :schedule/last-run started-at}]
+                        (schedule-timing-tx schedule-id current-record next-run nil)))))
 
 (defn schedule-history
   "Get recent run history for a schedule. Returns up to `limit` most recent runs."

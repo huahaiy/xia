@@ -188,6 +188,7 @@
  :remote.bridge/relay-url #:db{:valueType :db.type/string},
  :task.item/summary #:db{:valueType :db.type/string},
  :schedule/next-run #:db{:valueType :db.type/instant},
+ :schedule/reserved-next-run #:db{:valueType :db.type/instant},
  :local.doc/media-type #:db{:valueType :db.type/string},
  :local.doc/text
  {:db/valueType :db.type/string,

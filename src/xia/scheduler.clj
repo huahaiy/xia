@@ -153,8 +153,8 @@
 
 (defn- execute-tool-schedule
   "Execute a :tool type schedule."
-  [{:keys [id tool-id tool-args trusted?] :as sched}]
-  (let [started          (java.util.Date.)
+  [{:keys [id tool-id tool-args trusted? started-at] :as sched}]
+  (let [started          (or started-at (java.util.Date.))
         existing-task-id (schedule/schedule-task-id id)
         task-id          (schedule/ensure-schedule-task! sched
                                                          :started-at started)
@@ -216,8 +216,8 @@
 
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
-  [{:keys [id name prompt trusted?] :as sched}]
-  (let [started (java.util.Date.)
+  [{:keys [id name prompt trusted? started-at] :as sched}]
+  (let [started (or started-at (java.util.Date.))
         resumed-session-id (schedule/resumable-session-id id)
         session-id (or resumed-session-id
                        (db/create-session! :scheduler))
@@ -294,26 +294,32 @@
                (not (contains? @running-schedules id)))
       (swap! running-schedules conj id)
       (try
-        (try
-          (let [{:keys [status refreshed errors]}
-                (oauth/refresh-autonomous-accounts!)]
-            (when (seq refreshed)
-              (log/info "Proactively refreshed" (count refreshed)
-                        "OAuth account(s) before autonomous schedule execution"))
-            (when (seq errors)
-              (log/warn "Proactive OAuth refresh completed with"
-                        (count errors) "failure(s) before schedule" (name id)))
-            (when (= status :skipped)
-              (log/debug "Skipped proactive OAuth refresh before schedule" (name id)
-                         "because a recent sweep already ran")))
-          (catch Exception e
-            (log/warn e "Proactive OAuth refresh failed before schedule" (name id))))
-        (log/info "Executing schedule:" (name id) "type:" (:type sched))
-        (case (:type sched)
-          :tool (execute-tool-schedule sched)
-          :prompt (execute-prompt-schedule sched))
-        ;; Trim old history (keep 50 most recent per schedule)
-        (schedule/trim-history! id 50)
+        (let [started-at    (java.util.Date.)
+              claimed-sched (schedule/claim-schedule-run! id started-at)]
+          (if-not claimed-sched
+            (log/debug "Skipping schedule execution because it is no longer due"
+                       {:schedule-id id})
+            (do
+              (try
+                (let [{:keys [status refreshed errors]}
+                      (oauth/refresh-autonomous-accounts!)]
+                  (when (seq refreshed)
+                    (log/info "Proactively refreshed" (count refreshed)
+                              "OAuth account(s) before autonomous schedule execution"))
+                  (when (seq errors)
+                    (log/warn "Proactive OAuth refresh completed with"
+                              (count errors) "failure(s) before schedule" (name id)))
+                  (when (= status :skipped)
+                    (log/debug "Skipped proactive OAuth refresh before schedule" (name id)
+                               "because a recent sweep already ran")))
+                (catch Exception e
+                  (log/warn e "Proactive OAuth refresh failed before schedule" (name id))))
+              (log/info "Executing schedule:" (name id) "type:" (:type claimed-sched))
+              (case (:type claimed-sched)
+                :tool (execute-tool-schedule (assoc claimed-sched :started-at started-at))
+                :prompt (execute-prompt-schedule (assoc claimed-sched :started-at started-at)))
+              ;; Trim old history (keep 50 most recent per schedule)
+              (schedule/trim-history! id 50))))
         (catch Exception e
           (log/error e "Schedule execution failed:" (name id)))
         (finally
