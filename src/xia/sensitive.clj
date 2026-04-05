@@ -9,7 +9,6 @@
     :oauth.account/client-secret
     :oauth.account/access-token
     :oauth.account/refresh-token
-    :remote.device/push-token
     :site-cred/username
     :site-cred/password})
 

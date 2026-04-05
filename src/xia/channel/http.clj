@@ -1570,7 +1570,6 @@
           workspace-download-match (re-matches #"/workspace/items/([^/]+)/download" uri)
           knowledge-node-facts-match (re-matches #"/knowledge/nodes/([^/]+)/facts" uri)
           knowledge-fact-match (re-matches #"/knowledge/facts/([^/]+)" uri)
-          admin-remote-device-match (re-matches #"/admin/remote-bridge/devices/([0-9a-fA-F-]+)" uri)
           admin-managed-instance-stop-match (re-matches #"/admin/managed-instances/([^/]+)/stop" uri)
           admin-site-match   (re-matches #"/admin/sites/([^/]+)" uri)
           admin-schedule-match (re-matches #"/admin/schedules/([^/]+)" uri)
@@ -1882,18 +1881,8 @@
         (and (= method :post) (= uri "/admin/database-backup"))
         (protected-route-response req #(http-admin/handle-save-database-backup (admin-handler-deps) req))
 
-        (and (= method :post) (= uri "/admin/remote-bridge"))
-        (protected-route-response req #(http-admin/handle-save-remote-bridge (admin-handler-deps) req))
-
         (and (= method :post) (= uri "/admin/messaging"))
         (protected-route-response req #(http-admin/handle-save-messaging (admin-handler-deps) req))
-
-        (and (= method :post) (= uri "/admin/remote-bridge/pair"))
-        (protected-route-response req #(http-admin/handle-pair-remote-device (admin-handler-deps) req))
-
-        (and (= method :delete) admin-remote-device-match)
-        (protected-route-response req #(http-admin/handle-revoke-remote-device (admin-handler-deps)
-                                                                               (second admin-remote-device-match)))
 
         (and (= method :post) (= uri "/admin/oauth-accounts"))
         (protected-route-response req #(http-admin/handle-save-oauth-account (admin-handler-deps) req))

@@ -183,25 +183,6 @@ Xia does not only answer ad hoc prompts.
 - **Maintenance jobs:** memory consolidation, knowledge graph maintenance, and session cleanup.
 - **Warm starts:** resume a conversation with working memory already populated from prior context.
 
-## Notification Bridge Foundation
-
-Xia now includes the local-side substrate for a notification and remote-status bridge.
-
-- persistent bridge identity and key material
-- paired device records
-- a compact event log for schedule failures, recovery, and related operational state
-- a computed status snapshot suitable for a future mobile status view
-
-What is intentionally not implemented yet:
-
-- relay transport
-- end-to-end encrypted fanout
-- mobile push delivery
-- a mobile client
-
-In other words, Xia currently exposes the bridge configuration and local event
-snapshot model in the admin UI, but not the full relay/mobile system.
-
 ## Security Model
 
 Xia runs user-installed tools: arbitrary code that the LLM can invoke via function-calling. A compromised or malicious tool must not be able to read API keys, OAuth tokens, or other configured secrets.

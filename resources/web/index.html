@@ -411,7 +411,6 @@
               <button class="settings-nav-item advanced-only" data-section="database-backups">Database Backups</button>
               <button class="settings-nav-item advanced-only" data-section="episode-retention">Episode Retention</button>
               <button class="settings-nav-item advanced-only" data-section="knowledge-decay">Knowledge Decay</button>
-              <button class="settings-nav-item advanced-only" data-section="notification-bridge">Notification Bridge</button>
               <button class="settings-nav-item advanced-only" data-section="tools">Tools</button>
             </nav>
             <div class="settings-content">
@@ -1157,66 +1156,6 @@
                   <div class="actions">
                     <button type="button" class="secondary" id="delete-site">Delete</button>
                     <button type="button" class="primary" id="save-site">Save site login</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="admin-card" data-settings-section="notification-bridge">
-              <div class="panel-header">
-                <div>
-                <h3 class="panel-title" title="Pair phones for notifications and compact remote status checks without exposing Xia directly.">Notification Bridge</h3>
-                <p class="panel-note">Pair remote devices for notifications and status snapshots.</p>
-                </div>
-              </div>
-              <div class="capability-grid bridge-grid">
-                <div class="field">
-                  <label class="field-label">Bridge Settings</label>
-                  <div class="field-grid">
-                    <div class="field full">
-                      <div class="check-row">
-                        <input type="checkbox" id="remote-bridge-enabled">
-                        <label class="check-label" for="remote-bridge-enabled">Enable notification bridge event recording</label>
-                      </div>
-                    </div>
-                    <div class="field">
-                      <label class="field-label" for="remote-bridge-instance-label">Instance Label</label>
-                      <input type="text" id="remote-bridge-instance-label" class="text-input" placeholder="Desk Xia">
-                    </div>
-                    <div class="field">
-                      <label class="field-label" for="remote-bridge-relay-url">Relay URL</label>
-                      <input type="url" id="remote-bridge-relay-url" class="text-input" placeholder="https://relay.example.com">
-                    </div>
-                    <div class="field full">
-                      <label class="field-label" for="remote-bridge-public-key">Instance Public Key</label>
-                      <textarea id="remote-bridge-public-key" readonly placeholder="Saved automatically when the bridge initializes."></textarea>
-                    </div>
-                  </div>
-                  <div class="composer-foot">
-                    <div class="admin-status" id="remote-bridge-status">Loading notification bridge settings...</div>
-                    <div class="actions">
-                      <button type="button" class="primary" id="save-remote-bridge">Save bridge</button>
-                    </div>
-                  </div>
-                  <div class="field capability-import-field">
-                    <label class="field-label" for="remote-pairing-token">Pair Device</label>
-                    <textarea id="remote-pairing-token" placeholder="Paste a pairing token from the mobile app."></textarea>
-                    <div class="actions">
-                      <button type="button" class="primary" id="pair-remote-device">Pair device</button>
-                    </div>
-                    <div class="admin-status" id="remote-pair-status">Paste a pairing token from the mobile app to authorize a phone.</div>
-                  </div>
-                  <div class="field capability-import-field">
-                    <label class="field-label">Paired Devices</label>
-                    <div class="capability-list" id="remote-device-list"></div>
-                  </div>
-                </div>
-                <div class="field">
-                  <label class="field-label">Remote Snapshot</label>
-                  <div class="capability-list" id="remote-snapshot-list"></div>
-                  <div class="field capability-import-field">
-                    <label class="field-label">Recent Bridge Events</label>
-                    <div class="capability-list" id="remote-event-list"></div>
                   </div>
                 </div>
               </div>

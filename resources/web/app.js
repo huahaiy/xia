@@ -52,11 +52,7 @@ const state = {
     schedules: [],
     tools: [],
     skills: [],
-    managedInstances: [],
-    remoteBridge: null,
-    remoteDevices: [],
-    remoteEvents: [],
-    remoteSnapshot: null
+    managedInstances: []
   },
   setupRequired: false,
   history: {
@@ -115,16 +111,12 @@ const state = {
   skillSaving: false,
   managedInstanceStoppingId: '',
   messagingChannelsSaving: false,
-  remoteBridgeSaving: false,
-  remotePairing: false,
   localDocSummarizationStatus: 'Loading document summary settings...',
   localDocOcrStatus: 'Loading OCR settings...',
   contextStatus: 'Loading conversation context settings...',
   workloadRoutingStatus: 'Loading workload routing...',
   databaseBackupStatus: 'Loading database backup settings...',
   messagingChannelsStatus: 'Loading messaging channel settings...',
-  remoteBridgeStatus: 'Loading notification bridge settings...',
-  remotePairStatus: 'Paste a pairing token from the mobile app to authorize a phone.',
   littleXiaStatus: 'Loading child Xia instances...',
   openclawImporting: false,
   openclawImportStatus: 'Import a ClawHub zip URL or a local OpenClaw skill path.',
@@ -378,12 +370,6 @@ const saveScheduleEl = document.getElementById('save-schedule');
 const deleteScheduleEl = document.getElementById('delete-schedule');
 const scheduleToggleEl = document.getElementById('schedule-toggle');
 const scheduleViewRunsEl = document.getElementById('schedule-view-runs');
-const remoteBridgeEnabledEl = document.getElementById('remote-bridge-enabled');
-const remoteBridgeInstanceLabelEl = document.getElementById('remote-bridge-instance-label');
-const remoteBridgeRelayUrlEl = document.getElementById('remote-bridge-relay-url');
-const remoteBridgePublicKeyEl = document.getElementById('remote-bridge-public-key');
-const remoteBridgeStatusEl = document.getElementById('remote-bridge-status');
-const saveRemoteBridgeEl = document.getElementById('save-remote-bridge');
 const messagingSlackEnabledEl = document.getElementById('messaging-slack-enabled');
 const messagingSlackBotTokenEl = document.getElementById('messaging-slack-bot-token');
 const messagingSlackSigningSecretEl = document.getElementById('messaging-slack-signing-secret');
@@ -394,12 +380,6 @@ const messagingImessageEnabledEl = document.getElementById('messaging-imessage-e
 const messagingImessagePollIntervalEl = document.getElementById('messaging-imessage-poll-interval-ms');
 const messagingChannelsStatusEl = document.getElementById('messaging-channels-status');
 const saveMessagingChannelsEl = document.getElementById('save-messaging-channels');
-const remotePairingTokenEl = document.getElementById('remote-pairing-token');
-const remotePairStatusEl = document.getElementById('remote-pair-status');
-const pairRemoteDeviceEl = document.getElementById('pair-remote-device');
-const remoteDeviceListEl = document.getElementById('remote-device-list');
-const remoteSnapshotListEl = document.getElementById('remote-snapshot-list');
-const remoteEventListEl = document.getElementById('remote-event-list');
 const toolListEl = document.getElementById('tool-list');
 const skillListEl = document.getElementById('skill-list');
 const skillIdEl = document.getElementById('skill-id');
@@ -1882,221 +1862,6 @@ function renderOpenClawImport() {
   updateAdminButtons();
 }
 
-function remoteBadge(label, off) {
-  const badge = document.createElement('span');
-  badge.className = 'badge' + (off ? ' off' : '');
-  badge.textContent = label;
-  return badge;
-}
-
-function renderRemoteDevices() {
-  remoteDeviceListEl.replaceChildren();
-  const devices = Array.isArray(state.admin.remoteDevices) ? state.admin.remoteDevices : [];
-  if (!devices.length) {
-    const empty = document.createElement('div');
-    empty.className = 'admin-list-empty';
-    empty.textContent = 'No paired phones yet.';
-    remoteDeviceListEl.appendChild(empty);
-    return;
-  }
-  devices.forEach((device) => {
-    const card = document.createElement('div');
-    card.className = 'capability-item';
-
-    const title = document.createElement('div');
-    title.className = 'capability-title';
-    const name = document.createElement('span');
-    name.textContent = firstNonEmpty(device.name, device.id);
-    title.appendChild(name);
-    title.appendChild(remoteBadge(firstNonEmpty(device.status, 'unknown'), device.status === 'revoked'));
-
-    const meta = document.createElement('div');
-    meta.className = 'capability-meta';
-    const metaBits = [];
-    if (device.platform) metaBits.push(device.platform);
-    if (Array.isArray(device.topics) && device.topics.length) metaBits.push('Topics: ' + device.topics.join(', '));
-    meta.textContent = metaBits.join(' • ');
-
-    const stamp = document.createElement('div');
-    stamp.className = 'capability-meta';
-    const stampBits = [];
-    if (device.created_at) stampBits.push('Paired ' + formatDateTime(device.created_at));
-    if (device.last_seen_at) stampBits.push('Last seen ' + formatDateTime(device.last_seen_at));
-    stamp.textContent = stampBits.join(' • ');
-
-    card.appendChild(title);
-    if (meta.textContent) card.appendChild(meta);
-    if (stamp.textContent) card.appendChild(stamp);
-
-    if (device.status !== 'revoked') {
-      const actions = document.createElement('div');
-      actions.className = 'capability-actions';
-      const revoke = document.createElement('button');
-      revoke.type = 'button';
-      revoke.className = 'secondary';
-      revoke.textContent = 'Revoke';
-      revoke.disabled = state.remotePairing || state.remoteBridgeSaving;
-      revoke.addEventListener('click', () => revokeRemoteDevice(device));
-      actions.appendChild(revoke);
-      card.appendChild(actions);
-    }
-
-    remoteDeviceListEl.appendChild(card);
-  });
-}
-
-function renderRemoteEvents() {
-  remoteEventListEl.replaceChildren();
-  const events = Array.isArray(state.admin.remoteEvents) ? state.admin.remoteEvents : [];
-  if (!events.length) {
-    const empty = document.createElement('div');
-    empty.className = 'admin-list-empty';
-    empty.textContent = 'No bridge events recorded yet.';
-    remoteEventListEl.appendChild(empty);
-    return;
-  }
-  events.forEach((event) => {
-    const card = document.createElement('div');
-    card.className = 'capability-item';
-
-    const title = document.createElement('div');
-    title.className = 'capability-title';
-    const name = document.createElement('span');
-    name.textContent = firstNonEmpty(event.title, event.type);
-    title.appendChild(name);
-    title.appendChild(remoteBadge(firstNonEmpty(event.severity, 'info'), event.severity === 'info'));
-
-    const meta = document.createElement('div');
-    meta.className = 'capability-meta';
-    meta.textContent = [event.topic, event.created_at ? formatDateTime(event.created_at) : '']
-      .filter(Boolean)
-      .join(' • ');
-
-    card.appendChild(title);
-    if (meta.textContent) card.appendChild(meta);
-    if (event.detail) {
-      const detail = document.createElement('div');
-      detail.className = 'capability-meta';
-      detail.textContent = event.detail;
-      card.appendChild(detail);
-    }
-    remoteEventListEl.appendChild(card);
-  });
-}
-
-function buildRemoteSnapshotCard(titleText, lines, badgeText, badgeOff) {
-  const card = document.createElement('div');
-  card.className = 'capability-item';
-
-  const title = document.createElement('div');
-  title.className = 'capability-title';
-  const name = document.createElement('span');
-  name.textContent = titleText;
-  title.appendChild(name);
-  if (badgeText) {
-    title.appendChild(remoteBadge(badgeText, !!badgeOff));
-  }
-  card.appendChild(title);
-
-  const validLines = lines.filter(Boolean);
-  if (!validLines.length) {
-    const empty = document.createElement('div');
-    empty.className = 'capability-meta';
-    empty.textContent = 'None';
-    card.appendChild(empty);
-    return card;
-  }
-
-  validLines.forEach((line) => {
-    const meta = document.createElement('div');
-    meta.className = 'capability-meta';
-    meta.textContent = line;
-    card.appendChild(meta);
-  });
-
-  return card;
-}
-
-function renderRemoteSnapshot() {
-  remoteSnapshotListEl.replaceChildren();
-  const snapshot = state.admin.remoteSnapshot || null;
-  if (!snapshot) {
-    const empty = document.createElement('div');
-    empty.className = 'admin-list-empty';
-    empty.textContent = 'No snapshot available yet.';
-    remoteSnapshotListEl.appendChild(empty);
-    return;
-  }
-
-  const connectivity = snapshot.connectivity || {};
-  const running = Array.isArray(snapshot.running) ? snapshot.running : [];
-  const failures = Array.isArray(snapshot.recent_failures) ? snapshot.recent_failures : [];
-  const successes = Array.isArray(snapshot.recent_successes) ? snapshot.recent_successes : [];
-  const attention = Array.isArray(snapshot.attention) ? snapshot.attention : [];
-
-  remoteSnapshotListEl.appendChild(buildRemoteSnapshotCard(
-    'Connectivity',
-    [
-      snapshot.instance && snapshot.instance.label ? ('Instance: ' + snapshot.instance.label) : '',
-      connectivity.relay_url ? ('Relay: ' + connectivity.relay_url) : 'Relay not configured',
-      connectivity.last_seen_at ? ('Last seen: ' + formatDateTime(connectivity.last_seen_at)) : ''
-    ],
-    firstNonEmpty(connectivity.connection_state, 'disabled'),
-    connectivity.connection_state !== 'connected'
-  ));
-
-  remoteSnapshotListEl.appendChild(buildRemoteSnapshotCard(
-    'Attention',
-    attention.map((item) => item.title + (item.detail ? ' - ' + item.detail : '')),
-    attention.length ? String(attention.length) : 'clear',
-    !attention.length
-  ));
-
-  remoteSnapshotListEl.appendChild(buildRemoteSnapshotCard(
-    'Running Now',
-    running.map((item) => [item.schedule_name || item.schedule_id, item.phase].filter(Boolean).join(' • ')),
-    running.length ? String(running.length) : 'idle',
-    !running.length
-  ));
-
-  remoteSnapshotListEl.appendChild(buildRemoteSnapshotCard(
-    'Recent Failures',
-    failures.map((item) => [item.schedule_name || item.schedule_id,
-                            item.started_at ? formatDateTime(item.started_at) : '',
-                            item.detail || '']
-      .filter(Boolean)
-      .join(' • ')),
-    failures.length ? String(failures.length) : 'none',
-    !failures.length
-  ));
-
-  remoteSnapshotListEl.appendChild(buildRemoteSnapshotCard(
-    'Recent Successes',
-    successes.map((item) => [item.schedule_name || item.schedule_id,
-                             item.finished_at ? formatDateTime(item.finished_at) : (item.started_at ? formatDateTime(item.started_at) : ''),
-                             item.detail || '']
-      .filter(Boolean)
-      .join(' • ')),
-    successes.length ? String(successes.length) : 'none',
-    !successes.length
-  ));
-}
-
-function defaultRemoteBridgeStatus() {
-  const bridge = state.admin.remoteBridge || {};
-  if (!bridge.enabled) return 'Disabled.';
-  if (!bridge.keypair_ready) return 'Keys missing.';
-  if (bridge.connection_state === 'connected') return 'Connected.';
-  return 'Enabled.';
-}
-
-function defaultRemotePairStatus() {
-  const devices = Array.isArray(state.admin.remoteDevices) ? state.admin.remoteDevices : [];
-  return devices.length
-    ? ('Paired ' + devices.length + ' ' + pluralize(devices.length, 'device') + '.')
-    : 'Paste a pairing token from the mobile app to authorize a phone.';
-}
-
 function defaultMessagingChannelsStatus() {
   const channels = state.admin.messagingChannels || {};
   const slack = channels.slack || {};
@@ -2127,19 +1892,6 @@ function renderMessagingChannelSettings() {
   messagingTelegramBotTokenEl.placeholder = telegram.bot_token_configured ? 'Configured' : '123456:ABC...';
   messagingTelegramWebhookSecretEl.placeholder = telegram.webhook_secret_configured ? 'Configured' : 'Optional shared secret';
   messagingChannelsStatusEl.textContent = state.messagingChannelsStatus || defaultMessagingChannelsStatus();
-}
-
-function renderRemoteBridge() {
-  const bridge = state.admin.remoteBridge || {};
-  remoteBridgeEnabledEl.checked = !!bridge.enabled;
-  remoteBridgeInstanceLabelEl.value = bridge.instance_label || '';
-  remoteBridgeRelayUrlEl.value = bridge.relay_url || '';
-  remoteBridgePublicKeyEl.value = bridge.public_key || '';
-  remoteBridgeStatusEl.textContent = state.remoteBridgeStatus || defaultRemoteBridgeStatus();
-  remotePairStatusEl.textContent = state.remotePairStatus || defaultRemotePairStatus();
-  renderRemoteDevices();
-  renderRemoteEvents();
-  renderRemoteSnapshot();
 }
 
 function providerTemplateById(templateId) {
@@ -4489,12 +4241,6 @@ function updateAdminButtons() {
   messagingImessageEnabledEl.disabled = state.messagingChannelsSaving;
   messagingImessagePollIntervalEl.disabled = state.messagingChannelsSaving;
   saveMessagingChannelsEl.disabled = state.messagingChannelsSaving;
-  remoteBridgeEnabledEl.disabled = state.remoteBridgeSaving;
-  remoteBridgeInstanceLabelEl.disabled = state.remoteBridgeSaving;
-  remoteBridgeRelayUrlEl.disabled = state.remoteBridgeSaving;
-  remotePairingTokenEl.disabled = state.remotePairing;
-  saveRemoteBridgeEl.disabled = state.remoteBridgeSaving;
-  pairRemoteDeviceEl.disabled = state.remotePairing || !remotePairingTokenEl.value.trim();
   openclawImportSourceEl.disabled = state.openclawImporting;
   openclawImportStrictEl.disabled = state.openclawImporting;
   openclawImportButtonEl.disabled = state.openclawImporting || !openclawImportSourceEl.value.trim();
@@ -4717,7 +4463,6 @@ function renderCapabilities() {
   renderToolList();
   renderSkillList();
   renderMessagingChannelSettings();
-  renderRemoteBridge();
   renderOpenClawImport();
 }
 
@@ -5769,17 +5514,11 @@ async function loadAdminConfigImpl() {
     state.admin.tools = Array.isArray(data.tools) ? data.tools : [];
     state.admin.skills = Array.isArray(data.skills) ? data.skills : [];
     state.admin.managedInstances = Array.isArray(data.managed_instances) ? data.managed_instances : [];
-    state.admin.remoteBridge = data.remote_bridge || null;
-    state.admin.remoteDevices = Array.isArray(data.remote_devices) ? data.remote_devices : [];
-    state.admin.remoteEvents = Array.isArray(data.remote_events) ? data.remote_events : [];
-    state.admin.remoteSnapshot = data.remote_snapshot || null;
     state.contextStatus = defaultConversationContextStatus();
     state.localDocSummarizationStatus = defaultLocalDocSummarizationStatus();
     state.localDocOcrStatus = defaultLocalDocOcrStatus();
     state.databaseBackupStatus = defaultDatabaseBackupStatus();
     state.messagingChannelsStatus = defaultMessagingChannelsStatus();
-    state.remoteBridgeStatus = defaultRemoteBridgeStatus();
-    state.remotePairStatus = defaultRemotePairStatus();
     state.littleXiaStatus = state.admin.managedInstances.length
       ? ''
       : (state.admin.capabilities && state.admin.capabilities.instance_management_configured === false
@@ -5900,88 +5639,6 @@ async function saveMessagingChannels() {
   } finally {
     state.messagingChannelsSaving = false;
     renderMessagingChannelSettings();
-    updateAdminButtons();
-  }
-}
-
-async function saveRemoteBridge() {
-  if (state.remoteBridgeSaving) return;
-  state.remoteBridgeSaving = true;
-  state.remoteBridgeStatus = 'Saving bridge settings...';
-  renderRemoteBridge();
-  updateAdminButtons();
-  try {
-    await fetchJson('/admin/remote-bridge', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        enabled: remoteBridgeEnabledEl.checked,
-        instance_label: remoteBridgeInstanceLabelEl.value,
-        relay_url: remoteBridgeRelayUrlEl.value
-      })
-    });
-    await loadAdminConfig();
-    state.remoteBridgeStatus = 'Bridge settings saved.';
-    setStatus('Notification bridge saved');
-  } catch (err) {
-    state.remoteBridgeStatus = err.message || 'Failed to save bridge settings.';
-    setStatus('Failed to save notification bridge');
-  } finally {
-    state.remoteBridgeSaving = false;
-    renderRemoteBridge();
-    updateAdminButtons();
-  }
-}
-
-async function pairRemoteDevice() {
-  const pairingToken = remotePairingTokenEl.value.trim();
-  if (!pairingToken || state.remotePairing) return;
-  state.remotePairing = true;
-  state.remotePairStatus = 'Pairing device...';
-  renderRemoteBridge();
-  updateAdminButtons();
-  try {
-    const data = await fetchJson('/admin/remote-bridge/pair', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pairing_token: pairingToken })
-    });
-    await loadAdminConfig();
-    const name = firstNonEmpty(data.device && data.device.name, 'device');
-    state.remotePairStatus = 'Paired ' + name + '.';
-    remotePairingTokenEl.value = '';
-    setStatus('Remote device paired');
-  } catch (err) {
-    state.remotePairStatus = err.message || 'Failed to pair device.';
-    setStatus('Failed to pair remote device');
-  } finally {
-    state.remotePairing = false;
-    renderRemoteBridge();
-    updateAdminButtons();
-  }
-}
-
-async function revokeRemoteDevice(device) {
-  if (!device || !device.id || state.remotePairing) return;
-  if (!window.confirm('Revoke this paired device?')) return;
-  state.remotePairing = true;
-  state.remotePairStatus = 'Revoking device...';
-  renderRemoteBridge();
-  updateAdminButtons();
-  try {
-    const data = await fetchJson('/admin/remote-bridge/devices/' + encodeURIComponent(device.id), {
-      method: 'DELETE'
-    });
-    await loadAdminConfig();
-    const name = firstNonEmpty(data.device && data.device.name, device.name || 'device');
-    state.remotePairStatus = 'Revoked ' + name + '.';
-    setStatus('Remote device revoked');
-  } catch (err) {
-    state.remotePairStatus = err.message || 'Failed to revoke device.';
-    setStatus('Failed to revoke remote device');
-  } finally {
-    state.remotePairing = false;
-    renderRemoteBridge();
     updateAdminButtons();
   }
 }
@@ -8606,15 +8263,6 @@ messagingTelegramBotTokenEl.addEventListener('input', () => updateAdminButtons()
 messagingTelegramWebhookSecretEl.addEventListener('input', () => updateAdminButtons());
 messagingImessageEnabledEl.addEventListener('change', () => updateAdminButtons());
 messagingImessagePollIntervalEl.addEventListener('input', () => updateAdminButtons());
-saveRemoteBridgeEl.addEventListener('click', () => saveRemoteBridge());
-pairRemoteDeviceEl.addEventListener('click', () => pairRemoteDevice());
-remotePairingTokenEl.addEventListener('input', () => updateAdminButtons());
-remotePairingTokenEl.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    pairRemoteDevice();
-  }
-});
 openclawImportButtonEl.addEventListener('click', () => importOpenClawSkill());
 openclawImportSourceEl.addEventListener('input', () => updateAdminButtons());
 openclawImportSourceEl.addEventListener('keydown', (event) => {

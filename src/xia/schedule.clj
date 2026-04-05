@@ -17,7 +17,6 @@
             [xia.cron :as cron]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.remote-bridge :as remote-bridge]
             [xia.task-policy :as task-policy]
             [xia.working-memory :as wm]))
 
@@ -414,11 +413,6 @@
         (conj [:db/retract state-eid :schedule.state/backoff-until])
         state-eid
         (conj [:db/retract state-eid :schedule.state/last-policy])))
-    (when (pos? (long (or (:consecutive-failures state) 0)))
-      (remote-bridge/notify-schedule-recovered!
-        schedule-id
-        {:previous-failures (:consecutive-failures state)
-         :result-summary result-summary}))
     (task-state schedule-id)))
 
 (defn record-task-failure!
@@ -453,13 +447,6 @@
                  backoff-until (assoc :schedule/next-run backoff-until))]
         (and paused? state-eid)
         (conj [:db/retract state-eid :schedule.state/backoff-until])))
-    (remote-bridge/notify-schedule-failure!
-      schedule-id
-      {:paused? paused?
-       :policy policy
-       :consecutive-failures consecutive-failures
-       :backoff-until backoff-until
-       :error-message error-message})
     (task-state schedule-id)))
 
 (defn recovery-brief

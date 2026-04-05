@@ -19,7 +19,6 @@
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
             [xia.paths :as paths]
-            [xia.remote-bridge :as remote-bridge]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.schedule :as schedule]
             [xia.service :as service-proxy]
@@ -911,90 +910,6 @@
   (assoc (skill->body skill)
          :content (:skill/content skill)))
 
-(defn- remote-bridge->admin-body
-  [deps bridge]
-  {:id               (some-> (:id bridge) name)
-   :enabled          (boolean (:enabled? bridge))
-   :instance_id      (:instance-id bridge)
-   :instance_label   (:instance-label bridge)
-   :relay_url        (:relay-url bridge)
-   :public_key       (:public-key bridge)
-   :keypair_ready    (boolean (:keypair-ready? bridge))
-   :connected_at     (instant->str* deps (:connected-at bridge))
-   :last_seen_at     (instant->str* deps (:last-seen-at bridge))
-   :connection_state (some-> (:connection-state bridge) name)})
-
-(defn- remote-device->admin-body
-  [deps device]
-  {:id           (some-> (:id device) str)
-   :name         (:name device)
-   :public_key   (:public-key device)
-   :platform     (some-> (:platform device) name)
-   :status       (some-> (:status device) name)
-   :topics       (->> (or (:topics device) [])
-                      (map name)
-                      sort
-                      vec)
-   :muted        (boolean (:muted? device))
-   :created_at   (instant->str* deps (:created-at device))
-   :last_seen_at (instant->str* deps (:last-seen-at device))})
-
-(defn- remote-event->admin-body
-  [deps event]
-  {:id           (some-> (:id event) str)
-   :type         (some-> (:type event) name)
-   :topic        (some-> (:topic event) name)
-   :severity     (some-> (:severity event) name)
-   :title        (:title event)
-   :detail       (:detail event)
-   :metadata     (:metadata event)
-   :status       (some-> (:status event) name)
-   :device_id    (some-> (:device-id event) str)
-   :created_at   (instant->str* deps (:created-at event))
-   :delivered_at (instant->str* deps (:delivered-at event))})
-
-(defn- remote-snapshot-run->admin-body
-  [deps run]
-  {:id            (some-> (:id run) str)
-   :schedule_id   (some-> (:schedule-id run) name)
-   :schedule_name (:schedule-name run)
-   :status        (some-> (:status run) name)
-   :started_at    (instant->str* deps (:started-at run))
-   :finished_at   (instant->str* deps (:finished-at run))
-   :detail        (:detail run)})
-
-(defn- remote-snapshot-attention->admin-body
-  [item]
-  {:type             (some-> (:type item) name)
-   :severity         (some-> (:severity item) name)
-   :title            (:title item)
-   :detail           (:detail item)
-   :schedule_id      (some-> (:schedule-id item) name)
-   :service_id       (some-> (:service-id item) name)
-   :oauth_account_id (some-> (:oauth-account-id item) name)})
-
-(defn- remote-snapshot-running->admin-body
-  [deps item]
-  {:schedule_id   (some-> (:schedule-id item) name)
-   :schedule_name (:schedule-name item)
-   :phase         (some-> (:phase item) name)
-   :checkpoint_at (instant->str* deps (:checkpoint-at item))})
-
-(defn- remote-snapshot->admin-body
-  [deps snapshot]
-  {:instance {:id      (get-in snapshot [:instance :id])
-              :label   (get-in snapshot [:instance :label])
-              :version (get-in snapshot [:instance :version])}
-   :connectivity {:enabled          (boolean (get-in snapshot [:connectivity :enabled?]))
-                  :relay_url        (get-in snapshot [:connectivity :relay-url])
-                  :connection_state (some-> (get-in snapshot [:connectivity :connection-state]) name)
-                  :connected_at     (instant->str* deps (get-in snapshot [:connectivity :connected-at]))
-                  :last_seen_at     (instant->str* deps (get-in snapshot [:connectivity :last-seen-at]))}
-   :running          (mapv #(remote-snapshot-running->admin-body deps %) (get snapshot :running))
-   :recent_failures  (mapv #(remote-snapshot-run->admin-body deps %) (get snapshot :recent-failures))
-   :recent_successes (mapv #(remote-snapshot-run->admin-body deps %) (get snapshot :recent-successes))
-   :attention        (mapv remote-snapshot-attention->admin-body (get snapshot :attention))})
-
 (defn- parse-optional-bounded-double
   [value field-name]
   (let [text (nonblank-str value)]
@@ -1161,11 +1076,7 @@
                        sort-by-name)
        :skills    (->> (db/list-skills)
                        (into [] (map skill->body))
-                       sort-by-name)
-       :remote_bridge   (remote-bridge->admin-body deps (remote-bridge/bridge-config))
-       :remote_devices  (into [] (map #(remote-device->admin-body deps %)) (remote-bridge/list-devices))
-       :remote_events   (into [] (map #(remote-event->admin-body deps %)) (remote-bridge/list-events 20))
-       :remote_snapshot (remote-snapshot->admin-body deps (remote-bridge/status-snapshot))})))
+                       sort-by-name)})))
 
 (defn handle-fetch-provider-models
   [deps req]
@@ -1623,26 +1534,6 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 
-(defn handle-save-remote-bridge
-  [deps req]
-  (try
-    (let [data           (or (read-body* deps req) {})
-          enabled?       (if (contains? data "enabled")
-                           (true? (get data "enabled"))
-                           false)
-          instance-label (nonblank-str (get data "instance_label"))
-          relay-url      (get data "relay_url")
-          bridge         (remote-bridge/save-bridge-config!
-                           {:enabled?       enabled?
-                            :instance-label instance-label
-                            :relay-url      relay-url})]
-      (json-response* deps 200
-                      {:remote_bridge   (remote-bridge->admin-body deps bridge)
-                       :remote_snapshot (remote-snapshot->admin-body deps
-                                                                    (remote-bridge/status-snapshot))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
-
 (defn handle-save-messaging
   [deps req]
   (try
@@ -1665,33 +1556,6 @@
     (catch Exception e
       (json-response* deps 500 {:error (or (.getMessage e)
                                            "failed to save messaging settings")}))))
-
-(defn handle-pair-remote-device
-  [deps req]
-  (try
-    (let [data          (or (read-body* deps req) {})
-          pairing-token (nonblank-str (get data "pairing_token"))]
-      (when-not pairing-token
-        (throw (ex-info "missing 'pairing_token' field"
-                        {:field "pairing_token"})))
-      (let [device (remote-bridge/pair-device! pairing-token)]
-        (json-response* deps 200
-                        {:device         (remote-device->admin-body deps device)
-                         :remote_devices (mapv #(remote-device->admin-body deps %)
-                                               (remote-bridge/list-devices))})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
-
-(defn handle-revoke-remote-device
-  [deps device-id]
-  (try
-    (let [device (remote-bridge/revoke-device! device-id)]
-      (json-response* deps 200
-                      {:device         (remote-device->admin-body deps device)
-                       :remote_devices (mapv #(remote-device->admin-body deps %)
-                                             (remote-bridge/list-devices))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
 
 (defn handle-save-service
   [deps req]

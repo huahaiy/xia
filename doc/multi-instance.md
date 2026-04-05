@@ -388,7 +388,6 @@ The template seed does not copy ongoing working state such as:
 - local documents
 - artifacts
 - schedules and run history
-- remote bridge device/event state
 - browser sessions
 - installed tools
 - installed skills
