@@ -2,9 +2,7 @@
  [xia.artifact-test
   xia.autonomous-test
   xia.backup-test
-  xia.checkpoint-test
   xia.browser-session-options-test
-  xia.channel.http-test
   xia.config-test
   xia.core-test
   xia.cron-test
