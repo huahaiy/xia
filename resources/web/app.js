@@ -427,6 +427,73 @@ if (providerCardEl && providerCardEl.parentNode) {
   providerCardEl.parentNode.insertBefore(providerCardPlaceholderEl, providerCardEl);
 }
 
+/* ── Accessible modal helpers ── */
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+let _modalTrapHandler = null;
+let _modalPriorFocus = null;
+
+function openModal(shellEl) {
+  const dialogEl = shellEl.querySelector('[role="dialog"]');
+  _modalPriorFocus = document.activeElement;
+
+  shellEl.hidden = false;
+  shellEl.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('modal-open');
+
+  // Initial focus: first focusable element inside the dialog
+  const firstFocusable = dialogEl.querySelectorAll(FOCUSABLE_SELECTOR);
+  if (firstFocusable.length) {
+    firstFocusable[0].focus();
+  } else {
+    dialogEl.setAttribute('tabindex', '-1');
+    dialogEl.focus();
+  }
+
+  // Focus trap: wrap Tab/Shift+Tab within the dialog
+  _modalTrapHandler = function (e) {
+    if (e.key === 'Escape') {
+      // Prevent focus from leaving; onboarding modal is mandatory
+      e.preventDefault();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusable = Array.from(dialogEl.querySelectorAll(FOCUSABLE_SELECTOR));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  };
+  document.addEventListener('keydown', _modalTrapHandler);
+}
+
+function closeModal(shellEl) {
+  if (_modalTrapHandler) {
+    document.removeEventListener('keydown', _modalTrapHandler);
+    _modalTrapHandler = null;
+  }
+  shellEl.hidden = true;
+  shellEl.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+
+  // Return focus to the element that was focused before the modal opened
+  if (_modalPriorFocus && typeof _modalPriorFocus.focus === 'function') {
+    _modalPriorFocus.focus();
+    _modalPriorFocus = null;
+  }
+}
+
 function switchTab(tabId) {
   tabLinks.forEach((link) => {
     link.classList.toggle('active', link.dataset.tab === tabId);
@@ -503,18 +570,15 @@ function syncProviderOnboardingModal() {
   if (!providerOnboardingModalEl || !providerOnboardingModalBodyEl || !providerOnboardingEl || !providerCardEl) {
     return;
   }
+  const wasOpen = !providerOnboardingModalEl.hidden;
   if (shouldOpen) {
     providerOnboardingModalBodyEl.replaceChildren(providerOnboardingEl, providerCardEl);
-    providerOnboardingModalEl.hidden = false;
-    providerOnboardingModalEl.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('modal-open');
+    if (!wasOpen) openModal(providerOnboardingModalEl);
     return;
   }
   restoreNodeAfterPlaceholder(providerOnboardingEl, providerOnboardingPlaceholderEl);
   restoreNodeAfterPlaceholder(providerCardEl, providerCardPlaceholderEl);
-  providerOnboardingModalEl.hidden = true;
-  providerOnboardingModalEl.setAttribute('aria-hidden', 'true');
-  document.body.classList.remove('modal-open');
+  if (wasOpen) closeModal(providerOnboardingModalEl);
 }
 
 uploadBtnEl.addEventListener('click', () => fileInputEl.click());
