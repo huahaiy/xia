@@ -1836,6 +1836,8 @@ function ensureInfoTooltip() {
   if (infoTooltipEl) return infoTooltipEl;
   const tooltip = document.createElement('div');
   tooltip.className = 'floating-info-tooltip';
+  tooltip.id = 'info-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
   tooltip.hidden = true;
   document.body.appendChild(tooltip);
   infoTooltipEl = tooltip;
@@ -1869,11 +1871,13 @@ function showInfoTooltip(anchor) {
   activeInfoHintEl = anchor;
   tooltip.textContent = text;
   tooltip.hidden = false;
+  anchor.setAttribute('aria-describedby', 'info-tooltip');
   positionInfoTooltip(anchor);
 }
 
 function hideInfoTooltip(anchor) {
   if (anchor && activeInfoHintEl && anchor !== activeInfoHintEl) return;
+  if (activeInfoHintEl) activeInfoHintEl.removeAttribute('aria-describedby');
   activeInfoHintEl = null;
   if (infoTooltipEl) infoTooltipEl.hidden = true;
 }
@@ -1895,8 +1899,8 @@ function buildInfoHint(text) {
   hint.textContent = '?';
   hint.tabIndex = 0;
   hint.dataset.tooltip = text;
-  hint.setAttribute('role', 'img');
-  hint.setAttribute('aria-label', text);
+  hint.setAttribute('role', 'button');
+  hint.setAttribute('aria-label', 'More info');
   return bindInfoHintEvents(hint);
 }
 
@@ -8212,8 +8216,7 @@ clearInputEl.addEventListener('click', () => {
   composerEl.focus();
 });
 
-scratchTitleEl.parentElement.addEventListener('click', () => { if (scratchTitleEl.disabled && !state.activePad) createScratchPad(); });
-scratchEditorEl.parentElement.addEventListener('click', () => { if (scratchEditorEl.disabled && !state.activePad) createScratchPad(); });
+document.getElementById('new-scratch').addEventListener('click', () => { if (!state.activePad) createScratchPad(); });
 scratchTitleEl.addEventListener('input', trackScratchInput);
 scratchEditorEl.addEventListener('input', trackScratchInput);
 

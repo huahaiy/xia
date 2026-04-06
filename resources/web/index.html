@@ -131,7 +131,7 @@
                   <div class="hint">Shift+Enter for new line. Cmd+Enter to send.</div>
                   <div class="actions">
                     <input type="file" id="file-input" hidden multiple accept=".c,.cc,.clj,.cljs,.cljc,.cpp,.csv,.docx,.edn,.htm,.html,.java,.js,.json,.log,.md,.markdown,.pdf,.pptx,.py,.rb,.sh,.sql,.text,.ts,.tsv,.txt,.xlsx,.xml,.yaml,.yml,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation">
-                    <button type="button" class="secondary" id="upload-btn" title="Upload local documents">📎</button>
+                    <button type="button" class="secondary" id="upload-btn" aria-label="Upload local documents" title="Upload local documents">📎</button>
                     <button type="button" class="secondary" id="clear-input" disabled>Clear</button>
                     <button type="submit" class="primary" id="send" disabled>Send to Xia</button>
                   </div>
@@ -145,8 +145,8 @@
                 <div class="accordion-title-wrap">
                   <div class="accordion-title-line">
                     <span class="panel-title">Notes</span>
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="Session drafts and working notes."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="Session drafts and working notes.">?</span>
                   </div>
                 </div>
@@ -169,6 +169,7 @@
                     <div class="composer-foot">
                       <div class="scratch-status" id="scratch-status">No note selected.</div>
                       <div class="actions">
+                        <button type="button" class="secondary" id="new-scratch">New note</button>
                         <button type="button" class="secondary" id="delete-scratch" disabled>Delete</button>
                         <button type="button" class="secondary" id="insert-scratch" disabled>Insert in Chat</button>
                         <button type="button" class="primary" id="save-scratch" disabled>Save</button>
@@ -183,8 +184,8 @@
                 <div class="accordion-title-wrap">
                   <div class="accordion-title-line">
                     <span class="panel-title" title="Upload text, PDF, or Office files, keep them in this session, and insert them into chat or notes when needed.">Local Documents</span>
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="Files available only in this chat session."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="Files available only in this chat session.">?</span>
                   </div>
                 </div>
@@ -216,8 +217,8 @@
                 <div class="accordion-title-wrap">
                   <div class="accordion-title-line">
                     <span class="panel-title" title="Generated outputs stay inside Xia until you inspect or download them yourself.">Artifacts</span>
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="Files created by Xia for this session."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="Files created by Xia for this session.">?</span>
                   </div>
                 </div>
@@ -247,8 +248,8 @@
                 <div class="accordion-title-wrap">
                   <div class="accordion-title-line">
                     <span class="panel-title">Shared Workspace</span>
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="Shared files across local Xia instances."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="Shared files across local Xia instances.">?</span>
                   </div>
                 </div>
@@ -264,8 +265,8 @@
                 <div class="accordion-title-wrap">
                   <div class="accordion-title-line">
                     <span class="panel-title">Little Xia</span>
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="Child Xia instances this controller launched or manages."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="Child Xia instances this controller launched or manages.">?</span>
                   </div>
                 </div>
@@ -647,8 +648,8 @@
                 <div class="field">
                   <label class="field-label" for="context-recent-history-message-limit">
                     Recent History Window (Messages)
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="How many of the newest messages stay in the prompt verbatim before older history is summarized into the recap."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="How many of the newest messages stay in the prompt verbatim before older history is summarized into the recap.">?</span>
                   </label>
                   <input type="number" id="context-recent-history-message-limit" class="text-input" min="4" step="1" placeholder="24">
@@ -656,8 +657,8 @@
                 <div class="field">
                   <label class="field-label" for="context-history-budget">
                     Default History Budget (Tokens)
-                    <span class="info-hint" tabindex="0" role="img"
-                          aria-label="The token budget reserved for conversation history after the system prompt and current request, before older history must be compacted."
+                    <span class="info-hint" tabindex="0" role="button"
+                          aria-label="More info"
                           data-tooltip="The token budget reserved for conversation history after the system prompt and current request, before older history must be compacted.">?</span>
                   </label>
                   <input type="number" id="context-history-budget" class="text-input" min="1" step="1" placeholder="8000">
