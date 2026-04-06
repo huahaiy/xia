@@ -44,10 +44,10 @@
             <div class="scratch-empty">No active task.</div>
           </div>
         </section>
-        <nav class="tabs">
-          <button type="button" class="tab-link active" data-tab="chat-tab">Chat</button>
-          <button type="button" class="tab-link" data-tab="history-tab">History</button>
-          <button type="button" class="tab-link" data-tab="settings-tab">Settings</button>
+        <nav class="tabs" role="tablist" aria-label="Main">
+          <button type="button" role="tab" class="tab-link active" id="tab-chat" data-tab="chat-tab" aria-selected="true" aria-controls="chat-tab">Chat</button>
+          <button type="button" role="tab" class="tab-link" id="tab-history" data-tab="history-tab" aria-selected="false" aria-controls="history-tab" tabindex="-1">History</button>
+          <button type="button" role="tab" class="tab-link" id="tab-settings" data-tab="settings-tab" aria-selected="false" aria-controls="settings-tab" tabindex="-1">Settings</button>
         </nav>
       </header>
 
@@ -111,7 +111,7 @@
         </div>
       </div>
 
-      <div id="chat-tab" class="tab-panel active">
+      <div id="chat-tab" class="tab-panel active" role="tabpanel" aria-labelledby="tab-chat">
         <main class="workspace">
           <section class="panel chat-panel">
             <div class="panel-header">
@@ -280,7 +280,7 @@
         </main>
       </div>
 
-      <div id="history-tab" class="tab-panel">
+      <div id="history-tab" class="tab-panel" role="tabpanel" aria-labelledby="tab-history">
         <section class="panel">
           <div class="panel-header">
             <div>
@@ -370,7 +370,7 @@
         </section>
       </div>
 
-      <div id="settings-tab" class="tab-panel">
+      <div id="settings-tab" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings">
         <section class="panel admin-panel">
           <div class="panel-header">
             <div>

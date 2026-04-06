@@ -496,7 +496,10 @@ function closeModal(shellEl) {
 
 function switchTab(tabId) {
   tabLinks.forEach((link) => {
-    link.classList.toggle('active', link.dataset.tab === tabId);
+    const selected = link.dataset.tab === tabId;
+    link.classList.toggle('active', selected);
+    link.setAttribute('aria-selected', String(selected));
+    link.tabIndex = selected ? 0 : -1;
   });
   tabPanels.forEach((panel) => {
     panel.classList.toggle('active', panel.id === tabId);
@@ -504,7 +507,27 @@ function switchTab(tabId) {
 }
 
 tabLinks.forEach((link) => {
-  link.addEventListener('click', () => switchTab(link.dataset.tab));
+  link.addEventListener('click', () => {
+    switchTab(link.dataset.tab);
+    link.focus();
+  });
+});
+
+// Arrow-key navigation for top-level tabs (WAI-ARIA Tabs pattern)
+document.querySelector('.tabs[role="tablist"]').addEventListener('keydown', (e) => {
+  const tabs = Array.from(tabLinks);
+  const idx = tabs.indexOf(e.target);
+  if (idx === -1) return;
+  let next = -1;
+  if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+  else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+  else if (e.key === 'Home') next = 0;
+  else if (e.key === 'End') next = tabs.length - 1;
+  if (next !== -1) {
+    e.preventDefault();
+    switchTab(tabs[next].dataset.tab);
+    tabs[next].focus();
+  }
 });
 
 sidebarAccordionEls.forEach((accordion) => {
@@ -536,15 +559,59 @@ advancedToggleEl.addEventListener('change', () => {
 // Section navigation (shared by Settings and History tabs)
 function createSectionSwitcher(containerId) {
   const container = document.getElementById(containerId);
-  const navItems = container.querySelectorAll('.settings-nav-item');
+  const nav = container.querySelector('.settings-nav');
+  const navItems = Array.from(container.querySelectorAll('.settings-nav-item'));
   const cards = container.querySelectorAll('.settings-content > .admin-card');
 
+  // Wire up ARIA roles
+  nav.setAttribute('role', 'tablist');
+  nav.setAttribute('aria-label', container.querySelector('.panel-title')?.textContent || containerId);
+  navItems.forEach(item => {
+    const section = item.dataset.section;
+    item.setAttribute('role', 'tab');
+    item.id = item.id || (containerId + '-stab-' + section);
+    item.setAttribute('aria-controls', containerId + '-section-' + section);
+  });
+  cards.forEach(card => {
+    const section = card.dataset.settingsSection;
+    card.id = card.id || (containerId + '-section-' + section);
+    card.setAttribute('role', 'tabpanel');
+    const tab = navItems.find(i => i.dataset.section === section);
+    if (tab) card.setAttribute('aria-labelledby', tab.id);
+  });
+
   function switchSection(sectionId) {
-    navItems.forEach(item => item.classList.toggle('active', item.dataset.section === sectionId));
+    navItems.forEach(item => {
+      const selected = item.dataset.section === sectionId;
+      item.classList.toggle('active', selected);
+      item.setAttribute('aria-selected', String(selected));
+      item.tabIndex = selected ? 0 : -1;
+    });
     cards.forEach(card => card.classList.toggle('active-section', card.dataset.settingsSection === sectionId));
   }
 
-  navItems.forEach(item => item.addEventListener('click', () => switchSection(item.dataset.section)));
+  navItems.forEach(item => item.addEventListener('click', () => {
+    switchSection(item.dataset.section);
+    item.focus();
+  }));
+
+  // Arrow-key navigation
+  nav.addEventListener('keydown', (e) => {
+    const visible = navItems.filter(i => !i.hidden && i.offsetParent !== null);
+    const idx = visible.indexOf(e.target);
+    if (idx === -1) return;
+    let next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (idx + 1) % visible.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (idx - 1 + visible.length) % visible.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = visible.length - 1;
+    if (next !== -1) {
+      e.preventDefault();
+      switchSection(visible[next].dataset.section);
+      visible[next].focus();
+    }
+  });
+
   return switchSection;
 }
 
