@@ -17,7 +17,8 @@
            [java.nio.file Files Path Paths StandardCopyOption]
            [java.nio.file.attribute FileAttribute]
            [java.time Duration]
-           [java.util Base64]))
+           [java.util Base64]
+           [java.util.concurrent Callable ExecutionException ExecutorService Executors ThreadFactory TimeUnit TimeoutException]))
 
 (def ^:private default-model-backend :local)
 (def ^:private default-timeout-ms 120000)
@@ -35,7 +36,9 @@
        default-mmproj-file
        "?download=true"))
 (def ^:private managed-asset-lock (Object.))
+(def ^:private vision-runtime-lock (Object.))
 (def ^:private supported-backends #{:local :external})
+(defonce ^:private vision-runtime-atom (atom {}))
 
 (def ^:private ocr-mode-definitions
   {:ocr {:id :ocr
@@ -387,6 +390,26 @@
   (when generator
     (DTLV/dtlv_llama_vision_generator_destroy generator)))
 
+(defn- destroy-vision-runtime!
+  [{:keys [^ExecutorService executor ^DTLV$dtlv_llama_vision_generator generator]}]
+  (when executor
+    (.shutdownNow executor))
+  (destroy-vision-generator! generator))
+
+(defn reset-runtime!
+  []
+  (locking vision-runtime-lock
+    (doseq [runtime (vals @vision-runtime-atom)]
+      (destroy-vision-runtime! runtime))
+    (reset! vision-runtime-atom {})))
+
+(defn- daemon-thread-factory
+  [prefix]
+  (reify ThreadFactory
+    (newThread [_ runnable]
+      (doto (Thread. ^Runnable runnable prefix)
+        (.setDaemon true)))))
+
 (defn- create-vision-generator!
   [mode]
   (let [generator        (DTLV$dtlv_llama_vision_generator.)
@@ -409,6 +432,30 @@
                          :rc (long rc)
                          :ocr-mode (:id mode)
                          :image-max-pixels image-max-pixels}))))))
+
+(defn- vision-runtime-key
+  [mode]
+  [(resolved-model-path)
+   (resolved-mmproj-path)
+   (:id mode)
+   (long (or (:image-max-pixels mode) 0))])
+
+(defn- create-vision-runtime!
+  [mode]
+  {:generator (create-vision-generator! mode)
+   :executor  (Executors/newSingleThreadExecutor
+                (daemon-thread-factory
+                  (str "xia-local-ocr-" (name (:id mode)))) )})
+
+(defn- shared-vision-runtime!
+  [mode]
+  (let [runtime-key (vision-runtime-key mode)]
+    (or (get @vision-runtime-atom runtime-key)
+        (locking vision-runtime-lock
+          (or (get @vision-runtime-atom runtime-key)
+              (let [runtime (create-vision-runtime! mode)]
+                (swap! vision-runtime-atom assoc runtime-key runtime)
+                runtime))))))
 
 (defn- run-vision-operation!
   [^DTLV$dtlv_llama_vision_generator generator {:keys [prompt image-path max-tokens mode]}]
@@ -442,32 +489,36 @@
                          :max-tokens max-tokens
                          :rc (long actual-size)}))))))
 
-(defn- invoke-local-model!
-  [image-path mode]
-  (let [generator (create-vision-generator! mode)]
-    (try
-      (run-vision-operation! generator {:prompt (:prompt mode)
-                                        :image-path image-path
-                                        :max-tokens (max-tokens)
-                                        :mode mode})
-      (finally
-        (destroy-vision-generator! generator)))))
-
 (def ^:private timeout-sentinel ::timeout)
 
 (defn- run-with-timeout!
-  [timeout-ms thunk]
+  [^ExecutorService executor timeout-ms thunk]
   ;; Native llama.cpp work is not interruptible here, so timeout is best-effort
-  ;; at the caller boundary.
-  (let [task   (future (thunk))
-        result (deref task timeout-ms timeout-sentinel)]
-    (if (= timeout-sentinel result)
-      (do
-        (future-cancel task)
+  ;; at the caller boundary. The shared single-thread executor preserves
+  ;; generator safety even when a timed-out task keeps running underneath.
+  (let [task (.submit executor
+                      ^Callable
+                      (fn []
+                        (thunk)))]
+    (try
+      (.get task timeout-ms TimeUnit/MILLISECONDS)
+      (catch TimeoutException _
+        (.cancel task true)
         (throw (ex-info "Local OCR timed out."
                         {:type :local-doc/ocr-timeout
                          :timeout-ms timeout-ms})))
-      result)))
+      (catch ExecutionException e
+        (throw (or (.getCause e) e))))))
+
+(defn- invoke-local-model!
+  [image-path mode]
+  (let [{:keys [executor generator]} (shared-vision-runtime! mode)]
+    (run-with-timeout! executor
+                       (timeout-ms)
+                       #(run-vision-operation! generator {:prompt (:prompt mode)
+                                                          :image-path image-path
+                                                          :max-tokens (max-tokens)
+                                                          :mode mode}))))
 
 (defn- normalize-output
   [text prompt]
@@ -513,8 +564,7 @@
         tmp        (create-temp-image-file! image-bytes {:name name :media-type media-type})
         image-path (.getAbsolutePath tmp)]
     (try
-      (-> (run-with-timeout! (timeout-ms)
-            #(invoke-local-model! image-path mode))
+      (-> (invoke-local-model! image-path mode)
           (normalize-output prompt))
       (finally
         (when (.exists tmp)

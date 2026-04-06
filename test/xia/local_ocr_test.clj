@@ -7,7 +7,15 @@
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.nio.charset StandardCharsets]))
 
-(use-fixtures :each with-test-db)
+(use-fixtures :each
+  (fn [f]
+    (with-test-db
+      (fn []
+        (local-ocr/reset-runtime!)
+        (try
+          (f)
+          (finally
+            (local-ocr/reset-runtime!)))))))
 
 (deftest external-backend-uses-vision-provider
   (db/upsert-provider! {:id :vision
@@ -55,3 +63,41 @@
         (is (= :formula (:id mode)))
         (is (= "Formula Recognition:" (:prompt mode)))
         (is (= ".png" (subs image-path (- (count image-path) 4))))))))
+
+(deftest local-backend-reuses-shared-vision-runtime
+  (db/set-config! :local-doc/ocr-enabled? true)
+  (let [created   (atom [])
+        destroyed (atom [])
+        calls     (atom [])
+        generator (Object.)]
+    (with-redefs-fn
+      {#'xia.local-ocr/ensure-managed-runtime-assets! (fn [] nil)
+       #'xia.local-ocr/create-vision-generator!
+       (fn [mode]
+         (swap! created conj (:id mode))
+         generator)
+       #'xia.local-ocr/run-vision-operation!
+       (fn [generator* {:keys [prompt image-path mode]}]
+         (swap! calls conj {:generator generator*
+                            :prompt prompt
+                            :image-path image-path
+                            :mode (:id mode)})
+         (str prompt "\nshared runtime output"))
+       #'xia.local-ocr/destroy-vision-generator!
+       (fn [generator*]
+         (swap! destroyed conj generator*))}
+      (fn []
+        (let [opts {:name "formula.png"
+                    :media-type "image/png"
+                    :ocr-mode :formula}]
+          (is (= "shared runtime output"
+                 (local-ocr/ocr-image-bytes (.getBytes "fake-image-a" StandardCharsets/UTF_8)
+                                            opts)))
+          (is (= "shared runtime output"
+                 (local-ocr/ocr-image-bytes (.getBytes "fake-image-b" StandardCharsets/UTF_8)
+                                            opts)))
+          (is (= [:formula] @created))
+          (is (= 2 (count @calls)))
+          (is (every? #(identical? generator (:generator %)) @calls))
+          (local-ocr/reset-runtime!)
+          (is (= [generator] @destroyed)))))))

@@ -553,6 +553,13 @@
   []
   @instance-id-atom)
 
+(defn current-db-tx
+  []
+  (read-when-connected
+    #(some-> (d/db (conn))
+             :max-tx
+             long)))
+
 (defn schema-version
   []
   (read-when-connected

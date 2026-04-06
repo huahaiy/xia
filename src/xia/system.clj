@@ -6,12 +6,14 @@
             [xia.agent :as agent]
             [xia.browser :as browser]
             [xia.channel.messaging :as messaging]
+            [xia.checkpoint :as checkpoint]
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
             [xia.identity :as identity]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.llm :as llm]
+            [xia.local-ocr :as local-ocr]
             [xia.paths :as paths]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.sci-env :as sci-env]
@@ -82,7 +84,9 @@
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay]}]
   (hippo/reset-runtime!)
+  (checkpoint/reset-runtime!)
   (llm/reset-runtime!)
+  (local-ocr/reset-runtime!)
   (let [recovered (agent/recover-runtime-tasks!)]
     (when (seq recovered)
       (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart")))
@@ -95,9 +99,12 @@
   (agent/cancel-all-sessions! "runtime stopping")
   (browser/release-all-sessions!)
   (hippo/prepare-shutdown!)
+  (checkpoint/prepare-shutdown!)
   (llm/prepare-shutdown!)
   (hippo/await-background-tasks!)
-  (llm/await-background-tasks!))
+  (checkpoint/await-background-tasks!)
+  (llm/await-background-tasks!)
+  (local-ocr/reset-runtime!))
 
 (defmethod ig/init-key :xia/sci-runtime
   [_ {:keys [db]}]

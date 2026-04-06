@@ -47,7 +47,10 @@
              (:next_global_wake_at snapshot-a)))
       (is (= (:projection_seq snapshot-a)
              (:projection_seq snapshot-b)))
-      (is (string? (:projection_seq snapshot-a)))
+      (is (= (:workspace_tx snapshot-a)
+             (:projection_seq snapshot-a)))
+      (is (integer? (:projection_seq snapshot-a)))
+      (is (pos? (:workspace_tx snapshot-a)))
       (is (= {:schedule_id "scheduled"
               :enabled true
               :status "scheduled"

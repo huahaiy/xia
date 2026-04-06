@@ -1,16 +1,12 @@
 (ns xia.wake-projection
   "Canonical control-plane wake projection derived from persisted schedule state.
 
-   This snapshot is intended to be the shared payload shape for both:
-   - pull: GET /command/managed/wake-projection
-   - push: wake_projection.updated"
+   This snapshot is intended to be the shared payload shape for the control
+   plane pull path: GET /command/managed/wake-projection."
   (:require [datalevin.core :as d]
             [xia.db :as db]
             [xia.paths :as paths])
-  (:import [java.math BigInteger]
-           [java.nio.charset StandardCharsets]
-           [java.security MessageDigest]
-           [java.time ZoneId]
+  (:import [java.time ZoneId]
            [java.util Date]))
 
 (def projection-schema-version 1)
@@ -31,12 +27,6 @@
   [value]
   (when (instance? Date value)
     (str (.toInstant ^Date value))))
-
-(defn- sha256-hex
-  [text]
-  (let [digest (doto (MessageDigest/getInstance "SHA-256")
-                 (.update (.getBytes ^String text StandardCharsets/UTF_8)))]
-    (format "%064x" (BigInteger. 1 (.digest digest)))))
 
 (defn- projection-status
   [sched task-state]
@@ -89,31 +79,15 @@
                  {:status (:schedule.state/status entity)}])))
        (into {})))
 
-(defn- projection-seq
-  [tenant-id timezone-id next-global-wake-at rows]
-  (str "wp_"
-       (sha256-hex
-         (pr-str [projection-schema-version
-                  tenant-id
-                  timezone-id
-                  (instant->str next-global-wake-at)
-                  (mapv (fn [{:keys [schedule-id enabled status next-wake-at wake-reason]}]
-                          [schedule-id
-                           enabled
-                           (keyword->str status)
-                           (instant->str next-wake-at)
-                           (keyword->str wake-reason)])
-                        rows)]))))
-
 (defn current-snapshot
   "Return the latest fully committed wake projection snapshot derived from the DB.
 
-   The returned shape is the canonical payload to reuse for both pull and push
-   control-plane paths."
+   The returned shape is the canonical payload for the control-plane pull path."
   ([] (current-snapshot {}))
   ([{:keys [generated-at]
      :or {generated-at (Date.)}}]
    (let [db-value              (snapshot-db)
+         workspace-tx          (some-> (:max-tx db-value) long)
          task-states           (task-state-index db-value)
          tenant-id             (or (some-> (db/current-instance-id) str)
                                   paths/default-instance-id)
@@ -125,11 +99,11 @@
          next-global-wake-at  (->> rows
                                    (keep :next-wake-at)
                                    (sort)
-                                   first)
-         seq-token            (projection-seq tenant-id timezone-id next-global-wake-at rows)]
+                                   first)]
      {:tenant_id                  tenant-id
       :projection_schema_version  projection-schema-version
-      :projection_seq             seq-token
+      :projection_seq             workspace-tx
+      :workspace_tx               workspace-tx
       :generated_at               (instant->str generated-at)
       :effective_timezone         timezone-id
       :next_global_wake_at        (instant->str next-global-wake-at)

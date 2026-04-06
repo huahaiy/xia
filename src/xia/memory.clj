@@ -174,6 +174,14 @@
                :importance (double importance)}))
        (sort-by :timestamp)))
 
+(defn unprocessed-episode-count
+  "Count episodes not yet consolidated by the hippocampus."
+  []
+  (long (or (db/q '[:find (count ?e) .
+                    :where
+                    [?e :episode/processed? false]])
+            0)))
+
 (defn mark-episode-processed! [eid]
   (db/transact! [[:db/add eid :episode/processed? true]]))
 

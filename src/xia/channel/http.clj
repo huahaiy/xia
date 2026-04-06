@@ -710,11 +710,17 @@
   (let [body         (or (read-body req) {})
         staging-root (some-> (get body "staging_root")
                              nonblank-str)
-        checkpoint*  (checkpoint/create-online-checkpoint!
+        checkpoint*  (checkpoint/submit-online-checkpoint!
                        (cond-> {}
                          staging-root
                          (assoc :staging-root staging-root)))]
-    (json-response 201 checkpoint*)))
+    (json-response 202 checkpoint*)))
+
+(defn- handle-command-get-checkpoint
+  [checkpoint-id]
+  (if-let [status (checkpoint/checkpoint-status checkpoint-id)]
+    (json-response 200 status)
+    (json-response 404 {:error "checkpoint not found"})))
 
 (defn- runtime-available?
   []
@@ -1555,6 +1561,7 @@
           command-runtime-drain-match (= uri "/command/runtime/drain")
           command-runtime-undrain-match (= uri "/command/runtime/undrain")
           command-managed-checkpoints-match (= uri "/command/managed/checkpoints")
+          command-managed-checkpoint-match (re-matches #"/command/managed/checkpoints/([^/]+)" uri)
           command-wake-projection-match (= uri "/command/managed/wake-projection")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
@@ -1649,6 +1656,10 @@
 
         (and (= method :post) command-managed-checkpoints-match)
         (command-route-response req #(handle-command-create-checkpoint req))
+
+        (and (= method :get) command-managed-checkpoint-match)
+        (command-route-response req #(handle-command-get-checkpoint
+                                      (second command-managed-checkpoint-match)))
 
         (and (= method :get) command-wake-projection-match)
         (command-route-response req #(handle-command-wake-projection req))

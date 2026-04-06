@@ -2,14 +2,24 @@
   (:require [charred.api :as json]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.channel.http :as http]
+            [xia.checkpoint :as checkpoint]
             [xia.db :as db]
             [xia.schedule :as schedule]
-            [xia.test-helpers :refer [with-test-db]])
+            [xia.test-helpers :refer [wait-until with-test-db]])
   (:import [java.io File]
            [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
-(use-fixtures :each with-test-db)
+(use-fixtures :each
+  (fn [f]
+    (with-test-db
+      (fn []
+        (checkpoint/reset-runtime!)
+        (try
+          (f)
+          (finally
+            (checkpoint/prepare-shutdown!)
+            (checkpoint/await-background-tasks!)))))))
 
 (defn- response-json
   [response]
@@ -50,7 +60,9 @@
         (is (= (or (db/current-instance-id) "default")
                (get body "tenant_id")))
         (is (= 1 (get body "projection_schema_version")))
-        (is (string? (get body "projection_seq")))
+        (is (= (get body "workspace_tx")
+               (get body "projection_seq")))
+        (is (integer? (get body "projection_seq")))
         (is (string? (get body "generated_at")))
         (is (string? (get body "effective_timezone")))
         (is (vector? (get body "schedules")))
@@ -132,7 +144,7 @@
         (is (= "missing or invalid command token"
                (get body "error")))))))
 
-(deftest command-managed-checkpoint-creates-ready-staged-copy
+(deftest command-managed-checkpoint-creates-staged-copy-asynchronously
   (let [checkpoint-root (temp-dir)
         support-dir     (str (db/current-db-path) "/.xia")]
     (spit (File. ^String support-dir "master.key") "do-not-copy")
@@ -143,17 +155,30 @@
                                         :uri "/command/managed/checkpoints"
                                         :headers {"authorization" "Bearer secret-token"}
                                         :body (json/write-json-str {"staging_root" checkpoint-root})})
-              body     (response-json response)
-              staged-db (get body "staged_db_path")]
-          (is (= 201 (:status response)))
-          (is (= "ready" (get body "status")))
-          (is (string? (get body "checkpoint_id")))
-          (is (= "prompt-passphrase" (get body "key_source")))
-          (is (= false (get body "includes_secret_material")))
+              body         (response-json response)
+              checkpoint-id (get body "checkpoint_id")
+              final-body   (wait-until
+                             #(let [status-response (#'http/router* {:request-method :get
+                                                                     :uri (str "/command/managed/checkpoints/" checkpoint-id)
+                                                                     :headers {"authorization" "Bearer secret-token"}})
+                                    status-body     (response-json status-response)]
+                                (when (= "ready" (get status-body "status"))
+                                  status-body))
+                             {:timeout-ms 5000
+                              :interval-ms 10})
+              staged-db    (get final-body "staged_db_path")]
+          (is (= 202 (:status response)))
+          (is (= "pending" (get body "status")))
+          (is (string? checkpoint-id))
+          (is (some? final-body))
+          (is (= "ready" (get final-body "status")))
+          (is (= "prompt-passphrase" (get final-body "key_source")))
+          (is (= false (get final-body "includes_secret_material")))
+          (is (integer? (get final-body "workspace_tx")))
           (is (= checkpoint-root
-                 (.getAbsolutePath (.getParentFile (File. ^String (get body "staged_path"))))))
-          (is (.exists (File. ^String (get body "manifest_path"))))
-          (is (.exists (File. ^String (get body "ready_marker_path"))))
+                 (.getAbsolutePath (.getParentFile (File. ^String (get final-body "staged_path"))))))
+          (is (.exists (File. ^String (get final-body "manifest_path"))))
+          (is (.exists (File. ^String (get final-body "ready_marker_path"))))
           (is (.exists (File. ^String staged-db)))
           (is (.exists (File. ^String (str staged-db "/data.mdb"))))
           (is (.exists (File. ^String (str staged-db "/.xia/master.salt"))))

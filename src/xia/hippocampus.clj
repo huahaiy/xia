@@ -276,14 +276,14 @@ Rules:
 
 (defn- failed-episode-summary
   []
-  (let [failed-at-values (->> (db/q '[:find ?failed-at
-                                      :where
-                                      [?e :episode/consolidation-failed-at ?failed-at]])
-                              (map first)
-                              vec)
-        last-failed-at   (when (seq failed-at-values)
-                           (apply max-key #(.getTime ^java.util.Date %) failed-at-values))]
-    {:failed_episode_count   (long (count failed-at-values))
+  (let [failed-count   (or (db/q '[:find (count ?e) .
+                                   :where
+                                   [?e :episode/consolidation-failed-at _]])
+                           0)
+        last-failed-at (db/q '[:find (max ?failed-at) .
+                               :where
+                               [?e :episode/consolidation-failed-at ?failed-at]])]
+    {:failed_episode_count   (long failed-count)
      :last_failed_episode_at (instant-string last-failed-at)}))
 
 ;; ---------------------------------------------------------------------------
@@ -721,7 +721,7 @@ Rules:
         {:keys [failed_episode_count last_failed_episode_at]} (failed-episode-summary)]
     {:accepting                   (boolean accepting?)
      :pending_background_task_count (long (count tasks))
-     :backlog                     {:pending_episode_count (long (count (memory/unprocessed-episodes)))
+     :backlog                     {:pending_episode_count (memory/unprocessed-episode-count)
                                    :failed_episode_count failed_episode_count
                                    :last_failed_episode_at last_failed_episode_at}
      :stats                       {:started_at (instant-string started-at)
