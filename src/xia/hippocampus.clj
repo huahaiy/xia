@@ -632,7 +632,14 @@ Rules:
                                               (:eid ep)
                                               default-episode-importance)))
             (catch Exception e
-              (record-failure! :exception (.getMessage e))
+              (let [error-message (.getMessage e)]
+                (try
+                  (memory/mark-episode-consolidation-failed! (:eid ep) error-message)
+                  (catch Exception quarantine-ex
+                    (log/error quarantine-ex
+                               "Failed to quarantine episode after consolidation failure:"
+                               (:summary ep))))
+                (record-failure! :exception error-message))
               (log/error e "Failed to consolidate episode:" (:summary ep)))))))))
 
 ;; ---------------------------------------------------------------------------
