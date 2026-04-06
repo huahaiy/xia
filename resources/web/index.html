@@ -423,42 +423,42 @@
               </div>
               <div class="field-grid">
                 <div class="field">
-                  <label class="field-label">Name</label>
+                  <label class="field-label" for="identity-name">Name</label>
                   <input type="text" id="identity-name" class="text-input" placeholder="Xia">
                 </div>
                 <div class="field">
-                  <label class="field-label">Role</label>
+                  <label class="field-label" for="identity-role">Role</label>
                   <input type="text" id="identity-role" class="text-input" placeholder="Personal Assistant">
                 </div>
                 <div class="field full">
-                  <label class="field-label">Description</label>
+                  <label class="field-label" for="identity-description">Description</label>
                   <textarea id="identity-description" class="text-input" rows="2" placeholder="A portable personal AI assistant..."></textarea>
                 </div>
                 <div class="field full">
-                  <label class="field-label">Controller Mode</label>
+                  <label class="field-label" for="identity-controller-enabled">Controller Mode</label>
                   <div class="check-row">
                     <input type="checkbox" id="identity-controller-enabled">
                     <label class="check-label" for="identity-controller-enabled">Allow this Xia to start and stop managed child Xia instances</label>
                   </div>
                 </div>
                 <div class="field full advanced-only">
-                  <label class="field-label">Instance ID</label>
+                  <label class="field-label" for="identity-instance-id">Instance ID</label>
                   <input type="text" id="identity-instance-id" class="text-input" readonly>
                 </div>
                 <div class="field full advanced-only">
-                  <label class="field-label">Database Path</label>
+                  <label class="field-label" for="identity-db-path">Database Path</label>
                   <input type="text" id="identity-db-path" class="text-input" readonly>
                 </div>
                 <div class="field full advanced-only">
-                  <label class="field-label">Support Directory</label>
+                  <label class="field-label" for="identity-support-dir">Support Directory</label>
                   <input type="text" id="identity-support-dir" class="text-input" readonly>
                 </div>
                 <div class="field full advanced-only">
-                  <label class="field-label">Personality</label>
+                  <label class="field-label" for="identity-personality">Personality</label>
                   <textarea id="identity-personality" class="text-input" rows="3" placeholder="You are Xia: a helpful, thoughtful personal assistant..."></textarea>
                 </div>
                 <div class="field full advanced-only">
-                  <label class="field-label">Guidelines</label>
+                  <label class="field-label" for="identity-guidelines">Guidelines</label>
                   <textarea id="identity-guidelines" class="text-input" rows="3" placeholder="- Be direct and helpful..."></textarea>
                 </div>
               </div>
@@ -482,7 +482,7 @@
                 <div class="detail-header" id="provider-detail-header">New model</div>
                 <div class="field-grid">
                   <div class="field full">
-                    <label class="field-label">Template</label>
+                    <label class="field-label" for="provider-template">Template</label>
                     <select id="provider-template" class="text-input"></select>
                     <div class="actions provider-auth-actions" style="margin-top:4px">
                       <a class="secondary-link" id="provider-configure-oauth" href="">Open Setup</a>
@@ -492,34 +492,35 @@
                     <p class="secret-note" id="provider-template-note"></p>
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">ID</label>
+                    <label class="field-label" for="provider-id">ID</label>
                     <input type="text" id="provider-id" class="text-input" placeholder="openai">
                   </div>
                   <div class="field">
-                    <label class="field-label">Connection Model</label>
+                    <label class="field-label" for="provider-access-mode">Connection Model</label>
                     <select id="provider-access-mode" class="text-input"></select>
                   </div>
                   <div class="field">
-                    <label class="field-label">Credential Type</label>
+                    <label class="field-label" for="provider-credential-source">Credential Type</label>
                     <select id="provider-credential-source" class="text-input"></select>
                   </div>
                   <div class="field full">
-                    <select id="provider-oauth-account" class="text-input" aria-label="API sign-in"></select>
+                    <label class="field-label" for="provider-oauth-account">OAuth Account</label>
+                    <select id="provider-oauth-account" class="text-input"></select>
                     <p class="secret-note" id="provider-oauth-account-note"></p>
                     <input type="hidden" id="provider-browser-session">
                     <p class="secret-note" id="provider-browser-session-note"></p>
                   </div>
                   <div class="field full">
-                    <label class="field-label">API Key</label>
+                    <label class="field-label" for="provider-api-key">API Key</label>
                     <input type="password" id="provider-api-key" class="text-input" placeholder="sk-...">
                     <p class="secret-note" id="provider-api-key-note" hidden></p>
                   </div>
                   <div class="field full advanced-only" id="provider-base-url-field">
-                    <label class="field-label">Base URL</label>
+                    <label class="field-label" for="provider-base-url">Base URL</label>
                     <input type="text" id="provider-base-url" class="text-input" placeholder="https://api.openai.com/v1">
                   </div>
                   <div class="field field-with-autocomplete">
-                    <label class="field-label">Model Name</label>
+                    <label class="field-label" for="provider-model">Model Name</label>
                     <div class="autocomplete-wrap">
                       <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o" autocomplete="off">
                       <div class="autocomplete-list" id="provider-model-list" hidden></div>
@@ -528,15 +529,15 @@
                     <p class="secret-note model-capability-note" id="provider-model-capability-note"></p>
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">System Prompt Budget</label>
+                    <label class="field-label" for="provider-system-prompt-budget">System Prompt Budget</label>
                     <input type="number" id="provider-system-prompt-budget" class="text-input" min="1" step="1" placeholder="16000">
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">History Budget</label>
+                    <label class="field-label" for="provider-history-budget">History Budget</label>
                     <input type="number" id="provider-history-budget" class="text-input" min="1" step="1" placeholder="32000">
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">Rate Limit / Minute</label>
+                    <label class="field-label" for="provider-rate-limit-per-minute">Rate Limit / Minute</label>
                     <input type="number" id="provider-rate-limit-per-minute" class="text-input" min="1" step="1" placeholder="60">
                   </div>
                   <div class="field full">
@@ -581,15 +582,15 @@
               </div>
               <div class="field-grid">
                 <div class="field">
-                  <label class="field-label">Full Resolution (Days)</label>
+                  <label class="field-label" for="retention-full-resolution-days">Full Resolution (Days)</label>
                   <input type="number" id="retention-full-resolution-days" class="text-input" min="1" step="1" placeholder="182">
                 </div>
                 <div class="field">
-                  <label class="field-label">Decay Half-Life (Days)</label>
+                  <label class="field-label" for="retention-decay-half-life-days">Decay Half-Life (Days)</label>
                   <input type="number" id="retention-decay-half-life-days" class="text-input" min="1" step="1" placeholder="365">
                 </div>
                 <div class="field">
-                  <label class="field-label">Retained Older Episodes</label>
+                  <label class="field-label" for="retention-retained-count">Retained Older Episodes</label>
                   <input type="number" id="retention-retained-count" class="text-input" min="1" step="1" placeholder="8">
                 </div>
               </div>
@@ -608,23 +609,23 @@
               </div>
               <div class="field-grid">
                 <div class="field">
-                  <label class="field-label">Grace Period (Days)</label>
+                  <label class="field-label" for="knowledge-grace-period-days">Grace Period (Days)</label>
                   <input type="number" id="knowledge-grace-period-days" class="text-input" min="1" step="1" placeholder="182">
                 </div>
                 <div class="field">
-                  <label class="field-label">Half-Life (Days)</label>
+                  <label class="field-label" for="knowledge-half-life-days">Half-Life (Days)</label>
                   <input type="number" id="knowledge-half-life-days" class="text-input" min="1" step="1" placeholder="730">
                 </div>
                 <div class="field">
-                  <label class="field-label">Min Confidence</label>
+                  <label class="field-label" for="knowledge-min-confidence">Min Confidence</label>
                   <input type="number" id="knowledge-min-confidence" class="text-input" min="0" max="1" step="0.01" placeholder="0.1">
                 </div>
                 <div class="field">
-                  <label class="field-label">Maintenance Interval (Days)</label>
+                  <label class="field-label" for="knowledge-maintenance-interval-days">Maintenance Interval (Days)</label>
                   <input type="number" id="knowledge-maintenance-interval-days" class="text-input" min="1" step="1" placeholder="1">
                 </div>
                 <div class="field">
-                  <label class="field-label">Archive After Bottom (Days)</label>
+                  <label class="field-label" for="knowledge-archive-after-bottom-days">Archive After Bottom (Days)</label>
                   <input type="number" id="knowledge-archive-after-bottom-days" class="text-input" min="1" step="1" placeholder="365">
                 </div>
               </div>
@@ -678,7 +679,7 @@
               </div>
               <div class="field-grid">
                 <div class="field">
-                  <label class="field-label">Search Backend</label>
+                  <label class="field-label" for="search-backend">Search Backend</label>
                   <select id="search-backend" class="text-input">
                     <option value="">Auto (DuckDuckGo + fallbacks)</option>
                     <option value="duckduckgo-html">DuckDuckGo</option>
@@ -687,12 +688,12 @@
                   </select>
                 </div>
                 <div class="field" id="search-brave-api-key-field" hidden>
-                  <label class="field-label">Brave Search API Key</label>
+                  <label class="field-label" for="search-brave-api-key">Brave Search API Key</label>
                   <input type="password" id="search-brave-api-key" class="text-input" placeholder="BSA...">
                   <p class="secret-note">Free tier: 2,000 queries/month at <a href="https://api.search.brave.com" target="_blank">api.search.brave.com</a></p>
                 </div>
                 <div class="field full advanced-only">
-                  <label class="field-label">SearxNG URL</label>
+                  <label class="field-label" for="search-searxng-url">SearxNG URL</label>
                   <input type="text" id="search-searxng-url" class="text-input" placeholder="https://searxng.example.com/search">
                 </div>
               </div>
@@ -716,67 +717,67 @@
                 <div class="detail-header">Connection details</div>
                 <div class="field-grid">
                   <div class="field full">
-                    <label class="field-label">Service Preset</label>
+                    <label class="field-label" for="oauth-template">Service Preset</label>
                     <select id="oauth-template" class="text-input"></select>
                     <p class="secret-note" id="oauth-template-note"></p>
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">Internal ID</label>
+                    <label class="field-label" for="oauth-account-id">Internal ID</label>
                     <input type="text" id="oauth-account-id" class="text-input" placeholder="github">
                   </div>
                   <div class="field">
-                    <label class="field-label">Display Name</label>
+                    <label class="field-label" for="oauth-account-name">Display Name</label>
                     <input type="text" id="oauth-account-name" class="text-input" placeholder="GitHub">
                   </div>
                   <div class="field">
-                    <label class="field-label">Connection Type</label>
+                    <label class="field-label" for="oauth-connection-mode">Connection Type</label>
                     <select id="oauth-connection-mode" class="text-input">
                       <option value="oauth-flow">OAuth flow</option>
                       <option value="manual-token">Manual API token</option>
                     </select>
                   </div>
                   <div class="field full" id="oauth-access-token-field">
-                    <label class="field-label">Access Token</label>
+                    <label class="field-label" for="oauth-access-token">Access Token</label>
                     <input type="password" id="oauth-access-token" class="text-input" placeholder="Paste a durable provider token">
                   </div>
                   <div class="field" id="oauth-token-type-field">
-                    <label class="field-label">Token Type</label>
+                    <label class="field-label" for="oauth-token-type">Token Type</label>
                     <input type="text" id="oauth-token-type" class="text-input" placeholder="Bearer">
                   </div>
                   <div class="field" id="oauth-expires-at-field">
-                    <label class="field-label">Expires At (Optional)</label>
+                    <label class="field-label" for="oauth-expires-at">Expires At (Optional)</label>
                     <input type="text" id="oauth-expires-at" class="text-input" placeholder="2027-03-22T00:00:00Z">
                   </div>
                   <div class="field full advanced-only" id="oauth-authorize-url-field">
-                    <label class="field-label">Authorize URL</label>
+                    <label class="field-label" for="oauth-authorize-url">Authorize URL</label>
                     <input type="text" id="oauth-authorize-url" class="text-input">
                   </div>
                   <div class="field full advanced-only" id="oauth-token-url-field">
-                    <label class="field-label">Token URL</label>
+                    <label class="field-label" for="oauth-token-url">Token URL</label>
                     <input type="text" id="oauth-token-url" class="text-input">
                   </div>
                   <div class="field" id="oauth-client-id-field">
-                    <label class="field-label">Client ID</label>
+                    <label class="field-label" for="oauth-client-id">Client ID</label>
                     <input type="text" id="oauth-client-id" class="text-input">
                   </div>
                   <div class="field" id="oauth-client-secret-field">
-                    <label class="field-label">Client Secret</label>
+                    <label class="field-label" for="oauth-client-secret">Client Secret</label>
                     <input type="password" id="oauth-client-secret" class="text-input">
                   </div>
                   <div class="field full advanced-only" id="oauth-scopes-field">
-                    <label class="field-label">Scopes</label>
+                    <label class="field-label" for="oauth-scopes">Scopes</label>
                     <input type="text" id="oauth-scopes" class="text-input">
                   </div>
                   <div class="field full advanced-only" id="oauth-redirect-uri-field">
-                    <label class="field-label">Redirect URI (Optional)</label>
+                    <label class="field-label" for="oauth-redirect-uri">Redirect URI (Optional)</label>
                     <input type="text" id="oauth-redirect-uri" class="text-input" placeholder="Leave blank for default">
                   </div>
                   <div class="field advanced-only" id="oauth-auth-params-field">
-                    <label class="field-label">Auth Params (JSON)</label>
+                    <label class="field-label" for="oauth-auth-params">Auth Params (JSON)</label>
                     <input type="text" id="oauth-auth-params" class="text-input" placeholder="{}">
                   </div>
                   <div class="field advanced-only" id="oauth-token-params-field">
-                    <label class="field-label">Token Params (JSON)</label>
+                    <label class="field-label" for="oauth-token-params">Token Params (JSON)</label>
                     <input type="text" id="oauth-token-params" class="text-input" placeholder="{}">
                   </div>
                   <div class="field full">
@@ -810,68 +811,68 @@
                 <div class="detail-header" id="schedule-detail-header">New schedule</div>
                 <div class="field-grid">
                   <div class="field advanced-only">
-                    <label class="field-label">ID</label>
+                    <label class="field-label" for="schedule-id">ID</label>
                     <input type="text" id="schedule-id" class="text-input" placeholder="morning-review">
                   </div>
                   <div class="field">
-                    <label class="field-label">Name</label>
+                    <label class="field-label" for="schedule-name">Name</label>
                     <input type="text" id="schedule-name" class="text-input" placeholder="Morning Review">
                   </div>
                   <div class="field">
-                    <label class="field-label">Execution Type</label>
+                    <label class="field-label" for="schedule-type">Execution Type</label>
                     <select id="schedule-type" class="text-input">
                       <option value="prompt">Prompt</option>
                       <option value="tool">Tool</option>
                     </select>
                   </div>
                   <div class="field">
-                    <label class="field-label">Schedule Mode</label>
+                    <label class="field-label" for="schedule-mode">Schedule Mode</label>
                     <select id="schedule-mode" class="text-input">
                       <option value="interval">Interval</option>
                       <option value="calendar">Calendar</option>
                     </select>
                   </div>
                   <div class="field" id="schedule-interval-field">
-                    <label class="field-label">Interval Minutes</label>
+                    <label class="field-label" for="schedule-interval-minutes">Interval Minutes</label>
                     <input type="number" id="schedule-interval-minutes" class="text-input" min="5" step="1" placeholder="60">
                   </div>
                   <div class="field" id="schedule-minute-field" hidden>
-                    <label class="field-label">Minute</label>
+                    <label class="field-label" for="schedule-minute">Minute</label>
                     <input type="text" id="schedule-minute" class="text-input" placeholder="0,30">
                   </div>
                   <div class="field" id="schedule-hour-field" hidden>
-                    <label class="field-label">Hour</label>
+                    <label class="field-label" for="schedule-hour">Hour</label>
                     <input type="text" id="schedule-hour" class="text-input" placeholder="9,17">
                   </div>
                   <div class="field" id="schedule-dom-field" hidden>
-                    <label class="field-label">Day of Month</label>
+                    <label class="field-label" for="schedule-dom">Day of Month</label>
                     <input type="text" id="schedule-dom" class="text-input" placeholder="1,15">
                   </div>
                   <div class="field" id="schedule-month-field" hidden>
-                    <label class="field-label">Month</label>
+                    <label class="field-label" for="schedule-month">Month</label>
                     <input type="text" id="schedule-month" class="text-input" placeholder="1,4,7,10">
                   </div>
                   <div class="field" id="schedule-dow-field" hidden>
-                    <label class="field-label">Day of Week</label>
+                    <label class="field-label" for="schedule-dow">Day of Week</label>
                     <input type="text" id="schedule-dow" class="text-input" placeholder="1,3,5">
                   </div>
                   <div class="field full" id="schedule-calendar-note-field" hidden>
                     <p class="secret-note">Calendar fields use comma-separated numbers. Leave a field blank to match every value.</p>
                   </div>
                   <div class="field full">
-                    <label class="field-label">Description</label>
+                    <label class="field-label" for="schedule-description">Description</label>
                     <textarea id="schedule-description" class="text-input form-textarea" rows="3" placeholder="What this schedule should accomplish."></textarea>
                   </div>
                   <div class="field full" id="schedule-tool-field" hidden>
-                    <label class="field-label">Tool</label>
+                    <label class="field-label" for="schedule-tool-id">Tool</label>
                     <select id="schedule-tool-id" class="text-input"></select>
                   </div>
                   <div class="field full" id="schedule-tool-args-field" hidden>
-                    <label class="field-label">Tool Args (JSON)</label>
+                    <label class="field-label" for="schedule-tool-args">Tool Args (JSON)</label>
                     <textarea id="schedule-tool-args" class="text-input form-textarea" rows="4" placeholder="{&quot;query&quot;:&quot;today&quot;}"></textarea>
                   </div>
                   <div class="field full" id="schedule-prompt-field">
-                    <label class="field-label">Prompt</label>
+                    <label class="field-label" for="schedule-prompt">Prompt</label>
                     <textarea id="schedule-prompt" class="text-input form-textarea" rows="6" placeholder="Summarize important updates and prepare the next actions."></textarea>
                   </div>
                   <div class="field full">
@@ -1032,19 +1033,19 @@
               <div class="admin-list" id="service-list"></div>
               <div class="field-grid">
                 <div class="field">
-                  <label class="field-label">ID</label>
+                  <label class="field-label" for="service-id">ID</label>
                   <input type="text" id="service-id" class="text-input" placeholder="github">
                 </div>
                 <div class="field">
-                  <label class="field-label">Name</label>
+                  <label class="field-label" for="service-name">Name</label>
                   <input type="text" id="service-name" class="text-input" placeholder="GitHub">
                 </div>
                 <div class="field full">
-                  <label class="field-label">Base URL</label>
+                  <label class="field-label" for="service-base-url">Base URL</label>
                   <input type="url" id="service-base-url" class="text-input" placeholder="https://api.github.com">
                 </div>
                 <div class="field">
-                  <label class="field-label">Auth Type</label>
+                  <label class="field-label" for="service-auth-type">Auth Type</label>
                   <select id="service-auth-type" class="text-input">
                     <option value="bearer">Bearer token</option>
                     <option value="basic">Basic auth</option>
@@ -1054,21 +1055,21 @@
                   </select>
                 </div>
                 <div class="field">
-                  <label class="field-label">Header / Param</label>
+                  <label class="field-label" for="service-auth-header">Header / Param</label>
                   <input type="text" id="service-auth-header" class="text-input" placeholder="X-API-Key">
                 </div>
                 <div class="field">
-                  <label class="field-label">Rate Limit (req/min)</label>
+                  <label class="field-label" for="service-rate-limit">Rate Limit (req/min)</label>
                   <input type="number" id="service-rate-limit" class="text-input" min="1" step="1" placeholder="60">
                   <p class="secret-note">Leave blank to use the default service limit.</p>
                 </div>
                 <div class="field full">
-                  <label class="field-label">OAuth Account</label>
+                  <label class="field-label" for="service-oauth-account">OAuth Account</label>
                   <select id="service-oauth-account" class="text-input"></select>
                   <p class="secret-note">Pick a connected OAuth account when auth type is OAuth account.</p>
                 </div>
                 <div class="field full">
-                  <label class="field-label">Auth Secret</label>
+                  <label class="field-label" for="service-auth-key">Auth Secret</label>
                   <input type="password" id="service-auth-key" class="text-input" placeholder="Leave blank to keep stored secret">
                 </div>
                 <div class="field full">
@@ -1109,39 +1110,39 @@
                 <div class="detail-header">Login details</div>
                 <div class="field-grid">
                   <div class="field advanced-only">
-                    <label class="field-label">ID</label>
+                    <label class="field-label" for="site-id">ID</label>
                     <input type="text" id="site-id" class="text-input" placeholder="github-web">
                   </div>
                   <div class="field">
-                    <label class="field-label">Name</label>
+                    <label class="field-label" for="site-name">Name</label>
                     <input type="text" id="site-name" class="text-input" placeholder="GitHub Web">
                   </div>
                   <div class="field full">
-                    <label class="field-label">Login Page URL</label>
+                    <label class="field-label" for="site-login-url">Login Page URL</label>
                     <input type="text" id="site-login-url" class="text-input" placeholder="https://github.com/login">
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">Username Field Name</label>
+                    <label class="field-label" for="site-username-field">Username Field Name</label>
                     <input type="text" id="site-username-field" class="text-input" value="username">
                   </div>
                   <div class="field advanced-only">
-                    <label class="field-label">Password Field Name</label>
+                    <label class="field-label" for="site-password-field">Password Field Name</label>
                     <input type="text" id="site-password-field" class="text-input" value="password">
                   </div>
                   <div class="field">
-                    <label class="field-label">Username</label>
+                    <label class="field-label" for="site-username">Username</label>
                     <input type="text" id="site-username" class="text-input">
                   </div>
                   <div class="field">
-                    <label class="field-label">Password</label>
+                    <label class="field-label" for="site-password">Password</label>
                     <input type="password" id="site-password" class="text-input">
                   </div>
                   <div class="field full advanced-only">
-                    <label class="field-label">Form CSS Selector</label>
+                    <label class="field-label" for="site-form-selector">Form CSS Selector</label>
                     <input type="text" id="site-form-selector" class="text-input" placeholder="form[action='/login']">
                   </div>
                   <div class="field full advanced-only">
-                    <label class="field-label">Extra JSON Fields</label>
+                    <label class="field-label" for="site-extra-fields">Extra JSON Fields</label>
                     <textarea id="site-extra-fields" placeholder='{"remember_me": "1"}'></textarea>
                   </div>
                   <div class="field full">
@@ -1170,7 +1171,7 @@
               </div>
               <div class="field-grid">
                 <div class="field full">
-                  <label class="field-label">Slack</label>
+                  <label class="field-label" for="messaging-slack-enabled">Slack</label>
                   <div class="check-row">
                     <input type="checkbox" id="messaging-slack-enabled">
                     <label class="check-label" for="messaging-slack-enabled">Enable Slack event + reply handling</label>
@@ -1186,7 +1187,7 @@
                 </div>
 
                 <div class="field full">
-                  <label class="field-label">Telegram</label>
+                  <label class="field-label" for="messaging-telegram-enabled">Telegram</label>
                   <div class="check-row">
                     <input type="checkbox" id="messaging-telegram-enabled">
                     <label class="check-label" for="messaging-telegram-enabled">Enable Telegram webhook + reply handling</label>
@@ -1202,7 +1203,7 @@
                 </div>
 
                 <div class="field full">
-                  <label class="field-label">iMessage</label>
+                  <label class="field-label" for="messaging-imessage-enabled">iMessage</label>
                   <div class="check-row">
                     <input type="checkbox" id="messaging-imessage-enabled">
                     <label class="check-label" for="messaging-imessage-enabled">Enable local macOS iMessage polling + send</label>
@@ -1233,19 +1234,19 @@
                 <div class="detail-header">Skill Details</div>
                 <div class="field-grid">
                   <div class="field advanced-only">
-                    <label class="field-label">ID</label>
+                    <label class="field-label" for="skill-id">ID</label>
                     <input type="text" id="skill-id" class="text-input" placeholder="email-drafting">
                   </div>
                   <div class="field">
-                    <label class="field-label">Name</label>
+                    <label class="field-label" for="skill-name">Name</label>
                     <input type="text" id="skill-name" class="text-input" placeholder="Email Drafting">
                   </div>
                   <div class="field full">
-                    <label class="field-label">Description</label>
+                    <label class="field-label" for="skill-description">Description</label>
                     <input type="text" id="skill-description" class="text-input" placeholder="Short summary shown in the skill list.">
                   </div>
                   <div class="field full">
-                    <label class="field-label">Tags</label>
+                    <label class="field-label" for="skill-tags">Tags</label>
                     <input type="text" id="skill-tags" class="text-input" placeholder="email, drafting, tone">
                   </div>
                   <div class="field full">
@@ -1255,7 +1256,7 @@
                     </div>
                   </div>
                   <div class="field full">
-                    <label class="field-label">Content</label>
+                    <label class="field-label" for="skill-content">Content</label>
                     <textarea id="skill-content" class="scratch-editor" placeholder="# Email Drafting&#10;&#10;## Tone&#10;&#10;Be concise and professional."></textarea>
                   </div>
                 </div>
@@ -1300,8 +1301,8 @@
               </div>
               <div class="field-grid">
                 <div class="field">
-                  <label class="field-label">Installed Tools</label>
-                  <div class="capability-list" id="tool-list"></div>
+                  <label class="field-label" id="tool-list-label">Installed Tools</label>
+                  <div class="capability-list" id="tool-list" role="list" aria-labelledby="tool-list-label"></div>
                 </div>
               </div>
             </div>
