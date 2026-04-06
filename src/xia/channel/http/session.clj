@@ -253,6 +253,8 @@
     {:state      (some-> (:state status) name)
      :phase      (some-> (:phase status) name)
      :message    (:message status)
+     :error      (:error status)
+     :finalization_step (some-> (:finalization-step status) name)
      :partial_content (:partial-content status)
      :tool_id    (some-> (:tool-id status) name)
      :tool_name  (:tool-name status)

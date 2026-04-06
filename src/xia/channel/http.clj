@@ -53,6 +53,8 @@
 (def ^:private session-finalize-lock-count 256)
 (def ^:private http-port-search-limit 100)
 (def ^:private rest-session-channels #{:http :command})
+(def ^:private local-ui-session-channels #{:http :websocket})
+(def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
 (def ^:private byte-array-class (class (byte-array 0)))
 (defn- long-max
   ^long [^long a ^long b]
@@ -289,23 +291,53 @@
 
 (declare protected-route-response with-session-finalize-lock touch-rest-session!)
 
+(defn- record-session-finalization-failure!
+  [session-id channel step ^Throwable e]
+  (let [sid-str (str session-id)]
+    (swap! session-statuses assoc
+           sid-str
+           {:session-id         sid-str
+            :state              :error
+            :phase              :finalizing
+            :message            (str "Failed to finalize "
+                                     (name channel)
+                                     " session; working memory preserved for retry.")
+            :error              (throwable-message e)
+            :finalization-step  step
+            :updated-at         (java.util.Date.)})
+    (log/error e
+               "Failed to finalize session; preserving working memory for retry"
+               sid-str
+               "channel" (name channel)
+               "step" (name step))))
+
 (defn- finalize-websocket-session!
   [ch]
   (when-let [sid (get @ws-sessions ch)]
-    (try
-      (let [topics (:topics (wm/get-wm sid))]
-        (wm/clear-autonomy-state! sid)
-        (wm/snapshot! sid)
-        (hippo/record-conversation! sid :websocket
-                                    :topics topics
-                                    :consolidation-mode :sync))
-      (catch Exception e
-        (log/error e "Failed to finalize WebSocket session"))
-      (finally
-        (try
-          (wm/clear-wm! sid)
-          (catch Exception e
-            (log/error e "Failed to clear WebSocket working memory"))))))
+    (let [topics-or-failure
+          (try
+            (:topics (wm/get-wm sid))
+            (catch Exception e
+              (record-session-finalization-failure! sid :websocket :load-working-memory e)
+              ::finalization-failed))]
+      (when-not (= ::finalization-failed topics-or-failure)
+        (let [finalized?
+              (try
+                (wm/clear-autonomy-state! sid)
+                (wm/snapshot! sid)
+                (hippo/record-conversation! sid :websocket
+                                            :topics topics-or-failure
+                                            :consolidation-mode :sync)
+                true
+                (catch Exception e
+                  (record-session-finalization-failure! sid :websocket :persist-session e)
+                  false))]
+          (when finalized?
+            (swap! session-statuses dissoc (str sid))
+            (try
+              (wm/clear-wm! sid)
+              (catch Exception e
+                (log/error e "Failed to clear WebSocket working memory"))))))))
   (swap! ws-sessions dissoc ch)
   (log/info "WebSocket disconnected"))
 
@@ -954,7 +986,12 @@
 
 (defn- session-busy?
   [session-id]
-  (contains? @session-statuses (str session-id)))
+  (let [state (:state (get @session-statuses (str session-id)))]
+    (contains? busy-session-states
+               (cond
+                 (keyword? state) state
+                 (string? state) (keyword state)
+                 :else state))))
 
 (defn- session-finalize-lock
   [session-id]
@@ -1325,6 +1362,19 @@
   ([session-id expected-channel]
    (http-session/handle-get-status (session-handler-deps) session-id expected-channel)))
 
+(defn- local-ui-session-allowed?
+  [session-id]
+  (contains? local-ui-session-channels
+             (session-channel session-id)))
+
+(defn- handle-local-get-status
+  [session-id]
+  (if-not (session-id-str session-id)
+    (handle-get-status session-id)
+    (if (local-ui-session-allowed? session-id)
+      (handle-get-status session-id)
+      (json-response 404 {:error "session not found"}))))
+
 (defn- handle-get-current-task
   ([session-id]
    (handle-get-current-task session-id nil))
@@ -1366,6 +1416,14 @@
    (handle-close-session session-id nil))
   ([session-id expected-channel]
    (http-session/handle-close-session (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-local-close-session
+  [session-id]
+  (if-not (session-id-str session-id)
+    (handle-close-session session-id)
+    (if (local-ui-session-allowed? session-id)
+      (handle-close-session session-id)
+      (json-response 404 {:error "session not found"}))))
 
 (defn- handle-history-sessions []
   (http-session/handle-history-sessions (session-handler-deps)))
@@ -1692,10 +1750,10 @@
         (command-route-response req #(handle-session-audit (second command-session-audit-match) :command))
 
         (and (= method :delete) session-close-match)
-        (protected-route-response req #(handle-close-session (second session-close-match) :http))
+        (protected-route-response req #(handle-local-close-session (second session-close-match)))
 
         (and (= method :get) status-match)
-        (protected-route-response req #(handle-get-status (second status-match) :http))
+        (protected-route-response req #(handle-local-get-status (second status-match)))
 
         (and (= method :get) session-task-match)
         (protected-route-response req #(handle-get-current-task (second session-task-match) :http))

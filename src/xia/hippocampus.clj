@@ -157,13 +157,6 @@ Rules:
         b* (long b)]
     (if (> a* b*) a* b*)))
 
-(defn- episode-importance-defaults
-  [episodes]
-  (into {}
-        (map (fn [{:keys [eid]}]
-               [eid default-episode-importance]))
-        episodes))
-
 (defn- instant-string
   [value]
   (when (instance? java.util.Date value)
@@ -181,36 +174,49 @@ Rules:
                                (when context
                                  (str "\nContext: " context)))))
                       (str/join "\n\n---\n\n"))
-        defaults (episode-importance-defaults episodes)
         response (llm/chat-simple
                    [{:role "system" :content importance-prompt}
                     {:role "user"   :content user-msg}]
                    :workload :memory-importance)]
-    (try
-      (let [parsed (json/read-json response)]
-        (reduce
-          (fn [scores entry]
-            (let [idx (get entry "index")]
-              (if (and (number? idx)
-                       (<= 0 (long idx))
-                       (< (long idx) (count episodes)))
-                (assoc scores
-                       (:eid (nth episodes (long idx)))
-                       (normalize-importance (get entry "importance")))
-                scores)))
-          defaults
-          (get parsed "episodes" [])))
-      (catch Exception e
-        (log/warn "Failed to parse episode importance batch:" (.getMessage e))
-        defaults))))
-
-(defn- rate-episode-importance
-  [episodes]
-  (->> episodes
-       (sort-by :timestamp)
-       (partition-all importance-batch-size)
-       (map #(rate-importance-batch (vec %)))
-       (reduce merge {})))
+    (let [parsed  (try
+                    (json/read-json response)
+                    (catch Exception e
+                      (throw (ex-info "Failed to parse episode importance batch"
+                                      {:response response}
+                                      e))))
+          entries (get parsed "episodes")]
+      (when-not (sequential? entries)
+        (throw (ex-info "Episode importance batch must contain an episodes array"
+                        {:response parsed})))
+      (let [scores-by-index
+            (reduce
+              (fn [scores entry]
+                (let [idx (get entry "index")]
+                  (when-not (number? idx)
+                    (throw (ex-info "Episode importance entry is missing a numeric index"
+                                    {:entry entry})))
+                  (let [idx* (long idx)]
+                    (when-not (< -1 idx* (count episodes))
+                      (throw (ex-info "Episode importance index is out of range"
+                                      {:entry entry
+                                       :episode-count (count episodes)})))
+                    (when (contains? scores idx*)
+                      (throw (ex-info "Episode importance response contains duplicate indexes"
+                                      {:entry entry
+                                       :indexes (keys scores)})))
+                    (assoc scores idx*
+                           (normalize-importance (get entry "importance"))))))
+              {}
+              entries)]
+        (when-not (= (count scores-by-index) (count episodes))
+          (throw (ex-info "Episode importance batch returned incomplete ratings"
+                          {:expected (count episodes)
+                           :actual (count scores-by-index)
+                           :response parsed})))
+        (into {}
+              (map (fn [[idx importance]]
+                     [(:eid (nth episodes idx)) importance]))
+              scores-by-index)))))
 
 (defn- extraction-counts
   [extraction]
@@ -619,28 +625,34 @@ Rules:
   []
   (let [episodes (memory/unprocessed-episodes)]
     (when (seq episodes)
-      (let [importance-by-eid (try
-                                (rate-episode-importance episodes)
-                                (catch Exception e
-                                  (log/warn e "Failed to rate episode importance; using default importance for consolidation batch")
-                                  {}))]
+      (let [episode-batches (->> episodes
+                                 (sort-by :timestamp)
+                                 (partition-all importance-batch-size)
+                                 (mapv vec))]
         (log/info "Consolidating" (count episodes) "pending episodes")
-        (doseq [ep episodes]
+        (doseq [batch episode-batches]
           (try
-            (consolidate-episode! (assoc ep :importance
-                                         (get importance-by-eid
-                                              (:eid ep)
-                                              default-episode-importance)))
-            (catch Exception e
-              (let [error-message (.getMessage e)]
+            (let [importance-by-eid (rate-importance-batch batch)]
+              (doseq [ep batch]
                 (try
-                  (memory/mark-episode-consolidation-failed! (:eid ep) error-message)
-                  (catch Exception quarantine-ex
-                    (log/error quarantine-ex
-                               "Failed to quarantine episode after consolidation failure:"
-                               (:summary ep))))
-                (record-failure! :exception error-message))
-              (log/error e "Failed to consolidate episode:" (:summary ep)))))))))
+                  (consolidate-episode! (assoc ep :importance
+                                               (get importance-by-eid
+                                                    (:eid ep))))
+                  (catch Exception e
+                    (let [error-message (.getMessage e)]
+                      (try
+                        (memory/mark-episode-consolidation-failed! (:eid ep) error-message)
+                        (catch Exception quarantine-ex
+                          (log/error quarantine-ex
+                                     "Failed to quarantine episode after consolidation failure:"
+                                     (:summary ep))))
+                      (record-failure! :exception error-message))
+                    (log/error e "Failed to consolidate episode:" (:summary ep))))))
+            (catch Exception e
+              (log/warn e
+                        "Failed to rate episode importance; leaving batch pending for retry"
+                        {:episode-count (count batch)
+                         :episode-summaries (mapv :summary batch)}))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Episode creation from conversation
