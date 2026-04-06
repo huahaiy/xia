@@ -330,6 +330,10 @@ h1 {
   color: var(--ink);
   border-bottom-color: var(--line);
 }
+.tab-link:focus-visible {
+  outline: 2px solid rgba(26, 158, 150, 0.35);
+  outline-offset: -2px;
+}
 .tab-link.active {
   color: var(--accent-dark);
   border-bottom-color: var(--accent);
@@ -530,6 +534,10 @@ button {
 }
 button:hover:not(:disabled) { box-shadow: var(--shadow); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:focus-visible {
+  outline: 2px solid rgba(26, 158, 150, 0.35);
+  outline-offset: 2px;
+}
 .primary { background: var(--accent); color: white; }
 .primary:hover:not(:disabled) { background: var(--accent-dark); }
 .secondary {
@@ -549,6 +557,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .secondary-link:hover {
   text-decoration: underline;
+}
+.secondary-link:focus-visible {
+  outline: 2px solid rgba(26, 158, 150, 0.35);
+  outline-offset: 2px;
 }
 .secondary-link[aria-disabled="true"] {
   opacity: 0.45;
@@ -624,6 +636,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   border: 1px solid var(--line);
   font-size: 0.8rem;
   border-radius: var(--radius-sm);
+}
+.copy-link:focus-visible {
+  outline: 2px solid rgba(26, 158, 150, 0.35);
+  outline-offset: 2px;
 }
 .message-body {
   margin: 0;
@@ -884,7 +900,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 0.92rem;
   line-height: 1.4;
 }
-.text-input:focus {
+.text-input:focus-visible {
   outline: 2px solid rgba(26, 158, 150, 0.3);
   outline-offset: 1px;
   border-color: var(--accent);
@@ -902,7 +918,7 @@ textarea {
   font-size: 0.92rem;
   line-height: 1.6;
 }
-textarea:focus {
+textarea:focus-visible {
   outline: 2px solid rgba(26, 158, 150, 0.3);
   outline-offset: 1px;
   border-color: var(--accent);

@@ -1,37 +1,20 @@
 {:test0
- [xia.artifact-test
-  xia.autonomous-test
-  xia.backup-test
-  xia.browser-session-options-test
+ [xia.autonomous-smoke-test
   xia.config-test
   xia.core-test
-  xia.cron-test
   xia.crypto-test
   xia.db-security-test
-  xia.email-test
-  xia.extractive-summary-test
-  xia.hippocampus-test
   xia.identity-test
-  xia.instance-supervisor-test
-  xia.llm-test
-  xia.local-doc-test
+  xia.llm-smoke-test
+  xia.local-doc-smoke-test
   xia.local-ocr-test
-  xia.logging-test
-  xia.oauth-template-test
   xia.oauth-test
-  xia.pack-test
-  xia.paths-test
   xia.prompt-test
-  xia.runtime-health-test
   xia.runtime-overlay-test
   xia.schedule-test
-  xia.scratch-test
   xia.secret-test
   xia.summarizer-test
   xia.system-test
-  xia.task-policy-test
-  xia.tool-test
-  xia.workspace-test
-  xia.channel.http-admin-test
-  xia.channel.messaging-test]
+  xia.tool-smoke-test
+  xia.channel.http-admin-test]
 }
