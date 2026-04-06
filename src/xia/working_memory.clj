@@ -35,6 +35,9 @@
 (def ^:dynamic *suppress-snapshot-scheduling?* false)
 
 (defonce ^:private wm-atom (atom {}))
+(defonce ^:private runtime-state-atom (atom {:generation 0
+                                             :reaper-future nil}))
+(defonce ^:private runtime-lock (Object.))
 (def ^:private session-op-lock-count 512)
 (defonce ^:private session-op-locks
   (vec (repeatedly session-op-lock-count #(Object.))))
@@ -43,6 +46,10 @@
 
 (def ^:private default-snapshot-interval-ms 30000)
 (def ^:private default-snapshot-debounce-ms 2000)
+(def ^:private default-reaper-interval-ms (* 5 60 1000))
+(def ^:private default-reap-idle-after-ms (* 2 60 60 1000))
+(def ^:private live-task-states
+  #{:running :waiting_input :waiting_approval :paused :resumable})
 
 (defn- current-time-ms []
   (System/currentTimeMillis))
@@ -101,6 +108,7 @@
             (let [now        (current-time-ms)
                   schedule?  (atom false)
                   updated    (cond-> (-> (f wm)
+                                         (assoc :last-active-at-ms now)
                                          (assoc :prompt-cache-version
                                                 (inc (long (or (:prompt-cache-version wm) 0)))))
                                (not *suppress-snapshot-scheduling?*)
@@ -167,6 +175,16 @@
   []
   (cfg/positive-long :wm/snapshot-debounce-ms
                      default-snapshot-debounce-ms))
+
+(defn- reaper-interval-ms
+  []
+  (cfg/positive-long :wm/reaper-interval-ms
+                     default-reaper-interval-ms))
+
+(defn- reap-idle-after-ms
+  []
+  (cfg/positive-long :wm/reap-idle-after-ms
+                     default-reap-idle-after-ms))
 
 (def ^:private fact-utility-batch-size 20)
 (def ^:private fact-utility-heuristic-utility 1.0)
@@ -1069,6 +1087,7 @@ Rules:
                 :topics          nil
                 :prev-topics     nil
                 :prompt-cache-version 0
+                :last-active-at-ms (current-time-ms)
                 :last-snapshot-at-ms 0
                 :last-dirty-at-ms nil
                 :snapshot-task-scheduled? false
@@ -1294,3 +1313,110 @@ Rules:
     (doseq [session-id session-ids]
       (snapshot! session-id))
     (count session-ids)))
+
+(defn- task-live?
+  [task]
+  (contains? live-task-states
+             (or (get-in task [:meta :runtime :state])
+                 (:state task))))
+
+(defn- session-protected-from-reap?
+  [session-id]
+  (try
+    (when-let [task (db/current-session-task session-id)]
+      (task-live? task))
+    (catch Exception e
+      (log/debug e "Failed to inspect session task during WM reap" session-id)
+      false)))
+
+(defn- stale-session-wm?
+  [wm now-ms]
+  (let [last-active-at-ms (long (or (:last-active-at-ms wm) 0))]
+    (and (pos? last-active-at-ms)
+         (>= (- now-ms last-active-at-ms)
+             (reap-idle-after-ms)))))
+
+(defn- maybe-reap-stale-session-wm!
+  [session-id now-ms]
+  (run-session-op! session-id
+    (fn [sid]
+      (when-let [wm (session-wm sid)]
+        (when (and (stale-session-wm? wm now-ms)
+                   (not (session-protected-from-reap? sid)))
+          (let [dirty? (some? (:last-dirty-at-ms wm))]
+            (when dirty?
+              (snapshot! sid))
+            (let [wm* (session-wm sid)]
+              (cond
+                (nil? wm*)
+                false
+
+                (some? (:last-dirty-at-ms wm*))
+                (do
+                  (log/warn "Skipping stale WM reap because snapshot did not complete"
+                            {:session-id sid})
+                  false)
+
+                :else
+                (let [idle-ms (- now-ms (long (or (:last-active-at-ms wm*) 0)))]
+                  (clear-wm! sid)
+                  (log/info "Reaped stale working memory"
+                            {:session-id sid
+                             :idle-ms idle-ms
+                             :dirty? dirty?})
+                  true)))))))))
+
+(defn- reap-stale-working-memories!
+  []
+  (let [now-ms      (current-time-ms)
+        session-ids (vec (keys @wm-atom))]
+    (reduce (fn [count* session-id]
+              (if (true? (maybe-reap-stale-session-wm! session-id now-ms))
+                (inc count*)
+                count*))
+            0
+            session-ids)))
+
+(defn- run-reaper-loop!
+  [generation]
+  (loop []
+    (when (= generation (:generation @runtime-state-atom))
+      (let [continue?
+            (try
+              (sleep-ms! (reaper-interval-ms))
+              (when (= generation (:generation @runtime-state-atom))
+                (let [reaped (reap-stale-working-memories!)]
+                  (when (pos? reaped)
+                    (log/info "Reaped" reaped "stale working-memory session(s)"))))
+              true
+              (catch InterruptedException _
+                false)
+              (catch Exception e
+                (log/error e "Working-memory reaper failed")
+                true))]
+        (when continue?
+          (recur))))))
+
+(defn reset-runtime!
+  []
+  (locking runtime-lock
+    (when-let [future (:reaper-future @runtime-state-atom)]
+      (.cancel future true))
+    (let [generation (inc (long (:generation @runtime-state-atom)))
+          future     (async/submit-background! "wm-reaper"
+                                               #(run-reaper-loop! generation))]
+      (reset! wm-atom {})
+      (reset! runtime-state-atom {:generation generation
+                                  :reaper-future future})))
+  nil)
+
+(defn prepare-shutdown!
+  []
+  (locking runtime-lock
+    (when-let [future (:reaper-future @runtime-state-atom)]
+      (.cancel future true))
+    (swap! runtime-state-atom
+           (fn [state]
+             {:generation (inc (long (:generation state)))
+              :reaper-future nil})))
+  nil)

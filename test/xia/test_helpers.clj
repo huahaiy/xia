@@ -273,6 +273,7 @@
   [f]
   (let [path (temp-db-path)]
     (runtime-overlay/clear!)
+    (wm/prepare-shutdown!)
     (wm/clear-wm!)
     (db/connect! path (test-connect-options
                         {:passphrase-provider (constantly "xia-test-passphrase")}))
@@ -280,6 +281,7 @@
       (f)
       (finally
         (runtime-overlay/clear!)
+        (wm/prepare-shutdown!)
         (wm/clear-wm!)
         (db/close!)))))
 

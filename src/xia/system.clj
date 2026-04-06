@@ -83,6 +83,7 @@
 
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay]}]
+  (wm/reset-runtime!)
   (hippo/reset-runtime!)
   (checkpoint/reset-runtime!)
   (llm/reset-runtime!)
@@ -95,6 +96,7 @@
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
+  (wm/prepare-shutdown!)
   (wm/snapshot-all!)
   (agent/cancel-all-sessions! "runtime stopping")
   (browser/release-all-sessions!)
