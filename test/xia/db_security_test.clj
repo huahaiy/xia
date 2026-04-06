@@ -11,14 +11,6 @@
 (defn- raw-entity [eid]
   (into {} (d/entity (d/db (db/conn)) eid)))
 
-(defn- reconnect-current-db!
-  []
-  (let [db-path (db/current-db-path)]
-    (db/close!)
-    (db/connect! db-path
-                 (th/test-connect-options
-                   {:passphrase-provider (constantly "xia-test-passphrase")}))))
-
 (deftest service-auth-is-encrypted-at-rest
   (db/register-service! {:id :github
                          :base-url "https://api.github.com"
@@ -194,79 +186,3 @@
            (:actions (first history))))
     (is (= "{\"records\":[\"secret\"]}" (:result (first history))))
     (is (= "token leak" (:error (first history))))))
-
-(deftest plaintext-secrets-are-migrated
-  (d/transact! (db/conn)
-               [{:service/id        :legacy
-                 :service/base-url  "https://legacy.example"
-                 :service/auth-type :bearer
-                 :service/auth-key  "legacy-token"
-                 :service/enabled?  true}])
-  (reconnect-current-db!)
-  (let [eid (ffirst (db/q '[:find ?e :where [?e :service/id :legacy]]))
-        raw (raw-entity eid)
-        svc (db/get-service :legacy)]
-    (is (crypto/encrypted? (:service/auth-key raw)))
-    (is (= "legacy-token" (:service/auth-key svc)))))
-
-(deftest plaintext-secret-migration-batches-configs-and-attrs
-  (d/transact! (db/conn)
-               [{:service/id        :legacy-batch
-                 :service/base-url  "https://legacy.example"
-                 :service/auth-type :bearer
-                 :service/auth-key  "legacy-batch-token"
-                 :service/enabled?  true}
-                {:config/key   :token/github
-                 :config/value "gho_batch_secret"}])
-  (reconnect-current-db!)
-  (let [eid       (ffirst (db/q '[:find ?e :where [?e :service/id :legacy-batch]]))
-        raw       (raw-entity eid)
-        raw-value (ffirst (db/q '[:find ?v :where
-                                  [?e :config/key :token/github]
-                                  [?e :config/value ?v]]))]
-    (is (crypto/encrypted? (:service/auth-key raw)))
-    (is (crypto/encrypted? raw-value))
-    (is (= "legacy-batch-token" (:service/auth-key (db/get-service :legacy-batch))))
-    (is (= "gho_batch_secret" (db/get-config :token/github)))))
-
-(deftest plaintext-secret-migration-commits-in-batches
-  (let [orig-transact! xia.db/transact!
-        batch-sizes    (atom [])]
-    (doseq [n (range 450)]
-      (d/transact! (db/conn)
-                   [{:service/id        (keyword (str "legacy-batch-" n))
-                     :service/base-url  (str "https://legacy-" n ".example")
-                     :service/auth-type :bearer
-                     :service/auth-key  (str "token-" n)
-                     :service/enabled?  true}]))
-    (with-redefs [xia.db/transact!
-                  (fn [tx-data]
-                    (swap! batch-sizes conj (count tx-data))
-                    (orig-transact! tx-data))]
-      (reconnect-current-db!))
-    (is (= [200 200 50] @batch-sizes))
-    (is (= "token-0" (:service/auth-key (db/get-service :legacy-batch-0))))
-    (is (= "token-449" (:service/auth-key (db/get-service :legacy-batch-449))))))
-
-(deftest plaintext-transcripts-are-left-plain-by-migration
-  (let [sid         (db/create-session! :terminal)
-        session-eid (ffirst (db/q '[:find ?e :in $ ?sid
-                                    :where [?e :session/id ?sid]]
-                                  sid))
-        message-id  (random-uuid)]
-    (d/transact! (db/conn)
-                 [{:message/id         message-id
-                   :message/session    session-eid
-                   :message/role       :assistant
-                   :message/content    "legacy transcript"
-                   :message/tool-calls {:calls [{"id" "call_1"}]}
-                   :message/created-at (java.util.Date.)}])
-    (reconnect-current-db!)
-    (let [eid      (ffirst (db/q '[:find ?e :in $ ?id :where [?e :message/id ?id]]
-                                 message-id))
-          raw      (raw-entity eid)
-          messages (db/session-messages sid)]
-      (is (= "legacy transcript" (:message/content raw)))
-      (is (= {:calls [{"id" "call_1"}]} (:message/tool-calls raw)))
-      (is (= "legacy transcript" (:content (first messages))))
-      (is (= [{"id" "call_1"}] (:tool-calls (first messages)))))))

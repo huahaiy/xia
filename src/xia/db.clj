@@ -88,7 +88,6 @@
   "Return the most recent close event for debugging."
   []
   @last-close-event-atom)
-(declare migrate-secrets!)
 
 (def ^:private default-embedding-provider-id
   ;; Datalevin persists embedding domain provider ids and only accepts its
@@ -484,10 +483,6 @@
        (reset! instance-id-atom instance-id)
        (ensure-schema-version! c db-path)
        (crypto/configure! db-path crypto-opts)
-       ;; Upgrade any legacy plaintext secret fields once the DB is open and
-       ;; the encryption key is configured, before higher-level runtime
-       ;; components begin reading config or provider records.
-       (migrate-secrets!)
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
        (reset! last-connect-event-atom
@@ -790,54 +785,6 @@
                (assoc acc k (decrypt-secret-attr k v)))
              {}
              entity-map))
-
-(defn- migrate-secret-attr-tx [eid attr value]
-  (when (and (string? value)
-             (not (str/blank? value))
-             (not (crypto/encrypted? value)))
-    [:db/add eid attr value]))
-
-(defn- migrate-secret-config-tx [eid config-key value]
-  (when (and (sensitive/secret-config-key? config-key)
-             (string? value)
-             (not (str/blank? value))
-             (not (crypto/encrypted? value)))
-    {:db/id eid
-     :config/key config-key
-     :config/value value}))
-
-(def ^:private secret-migration-batch-size 200)
-
-(defn- migrate-secrets!
-  []
-  (let [config-tx
-        (into []
-              (keep (fn [[eid k v]]
-                      (migrate-secret-config-tx eid k v)))
-              (vec
-                (q '[:find ?e ?k ?v
-                     :where
-                     [?e :config/key ?k]
-                     [?e :config/value ?v]])))
-        attr-tx
-        (into []
-              (keep identity)
-              (for [attr sensitive/encrypted-attrs
-                    [eid value] (vec
-                                  (q '[:find ?e ?v
-                                       :in $ ?attr
-                                       :where
-                                       [?e ?attr ?v]]
-                                     attr))]
-                (migrate-secret-attr-tx eid attr value)))
-        tx-data (into config-tx attr-tx)]
-    (when (seq tx-data)
-      (log/info "Migrating" (count tx-data) "legacy secret values in"
-                (count (partition-all secret-migration-batch-size tx-data))
-                "batches"))
-    (doseq [batch (partition-all secret-migration-batch-size tx-data)]
-      (transact! batch))
-    (count tx-data)))
 
 ;; ---------------------------------------------------------------------------
 ;; Config
