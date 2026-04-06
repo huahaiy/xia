@@ -522,8 +522,9 @@
                   <div class="field field-with-autocomplete">
                     <label class="field-label" for="provider-model">Model Name</label>
                     <div class="autocomplete-wrap">
-                      <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o" autocomplete="off">
-                      <div class="autocomplete-list" id="provider-model-list" hidden></div>
+                      <input type="text" id="provider-model" class="text-input" placeholder="gpt-4o" autocomplete="off"
+                             role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="provider-model-list">
+                      <div class="autocomplete-list" id="provider-model-list" role="listbox" hidden></div>
                     </div>
                     <button type="button" class="secondary" id="fetch-provider-models" style="margin-top:6px">Fetch models</button>
                     <p class="secret-note model-capability-note" id="provider-model-capability-note"></p>

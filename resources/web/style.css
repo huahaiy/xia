@@ -1630,7 +1630,8 @@ textarea:focus {
 .autocomplete-item:first-child { border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
 .autocomplete-item:last-child { border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
 .autocomplete-item:hover,
-.autocomplete-item.active {
+.autocomplete-item.active,
+.autocomplete-item.autocomplete-item-active {
   background: var(--accent-light);
 }
 .autocomplete-item-note:hover {

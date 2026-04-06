@@ -3057,26 +3057,64 @@ function maybeFetchProviderModelMetadata() {
   fetchProviderModelMetadata(modelId);
 }
 
+let _acHighlight = -1;
+
+function syncModelListExpanded() {
+  providerModelEl.setAttribute('aria-expanded', String(!providerModelListEl.hidden));
+  if (providerModelListEl.hidden) {
+    providerModelEl.removeAttribute('aria-activedescendant');
+    _acHighlight = -1;
+  }
+}
+
+function selectProviderModel(modelId) {
+  providerModelEl.value = modelId;
+  closeProviderModelList();
+  clearProviderModelVisionIfModelChanged();
+  fetchProviderModelMetadata(modelId);
+}
+
+function closeProviderModelList() {
+  providerModelListEl.hidden = true;
+  syncModelListExpanded();
+}
+
+function highlightModelOption(idx) {
+  const options = providerModelListEl.querySelectorAll('[role="option"]');
+  if (!options.length) return;
+  // Clamp
+  if (idx < 0) idx = options.length - 1;
+  if (idx >= options.length) idx = 0;
+  options.forEach(opt => opt.classList.remove('autocomplete-item-active'));
+  options[idx].classList.add('autocomplete-item-active');
+  options[idx].scrollIntoView({ block: 'nearest' });
+  _acHighlight = idx;
+  providerModelEl.setAttribute('aria-activedescendant', options[idx].id);
+}
+
 function renderProviderModelList() {
   providerModelListEl.innerHTML = '';
+  _acHighlight = -1;
+  providerModelEl.removeAttribute('aria-activedescendant');
   const query = providerModelEl.value.trim().toLowerCase();
   const models = state.providerModels;
   if (!models.length) {
-    providerModelListEl.hidden = true;
+    closeProviderModelList();
     return;
   }
   const filtered = query
     ? models.filter(function (m) { return m.toLowerCase().includes(query); })
     : models;
   if (!filtered.length) {
-    providerModelListEl.hidden = true;
+    closeProviderModelList();
     return;
   }
   var shown = filtered.slice(0, 80);
-  shown.forEach(function (modelId) {
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'autocomplete-item';
+  shown.forEach(function (modelId, i) {
+    var opt = document.createElement('div');
+    opt.className = 'autocomplete-item';
+    opt.setAttribute('role', 'option');
+    opt.id = 'provider-model-opt-' + i;
     var label = document.createElement('span');
     label.className = 'autocomplete-item-label';
     if (query) {
@@ -3091,22 +3129,19 @@ function renderProviderModelList() {
     } else {
       label.textContent = modelId;
     }
-    btn.appendChild(label);
+    opt.appendChild(label);
     var badgeStates = providerModelBadgeStates(modelId);
     badgeStates.forEach(function (badgeState) {
       var badge = document.createElement('span');
       badge.className = 'autocomplete-item-badge autocomplete-item-badge-' + badgeState.kind;
       badge.textContent = badgeState.label;
-      btn.appendChild(badge);
+      opt.appendChild(badge);
     });
-    btn.addEventListener('mousedown', function (e) {
+    opt.addEventListener('mousedown', function (e) {
       e.preventDefault();
-      providerModelEl.value = modelId;
-      providerModelListEl.hidden = true;
-      clearProviderModelVisionIfModelChanged();
-      fetchProviderModelMetadata(modelId);
+      selectProviderModel(modelId);
     });
-    providerModelListEl.appendChild(btn);
+    providerModelListEl.appendChild(opt);
   });
   if (filtered.length > 80) {
     var more = document.createElement('div');
@@ -3115,6 +3150,7 @@ function renderProviderModelList() {
     providerModelListEl.appendChild(more);
   }
   providerModelListEl.hidden = false;
+  syncModelListExpanded();
 }
 
 function escapeHtml(text) {
@@ -5876,7 +5912,7 @@ async function deleteProvider() {
     state.admin.providers = state.admin.providers.filter(function (p) { return p.id !== deletingId; });
     state.providerDraft = null;
     state.providerModels = [];
-    providerModelListEl.hidden = true;
+    closeProviderModelList();
     state.providerSaving = false;
     resetProviderForm('Provider deleted.');
     renderProviderOnboarding();
@@ -8231,7 +8267,7 @@ knowledgeQueryEl.addEventListener('keydown', (event) => {
 providerTemplateEl.addEventListener('change', () => {
   state.providerModels = [];
   setProviderModelVision('', false);
-  providerModelListEl.hidden = true;
+  closeProviderModelList();
   renderProviderTemplateOptions();
   renderProviderAccessModeOptions();
   renderProviderCredentialSourceOptions();
@@ -8254,7 +8290,7 @@ providerTemplateEl.addEventListener('change', () => {
 providerBaseUrlEl.addEventListener('input', () => {
   state.providerModels = [];
   setProviderModelVision('', false);
-  providerModelListEl.hidden = true;
+  closeProviderModelList();
   syncProviderModelFetchUi();
 });
 providerModelEl.addEventListener('input', () => {
@@ -8270,7 +8306,28 @@ providerModelEl.addEventListener('change', () => {
 });
 providerModelEl.addEventListener('blur', () => {
   maybeFetchProviderModelMetadata();
-  setTimeout(() => { providerModelListEl.hidden = true; }, 150);
+  setTimeout(() => closeProviderModelList(), 150);
+});
+providerModelEl.addEventListener('keydown', (e) => {
+  const listOpen = !providerModelListEl.hidden;
+  const options = providerModelListEl.querySelectorAll('[role="option"]');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (!listOpen && state.providerModels.length) {
+      renderProviderModelList();
+    }
+    highlightModelOption(_acHighlight + 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (listOpen) highlightModelOption(_acHighlight - 1);
+  } else if (e.key === 'Enter' && listOpen && _acHighlight >= 0 && _acHighlight < options.length) {
+    e.preventDefault();
+    const labelSpan = options[_acHighlight].querySelector('.autocomplete-item-label');
+    selectProviderModel(labelSpan ? labelSpan.textContent : providerModelEl.value);
+  } else if (e.key === 'Escape' && listOpen) {
+    e.preventDefault();
+    closeProviderModelList();
+  }
 });
 fetchProviderModelsEl.addEventListener('click', () => fetchProviderModels());
 providerAccessModeEl.addEventListener('change', () => {
