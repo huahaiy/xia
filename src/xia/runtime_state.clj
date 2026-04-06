@@ -34,7 +34,7 @@
        (reset! drain-state-atom
                {:draining? true
                 :reason reason
-                :requested-at (.toString (java.time.Instant/now))}))))
+                :requested-at (java.time.Instant/now)}))))
 
 (defn clear-drain!
   []

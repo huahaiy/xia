@@ -6648,6 +6648,7 @@ function renderApproval() {
   approvalToolEl.textContent = approval.tool_name || approval.tool_id || 'Privileged tool';
   approvalReasonEl.textContent = approval.reason || 'Needs confirmation.';
   approvalArgsEl.textContent = prettyJson(approval.arguments || {});
+  window.setTimeout(() => { allowApprovalEl.focus(); }, 120);
 }
 
 function renderInputRequest() {
@@ -6665,6 +6666,7 @@ function renderInputRequest() {
   inputNoteEl.textContent = request.masked
     ? 'This value is hidden while you type.'
     : 'Enter the requested value and submit it to resume the task.';
+  window.setTimeout(() => { inputValueEl.focus(); }, 120);
 }
 
 function formatDateTime(value) {
@@ -6807,7 +6809,11 @@ function buildMessageEl(message) {
   const body = document.createElement('div');
   body.className = 'message-body';
   if (message.role === 'assistant' && typeof marked !== 'undefined') {
-    const raw = marked.parse(message.content);
+    const raw = marked.parse(message.content)
+      .replace(/<(\/?)h([1-6])\b/gi, (_, slash, level) => {
+        const shifted = Math.min(parseInt(level, 10) + 3, 6);
+        return '<' + slash + 'h' + shifted;
+      });
     body.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(raw) : escapeHtml(raw);
   } else {
     body.textContent = message.content;

@@ -15,6 +15,22 @@
   --radius-sm: 10px;
   --radius-pill: 999px;
 }
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 9999;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.9rem;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  text-decoration: none;
+}
+.skip-link:focus {
+  left: 16px;
+}
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -533,7 +549,7 @@ button {
   transition: background 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
 }
 button:hover:not(:disabled) { box-shadow: var(--shadow); }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled { opacity: 0.65; cursor: not-allowed; }
 button:focus-visible {
   outline: 2px solid rgba(26, 158, 150, 0.35);
   outline-offset: 2px;
@@ -1816,5 +1832,46 @@ textarea:focus-visible {
     width: 36px;
     height: 36px;
     border-radius: 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+@media (forced-colors: active) {
+  button, .tab-link, .copy-link, .secondary-link, .text-input, textarea {
+    border: 1px solid ButtonText;
+  }
+  button:focus-visible, .tab-link:focus-visible, .copy-link:focus-visible,
+  .secondary-link:focus-visible, .text-input:focus-visible, textarea:focus-visible,
+  .info-hint:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  button:disabled {
+    border-color: GrayText;
+    color: GrayText;
+  }
+  .primary {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .tab-link.active {
+    border-bottom: 2px solid Highlight;
+  }
+  .status-pill {
+    border: 1px solid ButtonText;
+  }
+  .message.assistant {
+    border: 1px solid ButtonText;
+  }
+  .message.user {
+    border: 1px solid Highlight;
+  }
+  .panel {
+    border: 1px solid ButtonText;
   }
 }

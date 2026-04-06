@@ -14,6 +14,7 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
 </head>
 <body>
+  <a href="#composer" class="skip-link">Skip to chat</a>
   <div class="shell">
     <div class="frame">
       <header class="hero">
@@ -51,7 +52,7 @@
         </nav>
       </header>
 
-      <section class="panel approval-panel" id="approval-panel" hidden>
+      <section class="panel approval-panel" id="approval-panel" hidden role="alertdialog" aria-label="Approval Required">
         <div class="panel-header">
           <div>
             <h2 class="panel-title">Approval Required</h2>
@@ -72,13 +73,13 @@
             <p class="approval-reason" id="approval-reason">The current tool needs confirmation.</p>
           </div>
           <div class="meta-row">
-            <h3 class="meta-label">Arguments</h3>
-            <pre class="approval-args" id="approval-args">{}</pre>
+            <h3 class="meta-label" id="approval-args-label">Arguments</h3>
+            <pre class="approval-args" id="approval-args" aria-labelledby="approval-args-label">{}</pre>
           </div>
         </div>
       </section>
 
-      <section class="panel approval-panel" id="input-panel" hidden>
+      <section class="panel approval-panel" id="input-panel" hidden role="alertdialog" aria-label="Input Required">
         <div class="panel-header">
           <div>
             <h2 class="panel-title">Input Required</h2>
@@ -94,7 +95,7 @@
             <div class="meta-value" id="input-label">Waiting</div>
           </div>
           <div class="meta-row">
-            <h3 class="meta-label">Value</h3>
+            <label class="meta-label" for="input-value">Value</label>
             <input type="text" class="text-input" id="input-value" autocomplete="off">
           </div>
           <div class="meta-row">
