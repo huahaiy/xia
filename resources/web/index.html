@@ -27,7 +27,7 @@
           </div>
           <div class="hero-status">
             <div class="hero-status-row">
-              <div class="status-pill" id="status">Ready</div>
+              <div class="status-pill" id="status" role="status" aria-live="assertive" aria-atomic="true">Ready</div>
               <span class="meta-value" id="session-label">New local session</span>
             </div>
             <button type="button" class="secondary" id="new-chat">New session</button>
@@ -122,7 +122,7 @@
               <div class="empty">Start with a paste or a prompt. This interface is here to bridge the gap when Xia needs local material that cannot be read directly from disk.</div>
             </div>
             <div class="chat-compose-area">
-              <div class="activity-status" id="activity-status"></div>
+              <div class="activity-status" id="activity-status" role="status" aria-live="polite"></div>
               <form class="composer" id="composer-form">
                 <div class="field">
                   <textarea id="composer" placeholder="Paste context or type a message... (Cmd+Enter to send)"></textarea>
@@ -304,7 +304,7 @@
                 <button type="button" class="secondary" id="refresh-history-sessions">Refresh</button>
               </div>
               <div class="admin-list" id="history-session-list"></div>
-              <div class="admin-status" id="history-session-status">Loading chat history...</div>
+              <div class="admin-status" aria-live="polite" id="history-session-status">Loading chat history...</div>
               <div class="messages history-messages" id="history-session-messages">
                 <div class="empty">Select a prior session to view its transcript.</div>
               </div>
@@ -319,7 +319,7 @@
                 <button type="button" class="secondary" id="refresh-history-schedules">Refresh</button>
               </div>
               <div class="admin-list" id="history-schedule-list"></div>
-              <div class="admin-status" id="history-schedule-status">Loading scheduled runs...</div>
+              <div class="admin-status" aria-live="polite" id="history-schedule-status">Loading scheduled runs...</div>
               <div class="history-runs" id="history-schedule-runs">
                 <div class="admin-list-empty">Select a schedule to inspect recent runs.</div>
               </div>
@@ -344,7 +344,7 @@
                   <div class="admin-list-empty">Select an entity to inspect its stored facts.</div>
                 </div>
               </div>
-              <div class="admin-status" id="knowledge-status">Search for a person, project, or topic to inspect stored facts.</div>
+              <div class="admin-status" aria-live="polite" id="knowledge-status">Search for a person, project, or topic to inspect stored facts.</div>
             </div>
 
             <div class="admin-card" data-settings-section="llm-call-log">
@@ -363,7 +363,7 @@
                   <div class="admin-list-empty">Select a call to inspect its prompt and response.</div>
                 </div>
               </div>
-              <div class="admin-status" id="llm-call-status">Loading LLM call log...</div>
+              <div class="admin-status" aria-live="polite" id="llm-call-status">Loading LLM call log...</div>
             </div>
             </div>
           </div>
@@ -390,7 +390,7 @@
               </div>
             </div>
             <div class="template-grid" id="provider-template-list"></div>
-            <div class="admin-status" id="provider-onboarding-status">Choose a provider template to prefill the setup form below.</div>
+            <div class="admin-status" aria-live="polite" id="provider-onboarding-status">Choose a provider template to prefill the setup form below.</div>
           </div>
 
 	            <div class="settings-layout">
@@ -463,7 +463,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="identity-status"></div>
+                <div class="admin-status" aria-live="polite" id="identity-status"></div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-identity">Save identity</button>
                 </div>
@@ -548,7 +548,7 @@
                   </div>
                 </div>
                 <div class="composer-foot">
-                  <div class="admin-status" id="provider-status">Loading providers...</div>
+                  <div class="admin-status" aria-live="polite" id="provider-status">Loading providers...</div>
                   <div class="actions">
                     <button type="button" class="secondary" id="delete-provider" disabled>Delete</button>
                     <button type="button" class="primary" id="save-provider">Save model</button>
@@ -566,7 +566,7 @@
               </div>
               <div id="workload-routing-list"></div>
               <div class="composer-foot">
-                <div class="admin-status" id="workload-routing-status">Loading workload routing...</div>
+                <div class="admin-status" aria-live="polite" id="workload-routing-status">Loading workload routing...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-workload-routing">Save routing</button>
                 </div>
@@ -595,7 +595,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="retention-status">Loading retention settings...</div>
+                <div class="admin-status" aria-live="polite" id="retention-status">Loading retention settings...</div>
                 <button type="button" class="primary" id="save-retention">Save retention</button>
               </div>
             </div>
@@ -630,7 +630,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="knowledge-decay-status">Loading knowledge decay settings...</div>
+                <div class="admin-status" aria-live="polite" id="knowledge-decay-status">Loading knowledge decay settings...</div>
                 <button type="button" class="primary" id="save-knowledge-decay">Save decay</button>
               </div>
             </div>
@@ -663,7 +663,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="context-status">Loading conversation context settings...</div>
+                <div class="admin-status" aria-live="polite" id="context-status">Loading conversation context settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-context">Save context settings</button>
                 </div>
@@ -698,7 +698,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="search-status"></div>
+                <div class="admin-status" aria-live="polite" id="search-status"></div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-search">Save search settings</button>
                 </div>
@@ -788,7 +788,7 @@
                   </div>
                 </div>
                 <div class="composer-foot">
-                  <div class="admin-status" id="oauth-account-status">Loading connections...</div>
+                  <div class="admin-status" aria-live="polite" id="oauth-account-status">Loading connections...</div>
                   <div class="actions">
                     <button type="button" class="secondary" id="delete-oauth-account">Delete</button>
                     <button type="button" class="secondary" id="refresh-oauth-account">Refresh</button>
@@ -889,7 +889,7 @@
                   </div>
                 </div>
                 <div class="composer-foot">
-                  <div class="admin-status" id="schedule-status">Loading schedules...</div>
+                  <div class="admin-status" aria-live="polite" id="schedule-status">Loading schedules...</div>
                   <div class="actions">
                     <button type="button" class="secondary" id="schedule-view-runs" disabled>View runs</button>
                     <button type="button" class="secondary" id="schedule-toggle" disabled>Pause</button>
@@ -932,7 +932,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="local-doc-summarization-status">Loading document summary settings...</div>
+                <div class="admin-status" aria-live="polite" id="local-doc-summarization-status">Loading document summary settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-local-doc-summarization">Save summarization settings</button>
                 </div>
@@ -972,7 +972,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="local-doc-ocr-status">Loading OCR settings...</div>
+                <div class="admin-status" aria-live="polite" id="local-doc-ocr-status">Loading OCR settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-local-doc-ocr">Save OCR settings</button>
                 </div>
@@ -1015,7 +1015,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="database-backup-status">Loading database backup settings...</div>
+                <div class="admin-status" aria-live="polite" id="database-backup-status">Loading database backup settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-database-backup">Save backup settings</button>
                 </div>
@@ -1093,7 +1093,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="service-status">Loading services...</div>
+                <div class="admin-status" aria-live="polite" id="service-status">Loading services...</div>
                 <button type="button" class="primary" id="save-service">Save service</button>
               </div>
             </div>
@@ -1153,7 +1153,7 @@
                   </div>
                 </div>
                 <div class="composer-foot">
-                  <div class="admin-status" id="site-status">Loading site logins...</div>
+                  <div class="admin-status" aria-live="polite" id="site-status">Loading site logins...</div>
                   <div class="actions">
                     <button type="button" class="secondary" id="delete-site">Delete</button>
                     <button type="button" class="primary" id="save-site">Save site login</button>
@@ -1215,7 +1215,7 @@
                 </div>
               </div>
               <div class="composer-foot">
-                <div class="admin-status" id="messaging-channels-status">Loading messaging channel settings...</div>
+                <div class="admin-status" aria-live="polite" id="messaging-channels-status">Loading messaging channel settings...</div>
                 <div class="actions">
                   <button type="button" class="primary" id="save-messaging-channels">Save messaging settings</button>
                 </div>
@@ -1261,7 +1261,7 @@
                   </div>
                 </div>
                 <div class="composer-foot">
-                  <div class="admin-status" id="skill-status">Loading skills...</div>
+                  <div class="admin-status" aria-live="polite" id="skill-status">Loading skills...</div>
                   <div class="actions">
                     <button type="button" class="secondary" id="delete-skill">Delete</button>
                     <button type="button" class="primary" id="save-skill">Save skill</button>
@@ -1285,7 +1285,7 @@
                   <div class="actions">
                     <button type="button" class="primary" id="openclaw-import-button">Import skill</button>
                   </div>
-                  <div class="admin-status" id="openclaw-import-status">Import a ClawHub zip URL or a local OpenClaw skill path.</div>
+                  <div class="admin-status" aria-live="polite" id="openclaw-import-status">Import a ClawHub zip URL or a local OpenClaw skill path.</div>
                   <pre class="history-code capability-import-result" id="openclaw-import-result" hidden></pre>
                 </div>
               </div>
