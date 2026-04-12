@@ -34,15 +34,11 @@
 (def ^:dynamic *session-op-thread* nil)
 (def ^:dynamic *suppress-snapshot-scheduling?* false)
 
-(defonce ^:private wm-atom (atom {}))
-(defonce ^:private runtime-state-atom (atom {:generation 0
-                                             :reaper-future nil}))
-(defonce ^:private runtime-lock (Object.))
 (def ^:private session-op-lock-count 512)
-(defonce ^:private session-op-locks
-  (vec (repeatedly session-op-lock-count #(Object.))))
+(defonce ^:private installed-runtime-atom (atom nil))
 
-(declare get-wm warm-start! snapshot! snapshot-interval-ms snapshot-debounce-ms)
+(declare get-wm warm-start! snapshot! snapshot-interval-ms snapshot-debounce-ms
+         reset-runtime! prepare-shutdown!)
 
 (def ^:private default-snapshot-interval-ms 30000)
 (def ^:private default-snapshot-debounce-ms 2000)
@@ -50,6 +46,44 @@
 (def ^:private default-reap-idle-after-ms (* 2 60 60 1000))
 (def ^:private live-task-states
   #{:running :waiting_input :waiting_approval :paused :resumable})
+
+(defn- make-runtime
+  []
+  {:wm-state-atom      (atom {})
+   :runtime-state-atom (atom {:generation 0
+                              :reaper-future nil})
+   :runtime-lock       (Object.)
+   :session-op-locks   (vec (repeatedly session-op-lock-count #(Object.)))})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Working-memory runtime is not installed"
+                      {:component :xia/working-memory-runtime}))))
+
+(defn- wm-state-atom
+  []
+  (:wm-state-atom (current-runtime)))
+
+(defn- maybe-wm-state-atom
+  []
+  (some-> (maybe-current-runtime) :wm-state-atom))
+
+(defn- runtime-state-atom
+  []
+  (:runtime-state-atom (current-runtime)))
+
+(defn- runtime-lock
+  []
+  (:runtime-lock (current-runtime)))
+
+(defn- session-op-locks
+  []
+  (:session-op-locks (current-runtime)))
 
 (defn- current-time-ms []
   (System/currentTimeMillis))
@@ -59,8 +93,9 @@
   (Thread/sleep (long delay-ms)))
 
 (defn- default-session-id []
-  (when (= 1 (count @wm-atom))
-    (first (keys @wm-atom))))
+  (when-let [wm-state-atom* (maybe-wm-state-atom)]
+    (when (= 1 (count @wm-state-atom*))
+      (first (keys @wm-state-atom*)))))
 
 (defn- resolve-session-id
   ([] (resolve-session-id nil))
@@ -72,12 +107,13 @@
    (session-wm nil))
   ([session-id]
    (when-let [sid (resolve-session-id session-id)]
-     (get @wm-atom sid))))
+     (when-let [wm-state-atom* (maybe-wm-state-atom)]
+       (get @wm-state-atom* sid)))))
 
 (defn- session-op-lock
   [session-id]
   (when session-id
-    (nth session-op-locks
+    (nth (session-op-locks)
          (mod (bit-and Integer/MAX_VALUE (int (hash session-id)))
               session-op-lock-count))))
 
@@ -90,12 +126,13 @@
 (defn- run-session-op!
   [session-id f]
   (if-let [sid (resolve-session-id session-id)]
-    (if (in-session-op? sid)
-      (f sid)
-      (locking (session-op-lock sid)
-        (binding [*session-op-session-id* sid
-                  *session-op-thread* (Thread/currentThread)]
-          (f sid))))
+    (when (maybe-current-runtime)
+      (if (in-session-op? sid)
+        (f sid)
+        (locking (session-op-lock sid)
+          (binding [*session-op-session-id* sid
+                    *session-op-thread* (Thread/currentThread)]
+            (f sid)))))
     (f nil)))
 
 (defn- update-session-wm!
@@ -103,7 +140,8 @@
   (run-session-op! session-id
     (fn [sid]
       (when sid
-        (let [states @wm-atom]
+        (let [wm-state-atom* (wm-state-atom)
+              states @wm-state-atom*]
           (when-let [wm (get states sid)]
             (let [now        (current-time-ms)
                   schedule?  (atom false)
@@ -119,7 +157,7 @@
                                         (do
                                           (reset! schedule? true)
                                           (assoc next-wm :snapshot-task-scheduled? true)))))))]
-              (reset! wm-atom (assoc states sid updated))
+              (reset! wm-state-atom* (assoc states sid updated))
               (when @schedule?
                 (when-not (async/submit-background!
                            "wm-snapshot"
@@ -142,7 +180,7 @@
                                         (recur))))))))
                   (run-session-op! sid
                     (fn [sid*]
-                      (swap! wm-atom update sid*
+                      (swap! wm-state-atom* update sid*
                              #(when %
                                 (assoc % :snapshot-task-scheduled? false)))))))
               updated)))))))
@@ -152,10 +190,11 @@
   (run-session-op! session-id
     (fn [sid]
       (when sid
-        (let [states @wm-atom]
+        (let [wm-state-atom* (wm-state-atom)
+              states @wm-state-atom*]
           (when-let [wm (get states sid)]
             (let [updated (f wm)]
-              (reset! wm-atom (assoc states sid updated))
+              (reset! wm-state-atom* (assoc states sid updated))
               updated)))))))
 
 (def ^:private default-config
@@ -1083,7 +1122,7 @@ Rules:
   [session-id]
   (run-session-op! session-id
     (fn [sid]
-      (let [wm {:session-id      sid
+        (let [wm {:session-id      sid
                 :topics          nil
                 :prev-topics     nil
                 :prompt-cache-version 0
@@ -1100,7 +1139,7 @@ Rules:
                 :episode-refs    []
                 :local-doc-refs  []
                 :config          default-config}]
-        (swap! wm-atom assoc sid wm)
+        (swap! (wm-state-atom) assoc sid wm)
         wm))))
 
 (defn- restore-snapshot!
@@ -1204,12 +1243,13 @@ Rules:
 (defn clear-wm!
   "Clear working memory (on session end)."
   ([]
-   (reset! wm-atom {}))
+   (when-let [wm-state-atom* (maybe-wm-state-atom)]
+     (reset! wm-state-atom* {})))
   ([session-id]
    (run-session-op! session-id
      (fn [sid]
        (when sid
-         (swap! wm-atom dissoc sid))))))
+         (swap! (wm-state-atom) dissoc sid))))))
 
 ;; ============================================================================
 ;; Pinning
@@ -1309,10 +1349,12 @@ Rules:
 (defn snapshot-all!
   "Persist every currently live working-memory session to DB."
   []
-  (let [session-ids (vec (keys @wm-atom))]
-    (doseq [session-id session-ids]
-      (snapshot! session-id))
-    (count session-ids)))
+  (if-let [wm-state-atom* (maybe-wm-state-atom)]
+    (let [session-ids (vec (keys @wm-state-atom*))]
+      (doseq [session-id session-ids]
+        (snapshot! session-id))
+      (count session-ids))
+    0))
 
 (defn- task-live?
   [task]
@@ -1369,7 +1411,7 @@ Rules:
 (defn- reap-stale-working-memories!
   []
   (let [now-ms      (current-time-ms)
-        session-ids (vec (keys @wm-atom))]
+        session-ids (vec (keys @(wm-state-atom)))]
     (reduce (fn [count* session-id]
               (if (true? (maybe-reap-stale-session-wm! session-id now-ms))
                 (inc count*)
@@ -1378,13 +1420,13 @@ Rules:
             session-ids)))
 
 (defn- run-reaper-loop!
-  [generation]
+  [runtime-state-atom* generation]
   (loop []
-    (when (= generation (:generation @runtime-state-atom))
+    (when (= generation (:generation @runtime-state-atom*))
       (let [continue?
             (try
               (sleep-ms! (reaper-interval-ms))
-              (when (= generation (:generation @runtime-state-atom))
+              (when (= generation (:generation @runtime-state-atom*))
                 (let [reaped (reap-stale-working-memories!)]
                   (when (pos? reaped)
                     (log/info "Reaped" reaped "stale working-memory session(s)"))))
@@ -1397,26 +1439,52 @@ Rules:
         (when continue?
           (recur))))))
 
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (prepare-shutdown!)
+       (clear-wm!)))
+   (reset! installed-runtime-atom runtime)
+   (reset-runtime!)
+   runtime))
+
 (defn reset-runtime!
   []
-  (locking runtime-lock
-    (when-let [future (:reaper-future @runtime-state-atom)]
-      (.cancel future true))
-    (let [generation (inc (long (:generation @runtime-state-atom)))
-          future     (async/submit-background! "wm-reaper"
-                                               #(run-reaper-loop! generation))]
-      (reset! wm-atom {})
-      (reset! runtime-state-atom {:generation generation
-                                  :reaper-future future})))
+  (let [runtime (or (maybe-current-runtime)
+                    (let [runtime (make-runtime)]
+                      (reset! installed-runtime-atom runtime)
+                      runtime))]
+    (locking (runtime-lock)
+      (let [runtime-state-atom* (runtime-state-atom)]
+        (when-let [future (:reaper-future @runtime-state-atom*)]
+          (.cancel future true))
+        (let [generation (inc (long (:generation @runtime-state-atom*)))
+              future     (async/submit-background! "wm-reaper"
+                                                   #(run-reaper-loop! runtime-state-atom*
+                                                                      generation))]
+          (reset! (wm-state-atom) {})
+          (reset! runtime-state-atom* {:generation generation
+                                       :reaper-future future})))))
   nil)
 
 (defn prepare-shutdown!
   []
-  (locking runtime-lock
-    (when-let [future (:reaper-future @runtime-state-atom)]
-      (.cancel future true))
-    (swap! runtime-state-atom
-           (fn [state]
-             {:generation (inc (long (:generation state)))
-              :reaper-future nil})))
+  (when (maybe-current-runtime)
+    (locking (runtime-lock)
+      (when-let [future (:reaper-future @(runtime-state-atom))]
+        (.cancel future true))
+      (swap! (runtime-state-atom)
+             (fn [state]
+               {:generation (inc (long (:generation state)))
+                :reaper-future nil}))))
+  nil)
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (prepare-shutdown!)
+    (reset! (:wm-state-atom runtime) {})
+    (reset! installed-runtime-atom nil))
   nil)

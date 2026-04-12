@@ -7,9 +7,9 @@
 > is a modern echo of that tale: an autonomous AI assistant that quietly
 > tends to the details of your digital life.
 
-Xia (/ɕja/, pronounced "shyah") is a secure and portable personal AI assistant
-for online work. It runs as a single local application, remembers context across
-sessions, works with any LLM models, and helps with web research, browser
+Xia (/ɕja/, pronounced "shyah") is a secure Portable Persistent AI Assistant
+(P2A2) for online work. It runs as a single local application, remembers context
+across sessions, works with any LLM models, and helps with web research, browser
 automation, authenticated APIs, and recurring online tasks.
 
 ## What Xia Is For

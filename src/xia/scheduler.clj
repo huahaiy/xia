@@ -29,12 +29,57 @@
 ;; State
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private tick-executor (atom nil))
-(defonce ^:private work-executor (atom nil))
-(defonce ^:private running-schedules (atom #{}))
-(defonce ^:private maintenance-running? (atom false))
-(defonce ^:private last-maintenance-at (atom nil))
-(defonce ^:private thread-counter (atom 0))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:tick-executor-atom (atom nil)
+   :work-executor-atom (atom nil)
+   :running-schedules-atom (atom #{})
+   :maintenance-running?-atom (atom false)
+   :last-maintenance-at-atom (atom nil)
+   :thread-counter-atom (atom 0)
+   :runtime-lock (Object.)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- ensure-runtime-installed!
+  []
+  (or (maybe-current-runtime)
+      (let [runtime (make-runtime)]
+        (reset! installed-runtime-atom runtime)
+        runtime)))
+
+(defn- tick-executor-atom
+  []
+  (:tick-executor-atom (ensure-runtime-installed!)))
+
+(defn- work-executor-atom
+  []
+  (:work-executor-atom (ensure-runtime-installed!)))
+
+(defn- running-schedules-atom
+  []
+  (:running-schedules-atom (ensure-runtime-installed!)))
+
+(defn- maintenance-running?-atom
+  []
+  (:maintenance-running?-atom (ensure-runtime-installed!)))
+
+(defn- last-maintenance-at-atom
+  []
+  (:last-maintenance-at-atom (ensure-runtime-installed!)))
+
+(defn- thread-counter-atom
+  []
+  (:thread-counter-atom (ensure-runtime-installed!)))
+
+(defn- runtime-lock
+  []
+  (:runtime-lock (ensure-runtime-installed!)))
 
 (def ^:private maintenance-interval-ms (* 24 60 60 1000))
 (defn- max-concurrent-runs
@@ -46,18 +91,19 @@
   (reify ThreadFactory
     (newThread [_ runnable]
       (doto (Thread. ^Runnable runnable
-                     (str prefix "-" (swap! thread-counter inc)))
+                     (str prefix "-" (swap! (thread-counter-atom) inc)))
         (.setDaemon true)))))
 
 (defn- ensure-work-executor!
   []
-  (locking work-executor
-    (let [exec @work-executor]
+  (locking (runtime-lock)
+    (let [work-executor* (work-executor-atom)
+          exec @work-executor*]
       (if (and exec (not (.isShutdown ^ExecutorService exec)))
         exec
         (let [new-exec (Executors/newFixedThreadPool (int (max-concurrent-runs))
                                                      (daemon-thread-factory "xia-scheduler-work"))]
-          (reset! work-executor new-exec)
+          (reset! work-executor* new-exec)
           new-exec)))))
 
 (defn- submit-work!
@@ -75,6 +121,14 @@
       (catch RejectedExecutionException e
         (log/error e "Scheduler work submission rejected:" kind)
         false))))
+
+(defn- shutdown-executor!
+  [^ExecutorService exec]
+  (.shutdown exec)
+  (try
+    (.awaitTermination exec 30 TimeUnit/SECONDS)
+    (catch InterruptedException _
+      (.shutdownNow exec))))
 
 ;; ---------------------------------------------------------------------------
 ;; Execution
@@ -291,8 +345,8 @@
   [sched]
   (let [id (:id sched)]
     (when (and (runtime-state/accepting-new-work?)
-               (not (contains? @running-schedules id)))
-      (swap! running-schedules conj id)
+               (not (contains? @(running-schedules-atom) id)))
+      (swap! (running-schedules-atom) conj id)
       (try
         (let [started-at    (java.util.Date.)
               claimed-sched (schedule/claim-schedule-run! id started-at)]
@@ -323,7 +377,7 @@
         (catch Exception e
           (log/error e "Schedule execution failed:" (name id)))
         (finally
-          (swap! running-schedules disj id))))
+          (swap! (running-schedules-atom) disj id))))
     (when-not (runtime-state/accepting-new-work?)
       (log/debug "Skipping schedule execution because runtime is draining"
                  {:schedule-id id
@@ -365,20 +419,20 @@
         (when (backup/backup-due?)
           (submit-work! "automatic backup"
                         #(backup/run-scheduled-backup!)))
-        (when (and (or (nil? @last-maintenance-at)
-                       (>= (- (.getTime now) (.getTime ^java.util.Date @last-maintenance-at))
+        (when (and (or (nil? @(last-maintenance-at-atom))
+                       (>= (- (.getTime now) (.getTime ^java.util.Date @(last-maintenance-at-atom)))
                            (long maintenance-interval-ms)))
-                   (compare-and-set! maintenance-running? false true))
+                   (compare-and-set! (maintenance-running?-atom) false true))
           (submit-work! "background maintenance"
                         (fn []
                           (try
                             (hippo/consolidate-if-pending!)
                             (hippo/maintain-knowledge! now)
-                            (reset! last-maintenance-at now)
+                            (reset! (last-maintenance-at-atom) now)
                             (catch Exception e
                               (log/error e "Background maintenance failed"))
                             (finally
-                              (reset! maintenance-running? false))))))))
+                              (reset! (maintenance-running?-atom) false))))))))
     (catch Exception e
       (log/error e "Scheduler tick failed"))))
 
@@ -393,51 +447,72 @@
 (defn start!
   "Start the background scheduler. Ticks every 60 seconds."
   []
-  (when @tick-executor
+  (ensure-runtime-installed!)
+  (when @(tick-executor-atom)
     (log/warn "Scheduler already running"))
-  (when-not @tick-executor
+  (when-not @(tick-executor-atom)
     (let [^ScheduledExecutorService exec (Executors/newSingleThreadScheduledExecutor)]
       (ensure-work-executor!)
       (.scheduleAtFixedRate exec ^Runnable tick! 60 60 TimeUnit/SECONDS)
-      (reset! tick-executor exec)
+      (reset! (tick-executor-atom) exec)
       (log/info "Scheduler started (60s interval)"))))
 
 (defn stop!
   "Stop the background scheduler gracefully."
   []
-  (when-let [^ScheduledExecutorService exec @tick-executor]
-    (.shutdown exec)
-    (try
-      (.awaitTermination exec 30 TimeUnit/SECONDS)
-      (catch InterruptedException _
-        (.shutdownNow exec)))
-    (reset! tick-executor nil)
-    (when-let [^ExecutorService work @work-executor]
-      (.shutdown work)
-      (try
-        (.awaitTermination work 30 TimeUnit/SECONDS)
-        (catch InterruptedException _
-          (.shutdownNow work)))
-      (reset! work-executor nil))
-    (reset! maintenance-running? false)
-    (reset! last-maintenance-at nil)
-    (log/info "Scheduler stopped")))
+  (let [^ScheduledExecutorService tick-exec @(tick-executor-atom)
+        ^ExecutorService work-exec @(work-executor-atom)]
+    (when tick-exec
+      (shutdown-executor! tick-exec)
+      (reset! (tick-executor-atom) nil))
+    (when work-exec
+      (shutdown-executor! work-exec)
+      (reset! (work-executor-atom) nil))
+    (reset! (maintenance-running?-atom) false)
+    (reset! (last-maintenance-at-atom) nil)
+    (when (or tick-exec work-exec)
+      (log/info "Scheduler stopped"))))
 
 (defn ^:no-doc reset-runtime!
   []
-  (reset! running-schedules #{})
-  (reset! maintenance-running? false)
-  (reset! last-maintenance-at nil)
+  (reset! (running-schedules-atom) #{})
+  (reset! (maintenance-running?-atom) false)
+  (reset! (last-maintenance-at-atom) nil)
+  nil)
+
+(defn install-runtime!
+  ([] (or (maybe-current-runtime)
+          (install-runtime! (make-runtime))))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (when (or (some-> (:tick-executor-atom runtime) deref some?)
+              (some-> (:work-executor-atom runtime) deref some?))
+      (stop!))
+    (reset! (:tick-executor-atom runtime) nil)
+    (reset! (:work-executor-atom runtime) nil)
+    (reset! (:running-schedules-atom runtime) #{})
+    (reset! (:maintenance-running?-atom runtime) false)
+    (reset! (:last-maintenance-at-atom runtime) nil)
+    (reset! (:thread-counter-atom runtime) 0)
+    (reset! installed-runtime-atom nil))
   nil)
 
 (defn running?
   "Check if the scheduler is currently running."
   []
-  (some? @tick-executor))
+  (some? @(tick-executor-atom)))
 
 (defn runtime-activity
   "Return coarse scheduler runtime activity for control-plane inspection."
   []
-  {:running?               (boolean @tick-executor)
-   :running-schedule-count (count @running-schedules)
-   :maintenance-running?   (boolean @maintenance-running?)})
+  {:running?               (boolean @(tick-executor-atom))
+   :running-schedule-count (count @(running-schedules-atom))
+   :maintenance-running?   (boolean @(maintenance-running?-atom))})

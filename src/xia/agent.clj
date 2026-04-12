@@ -28,10 +28,38 @@
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(defonce ^:private active-session-turns (atom #{}))
-(defonce ^:private active-session-runs (atom {}))
-(defonce ^:private active-task-runs (atom {}))
+(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:dynamic *turn-llm-budget-state* nil)
+
+(declare clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:active-session-turns-atom (atom #{})
+   :active-session-runs-atom  (atom {})
+   :active-task-runs-atom     (atom {})})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Agent runtime is not installed"
+                      {:component :xia/agent-runtime}))))
+
+(defn- active-session-turns-atom
+  []
+  (:active-session-turns-atom (current-runtime)))
+
+(defn- active-session-runs-atom
+  []
+  (:active-session-runs-atom (current-runtime)))
+
+(defn- active-task-runs-atom
+  []
+  (:active-task-runs-atom (current-runtime)))
 
 (def ^:private trace-context-keys
   [:request-id
@@ -55,12 +83,13 @@
 (defn- try-acquire-session-turn!
   [session-id]
   (loop []
-    (let [active @active-session-turns]
+    (let [active-session-turns* (active-session-turns-atom)
+          active @active-session-turns*]
       (cond
         (contains? active session-id)
         false
 
-        (compare-and-set! active-session-turns active (conj active session-id))
+        (compare-and-set! active-session-turns* active (conj active session-id))
         true
 
         :else
@@ -69,7 +98,7 @@
 (defn- release-session-turn!
   [session-id]
   (when session-id
-    (swap! active-session-turns disj session-id))
+    (swap! (active-session-turns-atom) disj session-id))
   nil)
 
 (defn- with-session-turn-lock
@@ -294,7 +323,7 @@
   ([]
    (cancel-all-sessions! "runtime stopping"))
   ([reason]
-   (let [session-ids (keys @active-session-runs)]
+   (let [session-ids (keys @(active-session-runs-atom))]
      (doseq [session-id session-ids]
        (cancel-session! session-id reason))
      (count session-ids))))
@@ -302,9 +331,27 @@
 (defn runtime-activity
   "Return coarse agent runtime activity counts for control-plane inspection."
   []
-  {:active-session-turn-count (count @active-session-turns)
-   :active-session-run-count  (count @active-session-runs)
-   :active-task-run-count     (count @active-task-runs)})
+  {:active-session-turn-count (count @(active-session-turns-atom))
+   :active-session-run-count  (count @(active-session-runs-atom))
+   :active-task-run-count     (count @(active-task-runs-atom))})
+
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (reset! (:active-session-turns-atom runtime) #{})
+    (reset! (:active-session-runs-atom runtime) {})
+    (reset! (:active-task-runs-atom runtime) {})
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn session-cancelled?
   [session-id]
@@ -333,7 +380,7 @@
   [session-id f]
   (if session-id
     (let [run-id (Object.)]
-      (swap! active-session-runs assoc session-id
+      (swap! (active-session-runs-atom) assoc session-id
              {:run-id run-id
               :supervisor-thread (Thread/currentThread)
               :task-id nil
@@ -343,7 +390,7 @@
       (try
         (f)
         (finally
-          (swap! active-session-runs
+          (swap! (active-session-runs-atom)
                  (fn [runs]
                    (if (= run-id (get-in runs [session-id :run-id]))
                      (dissoc runs session-id)
@@ -353,12 +400,12 @@
 (defn- session-run-entry
   [session-id]
   (when session-id
-    (get @active-session-runs session-id)))
+    (get @(active-session-runs-atom) session-id)))
 
 (defn- task-run-entry
   [task-id]
   (when task-id
-    (get @active-task-runs task-id)))
+    (get @(active-task-runs-atom) task-id)))
 
 (defn- session-bound-task-id
   [session-id]
@@ -404,7 +451,7 @@
 (defn- update-session-run-entry!
   [session-id f]
   (when session-id
-    (swap! active-session-runs
+    (swap! (active-session-runs-atom)
            (fn [runs]
              (if-let [entry (get runs session-id)]
                (assoc runs session-id (f entry))
@@ -413,7 +460,7 @@
 (defn- update-task-run-entry!
   [task-id f]
   (when task-id
-    (swap! active-task-runs
+    (swap! (active-task-runs-atom)
            (fn [runs]
              (if-let [entry (get runs task-id)]
                (assoc runs task-id (f entry))
@@ -434,7 +481,7 @@
                         :child-session-ids (:child-session-ids entry)
                         :cancelled? (:cancelled? entry)
                         :cancel-reason (:cancel-reason entry)}]
-        (swap! active-task-runs assoc task-id task-entry)
+        (swap! (active-task-runs-atom) assoc task-id task-entry)
         (update-session-run-entry! session-id
                                    (fn [run]
                                      (if (= session-run-id (:run-id run))
@@ -449,7 +496,7 @@
   (when task-id
     (let [expected-task-run-id (or task-run-id
                                    (some-> (task-run-entry task-id) :task-run-id))]
-      (swap! active-task-runs
+      (swap! (active-task-runs-atom)
              (fn [runs]
                (if-let [entry (get runs task-id)]
                  (if (and (or (nil? expected-task-run-id)
@@ -632,7 +679,7 @@
   (let [session-entry* (atom nil)
         task-entry*    (atom nil)]
     (when session-id
-      (swap! active-session-runs
+      (swap! (active-session-runs-atom)
              (fn [runs]
                (if-let [entry (get runs session-id)]
                  (let [updated (assoc entry
@@ -643,7 +690,7 @@
                    (assoc runs session-id updated))
                  runs)))
       (when-let [task-id (:task-id @session-entry*)]
-        (swap! active-task-runs
+        (swap! (active-task-runs-atom)
                (fn [runs]
                  (if-let [entry (get runs task-id)]
                    (let [updated (assoc entry

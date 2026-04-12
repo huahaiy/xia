@@ -6,15 +6,44 @@
             RejectedExecutionException RejectedExecutionHandler ThreadFactory
             ThreadPoolExecutor TimeUnit]))
 
-(defonce ^:private executors (atom {}))
-(defonce ^:private thread-counter (atom 0))
+(defonce ^:private installed-runtime-atom (atom nil))
+
+(declare clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:executors-atom    (atom {})
+   :thread-counter    (atom 0)
+   :runtime-lock      (Object.)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Async runtime is not installed"
+                      {:component :xia/async-runtime}))))
+
+(defn- executors-atom
+  []
+  (:executors-atom (current-runtime)))
+
+(defn- thread-counter-atom
+  []
+  (:thread-counter (current-runtime)))
+
+(defn- runtime-lock
+  []
+  (:runtime-lock (current-runtime)))
 
 (defn- daemon-thread-factory
   [prefix]
   (reify ThreadFactory
     (newThread [_ runnable]
       (doto (Thread. ^Runnable runnable
-                     (str prefix "-" (swap! thread-counter inc)))
+                     (str prefix "-" (swap! (thread-counter-atom) inc)))
         (.setDaemon true)))))
 
 (defn- caller-runs-unless-shutdown-handler
@@ -71,12 +100,13 @@
 
 (defn- ensure-executor!
   [kind]
-  (locking executors
-    (let [^ExecutorService exec (get @executors kind)]
+  (locking (runtime-lock)
+    (let [executors* (executors-atom)
+          ^ExecutorService exec (get @executors* kind)]
       (if (and exec (not (.isShutdown exec)))
         exec
         (let [new-exec (create-executor kind)]
-          (swap! executors assoc kind new-exec)
+          (swap! executors* assoc kind new-exec)
           new-exec)))))
 
 (defn- convey-bindings
@@ -113,3 +143,32 @@
    (submit-parallel! nil f))
   ([description f]
    (submit! :parallel description f)))
+
+(defn- shutdown-executor!
+  [^ExecutorService exec]
+  (.shutdownNow exec)
+  (try
+    (.awaitTermination exec 25 TimeUnit/MILLISECONDS)
+    (catch InterruptedException _
+      (.interrupt (Thread/currentThread))
+      (.shutdownNow exec))))
+
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (locking (:runtime-lock runtime)
+      (doseq [[_ ^ExecutorService exec] @(:executors-atom runtime)]
+        (shutdown-executor! exec))
+      (reset! (:executors-atom runtime) {})
+      (reset! (:thread-counter runtime) 0)
+      (reset! installed-runtime-atom nil)))
+  nil)

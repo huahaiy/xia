@@ -27,18 +27,54 @@
 (def ^:private action-settle-ms 1200)
 (def ^:private session-snapshot-lock-count 256)
 
-(defonce ^:private runtime (atom {:playwright nil
-                                  :browser nil
-                                  :bootstrapped? false
-                                  :browser-installed? false
-                                  :browser-executable nil
-                                  :browser-channel nil
-                                  :driver-resource-fs nil
-                                  :driver-resource-fs-owned? false}))
-(defonce ^:private runtime-lock (Object.))
-(defonce ^ConcurrentHashMap ^:private sessions (ConcurrentHashMap.))
-(defonce ^:private session-snapshot-locks
-  (vec (repeatedly session-snapshot-lock-count #(Object.))))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn- empty-runtime-state
+  []
+  {:playwright nil
+   :browser nil
+   :bootstrapped? false
+   :browser-installed? false
+   :browser-executable nil
+   :browser-channel nil
+   :driver-resource-fs nil
+   :driver-resource-fs-owned? false})
+
+(defn- make-runtime
+  []
+  {:runtime-atom (atom (empty-runtime-state))
+   :runtime-lock (Object.)
+   :sessions (ConcurrentHashMap.)
+   :session-snapshot-locks
+   (vec (repeatedly session-snapshot-lock-count #(Object.)))})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- ensure-runtime-installed!
+  []
+  (or (maybe-current-runtime)
+      (let [runtime (make-runtime)]
+        (reset! installed-runtime-atom runtime)
+        runtime)))
+
+(defn- runtime-atom
+  []
+  (:runtime-atom (ensure-runtime-installed!)))
+
+(defn- runtime-lock
+  []
+  (:runtime-lock (ensure-runtime-installed!)))
+
+(defn- sessions-map
+  []
+  ^ConcurrentHashMap (:sessions (ensure-runtime-installed!)))
+
+(defn- session-snapshot-locks
+  []
+  (:session-snapshot-locks (ensure-runtime-installed!)))
 
 (defn- now-ms
   ^long []
@@ -100,7 +136,7 @@
   [session-id]
   (when session-id
     (let [session-hash (int (hash session-id))]
-      (nth session-snapshot-locks
+      (nth (session-snapshot-locks)
            (mod (bit-and Integer/MAX_VALUE session-hash)
                 session-snapshot-lock-count)))))
 
@@ -142,19 +178,19 @@
 
 (defn- ensure-driver-resource-fs!
   []
-  (locking runtime-lock
-    (when-not (:driver-resource-fs @runtime)
+  (locking (runtime-lock)
+    (when-not (:driver-resource-fs @(runtime-atom))
       (when-let [^URI resource-uri (driver-resource-uri)]
         (when-not (= "jar" (.getScheme resource-uri))
           (try
             (let [^FileSystem fs (open-driver-resource-fs resource-uri)]
-              (swap! runtime assoc
+              (swap! (runtime-atom) assoc
                      :driver-resource-fs fs
                      :driver-resource-fs-owned? true))
             (catch FileSystemAlreadyExistsException _
               (try
                 (let [^FileSystem fs (existing-driver-resource-fs resource-uri)]
-                  (swap! runtime assoc
+                  (swap! (runtime-atom) assoc
                          :driver-resource-fs fs
                          :driver-resource-fs-owned? false))
                 (catch Exception e
@@ -325,8 +361,8 @@
 
 (defn- stop-runtime!
   []
-  (locking runtime-lock
-    (let [{:keys [browser playwright driver-resource-fs driver-resource-fs-owned?]} @runtime]
+  (locking (runtime-lock)
+    (let [{:keys [browser playwright driver-resource-fs driver-resource-fs-owned?]} @(runtime-atom)]
       (try
         (when browser
           (.close ^Browser browser))
@@ -339,22 +375,15 @@
         (when driver-resource-fs-owned?
           (close-driver-resource-fs! driver-resource-fs))
         (catch Exception _))
-      (reset! runtime {:playwright nil
-                       :browser nil
-                       :bootstrapped? false
-                       :browser-installed? false
-                       :browser-executable nil
-                       :browser-channel nil
-                       :driver-resource-fs nil
-                       :driver-resource-fs-owned? false}))))
+      (reset! (runtime-atom) (empty-runtime-state)))))
 
 (defn runtime-status
   []
   (let [{:keys [bootstrapped?
                 browser-installed?
                 browser-executable
-                browser-channel]} @runtime
-        running? (runtime-running? @runtime)]
+                browser-channel]} @(runtime-atom)
+        running? (runtime-running? @(runtime-atom))]
     (cond
       (not (enabled?))
       {:backend backend-id
@@ -458,9 +487,9 @@
   []
   (when-not (enabled?)
     (throw (not-ready-ex)))
-  (locking runtime-lock
-    (if (runtime-running? @runtime)
-      @runtime
+  (locking (runtime-lock)
+    (if (runtime-running? @(runtime-atom))
+      @(runtime-atom)
       (let [playwright (create-playwright)]
         (try
           (let [{:keys [installed? executable]} (ensure-browser-installed! playwright)
@@ -472,7 +501,7 @@
                        :browser-installed? (boolean installed?)
                        :browser-executable executable
                        :browser-channel launch-channel}]
-            (reset! runtime state)
+            (reset! (runtime-atom) state)
             state)
           (catch Exception e
             (try (.close ^Playwright playwright) (catch Exception _))
@@ -760,7 +789,7 @@
   (with-session-snapshot-lock
     session-id
     (fn []
-      (when-let [sess (.get sessions session-id)]
+      (when-let [sess (.get (sessions-map) session-id)]
         ((:write-snapshot! ops)
          session-id
          (live-session->snapshot session-id sess))))))
@@ -779,14 +808,14 @@
 
 (defn- close-live-session!
   [session-id]
-  (when-let [sess (.remove sessions session-id)]
+  (when-let [sess (.remove (sessions-map) session-id)]
     (close-session-value! sess)
     true))
 
 (defn- discard-live-session!
   [session-id sess]
   (when sess
-    (.remove sessions session-id sess)
+    (.remove (sessions-map) session-id sess)
     (close-session-value! sess)
     true))
 
@@ -795,16 +824,16 @@
   (doseq [[session-id snapshot] (backend-snapshots ops)]
     (when ((:snapshot-expired? ops) snapshot)
       ((:delete-snapshot! ops) session-id)))
-  (doseq [[session-id sess] sessions]
+  (doseq [[session-id sess] (sessions-map)]
     (when (session-expired? @sess)
       (persist-session! ops session-id)
       (close-live-session! session-id)))
-  (when (zero? (.size sessions))
+  (when (zero? (.size (sessions-map)))
     (stop-runtime!)))
 
 (defn- least-recently-used-live-session-id
   []
-  (some->> (seq sessions)
+  (some->> (seq (sessions-map))
            (sort-by (fn [[_ sess]]
                       (long (or (:last-access @sess)
                                 (:created-at-ms @sess)
@@ -882,12 +911,12 @@
 (defn- create-session!
   [ops session-id url js-enabled storage-state created-at-ms headless-override channel-override]
   (evict-expired! ops)
-  (when (and (>= (.size sessions) (long (or (:max-sessions ops) 5)))
+  (when (and (>= (.size (sessions-map)) (long (or (:max-sessions ops) 5)))
              (not (evict-one-live-session! ops))
-             (>= (.size sessions) (long (or (:max-sessions ops) 5))))
+             (>= (.size (sessions-map)) (long (or (:max-sessions ops) 5))))
     (throw (ex-info (str "Too many browser sessions (max " (or (:max-sessions ops) 5)
                          "). Close one first.")
-                    {:active (.size sessions)})))
+                    {:active (.size (sessions-map))})))
   ((:validate-url! ops) url)
   (let [runtime* (ensure-runtime!)
         [browser owned-browser?] (session-browser runtime* headless-override channel-override)
@@ -900,7 +929,7 @@
                     :last-access (now-ms)
                     :created-at-ms (long (or created-at-ms (now-ms)))
                     :js-enabled js-enabled})]
-    (.put sessions session-id sess)
+    (.put (sessions-map) session-id sess)
     (try
       (.navigate ^Page page url)
       (settle-page! page)
@@ -950,14 +979,14 @@
 
 (defn- get-session
   [ops session-id]
-  (let [sess (or (.get sessions session-id)
+  (let [sess (or (.get (sessions-map) session-id)
                  (with-session-snapshot-lock
                    session-id
                    (fn []
-                     (or (.get sessions session-id)
+                     (or (.get (sessions-map) session-id)
                          (do
                            (restore-session! ops session-id)
-                           (.get sessions session-id))))))]
+                           (.get (sessions-map) session-id))))))]
     (when-not sess
       (throw (ex-info (str "No browser session: " session-id
                            ". Call browser-open first.")
@@ -966,7 +995,7 @@
                  (with-session-snapshot-lock
                    session-id
                    (fn []
-                     (let [current (.get sessions session-id)]
+                     (let [current (.get (sessions-map) session-id)]
                        (cond
                          (and current (not (session-expired? @current)))
                          current
@@ -1117,12 +1146,12 @@
   (open-session* [_ url {:keys [js storage-state headless channel]}]
     (let [session-id (str (random-uuid))
           _sess (create-session! ops session-id url (if (nil? js) true js) storage-state nil headless channel)
-          session-atom (.get sessions session-id)]
+          session-atom (.get (sessions-map) session-id)]
       (session-page-result session-id (current-page-or-throw session-id session-atom))))
   (navigate* [_ session-id url]
     ((:validate-url! ops) url)
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           page (current-page-or-throw session-id session-atom)]
       (.navigate ^Page page url)
       (settle-page! page)
@@ -1130,7 +1159,7 @@
       (session-page-result session-id page)))
   (click* [_ session-id selector]
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           page (current-page-or-throw session-id session-atom)
           locator (.locator ^Page page selector)]
       (when (zero? (.count ^Locator locator))
@@ -1143,7 +1172,7 @@
         (session-page-result session-id page*))))
   (fill-selector* [_ session-id selector value _opts]
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           page (current-page-or-throw session-id session-atom)
           locator (.locator ^Page page selector)]
       (when (zero? (.count ^Locator locator))
@@ -1154,7 +1183,7 @@
       (session-page-result session-id page)))
   (fill-form* [_ session-id fields {:keys [form-selector submit require-all-fields?]}]
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           page (current-page-or-throw session-id session-atom)
           form (form-locator page form-selector)
           missing-fields (missing-form-fields form fields)]
@@ -1180,13 +1209,13 @@
           (session-page-result session-id page)))))
   (read-page* [_ session-id]
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           page (current-page-or-throw session-id session-atom)]
       (persist-session! ops session-id)
       (session-page-result session-id page)))
   (query-elements* [_ session-id opts]
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           ^Page page (current-page-or-throw session-id session-atom)
           opts* (browser.query/normalize-opts opts)
           payload-json (json/write-json-str {:selector (:selector opts*)
@@ -1206,7 +1235,7 @@
                               :or {full-page false
                                    detail "auto"}}]
     (let [_sess (get-session ops session-id)
-          session-atom (.get sessions session-id)
+          session-atom (.get (sessions-map) session-id)
           page (current-page-or-throw session-id session-atom)]
       (persist-session! ops session-id)
       (screenshot-result session-id page {:full-page full-page
@@ -1215,7 +1244,7 @@
 	                                 :or {timeout-ms 10000
 	                                      interval-ms 500}}]
 	    (let [_sess (get-session ops session-id)
-	          session-atom (.get sessions session-id)
+	          session-atom (.get (sessions-map) session-id)
 	          ^Page page (current-page-or-throw session-id session-atom)
 	          timeout-ms* (long (clojure.core/max 0 (long timeout-ms)))
 	          interval-ms* (long (clojure.core/max 50 (long interval-ms)))
@@ -1246,10 +1275,10 @@
                        :timed_out true))
               (recur)))))))
   (release-session* [_ session-id]
-    (when-let [sess (.get sessions session-id)]
+    (when-let [sess (.get (sessions-map) session-id)]
       (persist-session! ops session-id)
       (close-live-session! session-id))
-    (when (zero? (.size sessions))
+    (when (zero? (.size (sessions-map)))
       (stop-runtime!))
     {:status "released"
      :session-id session-id
@@ -1257,22 +1286,22 @@
   (close-session* [_ session-id]
     (close-live-session! session-id)
     ((:delete-snapshot! ops) session-id)
-    (when (zero? (.size sessions))
+    (when (zero? (.size (sessions-map)))
       (stop-runtime!))
     {:status "closed" :session-id session-id})
   (release-all-sessions!* [_]
     (doseq [[session-id _snapshot] (backend-snapshots ops)]
-      (when-let [sess (.get sessions session-id)]
+      (when-let [sess (.get (sessions-map) session-id)]
         (persist-session! ops session-id)
         (close-live-session! session-id)))
-    (when (zero? (.size sessions))
+    (when (zero? (.size (sessions-map)))
       (stop-runtime!))
     {:backend backend-id
      :status "released"})
   (close-all-sessions!* [_]
-    (doseq [[session-id sess] sessions]
+    (doseq [[session-id sess] (sessions-map)]
       (close-session-value! sess)
-      (.remove sessions session-id))
+      (.remove (sessions-map) session-id))
     (doseq [[session-id _snapshot] (backend-snapshots ops)]
       ((:delete-snapshot! ops) session-id))
     (stop-runtime!)
@@ -1294,7 +1323,7 @@
 	                                                    :live? false
 	                                                    :resumable? true}])))
 	                                   (backend-snapshots ops)))]
-	      (->> sessions
+	      (->> (sessions-map)
 	           (reduce (fn [acc [session-id sess]]
 	                     (let [^Page page (current-page* sess)
 	                           state @sess
@@ -1316,3 +1345,29 @@
 (defn create-backend
   [ops]
   (->PlaywrightBackend ops))
+
+(defn install-runtime!
+  ([] (or (maybe-current-runtime)
+          (install-runtime! (make-runtime))))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (stop-runtime!)
+    (.clear ^ConcurrentHashMap (:sessions runtime))
+    (reset! (:runtime-atom runtime) (empty-runtime-state))
+    (reset! installed-runtime-atom nil))
+  nil)
+
+(defn reset-runtime!
+  []
+  (stop-runtime!)
+  (.clear (sessions-map))
+  (reset! (runtime-atom) (empty-runtime-state))
+  nil)

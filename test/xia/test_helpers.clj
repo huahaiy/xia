@@ -6,8 +6,17 @@
             [datalevin.embedding :as emb]
             [datalevin.llm :as llm]
             [taoensso.timbre :as timbre]
+            [xia.agent :as agent]
+            [xia.async :as async]
+            [xia.browser.playwright :as playwright]
+            [xia.channel.http :as http]
             [xia.db :as db]
+            [xia.oauth :as oauth]
+            [xia.prompt :as prompt]
+            [xia.retrieval-state :as retrieval-state]
             [xia.runtime-overlay :as runtime-overlay]
+            [xia.runtime-state :as runtime-state]
+            [xia.scheduler :as scheduler]
             [xia.working-memory :as wm])
   (:import [java.io File]
            [java.nio.file Files]
@@ -273,17 +282,45 @@
   [f]
   (let [path (temp-db-path)]
     (runtime-overlay/clear!)
-    (wm/prepare-shutdown!)
-    (wm/clear-wm!)
+    (scheduler/clear-runtime!)
+    (playwright/clear-runtime!)
+    (oauth/clear-runtime!)
+    (retrieval-state/clear-runtime!)
+    (runtime-state/clear-runtime!)
+    (http/clear-runtime!)
+    (agent/clear-runtime!)
+    (prompt/clear-runtime!)
+    (async/clear-runtime!)
+    (wm/clear-runtime!)
+    (db/clear-runtime!)
+    (runtime-state/install-runtime!)
+    (retrieval-state/install-runtime!)
+    (oauth/install-runtime!)
+    (playwright/install-runtime!)
+    (async/install-runtime!)
+    (prompt/install-runtime!)
+    (agent/install-runtime!)
+    (http/install-runtime!)
+    (scheduler/install-runtime!)
+    (wm/install-runtime!)
+    (db/install-runtime!)
     (db/connect! path (test-connect-options
                         {:passphrase-provider (constantly "xia-test-passphrase")}))
     (try
       (f)
       (finally
         (runtime-overlay/clear!)
-        (wm/prepare-shutdown!)
-        (wm/clear-wm!)
-        (db/close!)))))
+        (scheduler/clear-runtime!)
+        (playwright/clear-runtime!)
+        (oauth/clear-runtime!)
+        (retrieval-state/clear-runtime!)
+        (runtime-state/clear-runtime!)
+        (http/clear-runtime!)
+        (agent/clear-runtime!)
+        (prompt/clear-runtime!)
+        (async/clear-runtime!)
+        (wm/clear-runtime!)
+        (db/clear-runtime!)))))
 
 (defn seed-node!
   "Helper: create a KG node and return its entity id."

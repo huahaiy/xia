@@ -5,10 +5,14 @@
     [xia.crypto :as crypto]
     [xia.db :as db]
     [xia.instance-supervisor :as instance-supervisor]
+    [xia.oauth :as oauth]
+    [xia.browser.playwright :as playwright]
     [xia.paths :as paths]
     [xia.pack :as pack]
+    [xia.retrieval-state :as retrieval-state]
     [xia.runtime-overlay :as runtime-overlay]
     [xia.runtime-state :as runtime-state]
+    [xia.scheduler :as scheduler]
     [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
@@ -21,8 +25,16 @@
 (defn- reset-core-runtime!
   []
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
+  (xia.channel.http/clear-runtime!)
+  (xia.db/clear-runtime!)
+  (scheduler/clear-runtime!)
+  (playwright/clear-runtime!)
+  (oauth/clear-runtime!)
+  (retrieval-state/clear-runtime!)
+  (runtime-state/clear-runtime!)
   (xia.channel.http/clear-command-shutdown-handler!)
   (runtime-overlay/clear!)
+  (runtime-state/install-runtime!)
   (runtime-state/mark-stopped!))
 
 (use-fixtures :each

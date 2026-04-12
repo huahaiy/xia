@@ -34,14 +34,7 @@
 ;; State
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private server-atom (atom nil))
-(defonce ^:private ws-sessions (atom {})) ; channel → session-id
-(defonce ^:private session-statuses (atom {})) ; session-id string → latest status map
-(defonce ^:private task-runtime-events (atom {})) ; task-id string → {:next-index long :events [...]}
-(defonce ^:private task-runtime-stream-subscribers (atom {})) ; task-id string → {subscriber-id callback}
-(defonce ^:private web-dev-state (atom {:enabled? false
-                                        :root nil}))
-(defonce ^:private command-shutdown-handler-atom (atom nil))
+(defonce ^:private installed-runtime-atom (atom nil))
 
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
@@ -56,6 +49,88 @@
 (def ^:private local-ui-session-channels #{:http :websocket})
 (def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
 (def ^:private byte-array-class (class (byte-array 0)))
+(declare install-runtime! clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:server-atom                         (atom nil)
+   :ws-sessions-atom                    (atom {})
+   :session-statuses-atom               (atom {})
+   :task-runtime-events-atom            (atom {})
+   :task-runtime-stream-subscribers-atom (atom {})
+   :web-dev-state-atom                  (atom {:enabled? false
+                                               :root nil})
+   :command-shutdown-handler-atom       (atom nil)
+   :local-session-secret                (delay
+                                          (let [bytes (byte-array 32)
+                                                _     (.nextBytes (SecureRandom.) bytes)]
+                                            (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes)))
+   :rest-session-finalizer-executor-atom (atom nil)
+   :rest-session-finalizers-atom        (atom {})
+   :session-finalize-locks              (vec (repeatedly session-finalize-lock-count #(Object.)))})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "HTTP runtime is not installed"
+                      {:component :xia/http}))))
+
+(defn- server-atom
+  []
+  (:server-atom (current-runtime)))
+
+(defn- maybe-server-atom
+  []
+  (some-> (maybe-current-runtime) :server-atom))
+
+(defn- ws-sessions-atom
+  []
+  (:ws-sessions-atom (current-runtime)))
+
+(defn- session-statuses-atom
+  []
+  (:session-statuses-atom (current-runtime)))
+
+(defn- task-runtime-events-atom
+  []
+  (:task-runtime-events-atom (current-runtime)))
+
+(defn- task-runtime-stream-subscribers-atom
+  []
+  (:task-runtime-stream-subscribers-atom (current-runtime)))
+
+(defn- web-dev-state-atom
+  []
+  (:web-dev-state-atom (current-runtime)))
+
+(defn- command-shutdown-handler-atom
+  []
+  (:command-shutdown-handler-atom (current-runtime)))
+
+(defn- maybe-command-shutdown-handler-atom
+  []
+  (some-> (maybe-current-runtime) :command-shutdown-handler-atom))
+
+(defn- local-session-secret-delay
+  []
+  (:local-session-secret (current-runtime)))
+
+(defn- rest-session-finalizer-executor-atom
+  []
+  (:rest-session-finalizer-executor-atom (current-runtime)))
+
+(defn- rest-session-finalizers-atom
+  []
+  (:rest-session-finalizers-atom (current-runtime)))
+
+(defn- session-finalize-locks
+  []
+  (:session-finalize-locks (current-runtime)))
+
 (defn- long-max
   ^long [^long a ^long b]
   (if (> a b) a b))
@@ -63,16 +138,6 @@
 (defn- long-min
   ^long [^long a ^long b]
   (if (< a b) a b))
-
-(defonce ^:private local-session-secret
-  (delay
-    (let [bytes (byte-array 32)
-          _     (.nextBytes (SecureRandom.) bytes)]
-      (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes))))
-(defonce ^:private rest-session-finalizer-executor (atom nil))
-(defonce ^:private rest-session-finalizers (atom {})) ; session-id string → ScheduledFuture
-(defonce ^:private session-finalize-locks
-  (vec (repeatedly session-finalize-lock-count #(Object.))))
 
 ;; ---------------------------------------------------------------------------
 ;; Local web UI
@@ -103,7 +168,7 @@
 
 (defn- web-dev-enabled?
   []
-  (true? (:enabled? @web-dev-state)))
+  (true? (:enabled? @(web-dev-state-atom))))
 
 (defn- resolve-web-dev-root
   []
@@ -117,21 +182,21 @@
 (defn- configure-web-dev!
   [enabled?]
   (if-not enabled?
-    (reset! web-dev-state {:enabled? false
-                           :root nil})
+    (reset! (web-dev-state-atom) {:enabled? false
+                                  :root nil})
     (if-let [root (resolve-web-dev-root)]
       (do
-        (reset! web-dev-state {:enabled? true
-                               :root root})
+        (reset! (web-dev-state-atom) {:enabled? true
+                                      :root root})
         (log/info "Web dev mode enabled; serving live web assets from" (str root)))
       (do
-        (reset! web-dev-state {:enabled? false
-                               :root nil})
+        (reset! (web-dev-state-atom) {:enabled? false
+                                      :root nil})
         (log/warn "Web dev mode requested, but web resources are not file-backed; falling back to bundled assets")))))
 
 (defn- web-dev-root
   []
-  (:root @web-dev-state))
+  (:root @(web-dev-state-atom)))
 
 (defn- web-dev-path
   ^Path [path]
@@ -294,7 +359,7 @@
 (defn- record-session-finalization-failure!
   [session-id channel step ^Throwable e]
   (let [sid-str (str session-id)]
-    (swap! session-statuses assoc
+    (swap! (session-statuses-atom) assoc
            sid-str
            {:session-id         sid-str
             :state              :error
@@ -313,7 +378,7 @@
 
 (defn- finalize-websocket-session!
   [ch]
-  (when-let [sid (get @ws-sessions ch)]
+  (when-let [sid (get @(ws-sessions-atom) ch)]
     (let [topics-or-failure
           (try
             (:topics (wm/get-wm sid))
@@ -333,12 +398,12 @@
                   (record-session-finalization-failure! sid :websocket :persist-session e)
                   false))]
           (when finalized?
-            (swap! session-statuses dissoc (str sid))
+            (swap! (session-statuses-atom) dissoc (str sid))
             (try
               (wm/clear-wm! sid)
               (catch Exception e
                 (log/error e "Failed to clear WebSocket working memory"))))))))
-  (swap! ws-sessions dissoc ch)
+  (swap! (ws-sessions-atom) dissoc ch)
   (log/info "WebSocket disconnected"))
 
 (defn- ws-handler [req]
@@ -348,14 +413,14 @@
        {:on-open
         (fn [ch]
           (let [sid (db/create-session! :websocket)]
-            (swap! ws-sessions assoc ch sid)
+            (swap! (ws-sessions-atom) assoc ch sid)
             (wm/ensure-wm! sid)
             (log/info "WebSocket connected, session:" sid)
             (http/send! ch (json/write-json-str {:type "connected" :session-id (str sid)}))))
 
         :on-receive
         (fn [ch msg]
-          (if-let [sid (get @ws-sessions ch)]
+          (if-let [sid (get @(ws-sessions-atom) ch)]
             (try
               (let [data     (json/read-json msg)
                     text     (get data "message" (get data "content" msg))
@@ -501,7 +566,7 @@
         (str/split (or query-string "") #"&")))
 
 (defn- session-secret []
-  @local-session-secret)
+  @(local-session-secret-delay))
 
 (defn- session-cookie-value []
   (str local-session-cookie-name "=" (session-secret)))
@@ -660,19 +725,22 @@
 
 (defn register-command-shutdown-handler!
   [handler]
-  (reset! command-shutdown-handler-atom handler)
+  (when-not (maybe-current-runtime)
+    (install-runtime!))
+  (reset! (command-shutdown-handler-atom) handler)
   nil)
 
 (defn clear-command-shutdown-handler!
   []
-  (reset! command-shutdown-handler-atom nil)
+  (when-let [handler-atom (maybe-command-shutdown-handler-atom)]
+    (reset! handler-atom nil))
   nil)
 
 (declare runtime-idle-body)
 
 (defn- handle-command-shutdown
   [_req]
-  (if-let [handler @command-shutdown-handler-atom]
+  (if-let [handler (some-> (maybe-command-shutdown-handler-atom) deref)]
     (let [{:keys [shutdown-allowed?] :as status} (runtime-health/idle-status)]
       (if shutdown-allowed?
         (do
@@ -986,7 +1054,7 @@
 
 (defn- session-busy?
   [session-id]
-  (let [state (:state (get @session-statuses (str session-id)))]
+  (let [state (:state (get @(session-statuses-atom) (str session-id)))]
     (contains? busy-session-states
                (cond
                  (keyword? state) state
@@ -996,7 +1064,7 @@
 (defn- session-finalize-lock
   [session-id]
   (when-let [sid (session-id-str session-id)]
-    (nth session-finalize-locks
+    (nth (session-finalize-locks)
          (mod (bit-and Integer/MAX_VALUE (int (hash sid)))
               session-finalize-lock-count))))
 
@@ -1016,27 +1084,27 @@
 (defn- cancel-rest-session-finalizer!
   [session-id]
   (when-let [sid (session-id-str session-id)]
-    (when-let [^ScheduledFuture future (get @rest-session-finalizers sid)]
+    (when-let [^ScheduledFuture future (get @(rest-session-finalizers-atom) sid)]
       (.cancel future false))
-    (swap! rest-session-finalizers dissoc sid)))
+    (swap! (rest-session-finalizers-atom) dissoc sid)))
 
 (defn- clear-rest-session-finalizers!
   []
-  (doseq [[_ ^ScheduledFuture future] @rest-session-finalizers]
+  (doseq [[_ ^ScheduledFuture future] @(rest-session-finalizers-atom)]
     (.cancel future false))
-  (reset! rest-session-finalizers {}))
+  (reset! (rest-session-finalizers-atom) {}))
 
 (defn- schedule-rest-session-finalizer!
   [session-id]
   (when-let [sid (session-id-str session-id)]
     (cancel-rest-session-finalizer! sid)
-    (when-let [^ScheduledExecutorService exec @rest-session-finalizer-executor]
+    (when-let [^ScheduledExecutorService exec @(rest-session-finalizer-executor-atom)]
       (let [delay-ms (rest-session-idle-timeout-ms)
             task     ^Runnable
             (fn []
-              (swap! rest-session-finalizers dissoc sid)
+              (swap! (rest-session-finalizers-atom) dissoc sid)
               (finalize-rest-session! sid :idle-timeout))]
-        (swap! rest-session-finalizers assoc
+        (swap! (rest-session-finalizers-atom) assoc
                sid
                (.schedule exec task (long delay-ms) TimeUnit/MILLISECONDS))))))
 
@@ -1057,13 +1125,13 @@
 (defn- clear-session-status!
   [session-id]
   (when session-id
-    (swap! session-statuses dissoc (str session-id))))
+    (swap! (session-statuses-atom) dissoc (str session-id))))
 
 (defn- append-task-runtime-event!
   [event]
   (when-let [task-id (some-> (:task-id event) str)]
     (let [received-at (java.util.Date.)]
-      (-> (swap! task-runtime-events
+      (-> (swap! (task-runtime-events-atom)
                  (fn [state]
                    (let [{:keys [next-index events]} (get state task-id)
                          next-index* (inc (long (or next-index 0)))
@@ -1083,7 +1151,7 @@
 (defn- register-task-runtime-stream-subscriber!
   [task-id subscriber-id callback]
   (when (and task-id subscriber-id callback)
-    (swap! task-runtime-stream-subscribers
+    (swap! (task-runtime-stream-subscribers-atom)
            update
            (str task-id)
            (fnil assoc {})
@@ -1093,7 +1161,7 @@
 (defn- unregister-task-runtime-stream-subscriber!
   [task-id subscriber-id]
   (when (and task-id subscriber-id)
-    (swap! task-runtime-stream-subscribers
+    (swap! (task-runtime-stream-subscribers-atom)
            (fn [state]
              (let [task-key (str task-id)
                    subscribers (dissoc (get state task-key {}) subscriber-id)]
@@ -1104,7 +1172,7 @@
 (defn- notify-task-runtime-stream-subscribers!
   [event]
   (when-let [task-id (some-> (:task-id event) str)]
-    (doseq [[subscriber-id callback] (get @task-runtime-stream-subscribers task-id)]
+    (doseq [[subscriber-id callback] (get @(task-runtime-stream-subscribers-atom) task-id)]
       (try
         (callback event)
         (catch Exception e
@@ -1129,7 +1197,7 @@
   (when-let [sid (some-> session-id str)]
     (if (terminal-status-state? state)
       (clear-session-status! sid)
-      (swap! session-statuses assoc sid (assoc status :updated-at (java.util.Date.))))))
+      (swap! (session-statuses-atom) assoc sid (assoc status :updated-at (java.util.Date.))))))
 
 (defn- http-runtime-event-handler
   [event]
@@ -1329,8 +1397,8 @@
    :session-accessible?          session-accessible?
    :session-active?              session-active?
    :session-busy?                session-busy?
-   :session-statuses-atom        session-statuses
-   :task-runtime-events-atom     task-runtime-events
+   :session-statuses-atom        (session-statuses-atom)
+   :task-runtime-events-atom     (task-runtime-events-atom)
    :throwable-message            throwable-message
    :touch-rest-session!          touch-rest-session!
    :truncate-text                truncate-text
@@ -1372,7 +1440,9 @@
   (if-not (session-id-str session-id)
     (handle-get-status session-id)
     (if (local-ui-session-allowed? session-id)
-      (handle-get-status session-id)
+      (handle-get-status session-id
+                         (when (= :http (session-channel session-id))
+                           :http))
       (json-response 404 {:error "session not found"}))))
 
 (defn- handle-get-current-task
@@ -2055,7 +2125,7 @@
 
 (defn current-port
   []
-  (:port @server-atom))
+  (some-> (maybe-server-atom) deref :port))
 
 (defn- port-bind-conflict?
   [^Throwable error]
@@ -2098,7 +2168,7 @@
   ([bind-host port]
    (start! bind-host port nil))
   ([bind-host port {:keys [web-dev?] :or {web-dev? false}}]
-   (when-let [{:keys [bind-host port]} @server-atom]
+   (when-let [{:keys [bind-host port]} @(server-atom)]
      (throw (ex-info "HTTP/WebSocket server already running"
                      {:bind-host bind-host
                       :port port})))
@@ -2120,33 +2190,67 @@
    (let [^ScheduledExecutorService finalizer-exec
          (Executors/newSingleThreadScheduledExecutor)
          {:keys [stop-fn port]} (start-server-with-port-fallback bind-host port)]
-     (reset! rest-session-finalizer-executor finalizer-exec)
-     (reset! server-atom {:stop-fn stop-fn
-                          :bind-host bind-host
-                          :port port})
+     (reset! (rest-session-finalizer-executor-atom) finalizer-exec)
+     (reset! (server-atom) {:stop-fn stop-fn
+                            :bind-host bind-host
+                            :port port})
      (log/info "HTTP/WebSocket server started on" bind-host ":" port)
      stop-fn)))
 
 (defn stop! []
-  (when-let [{:keys [stop-fn]} @server-atom]
+  (when-let [{:keys [stop-fn]} @(server-atom)]
     (doseq [{:keys [id channel active?]} (db/list-sessions {:include-workers? true})
             :when (and (contains? rest-session-channels channel) active?)]
       (finalize-rest-session! id :server-stop))
     (stop-fn) ; http-kit stop fn
-    (when-let [^ScheduledExecutorService exec @rest-session-finalizer-executor]
+    (when-let [^ScheduledExecutorService exec @(rest-session-finalizer-executor-atom)]
       (clear-rest-session-finalizers!)
       (.shutdown exec)
       (try
         (.awaitTermination exec 5 TimeUnit/SECONDS)
         (catch InterruptedException _
           (.shutdownNow exec)))
-      (reset! rest-session-finalizer-executor nil))
+      (reset! (rest-session-finalizer-executor-atom) nil))
     (prompt/clear-channel-adapter! :http)
     (prompt/clear-channel-adapter! :command)
     (prompt/clear-channel-adapter! :websocket)
-    (reset! session-statuses {})
-    (reset! task-runtime-events {})
+    (reset! (session-statuses-atom) {})
+    (reset! (task-runtime-events-atom) {})
     (clear-command-shutdown-handler!)
     (configure-web-dev! false)
-    (reset! server-atom nil)
+    (reset! (server-atom) nil)
     (log/info "Server stopped")))
+
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (when (some-> (:server-atom runtime) deref some?)
+      (stop!))
+    (when-let [^ScheduledExecutorService exec @(:rest-session-finalizer-executor-atom runtime)]
+      (clear-rest-session-finalizers!)
+      (.shutdown exec)
+      (try
+        (.awaitTermination exec 5 TimeUnit/SECONDS)
+        (catch InterruptedException _
+          (.shutdownNow exec))))
+    (reset! (:server-atom runtime) nil)
+    (reset! (:ws-sessions-atom runtime) {})
+    (reset! (:session-statuses-atom runtime) {})
+    (reset! (:task-runtime-events-atom runtime) {})
+    (reset! (:task-runtime-stream-subscribers-atom runtime) {})
+    (reset! (:web-dev-state-atom runtime) {:enabled? false
+                                           :root nil})
+    (reset! (:command-shutdown-handler-atom runtime) nil)
+    (reset! (:rest-session-finalizer-executor-atom runtime) nil)
+    (reset! (:rest-session-finalizers-atom runtime) {})
+    (reset! installed-runtime-atom nil))
+  nil)

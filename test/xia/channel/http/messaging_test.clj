@@ -2,6 +2,7 @@
   (:require [charred.api :as json]
             [clojure.test :refer :all]
             [xia.channel.http.messaging :as http-messaging]
+            [xia.db :as db]
             [xia.test-helpers :refer [with-test-db]])
   (:import [java.io ByteArrayInputStream]
            [java.nio.charset StandardCharsets]))
@@ -82,6 +83,15 @@
           body     (response-json response)]
       (is (= 401 (:status response)))
       (is (= "invalid telegram webhook secret" (get body "error"))))))
+
+(deftest telegram-webhook-handler-rejects-missing-configured-secret
+  (db/set-config! :messaging/telegram-enabled? "true")
+  (let [response (http-messaging/handle-telegram-webhook
+                  (handler-deps)
+                  {:body (request-body {"update_id" 1})})
+        body     (response-json response)]
+    (is (= 401 (:status response)))
+    (is (= "invalid telegram webhook secret" (get body "error")))))
 
 (deftest telegram-webhook-handler-forwards-valid-updates
   (let [seen (atom nil)]

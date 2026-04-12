@@ -365,8 +365,8 @@
 (defn telegram-secret-valid?
   [header-value]
   (let [secret (telegram-webhook-secret)]
-    (or (str/blank? (or secret ""))
-        (= secret (nonblank-str header-value)))))
+    (and (seq secret)
+         (= secret (nonblank-str header-value)))))
 
 (defn- session-meta
   [session-id]

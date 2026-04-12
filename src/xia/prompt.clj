@@ -12,22 +12,62 @@
 ;; Prompt callback registry
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private prompt-handlers (atom {}))
-(defonce ^:private approval-handlers (atom {}))
-(defonce ^:private status-handlers (atom {}))
-(defonce ^:private assistant-message-handlers (atom {}))
-(defonce ^:private runtime-event-handlers (atom {}))
-(defonce ^:private pending-interactions
-  (atom {:by-id {}
-         :by-session {}
-         :by-task {}}))
+(defonce ^:private installed-runtime-atom (atom nil))
 
-(def ^:private handler-registry
-  {:prompt prompt-handlers
-   :approval approval-handlers
-   :status status-handlers
-   :assistant-message assistant-message-handlers
-   :runtime-event runtime-event-handlers})
+(declare clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:prompt-handlers-atom            (atom {})
+   :approval-handlers-atom          (atom {})
+   :status-handlers-atom            (atom {})
+   :assistant-message-handlers-atom (atom {})
+   :runtime-event-handlers-atom     (atom {})
+   :pending-interactions-atom       (atom {:by-id {}
+                                           :by-session {}
+                                           :by-task {}})})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Prompt runtime is not installed"
+                      {:component :xia/prompt-runtime}))))
+
+(defn- prompt-handlers-atom
+  []
+  (:prompt-handlers-atom (current-runtime)))
+
+(defn- approval-handlers-atom
+  []
+  (:approval-handlers-atom (current-runtime)))
+
+(defn- status-handlers-atom
+  []
+  (:status-handlers-atom (current-runtime)))
+
+(defn- assistant-message-handlers-atom
+  []
+  (:assistant-message-handlers-atom (current-runtime)))
+
+(defn- runtime-event-handlers-atom
+  []
+  (:runtime-event-handlers-atom (current-runtime)))
+
+(defn- pending-interactions-atom
+  []
+  (:pending-interactions-atom (current-runtime)))
+
+(defn- handler-registry
+  []
+  {:prompt (prompt-handlers-atom)
+   :approval (approval-handlers-atom)
+   :status (status-handlers-atom)
+   :assistant-message (assistant-message-handlers-atom)
+   :runtime-event (runtime-event-handlers-atom)})
 
 (def ^:dynamic *interaction-context*
   "Dynamic execution context for tool interactions, e.g. {:channel :terminal :session-id ...}."
@@ -71,9 +111,9 @@
    - `:runtime-event`
 
    Any omitted key is cleared for that channel, so the adapter map acts as the
-   full interaction surface for that channel."
+  full interaction surface for that channel."
   [channel adapter]
-  (doseq [[k handlers] handler-registry]
+  (doseq [[k handlers] (handler-registry)]
     (register-handler! handlers channel (get adapter k)))
   nil)
 
@@ -139,7 +179,7 @@
                          (update :session-id #(some-> % str))
                          (update :task-id #(some-> % str))
                          (update :interaction-id str))]
-    (swap! pending-interactions
+    (swap! (pending-interactions-atom)
            (fn [state]
              (let [state* (cond-> state
                             (:task-id interaction*)
@@ -160,7 +200,7 @@
    - `:kind`
    - `:channel`"
   [selector]
-  (let [state       @pending-interactions
+  (let [state       @(pending-interactions-atom)
         selector*   (normalize-interaction-selector selector)
         interaction-id (interaction-id-for-selector state selector*)
         interaction (when interaction-id
@@ -483,7 +523,7 @@
   "Remove a pending interaction by selector."
   [selector]
   (let [selector* (normalize-interaction-selector selector)]
-    (swap! pending-interactions
+    (swap! (pending-interactions-atom)
            (fn [state]
              (if-let [interaction-id (interaction-id-for-selector state selector*)]
                (dissoc-interaction* state interaction-id)
@@ -515,13 +555,13 @@
   ([f]
    (register-prompt! :default f))
   ([channel f]
-   (register-handler! prompt-handlers channel f)))
+   (register-handler! (prompt-handlers-atom) channel f)))
 
 (defn prompt!
   "Prompt the user for input. Blocks until the user responds.
    Throws if no channel has registered a prompt handler."
   [label & {:keys [mask?] :or {mask? false}}]
-  (let [f (resolve-handler prompt-handlers)]
+  (let [f (resolve-handler (prompt-handlers-atom))]
     (when-not f
       (throw (ex-info "No interactive prompt available for current channel"
                       {:label label :channel (current-channel)})))
@@ -549,7 +589,7 @@
 (defn prompt-available?
   "True if a prompt handler is registered."
   []
-  (some? (resolve-handler prompt-handlers)))
+  (some? (resolve-handler (prompt-handlers-atom))))
 
 (defn register-approval!
   "Register a privileged-tool approval handler for a channel.
@@ -557,13 +597,13 @@
   ([f]
    (register-approval! :default f))
   ([channel f]
-   (register-handler! approval-handlers channel f)))
+   (register-handler! (approval-handlers-atom) channel f)))
 
 (defn approve!
   "Request approval for a privileged tool in the current interaction context.
    Returns true if approved, false if denied."
   [request]
-  (let [f (resolve-handler approval-handlers)
+  (let [f (resolve-handler (approval-handlers-atom))
         req (merge {:channel (current-channel)} *interaction-context* request)]
     (when-not f
       (throw (ex-info "No approval handler available for current channel"
@@ -610,7 +650,7 @@
 (defn approval-available?
   "True if an approval handler is registered."
   []
-  (some? (resolve-handler approval-handlers)))
+  (some? (resolve-handler (approval-handlers-atom))))
 
 (defn register-status!
   "Register a status callback for a channel.
@@ -618,20 +658,20 @@
   ([f]
    (register-status! :default f))
   ([channel f]
-   (register-handler! status-handlers channel f)))
+   (register-handler! (status-handlers-atom) channel f)))
 
 (defn status!
   "Report an execution status update for the current interaction context.
    Returns nil if no status handler is registered for the current channel."
   [status]
   (invoke-runtime-hook! :task-runtime/on-status status)
-  (when-let [f (resolve-handler status-handlers)]
+  (when-let [f (resolve-handler (status-handlers-atom))]
     (f (merge {:channel (current-channel)} *interaction-context* status))))
 
 (defn status-available?
   "True if a status handler is registered."
   []
-  (some? (resolve-handler status-handlers)))
+  (some? (resolve-handler (status-handlers-atom))))
 
 (defn register-assistant-message!
   "Register an assistant message callback for a channel.
@@ -639,19 +679,19 @@
   ([f]
    (register-assistant-message! :default f))
   ([channel f]
-   (register-handler! assistant-message-handlers channel f)))
+   (register-handler! (assistant-message-handlers-atom) channel f)))
 
 (defn assistant-message!
   "Report an assistant message for the current interaction context.
    Returns nil if no assistant message handler is registered for the current channel."
   [message]
-  (when-let [f (resolve-handler assistant-message-handlers)]
+  (when-let [f (resolve-handler (assistant-message-handlers-atom))]
     (f (merge {:channel (current-channel)} *interaction-context* message))))
 
 (defn assistant-message-available?
   "True if an assistant message handler is registered."
   []
-  (some? (resolve-handler assistant-message-handlers)))
+  (some? (resolve-handler (assistant-message-handlers-atom))))
 
 (defn register-runtime-event!
   "Register a runtime event callback for a channel.
@@ -659,16 +699,41 @@
   ([f]
    (register-runtime-event! :default f))
   ([channel f]
-   (register-handler! runtime-event-handlers channel f)))
+   (register-handler! (runtime-event-handlers-atom) channel f)))
 
 (defn runtime-event!
   "Report a typed runtime event for the current interaction context.
    Returns nil if no runtime event handler is registered for the current channel."
   [event]
-  (when-let [f (resolve-handler runtime-event-handlers)]
+  (when-let [f (resolve-handler (runtime-event-handlers-atom))]
     (f (merge {:channel (current-channel)} *interaction-context* event))))
 
 (defn runtime-event-available?
   "True if a runtime event handler is registered."
   []
-  (some? (resolve-handler runtime-event-handlers)))
+  (some? (resolve-handler (runtime-event-handlers-atom))))
+
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (doseq [state-atom [(:prompt-handlers-atom runtime)
+                        (:approval-handlers-atom runtime)
+                        (:status-handlers-atom runtime)
+                        (:assistant-message-handlers-atom runtime)
+                        (:runtime-event-handlers-atom runtime)]]
+      (reset! state-atom {}))
+    (reset! (:pending-interactions-atom runtime)
+            {:by-id {}
+             :by-session {}
+             :by-task {}})
+    (reset! installed-runtime-atom nil))
+  nil)

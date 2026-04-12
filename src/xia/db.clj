@@ -49,13 +49,82 @@
 ;; Connection management
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private conn-atom (atom nil))
-(defonce ^:private embedding-provider-atom (atom nil))
-(defonce ^:private llm-provider-atom (atom nil))
-(defonce ^:private db-path-atom (atom nil))
-(defonce ^:private instance-id-atom (atom nil))
-(defonce ^:private last-connect-event-atom (atom nil))
-(defonce ^:private last-close-event-atom (atom nil))
+(defonce ^:private installed-runtime-atom (atom nil))
+
+(declare install-runtime! clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:conn-atom               (atom nil)
+   :embedding-provider-atom (atom nil)
+   :llm-provider-atom       (atom nil)
+   :db-path-atom            (atom nil)
+   :instance-id-atom        (atom nil)
+   :last-connect-event-atom (atom nil)
+   :last-close-event-atom   (atom nil)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "DB runtime is not installed"
+                      {:component :xia/db}))))
+
+(defn- ensure-runtime-installed!
+  []
+  (or (maybe-current-runtime)
+      (install-runtime!)))
+
+(defn- conn-atom
+  []
+  (:conn-atom (current-runtime)))
+
+(defn- maybe-conn-atom
+  []
+  (some-> (maybe-current-runtime) :conn-atom))
+
+(defn- embedding-provider-atom
+  []
+  (:embedding-provider-atom (current-runtime)))
+
+(defn- llm-provider-atom
+  []
+  (:llm-provider-atom (current-runtime)))
+
+(defn- db-path-atom
+  []
+  (:db-path-atom (current-runtime)))
+
+(defn- maybe-db-path-atom
+  []
+  (some-> (maybe-current-runtime) :db-path-atom))
+
+(defn- instance-id-atom
+  []
+  (:instance-id-atom (current-runtime)))
+
+(defn- maybe-instance-id-atom
+  []
+  (some-> (maybe-current-runtime) :instance-id-atom))
+
+(defn- last-connect-event-atom
+  []
+  (:last-connect-event-atom (current-runtime)))
+
+(defn- maybe-last-connect-event-atom
+  []
+  (some-> (maybe-current-runtime) :last-connect-event-atom))
+
+(defn- last-close-event-atom
+  []
+  (:last-close-event-atom (current-runtime)))
+
+(defn- maybe-last-close-event-atom
+  []
+  (some-> (maybe-current-runtime) :last-close-event-atom))
 
 (defn- stack-frame->summary
   [^StackTraceElement frame]
@@ -75,19 +144,19 @@
   [phase callsite]
   {:at          (Instant/now)
    :phase       phase
-   :db-path     @db-path-atom
-   :instance-id @instance-id-atom
+   :db-path     (some-> (maybe-db-path-atom) deref)
+   :instance-id (some-> (maybe-instance-id-atom) deref)
    :callsite    (:summary callsite)})
 
 (defn last-connect-event
   "Return the most recent successful connect event for debugging."
   []
-  @last-connect-event-atom)
+  (some-> (maybe-last-connect-event-atom) deref))
 
 (defn last-close-event
   "Return the most recent close event for debugging."
   []
-  @last-close-event-atom)
+  (some-> (maybe-last-close-event-atom) deref))
 
 (def ^:private default-embedding-provider-id
   ;; Datalevin persists embedding domain provider ids and only accepts its
@@ -310,11 +379,11 @@
   (ensure-managed-model! provider-spec embedding-model-lock "embedding"))
 
 (defn- close-embedding-provider! []
-  (when-let [provider @embedding-provider-atom]
+  (when-let [provider @(embedding-provider-atom)]
     (try
       (d/close-embedding-provider provider)
       (catch Exception _))
-    (reset! embedding-provider-atom nil)))
+    (reset! (embedding-provider-atom) nil)))
 
 (defn- resolve-llm-provider-spec
   [db-path options]
@@ -387,11 +456,11 @@
         (llm/close-llm-provider this)))))
 
 (defn- close-llm-provider! []
-  (when-let [provider @llm-provider-atom]
+  (when-let [provider @(llm-provider-atom)]
     (try
       (d/close-llm-provider provider)
       (catch Exception _))
-    (reset! llm-provider-atom nil)))
+    (reset! (llm-provider-atom) nil)))
 
 (defn- prepare-managed-embedding-runtime!
   [datalevin-opts db-path]
@@ -409,7 +478,7 @@
                      (d/new-embedding-provider provider-spec))]
       (try
         (d/embedding-dimensions provider)
-        (reset! embedding-provider-atom provider)
+        (reset! (embedding-provider-atom) provider)
         provider
         (catch Throwable t
           (when-not (identical? provider provider-spec)
@@ -425,7 +494,7 @@
     (let [provider (if (satisfies? llm/ILLMProvider provider-spec)
                      provider-spec
                      (lazy-managed-llm-provider provider-spec))]
-      (reset! llm-provider-atom provider)
+      (reset! (llm-provider-atom) provider)
       provider)))
 
 (defn- parse-schema-version
@@ -472,20 +541,21 @@
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
   ([db-path crypto-opts]
+   (ensure-runtime-installed!)
    (let [callsite       (capture-callsite "db/connect! callsite")
          instance-id    (paths/resolve-instance-id (:instance-id crypto-opts))
          datalevin-opts (-> (resolve-datalevin-opts crypto-opts)
                             (prepare-managed-embedding-runtime! db-path))
          c              (d/get-conn db-path schema datalevin-opts)]
      (try
-       (reset! conn-atom c)
-       (reset! db-path-atom db-path)
-       (reset! instance-id-atom instance-id)
+       (reset! (conn-atom) c)
+       (reset! (db-path-atom) db-path)
+       (reset! (instance-id-atom) instance-id)
        (ensure-schema-version! c db-path)
        (crypto/configure! db-path crypto-opts)
        (init-embedding-provider! db-path datalevin-opts)
        (init-llm-provider! db-path crypto-opts)
-       (reset! last-connect-event-atom
+       (reset! (last-connect-event-atom)
                (assoc (lifecycle-event (runtime-state/phase) callsite)
                       :db-path db-path
                       :instance-id instance-id))
@@ -493,9 +563,9 @@
        (catch Throwable t
          (close-llm-provider!)
          (close-embedding-provider!)
-         (reset! conn-atom nil)
-         (reset! db-path-atom nil)
-         (reset! instance-id-atom nil)
+         (reset! (conn-atom) nil)
+         (reset! (db-path-atom) nil)
+         (reset! (instance-id-atom) nil)
          (try
            (d/close c)
            (catch Exception _))
@@ -506,7 +576,16 @@
 
 (defn connected?
   []
-  (some? @conn-atom))
+  (some-> (maybe-conn-atom) deref some?))
+
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
 
 (defn- not-connected-ex?
   [ex]
@@ -529,24 +608,24 @@
 (defn conn
   "Return the current connection. Throws if not connected."
   []
-  (or @conn-atom
+  (or @(conn-atom)
       (throw (ex-info not-connected-message {}))))
 
 (defn current-embedding-provider
   []
-  @embedding-provider-atom)
+  (some-> (maybe-current-runtime) :embedding-provider-atom deref))
 
 (defn current-llm-provider
   []
-  @llm-provider-atom)
+  (some-> (maybe-current-runtime) :llm-provider-atom deref))
 
 (defn current-db-path
   []
-  @db-path-atom)
+  (some-> (maybe-db-path-atom) deref))
 
 (defn current-instance-id
   []
-  @instance-id-atom)
+  (some-> (maybe-instance-id-atom) deref))
 
 (defn current-db-tx
   []
@@ -579,7 +658,8 @@
   (let [phase    (runtime-state/phase)
         callsite (capture-callsite "db/close! callsite")
         event    (lifecycle-event phase callsite)]
-    (reset! last-close-event-atom event)
+    (when-let [last-close-event-atom* (maybe-last-close-event-atom)]
+      (reset! last-close-event-atom* event))
     (if (= phase :running)
       (log/error (:throwable callsite)
                  "Unexpected db/close! while Xia runtime is still marked running"
@@ -591,11 +671,23 @@
                 "instance" (:instance-id event))))
   (close-llm-provider!)
   (close-embedding-provider!)
-  (when-let [c @conn-atom]
+  (when-let [c (some-> (maybe-conn-atom) deref)]
     (d/close c)
-    (reset! conn-atom nil))
-  (reset! db-path-atom nil)
-  (reset! instance-id-atom nil))
+    (reset! (conn-atom) nil))
+  (when-let [db-path-atom* (maybe-db-path-atom)]
+    (reset! db-path-atom* nil))
+  (when-let [instance-id-atom* (maybe-instance-id-atom)]
+    (reset! instance-id-atom* nil)))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (close!)
+    (doseq [state-atom [(:last-connect-event-atom runtime)
+                        (:last-close-event-atom runtime)]]
+      (reset! state-atom nil))
+    (reset! installed-runtime-atom nil))
+  nil)
 
 ;; ---------------------------------------------------------------------------
 ;; Generic helpers

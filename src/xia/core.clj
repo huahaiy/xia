@@ -221,13 +221,45 @@
     {:xia/runtime-overlay
      {:overlay-path runtime-overlay}
 
+     :xia/runtime-state-runtime
+     {}
+
+     :xia/retrieval-runtime
+     {}
+
+     :xia/oauth-runtime
+     {}
+
+     :xia/browser-runtime
+     {}
+
      :xia/db
      {:db-path db
       :connect-options connect-options}
 
+     :xia/async-runtime
+     {}
+
+     :xia/prompt-runtime
+     {:async-runtime (ig/ref :xia/async-runtime)}
+
+     :xia/agent-runtime
+     {:async-runtime (ig/ref :xia/async-runtime)}
+
+     :xia/working-memory-runtime
+     {:async-runtime (ig/ref :xia/async-runtime)}
+
      :xia/runtime-support
      {:db (ig/ref :xia/db)
-      :overlay (ig/ref :xia/runtime-overlay)}
+      :overlay (ig/ref :xia/runtime-overlay)
+      :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)
+      :retrieval-runtime (ig/ref :xia/retrieval-runtime)
+      :oauth-runtime (ig/ref :xia/oauth-runtime)
+      :browser-runtime (ig/ref :xia/browser-runtime)
+      :async-runtime (ig/ref :xia/async-runtime)
+      :prompt-runtime (ig/ref :xia/prompt-runtime)
+      :agent-runtime (ig/ref :xia/agent-runtime)
+      :working-memory-runtime (ig/ref :xia/working-memory-runtime)}
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)}
@@ -261,8 +293,12 @@
      :xia/messaging
      {:runtime-support (ig/ref :xia/runtime-support)}
 
+     :xia/http-runtime
+     {:runtime-support (ig/ref :xia/runtime-support)}
+
      :xia/http
-     {:scheduler (ig/ref :xia/scheduler)
+     {:http-runtime (ig/ref :xia/http-runtime)
+      :scheduler (ig/ref :xia/scheduler)
       :messaging (ig/ref :xia/messaging)
       :bind-host bind
       :port port

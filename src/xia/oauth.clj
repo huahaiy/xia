@@ -12,9 +12,62 @@
            [java.security MessageDigest SecureRandom]
            [java.time Instant]
            [java.util Base64 Date]))
-(defonce ^:private pending-authorizations (atom {}))
-(defonce ^:private proactive-refresh-lock (Object.))
-(defonce ^:private last-proactive-refresh-at-ms (atom 0))
+
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn- make-runtime
+  []
+  {:pending-authorizations-atom (atom {})
+   :proactive-refresh-lock (Object.)
+   :last-proactive-refresh-at-ms-atom (atom 0)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- ensure-runtime-installed!
+  []
+  (or (maybe-current-runtime)
+      (let [runtime (make-runtime)]
+        (reset! installed-runtime-atom runtime)
+        runtime)))
+
+(defn- pending-authorizations-atom
+  []
+  (:pending-authorizations-atom (ensure-runtime-installed!)))
+
+(defn- proactive-refresh-lock
+  []
+  (:proactive-refresh-lock (ensure-runtime-installed!)))
+
+(defn- last-proactive-refresh-at-ms-atom
+  []
+  (:last-proactive-refresh-at-ms-atom (ensure-runtime-installed!)))
+
+(defn install-runtime!
+  ([] (or (maybe-current-runtime)
+          (install-runtime! (make-runtime))))
+  ([runtime]
+   (when-let [current (maybe-current-runtime)]
+     (when-not (identical? current runtime)
+       (clear-runtime!)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn clear-runtime!
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (reset! (:pending-authorizations-atom runtime) {})
+    (reset! (:last-proactive-refresh-at-ms-atom runtime) 0)
+    (reset! installed-runtime-atom nil))
+  nil)
+
+(defn reset-runtime!
+  []
+  (reset! (pending-authorizations-atom) {})
+  (reset! (last-proactive-refresh-at-ms-atom) 0)
+  nil)
 
 (def ^:private auth-state-ttl-ms (* 15 60 1000))
 (def ^:private refresh-skew-ms 60000)
@@ -56,7 +109,7 @@
 (defn- cleanup-pending!
   []
   (let [cutoff (- (long (now-ms)) (long auth-state-ttl-ms))]
-    (swap! pending-authorizations
+    (swap! (pending-authorizations-atom)
            (fn [pending]
              (into {}
                    (filter (fn [[_ {:keys [created-at-ms]}]]
@@ -214,10 +267,10 @@
   ([] (refresh-autonomous-accounts! {}))
   ([{:keys [force?]
      :or   {force? false}}]
-   (locking proactive-refresh-lock
+   (locking (proactive-refresh-lock)
      (let [started-at (long (now-ms))]
        (if (and (not force?)
-                (< (- started-at (long @last-proactive-refresh-at-ms))
+                (< (- started-at (long @(last-proactive-refresh-at-ms-atom)))
                    (long proactive-refresh-min-interval-ms)))
          {:status    :skipped
           :reason    :recent
@@ -249,7 +302,7 @@
                                (seq (:refreshed result))) :partial
                           (seq (:errors result)) :error
                           :else :ok)]
-           (reset! last-proactive-refresh-at-ms started-at)
+           (reset! (last-proactive-refresh-at-ms-atom) started-at)
            (assoc result
                   :status status
                   :checked (count accounts))))))))
@@ -277,10 +330,10 @@
     (when-not redirect-uri
       (throw (ex-info "OAuth redirect URI is required"
                       {:account-id account-id})))
-    (swap! pending-authorizations assoc state {:account-id    account-id
-                                               :redirect-uri  redirect-uri
-                                               :code-verifier verifier
-                                               :created-at-ms (now-ms)})
+    (swap! (pending-authorizations-atom) assoc state {:account-id    account-id
+                                                      :redirect-uri  redirect-uri
+                                                      :code-verifier verifier
+                                                      :created-at-ms (now-ms)})
     {:account-id    account-id
      :authorization-url auth-url
      :redirect-uri  redirect-uri
@@ -290,10 +343,10 @@
   [state code]
   (cleanup-pending!)
   (let [{:keys [account-id redirect-uri code-verifier] :as pending}
-        (get @pending-authorizations state)]
+        (get @(pending-authorizations-atom) state)]
     (when-not pending
       (throw (ex-info "OAuth authorization state is invalid or expired" {:state state})))
-    (swap! pending-authorizations dissoc state)
+    (swap! (pending-authorizations-atom) dissoc state)
     (let [account      (get-account account-id)
           token-params (or (parse-json-map (:oauth.account/token-params account)) {})
           params       (merge {"grant_type" "authorization_code"
@@ -344,4 +397,4 @@
 
 (defn callback-account-id
   [state]
-  (some-> (get @pending-authorizations state) :account-id))
+  (some-> (get @(pending-authorizations-atom) state) :account-id))
