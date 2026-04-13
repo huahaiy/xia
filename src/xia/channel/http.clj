@@ -20,6 +20,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
+            [xia.util :as util]
             [xia.wake-projection :as wake-projection]
             [xia.working-memory :as wm])
   (:import [java.io ByteArrayOutputStream InputStream]
@@ -43,6 +44,7 @@
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private max-live-task-runtime-events 200)
+(def ^:private websocket-receive-retry-delay-ms 5000)
 (def ^:private session-finalize-lock-count 256)
 (def ^:private http-port-search-limit 100)
 (def ^:private rest-session-channels #{:http :command})
@@ -55,6 +57,7 @@
   []
   {:server-atom                         (atom nil)
    :ws-sessions-atom                    (atom {})
+   :websocket-receive-failures-atom     (atom {})
    :session-statuses-atom               (atom {})
    :task-runtime-events-atom            (atom {})
    :task-runtime-stream-subscribers-atom (atom {})
@@ -95,6 +98,10 @@
   []
   (:session-statuses-atom (current-runtime)))
 
+(defn- websocket-receive-failures-atom
+  []
+  (:websocket-receive-failures-atom (current-runtime)))
+
 (defn- task-runtime-events-atom
   []
   (:task-runtime-events-atom (current-runtime)))
@@ -130,14 +137,6 @@
 (defn- session-finalize-locks
   []
   (:session-finalize-locks (current-runtime)))
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 ;; ---------------------------------------------------------------------------
 ;; Local web UI
@@ -376,9 +375,74 @@
                "channel" (name channel)
                "step" (name step))))
 
+(defn- clear-websocket-receive-failure!
+  [session-id]
+  (swap! (websocket-receive-failures-atom) dissoc (str session-id)))
+
+(defn- active-websocket-receive-failure
+  [session-id]
+  (let [sid-str  (str session-id)
+        failure  (get @(websocket-receive-failures-atom) sid-str)
+        now-ms   (System/currentTimeMillis)
+        retry-ms (long (or (:retry-not-before-ms failure) 0))]
+    (cond
+      (nil? failure)
+      nil
+
+      (<= retry-ms now-ms)
+      (do
+        (clear-websocket-receive-failure! sid-str)
+        nil)
+
+      :else
+      (assoc failure :retry-after-ms (- retry-ms now-ms)))))
+
+(defn- send-websocket-json!
+  [ch payload]
+  (try
+    (http/send! ch (json/write-json-str payload))
+    (catch Exception e
+      (log/warn e "Failed to send WebSocket response"))))
+
+(defn- send-websocket-error!
+  [ch error-message & {:as extra}]
+  (send-websocket-json! ch
+                        (merge {:type  "error"
+                                :error (or (some-> error-message str/trim not-empty)
+                                           "WebSocket request failed")}
+                               extra)))
+
+(defn- record-websocket-receive-failure!
+  [session-id ^Throwable e]
+  (let [sid-str             (str session-id)
+        retry-not-before-ms (+ (System/currentTimeMillis)
+                               websocket-receive-retry-delay-ms)
+        failure             {:session-id          sid-str
+                             :error               (or (some-> (throwable-message e) str/trim not-empty)
+                                                      "WebSocket request failed")
+                             :failed-at           (java.util.Date.)
+                             :retry-not-before-ms retry-not-before-ms}]
+    (swap! (websocket-receive-failures-atom) assoc sid-str failure)
+    failure))
+
+(defn- handle-websocket-receive-failure!
+  [ch session-id ^Throwable e]
+  (try
+    (agent/cancel-session! session-id "websocket request failed")
+    (catch Exception cancel-error
+      (log/warn cancel-error
+                "Failed to cancel WebSocket session after receive error"
+                (str session-id))))
+  (let [{:keys [error]} (record-websocket-receive-failure! session-id e)]
+    (log/error e "WebSocket message error; temporarily blocking retries" (str session-id))
+    (send-websocket-error! ch
+                           error
+                           :retry_after_ms websocket-receive-retry-delay-ms)))
+
 (defn- finalize-websocket-session!
   [ch]
   (when-let [sid (get @(ws-sessions-atom) ch)]
+    (clear-websocket-receive-failure! sid)
     (let [topics-or-failure
           (try
             (:topics (wm/get-wm sid))
@@ -416,23 +480,33 @@
             (swap! (ws-sessions-atom) assoc ch sid)
             (wm/ensure-wm! sid)
             (log/info "WebSocket connected, session:" sid)
-            (http/send! ch (json/write-json-str {:type "connected" :session-id (str sid)}))))
+            (send-websocket-json! ch {:type "connected" :session-id (str sid)})))
 
         :on-receive
         (fn [ch msg]
           (if-let [sid (get @(ws-sessions-atom) ch)]
-            (try
-              (let [data     (json/read-json msg)
-                    text     (get data "message" (get data "content" msg))
-                    response (agent/process-message sid text :channel :websocket)]
-                (http/send! ch (json/write-json-str {:type    "message"
-                                                     :role    "assistant"
-                                                     :content response})))
-              (catch Exception e
-                (log/error e "WebSocket message error")
-                (http/send! ch (json/write-json-str {:type  "error"
-                                                     :error (.getMessage e)}))))
-            (http/send! ch (json/write-json-str {:type "error" :error "Session not found"}))))
+            (if-let [{:keys [retry-after-ms]} (active-websocket-receive-failure sid)]
+              (send-websocket-error! ch
+                                     "Previous WebSocket request failed; wait before retrying."
+                                     :retry_after_ms retry-after-ms)
+              (let [data (try
+                           (json/read-json msg)
+                           (catch Exception e
+                             (send-websocket-error! ch (throwable-message e))
+                             ::invalid-message))]
+                (when-not (= ::invalid-message data)
+                  (try
+                    (let [text     (get data "message" (get data "content" msg))
+                          response (agent/process-message sid text :channel :websocket)]
+                      (clear-websocket-receive-failure! sid)
+                      (send-websocket-json! ch {:type    "message"
+                                                :role    "assistant"
+                                                :content response}))
+                    (catch Throwable t
+                      (handle-websocket-receive-failure! ch sid t)
+                      (when (instance? Error t)
+                        (throw t)))))))
+            (send-websocket-error! ch "Session not found")))
 
         :on-close
         (fn [ch _status]
@@ -1119,7 +1193,7 @@
         limit (long limit)]
     (when (seq text)
       (if (> (long (count text)) limit)
-        (str (subs text 0 (long-max 0 (- limit 1))) "…")
+        (str (subs text 0 (util/long-max 0 (- limit 1))) "…")
         text))))
 
 (defn- clear-session-status!
@@ -1340,7 +1414,7 @@
   (-> (or (parse-optional-positive-long value "top")
           default-knowledge-search-top)
       long
-      (long-min max-knowledge-search-top)
+      (util/long-min max-knowledge-search-top)
       int))
 
 (defn- search-knowledge-nodes
@@ -2214,6 +2288,7 @@
     (prompt/clear-channel-adapter! :http)
     (prompt/clear-channel-adapter! :command)
     (prompt/clear-channel-adapter! :websocket)
+    (reset! (websocket-receive-failures-atom) {})
     (reset! (session-statuses-atom) {})
     (reset! (task-runtime-events-atom) {})
     (clear-command-shutdown-handler!)
@@ -2244,6 +2319,7 @@
           (.shutdownNow exec))))
     (reset! (:server-atom runtime) nil)
     (reset! (:ws-sessions-atom runtime) {})
+    (reset! (:websocket-receive-failures-atom runtime) {})
     (reset! (:session-statuses-atom runtime) {})
     (reset! (:task-runtime-events-atom runtime) {})
     (reset! (:task-runtime-stream-subscribers-atom runtime) {})

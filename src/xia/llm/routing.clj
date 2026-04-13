@@ -1,16 +1,9 @@
 (ns xia.llm.routing
   "Provider-routing and runtime helpers for the LLM subsystem."
   (:require [clojure.string :as str]
-            [taoensso.timbre :as log])
+            [taoensso.timbre :as log]
+            [xia.util :as util])
   (:import [java.net URI]))
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 (defn workload-routes
   [workload-options]
@@ -146,10 +139,10 @@
   ^long
   [base-cooldown-ms max-cooldown-ms consecutive-failures]
   (loop [cooldown (long base-cooldown-ms)
-         remaining (long-max 0 (dec (long consecutive-failures)))]
+         remaining (util/long-max 0 (dec (long consecutive-failures)))]
     (if (zero? remaining)
       cooldown
-      (recur (long-min (long max-cooldown-ms)
+      (recur (util/long-min (long max-cooldown-ms)
                        (* 2 cooldown))
              (dec remaining)))))
 
@@ -168,7 +161,7 @@
         (provider-health-entry provider-health provider-id)
         current-ms            (long (now-ms))
         cooldown-remaining-ms (when cooldown-until-ms
-                                (long-max 0 (- (long cooldown-until-ms) current-ms)))
+                                (util/long-max 0 (- (long cooldown-until-ms) current-ms)))
         status                (cond
                                 (pos? (long (or cooldown-remaining-ms 0))) :cooling-down
                                 (pos? (long (or consecutive-failures 0)))   :degraded
@@ -202,7 +195,7 @@
            (fn [state]
              (let [previous             (get state provider-id)
                    consecutive-failures (inc (long (or (:consecutive-failures previous) 0)))
-                   cooldown-ms          (long-max (long (or cooldown-ms 0))
+                   cooldown-ms          (util/long-max (long (or cooldown-ms 0))
                                                   (provider-cooldown-ms base-cooldown-ms
                                                                         max-cooldown-ms
                                                                         consecutive-failures))]

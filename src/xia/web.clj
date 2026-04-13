@@ -12,7 +12,8 @@
             [charred.api :as json]
             [xia.config :as cfg]
             [xia.rate-limit :as rate-limit]
-            [xia.ssrf :as ssrf])
+            [xia.ssrf :as ssrf]
+            [xia.util :as util])
    (:import [org.jsoup Jsoup]
             [org.jsoup.nodes Document Element TextNode]
             [org.jsoup.select Elements]
@@ -42,14 +43,6 @@
   #"(?i)\bno results\b|\bno more results\b")
 (def ^:private ddg-blocked-pattern
   #"(?i)automated traffic|unusual traffic|captcha|verify you are human")
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 ;; ---------------------------------------------------------------------------
 ;; SSRF protection
@@ -167,7 +160,7 @@
           (and (= prev 13) (= b 10))
           (let [line-bytes (.toByteArray out)
                 line-size  (alength ^bytes line-bytes)]
-            (String. ^bytes line-bytes 0 (long-max 0 (dec line-size)) StandardCharsets/ISO_8859_1))
+            (String. ^bytes line-bytes 0 (util/long-max 0 (dec line-size)) StandardCharsets/ISO_8859_1))
 
           :else
           (do
@@ -242,7 +235,7 @@
                                  :limit max-body-bytes})))
               (loop [remaining chunk-size]
                 (when (pos? remaining)
-                  (let [read-count (.read in buffer 0 (int (long-min (long remaining) (long (alength buffer)))))]
+                  (let [read-count (.read in buffer 0 (int (util/long-min (long remaining) (long (alength buffer)))))]
                     (when (neg? read-count)
                       (throw (ex-info "Unexpected end of chunked response body"
                                       {:url url

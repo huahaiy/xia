@@ -25,6 +25,7 @@
             [xia.skill :as skill]
             [xia.llm :as llm]
             [xia.memory :as memory]
+            [xia.util :as util]
             [xia.working-memory :as wm])
   (:import [java.util LinkedHashMap Map]))
 
@@ -43,14 +44,6 @@
 
 (def ^:private camel-segment-pattern
   #"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+")
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 (defn- budget-value
   ^long [budget k]
@@ -72,7 +65,7 @@
   [chunk]
   (let [camel-segments  (long (count (re-seq camel-segment-pattern chunk)))
         length-estimate (ceil-div (long (count chunk)) 8)]
-    (long-max 1 (long-max camel-segments length-estimate))))
+    (util/long-max 1 (util/long-max camel-segments length-estimate))))
 
 (defn- codeish-span-tokens
   [span]
@@ -87,7 +80,7 @@
        (filter codeish-span?)
        (reduce (fn [^long discount span]
                  (let [baseline (quot (long (count span)) 4)
-                       adjusted (long-min baseline
+                       adjusted (util/long-min baseline
                                           (long (codeish-span-tokens span)))]
                     (+ discount (- baseline adjusted))))
                0)))
@@ -107,7 +100,7 @@
             cjk-adjustment (- (ceil-div cjk-chars 2)
                               (quot cjk-chars 4))
             code-discount  (long (codeish-discount text))]
-        (long-max 1 (- (+ baseline cjk-adjustment) code-discount))))))
+        (util/long-max 1 (- (+ baseline cjk-adjustment) code-discount))))))
 
 (def ^:private token-estimate-cache-max-size 2048)
 (def ^:private token-estimate-cache-max-text-chars 8192)
@@ -303,7 +296,7 @@
                                 :recommended-history-budget)]
     (if (and (number? recommended-cap)
              (pos? (long recommended-cap)))
-      (long-min configured (long recommended-cap))
+      (util/long-min configured (long recommended-cap))
       configured)))
 
 (defn- tool-result->content
@@ -325,7 +318,7 @@
     (when (seq text)
       (if (<= (long (count text)) max*)
         text
-        (str (subs text 0 (long-max 1 (- max* 3))) "...")))))
+        (str (subs text 0 (util/long-max 1 (- max* 3))) "...")))))
 
 (def ^:private history-message-truncation-note
   " [truncated to fit history budget]")
@@ -523,7 +516,7 @@
     (when text
       (if (<= (long (count text)) max*)
         text
-        (str (subs text 0 (long-max 1 (- max* (count history-message-truncation-note))))
+        (str (subs text 0 (util/long-max 1 (- max* (count history-message-truncation-note))))
              history-message-truncation-note)))))
 
 (defn- assoc-existing-key
@@ -565,11 +558,11 @@
         tool-calls          (when tool-calls-key
                               (get message* tool-calls-key))
         tool-call-count     (long (max 1 (count tool-calls)))
-        max-chars           (long-max 48 (* 4 (long max-tokens)))
+        max-chars           (util/long-max 48 (* 4 (long max-tokens)))
         content-char-budget (if (seq tool-calls)
-                              (long-max 32 (quot (* 2 max-chars) 3))
+                              (util/long-max 32 (quot (* 2 max-chars) 3))
                               max-chars)
-        tool-char-budget    (long-max 24 (quot max-chars (long-max 1 tool-call-count)))
+        tool-char-budget    (util/long-max 24 (quot max-chars (util/long-max 1 tool-call-count)))
         content-key         (cond
                               (contains? message* :content) :content
                               (contains? message* "content") "content"
@@ -1005,7 +998,7 @@
 (defn- truncate-text-to-budget
   [text budget]
   (let [text*         (str text)
-        total-budget  (long-max 0 (long budget))
+        total-budget  (util/long-max 0 (long budget))
         note*         final-prompt-truncation-note
         note-tokens   (long (estimate-tokens note*))
         suffix        (if (< note-tokens total-budget) note* "")
@@ -1086,28 +1079,28 @@
         remaining (- (budget-value budget :total) id-tokens topic-tokens)
 
         ;; P1: Entities (highest priority — cut last)
-        ent-budget  (long-min (budget-value budget :entities) (long-max 0 remaining))
+        ent-budget  (util/long-min (budget-value budget :entities) (util/long-max 0 remaining))
         ent-data    (render-entities-data (:entities wm-context) ent-budget)
         ent-section (:content ent-data)
         ent-tokens  (long (or (:tokens ent-data) 0))
         remaining   (- remaining ent-tokens)
 
         ;; P2: Local documents
-        doc-budget  (long-min (budget-value budget :local-docs) (long-max 0 remaining))
+        doc-budget  (util/long-min (budget-value budget :local-docs) (util/long-max 0 remaining))
         doc-data    (render-local-docs-data (:local-docs wm-context) doc-budget)
         doc-section (:content doc-data)
         doc-tokens  (long (or (:tokens doc-data) 0))
         remaining   (- remaining doc-tokens)
 
         ;; P3: Episodes
-        ep-budget  (long-min (budget-value budget :episodes) (long-max 0 remaining))
+        ep-budget  (util/long-min (budget-value budget :episodes) (util/long-max 0 remaining))
         ep-data    (render-episodes-data (:episodes wm-context) ep-budget)
         ep-section (:content ep-data)
         ep-tokens  (long (or (:tokens ep-data) 0))
         remaining  (- remaining ep-tokens)
 
         ;; P4: Skills (lowest priority — cut first)
-        skill-budget  (long-min (budget-value budget :skills) (long-max 0 remaining))
+        skill-budget  (util/long-min (budget-value budget :skills) (util/long-max 0 remaining))
         skill-data    (render-skills-data skills skill-budget)
         skill-section (:content skill-data)
         skill-tokens  (long (or (:tokens skill-data) 0))
@@ -1157,15 +1150,15 @@
                      recap-prefix0 (into [] (take-while recap-message?) messages')
                      live-history0 (subvec messages' (count recap-prefix0))
                      live-count    (long (count live-history0))
-                     live-divisor  (long-max 1 (long-min 4 live-count))
-                     live-cap      (long-max 8 (quot budget* live-divisor))
-                     recap-cap     (long-max 8 (quot budget* 2))
+                     live-divisor  (util/long-max 1 (util/long-min 4 live-count))
+                     live-cap      (util/long-max 8 (quot budget* live-divisor))
+                     recap-cap     (util/long-max 8 (quot budget* 2))
                      recap-prefix  (mapv #(truncate-history-message % recap-cap)
                                          recap-prefix0)
                      live-history  (mapv #(truncate-history-message % live-cap)
                                          live-history0)
                      msg-count     (long (count live-history))
-                     min-keep      (long-min 4 msg-count)
+                     min-keep      (util/long-min 4 msg-count)
                      live-result   (reduce (fn [{:keys [tokens kept-count kept] :as acc} msg]
                                              (let [msg-tokens (estimate-history-message-tokens msg)
                                                    must-keep? (< kept-count min-keep)
@@ -1182,7 +1175,7 @@
                                            (rseq live-history))
                      live-kept     (vec (:kept live-result))
                      live-tokens   (long (:tokens live-result))
-                     recap-budget  (long-max 0 (- budget* live-tokens))
+                     recap-budget  (util/long-max 0 (- budget* live-tokens))
                      recap-kept    (vec
                                     (:kept
                                      (reduce (fn [{:keys [tokens kept] :as acc} msg]
@@ -1203,7 +1196,7 @@
            messages*
            (if (<= msg-count 4)
              (bounded-history-messages messages*)
-             (let [keep-count  (long-max 4 (quot msg-count 2))
+             (let [keep-count  (util/long-max 4 (quot msg-count 2))
                    old-msgs    (subvec live-history 0 (- msg-count keep-count))
                    recent-msgs (subvec live-history (- msg-count keep-count))
                    old-text    (history-summary-text old-msgs)]
@@ -1256,7 +1249,7 @@
                                 (map :eid)
                                 (db/session-message-metadata-range session-id 0 total total)))))
        :history-recap-updated? false}
-      (let [recent-start       (long-max 0 (- total recent-limit))
+      (let [recent-start       (util/long-max 0 (- total recent-limit))
             recap-state        (db/session-history-recap session-id)
             recap-count0       (long (or (:message-count recap-state) 0))
             recap-count        (if (<= recap-count0 recent-start) recap-count0 0)

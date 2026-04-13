@@ -11,6 +11,7 @@
             [xia.browser.playwright :as playwright]
             [xia.channel.http :as http]
             [xia.db :as db]
+            [xia.llm :as xia-llm]
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
@@ -282,6 +283,7 @@
   [f]
   (let [path (temp-db-path)]
     (runtime-overlay/clear!)
+    (xia-llm/clear-runtime!)
     (scheduler/clear-runtime!)
     (playwright/clear-runtime!)
     (oauth/clear-runtime!)
@@ -310,6 +312,7 @@
       (f)
       (finally
         (runtime-overlay/clear!)
+        (xia-llm/clear-runtime!)
         (scheduler/clear-runtime!)
         (playwright/clear-runtime!)
         (oauth/clear-runtime!)

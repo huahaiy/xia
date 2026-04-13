@@ -73,10 +73,6 @@
 (def ^:private refresh-skew-ms 60000)
 (def ^:private proactive-refresh-min-interval-ms 30000)
 
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
 (declare ensure-account-ready!)
 
 (defn- now-ms []

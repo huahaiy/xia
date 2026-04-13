@@ -1,17 +1,10 @@
 (ns xia.extractive-summary
   (:require [clojure.set :as set]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [xia.util :as util]))
 
 (def ^:private month-or-time-pattern
   #"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|q[1-4]|utc)\b")
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 (defn- compact-text
   [text]
@@ -26,7 +19,7 @@
   (when-let [compact (compact-text text)]
     (let [limit (some-> max-chars long)]
       (if (and limit (> (long (count compact)) (long limit)))
-        (str (subs compact 0 (long-max 0 (dec (long limit)))) "…")
+        (str (subs compact 0 (util/long-max 0 (dec (long limit)))) "…")
         compact))))
 
 (defn- tokenize
@@ -45,7 +38,7 @@
   [left right]
   (let [left*  (token-set left)
         right* (token-set right)
-        denom  (long-max 1 (long-min (long (count left*)) (long (count right*))))]
+        denom  (util/long-max 1 (util/long-min (long (count left*)) (long (count right*))))]
     (/ (double (count (set/intersection left* right*)))
        denom)))
 
@@ -102,7 +95,7 @@
                                   (<= 40 char-count 180) 2.5
                                   (<= 25 char-count 260) 1.0
                                   :else 0.0))]
-    (+ (double (long-max 0 (- 6 (long idx))))
+    (+ (double (util/long-max 0 (- 6 (long idx))))
        size-bonus
        (if (re-find #"\d" text) 3.0 0.0)
        (if (re-find #"[/$%]" text) 2.0 0.0)

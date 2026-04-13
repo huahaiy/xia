@@ -15,7 +15,8 @@
             [datalevin.core :as d]
             [xia.config :as cfg]
             [xia.db :as db]
-            [xia.retrieval-state :as retrieval-state]))
+            [xia.retrieval-state :as retrieval-state]
+            [xia.util :as util]))
 
 ;; ============================================================================
 ;; Episodic Memory
@@ -56,14 +57,6 @@
 (def ^:private fact-confidence-weight 0.8)
 (def ^:private fact-utility-weight 0.2)
 (def ^:private fact-confidence-reinforcement-weight 0.4)
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 (defn- double-max
   ^double [^double a ^double b]
@@ -246,7 +239,7 @@
 (defn- episode-age-ms
   ^long
   [^java.util.Date timestamp ^java.util.Date as-of]
-  (long-max 0 (- (.getTime as-of) (.getTime timestamp))))
+  (util/long-max 0 (- (.getTime as-of) (.getTime timestamp))))
 
 (defn- decayed-episode?
   [episode ^java.util.Date as-of retention-config]
@@ -339,7 +332,7 @@
   ([^java.util.Date as-of] (processed-episode-prune-plan as-of nil))
   ([^java.util.Date as-of {:keys [exclude-eids]}]
    (let [retention-config (episode-retention-settings)
-         cutoff-ms        (long-max 0 (- (.getTime as-of)
+         cutoff-ms        (util/long-max 0 (- (.getTime as-of)
                                          (long (or (:full-resolution-ms retention-config)
                                                    0))))
          cutoff           (java.util.Date. cutoff-ms)
@@ -736,7 +729,7 @@
 
 (defn- default-candidate-pool-size
   ^long [top]
-  (long-max (long minimum-candidate-pool-size)
+  (util/long-max (long minimum-candidate-pool-size)
             (* (long default-candidate-pool-multiplier)
                (long top))))
 
@@ -746,7 +739,7 @@
         configured   (long (cfg/positive-long (get candidate-pool-config-keys kind)
                                               default-size))]
     (-> configured
-        (long-max (long top))
+        (util/long-max (long top))
         int)))
 
 (defn- fulltext-domain-hits
@@ -798,7 +791,7 @@
   [current rank]
   (cond
     (nil? rank) (long (or current Long/MAX_VALUE))
-    current (long-min (long current) (long rank))
+    current (util/long-min (long current) (long rank))
     :else (long rank)))
 
 (defn- update-best-score

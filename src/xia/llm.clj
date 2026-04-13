@@ -14,7 +14,8 @@
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
             [xia.rate-limit :as rate-limit]
-            [xia.task-policy :as task-policy])
+            [xia.task-policy :as task-policy]
+            [xia.util :as util])
   (:import [java.net URI URLEncoder]
            [java.nio.charset StandardCharsets]
            [java.time ZonedDateTime]
@@ -71,14 +72,6 @@
 (def ^:dynamic *request-budget-guard* nil)
 (def ^:dynamic *request-observer* nil)
 
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
-
 ;; ---------------------------------------------------------------------------
 ;; Provider resolution
 ;; ---------------------------------------------------------------------------
@@ -88,10 +81,26 @@
   []
   (llm-routing/workload-routes workload-options))
 
-(defn reset-runtime!
-  "Re-enable async LLM log writes for a fresh runtime."
+(defn- reset-runtime-state!
   []
+  (reset! workload-counters {})
+  (reset! provider-health {})
+  (.clear provider-rate-limits)
+  (.set provider-rate-limit-cleanup 0))
+
+(defn reset-runtime!
+  "Reset in-memory LLM runtime state for a fresh runtime."
+  []
+  (llm-routing/prepare-shutdown! async-log-lock async-log-state)
+  (llm-routing/await-background-tasks! async-log-lock async-log-state)
+  (reset-runtime-state!)
   (llm-routing/reset-runtime! async-log-lock async-log-state))
+
+(defn clear-runtime!
+  "Fully clear in-memory LLM runtime state."
+  []
+  (reset-runtime!)
+  nil)
 
 (defn prepare-shutdown!
   "Stop accepting new async LLM log writes and return the pending count."
@@ -1809,16 +1818,16 @@
         input-budget-cap (-> (* 0.75 (double window))
                              Math/floor
                              long
-                             (long-max 512)
-                             (long-min recommended-context-input-max))
-        max-system       (long-max recommended-min-system-budget
+                             (util/long-max 512)
+                             (util/long-min recommended-context-input-max))
+        max-system       (util/long-max recommended-min-system-budget
                                    (- input-budget-cap recommended-min-history-budget))
         system-target    (long (Math/round (* 0.25 (double input-budget-cap))))
         system-budget    (-> system-target
-                             (long-max recommended-min-system-budget)
-                             (long-min recommended-system-budget-max)
-                             (long-min max-system))
-        history-budget   (long-max recommended-min-history-budget
+                             (util/long-max recommended-min-system-budget)
+                             (util/long-min recommended-system-budget-max)
+                             (util/long-min max-system))
+        history-budget   (util/long-max recommended-min-history-budget
                                    (- input-budget-cap system-budget))]
     {:system-prompt-budget system-budget
      :history-budget history-budget

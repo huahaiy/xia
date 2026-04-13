@@ -16,7 +16,8 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
-            [xia.memory :as memory]))
+            [xia.memory :as memory]
+            [xia.util :as util]))
 
 ;; ---------------------------------------------------------------------------
 ;; Extraction prompt
@@ -150,12 +151,6 @@ Rules:
   ^double [x]
   (let [x* (double x)]
     (if (neg? x*) (- x*) x*)))
-
-(defn- long-max
-  ^long [a b]
-  (let [a* (long a)
-        b* (long b)]
-    (if (> a* b*) a* b*)))
 
 (defn- instant-string
   [value]
@@ -907,7 +902,7 @@ Rules:
   (let [as-of-ms (.getTime as-of)
         updated-ms (.getTime updated-at)
         grace-period-ms (long (:grace-period-ms decay-config))]
-    (long-max 0
+    (util/long-max 0
               (- as-of-ms
                  updated-ms
                  grace-period-ms))))

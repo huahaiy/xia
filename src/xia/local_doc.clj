@@ -7,6 +7,7 @@
             [xia.memory :as memory]
             [xia.retrieval-state :as retrieval-state]
             [xia.summarizer :as summarizer]
+            [xia.util :as util]
             [xia.working-memory :as wm]
             [xia.scratch :as scratch])
   (:import [java.io BufferedReader ByteArrayInputStream ByteArrayOutputStream IOException StringReader]
@@ -109,14 +110,6 @@
   #{jpeg-media-type
     png-media-type
     webp-media-type})
-
-(defn- long-max
-  ^long [^long a ^long b]
-  (if (> a b) a b))
-
-(defn- long-min
-  ^long [^long a ^long b]
-  (if (< a b) a b))
 
 (defn- indexed-ordinal
   ^long [idx]
@@ -284,7 +277,7 @@
   (let [trimmed (str/trim (or text ""))
         limit   (long preview-char-limit)]
     (if (> (long (count trimmed)) limit)
-      (str (subs trimmed 0 (long-max 0 (dec limit))) "…")
+      (str (subs trimmed 0 (util/long-max 0 (dec limit))) "…")
       trimmed)))
 
 (defn- compact-text
@@ -300,7 +293,7 @@
   (when-let [compact (compact-text text)]
     (let [limit (long max-chars)]
       (if (> (long (count compact)) limit)
-        (str (subs compact 0 (long-max 0 (dec limit))) "…")
+        (str (subs compact 0 (util/long-max 0 (dec limit))) "…")
         compact))))
 
 (defn- sentence-fragments
@@ -340,7 +333,7 @@
            pieces []]
       (if (>= (long start) value-length)
         pieces
-        (let [raw-end    (int (long-min value-length (+ (long start) limit)))
+        (let [raw-end    (int (util/long-min value-length (+ (long start) limit)))
               space-end  (.lastIndexOf value " " raw-end)
               split-end  (if (and (< (long raw-end) value-length)
                                   (> (long space-end) (long start)))

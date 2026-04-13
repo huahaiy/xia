@@ -5,6 +5,7 @@
     [xia.crypto :as crypto]
     [xia.db :as db]
     [xia.instance-supervisor :as instance-supervisor]
+    [xia.llm :as llm]
     [xia.oauth :as oauth]
     [xia.browser.playwright :as playwright]
     [xia.paths :as paths]
@@ -27,6 +28,7 @@
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
   (xia.channel.http/clear-runtime!)
   (xia.db/clear-runtime!)
+  (llm/clear-runtime!)
   (scheduler/clear-runtime!)
   (playwright/clear-runtime!)
   (oauth/clear-runtime!)
