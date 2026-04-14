@@ -163,6 +163,16 @@
 (defonce ^AtomicLong ^:private service-rate-limit-cleanup (AtomicLong. 0))
 (def ^:private rate-limit-window-ms 60000)
 
+(defn reset-runtime!
+  []
+  (.clear service-rate-limits)
+  (.set service-rate-limit-cleanup 0)
+  nil)
+
+(defn clear-runtime!
+  []
+  (reset-runtime!))
+
 (defn effective-rate-limit-per-minute
   "Return the effective per-service request cap for a minute window."
   [service]

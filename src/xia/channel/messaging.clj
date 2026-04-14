@@ -1096,6 +1096,28 @@
         (.shutdownNow exec)))
     (reset! imessage-poller-executor nil)))
 
+(defn- clear-channel-adapters!
+  []
+  (try
+    (doseq [channel [:slack :telegram :imessage]]
+      (prompt/clear-channel-adapter! channel))
+    (catch clojure.lang.ExceptionInfo e
+      (when-not (= :xia/prompt-runtime (:component (ex-data e)))
+        (throw e))))
+  nil)
+
+(defn reset-runtime!
+  []
+  (stop-imessage-poller!)
+  (reset! recent-external-message-ids {})
+  (reset! imessage-last-rowid 0)
+  nil)
+
+(defn clear-runtime!
+  []
+  (clear-channel-adapters!)
+  (reset-runtime!))
+
 (defn- start-imessage-poller!
   []
   (stop-imessage-poller!)
@@ -1114,6 +1136,7 @@
 
 (defn start!
   []
+  (clear-runtime!)
   (doseq [channel [:slack :telegram :imessage]]
     (prompt/register-channel-adapter! channel
                                       {:prompt messaging-prompt
@@ -1123,7 +1146,4 @@
 
 (defn stop!
   []
-  (stop-imessage-poller!)
-  (doseq [channel [:slack :telegram :imessage]]
-    (prompt/clear-channel-adapter! channel))
-  nil)
+  (clear-runtime!))

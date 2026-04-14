@@ -23,9 +23,11 @@
             [xia.runtime-state :as runtime-state]
             [xia.sci-env :as sci-env]
             [xia.scheduler :as scheduler]
+            [xia.service :as service]
             [xia.setup :as setup]
             [xia.skill :as skill]
             [xia.tool :as tool]
+            [xia.web :as web]
             [xia.working-memory :as wm]
             [xia.browser.playwright :as playwright]
             [xia.channel.http :as http])
@@ -165,6 +167,8 @@
   (checkpoint/reset-runtime!)
   (llm/reset-runtime!)
   (local-ocr/reset-runtime!)
+  (service/reset-runtime!)
+  (web/reset-runtime!)
   (let [recovered (agent/recover-runtime-tasks!)]
     (when (seq recovered)
       (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart")))
@@ -211,6 +215,7 @@
 
 (defmethod ig/init-key :xia/instance-supervisor
   [_ {:keys [db enabled? command]}]
+  (instance-supervisor/reset-runtime!)
   (instance-supervisor/configure! {:enabled? enabled?
                                    :command command})
   {:db db
@@ -219,7 +224,7 @@
 
 (defmethod ig/halt-key! :xia/instance-supervisor
   [_ _]
-  (instance-supervisor/shutdown!))
+  (instance-supervisor/clear-runtime!))
 
 (defmethod ig/init-key :xia/bootstrap
   [_ {:keys [db overlay runtime-support instance-supervisor db-path instance template-instance
@@ -292,7 +297,7 @@
 
 (defmethod ig/halt-key! :xia/messaging
   [_ _]
-  (messaging/stop!))
+  (messaging/clear-runtime!))
 
 (defmethod ig/init-key :xia/http
   [_ {:keys [http-runtime scheduler messaging bind-host port web-dev?]}]

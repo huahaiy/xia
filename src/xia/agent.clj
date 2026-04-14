@@ -341,11 +341,13 @@
    (when-let [current (maybe-current-runtime)]
      (when-not (identical? current runtime)
        (clear-runtime!)))
+   (fact-review/reset-runtime!)
    (reset! installed-runtime-atom runtime)
    runtime))
 
 (defn clear-runtime!
   []
+  (fact-review/reset-runtime!)
   (when-let [runtime (maybe-current-runtime)]
     (reset! (:active-session-turns-atom runtime) #{})
     (reset! (:active-session-runs-atom runtime) {})
@@ -858,8 +860,6 @@
   (apply emit-status! message (mapcat identity extra)))
 
 (def ^:private fact-utility-review-debounce-ms 2000)
-(def ^:private fact-utility-review-state
-  fact-review/fact-utility-review-state)
 
 (defn- llm-preview-text
   [content]

@@ -66,6 +66,16 @@
 (def ^:private rate-limit-max 30)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute
 
+(defn reset-runtime!
+  []
+  (.clear rate-limits)
+  (.set rate-limit-cleanup 0)
+  nil)
+
+(defn clear-runtime!
+  []
+  (reset-runtime!))
+
 (defn- check-rate-limit!
   "Enforce per-domain rate limiting. Throws if limit exceeded."
   [url]

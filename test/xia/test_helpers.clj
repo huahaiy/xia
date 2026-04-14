@@ -10,14 +10,23 @@
             [xia.async :as async]
             [xia.browser.playwright :as playwright]
             [xia.channel.http :as http]
+            [xia.channel.messaging :as messaging]
+            [xia.checkpoint :as checkpoint]
             [xia.db :as db]
+            [xia.hippocampus :as hippo]
+            [xia.instance-supervisor :as instance-supervisor]
             [xia.llm :as xia-llm]
+            [xia.local-ocr :as local-ocr]
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
+            [xia.sci-env :as sci-env]
             [xia.scheduler :as scheduler]
+            [xia.service :as service]
+            [xia.tool :as tool]
+            [xia.web :as web]
             [xia.working-memory :as wm])
   (:import [java.io File]
            [java.nio.file Files]
@@ -283,6 +292,15 @@
   [f]
   (let [path (temp-db-path)]
     (runtime-overlay/clear!)
+    (instance-supervisor/reset-runtime!)
+    (messaging/clear-runtime!)
+    (tool/reset-runtime!)
+    (checkpoint/reset-runtime!)
+    (hippo/reset-runtime!)
+    (local-ocr/reset-runtime!)
+    (sci-env/reset-runtime!)
+    (service/reset-runtime!)
+    (web/reset-runtime!)
     (xia-llm/clear-runtime!)
     (scheduler/clear-runtime!)
     (playwright/clear-runtime!)
@@ -312,6 +330,15 @@
       (f)
       (finally
         (runtime-overlay/clear!)
+        (instance-supervisor/reset-runtime!)
+        (messaging/clear-runtime!)
+        (tool/reset-runtime!)
+        (checkpoint/reset-runtime!)
+        (hippo/reset-runtime!)
+        (local-ocr/reset-runtime!)
+        (sci-env/reset-runtime!)
+        (service/reset-runtime!)
+        (web/reset-runtime!)
         (xia-llm/clear-runtime!)
         (scheduler/clear-runtime!)
         (playwright/clear-runtime!)

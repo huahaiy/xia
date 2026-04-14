@@ -1,20 +1,28 @@
 (ns xia.core-test
   (:require [clojure.test :refer :all]
-    [xia.core :as core]
-    [xia.channel.http]
-    [xia.crypto :as crypto]
-    [xia.db :as db]
-    [xia.instance-supervisor :as instance-supervisor]
-    [xia.llm :as llm]
-    [xia.oauth :as oauth]
-    [xia.browser.playwright :as playwright]
-    [xia.paths :as paths]
-    [xia.pack :as pack]
-    [xia.retrieval-state :as retrieval-state]
-    [xia.runtime-overlay :as runtime-overlay]
-    [xia.runtime-state :as runtime-state]
-    [xia.scheduler :as scheduler]
-    [xia.test-helpers :as th])
+            [xia.channel.http]
+            [xia.channel.messaging]
+            [xia.checkpoint :as checkpoint]
+            [xia.core :as core]
+            [xia.crypto :as crypto]
+            [xia.db :as db]
+            [xia.hippocampus :as hippo]
+            [xia.instance-supervisor :as instance-supervisor]
+            [xia.llm :as llm]
+            [xia.local-ocr :as local-ocr]
+            [xia.oauth :as oauth]
+            [xia.browser.playwright :as playwright]
+            [xia.paths :as paths]
+            [xia.pack :as pack]
+            [xia.retrieval-state :as retrieval-state]
+            [xia.runtime-overlay :as runtime-overlay]
+            [xia.runtime-state :as runtime-state]
+            [xia.sci-env :as sci-env]
+            [xia.scheduler :as scheduler]
+            [xia.service :as service]
+            [xia.test-helpers :as th]
+            [xia.tool :as tool]
+            [xia.web :as web])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]
            [java.util Base64]))
@@ -26,14 +34,23 @@
 (defn- reset-core-runtime!
   []
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
+  (xia.channel.messaging/clear-runtime!)
   (xia.channel.http/clear-runtime!)
   (xia.db/clear-runtime!)
+  (instance-supervisor/reset-runtime!)
+  (tool/reset-runtime!)
+  (checkpoint/reset-runtime!)
+  (hippo/reset-runtime!)
   (llm/clear-runtime!)
+  (local-ocr/reset-runtime!)
   (scheduler/clear-runtime!)
   (playwright/clear-runtime!)
   (oauth/clear-runtime!)
   (retrieval-state/clear-runtime!)
   (runtime-state/clear-runtime!)
+  (sci-env/reset-runtime!)
+  (service/reset-runtime!)
+  (web/reset-runtime!)
   (xia.channel.http/clear-command-shutdown-handler!)
   (runtime-overlay/clear!)
   (runtime-state/install-runtime!)

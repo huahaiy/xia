@@ -635,3 +635,14 @@
         (log/warn e "Failed to stop managed Xia instance during shutdown" instance-id))))
   (reset! managed-instances {})
   nil)
+
+(defn reset-runtime!
+  []
+  (shutdown!)
+  (reset! capability-state {:enabled? false
+                            :command nil})
+  nil)
+
+(defn clear-runtime!
+  []
+  (reset-runtime!))

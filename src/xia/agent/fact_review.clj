@@ -9,6 +9,11 @@
 (def ^:private fact-utility-review-max-pending 120)
 (defonce fact-utility-review-state (atom {}))
 
+(defn reset-runtime!
+  []
+  (reset! fact-utility-review-state {})
+  nil)
+
 (defn- fact-utility-observations
   [fact-eids user-message assistant-response explicit-fact-eids]
   (let [explicit-facts (set explicit-fact-eids)]
