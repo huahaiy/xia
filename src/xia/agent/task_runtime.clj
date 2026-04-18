@@ -1172,30 +1172,46 @@
         (runtime-draining-result task-id session-id)
 
         :else
-        (if-let [_future
-                 (async/submit-background!
-                  (str "task-resume:" task-id)
-                  #((:process-message deps) session-id
-                    message*
-                    :channel channel
-                    :task-id task-id
-                    :runtime-op :resume
-                    :persist-message? false))]
-          (do
-            (sync-runtime-task! task-id
-                                {:state :running
-                                 :stop-reason nil
-                                 :error nil
-                                 :finished-at nil
-                                 :summary "Task resumed"})
-            (record-task-resume! task-id :resume message*)
-            {:status :running
-             :task-id task-id
-             :session-id session-id})
-          {:status :unavailable
+        (if-let [reservation-token ((:reserve-next-session-turn! deps)
+                                    session-id
+                                    {:task-id task-id
+                                     :runtime-op :resume})]
+          (if-let [_future
+                   (async/submit-background!
+                    (str "task-resume:" task-id)
+                    #(try
+                       ((:process-message deps) session-id
+                        message*
+                        :channel channel
+                        :task-id task-id
+                        :runtime-op :resume
+                        :persist-message? false
+                        :turn-reservation-token reservation-token)
+                       (finally
+                         ((:clear-session-turn-reservation! deps)
+                          session-id
+                          reservation-token))))]
+            (do
+              (sync-runtime-task! task-id
+                                  {:state :running
+                                   :stop-reason nil
+                                   :error nil
+                                   :finished-at nil
+                                   :summary "Task resumed"})
+              (record-task-resume! task-id :resume message*)
+              {:status :running
+               :task-id task-id
+               :session-id session-id})
+            (do
+              ((:clear-session-turn-reservation! deps) session-id reservation-token)
+              {:status :unavailable
+               :task-id task-id
+               :session-id session-id
+               :error "resume worker unavailable"}))
+          {:status :busy
            :task-id task-id
            :session-id session-id
-           :error "resume worker unavailable"})))
+           :error "session is busy"})))
     {:status :not-found
      :error "task not found"}))
 
@@ -1246,11 +1262,16 @@
           message*              (some-> message str str/trim not-empty)
           interrupted-turn-id   (or (:task-turn-id live-run)
                                     (active-task-turn-id deps task-id))
+          reserve-turn!         (fn [runtime-op]
+                                  ((:reserve-next-session-turn! deps)
+                                   session-id
+                                   {:task-id task-id
+                                    :runtime-op runtime-op}))
           submit-steer!
-          (fn [interrupting-turn-id]
+          (fn [interrupting-turn-id reservation-token]
             (async/submit-background!
              (str "task-steer:" task-id)
-             #(do
+             #(try
                 (when interrupting-turn-id
                   (let [timeout-ms ((:task-control-wait-ms deps))
                         task-wait-fn (:wait-for-task-idle! deps)
@@ -1260,22 +1281,27 @@
                                 ((:wait-for-session-idle! deps) session-id timeout-ms)
                                 :else true)]
                     (when-not idle?
-                    (db/update-task! task-id
-                                     {:state :paused
-                                      :stop-reason :interrupted
-                                      :summary "Timed out waiting to apply the new instruction"
-                                      :error "steer request timed out waiting for the current turn to stop"})
-                    (throw (ex-info "Timed out waiting for the current task turn to stop"
-                                    {:type :task-steer-timeout
-                                     :task-id task-id
-                                     :session-id session-id
-                                     :timeout-ms timeout-ms})))))
+                      (db/update-task! task-id
+                                       {:state :paused
+                                        :stop-reason :interrupted
+                                        :summary "Timed out waiting to apply the new instruction"
+                                        :error "steer request timed out waiting for the current turn to stop"})
+                      (throw (ex-info "Timed out waiting for the current task turn to stop"
+                                      {:type :task-steer-timeout
+                                       :task-id task-id
+                                       :session-id session-id
+                                       :timeout-ms timeout-ms})))))
                 ((:process-message deps) session-id
                  message*
                  :channel channel
                  :task-id task-id
                  :runtime-op :steer
-                 :interrupting-turn-id interrupting-turn-id))))]
+                 :interrupting-turn-id interrupting-turn-id
+                 :turn-reservation-token reservation-token)
+                (finally
+                  ((:clear-session-turn-reservation! deps)
+                   session-id
+                   reservation-token)))))]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -1290,7 +1316,39 @@
 
         (task-active? deps task)
         (if ((:cancel-session! deps) session-id "task steer requested")
-          (if-let [_future (submit-steer! interrupted-turn-id)]
+          (if-let [reservation-token (reserve-turn! :steer)]
+            (if-let [_future (submit-steer! interrupted-turn-id reservation-token)]
+              (do
+                (sync-runtime-task! task-id
+                                    {:state :running
+                                     :stop-reason nil
+                                     :error nil
+                                     :finished-at nil
+                                     :summary (task-title deps message*)})
+                (record-task-resume! task-id :steer message*)
+                {:status :steering
+                 :task-id task-id
+                 :session-id session-id})
+              (do
+                ((:clear-session-turn-reservation! deps) session-id reservation-token)
+                (db/update-task! task-id
+                                 {:state :paused
+                                  :stop-reason :interrupted
+                                  :summary "Task interrupted by new instruction"})
+                {:status :unavailable
+                 :task-id task-id
+                 :session-id session-id
+                 :error "steer worker unavailable"}))
+            {:status :busy
+             :task-id task-id
+             :session-id session-id
+             :error "session is busy"})
+          {:status :busy
+           :error "task is still processing a request"})
+
+        :else
+        (if-let [reservation-token (reserve-turn! :steer)]
+          (if-let [_future (submit-steer! nil reservation-token)]
             (do
               (sync-runtime-task! task-id
                                   {:state :running
@@ -1303,34 +1361,15 @@
                :task-id task-id
                :session-id session-id})
             (do
-              (db/update-task! task-id
-                               {:state :paused
-                                :stop-reason :interrupted
-                                :summary "Task interrupted by new instruction"})
+              ((:clear-session-turn-reservation! deps) session-id reservation-token)
               {:status :unavailable
                :task-id task-id
                :session-id session-id
                :error "steer worker unavailable"}))
           {:status :busy
-           :error "task is still processing a request"})
-
-        :else
-        (if-let [_future (submit-steer! nil)]
-          (do
-            (sync-runtime-task! task-id
-                                {:state :running
-                                 :stop-reason nil
-                                 :error nil
-                                 :finished-at nil
-                                 :summary (task-title deps message*)})
-            (record-task-resume! task-id :steer message*)
-            {:status :steering
-             :task-id task-id
-             :session-id session-id})
-          {:status :unavailable
            :task-id task-id
            :session-id session-id
-           :error "steer worker unavailable"})))
+           :error "session is busy"})))
     {:status :not-found
      :error "task not found"}))
 

@@ -36,8 +36,10 @@
 (defn- make-runtime
   []
   {:active-session-turns-atom (atom #{})
+   :session-turn-reservations-atom (atom {})
    :active-session-runs-atom  (atom {})
-   :active-task-runs-atom     (atom {})})
+   :active-task-runs-atom     (atom {})
+   :idle-monitor              (Object.)})
 
 (defn- maybe-current-runtime
   []
@@ -57,9 +59,17 @@
   []
   (:active-session-runs-atom (current-runtime)))
 
+(defn- session-turn-reservations-atom
+  []
+  (:session-turn-reservations-atom (current-runtime)))
+
 (defn- active-task-runs-atom
   []
   (:active-task-runs-atom (current-runtime)))
+
+(defn- idle-monitor
+  []
+  (:idle-monitor (current-runtime)))
 
 (def ^:private trace-context-keys
   [:request-id
@@ -80,41 +90,82 @@
 
 ;; build-messages is now in xia.context
 
+(defn- reserve-next-session-turn!
+  [session-id metadata]
+  (when session-id
+    (let [token (Object.)]
+      (locking (idle-monitor)
+        (let [reservations* (session-turn-reservations-atom)]
+          (when-not (contains? @reservations* session-id)
+            (swap! reservations* assoc session-id (assoc metadata :token token))
+            (.notifyAll ^Object (idle-monitor))
+            token))))))
+
+(defn- clear-session-turn-reservation!
+  [session-id token]
+  (when (and session-id token)
+    (locking (idle-monitor)
+      (swap! (session-turn-reservations-atom)
+             (fn [reservations]
+               (if (= token (get-in reservations [session-id :token]))
+                 (dissoc reservations session-id)
+                 reservations)))
+      (.notifyAll ^Object (idle-monitor))))
+  nil)
+
 (defn- try-acquire-session-turn!
-  [session-id]
-  (loop []
-    (let [active-session-turns* (active-session-turns-atom)
-          active @active-session-turns*]
-      (cond
-        (contains? active session-id)
-        false
+  ([session-id]
+   (try-acquire-session-turn! session-id nil))
+  ([session-id reservation-token]
+   (locking (idle-monitor)
+     (let [active-session-turns* (active-session-turns-atom)
+           reservations* (session-turn-reservations-atom)
+           active @active-session-turns*
+           reservation (get @reservations* session-id)]
+       (cond
+         (contains? active session-id)
+         false
 
-        (compare-and-set! active-session-turns* active (conj active session-id))
-        true
+         reservation
+         (if (= reservation-token (:token reservation))
+           (do
+             (swap! reservations* dissoc session-id)
+             (swap! active-session-turns* conj session-id)
+             true)
+           false)
 
-        :else
-        (recur)))))
+         reservation-token
+         false
+
+         :else
+         (do
+           (swap! active-session-turns* conj session-id)
+           true))))))
 
 (defn- release-session-turn!
   [session-id]
   (when session-id
-    (swap! (active-session-turns-atom) disj session-id))
+    (locking (idle-monitor)
+      (swap! (active-session-turns-atom) disj session-id)
+      (.notifyAll ^Object (idle-monitor))))
   nil)
 
 (defn- with-session-turn-lock
-  [session-id f]
-  (if session-id
-    (if (try-acquire-session-turn! session-id)
-      (try
-        (f)
-        (finally
-          (release-session-turn! session-id)))
-      (throw (ex-info "Session is already processing another request"
-                      {:type :session-busy
-                       :status 409
-                       :error "session is busy"
-                       :session-id session-id})))
-    (f)))
+  ([session-id f]
+   (with-session-turn-lock session-id nil f))
+  ([session-id reservation-token f]
+   (if session-id
+     (if (try-acquire-session-turn! session-id reservation-token)
+       (try
+         (f)
+         (finally
+           (release-session-turn! session-id)))
+       (throw (ex-info "Session is already processing another request"
+                       {:type :session-busy
+                        :status 409
+                        :error "session is busy"
+                        :session-id session-id})))
+     (f))))
 
 (defn- max-user-message-chars
   []
@@ -350,8 +401,11 @@
   (fact-review/reset-runtime!)
   (when-let [runtime (maybe-current-runtime)]
     (reset! (:active-session-turns-atom runtime) #{})
+    (reset! (:session-turn-reservations-atom runtime) {})
     (reset! (:active-session-runs-atom runtime) {})
     (reset! (:active-task-runs-atom runtime) {})
+    (locking (:idle-monitor runtime)
+      (.notifyAll ^Object (:idle-monitor runtime)))
     (reset! installed-runtime-atom nil))
   nil)
 
@@ -389,6 +443,8 @@
               :child-session-ids #{}
               :cancelled? false
               :cancel-reason nil})
+      (locking (idle-monitor)
+        (.notifyAll ^Object (idle-monitor)))
       (try
         (f)
         (finally
@@ -396,7 +452,9 @@
                  (fn [runs]
                    (if (= run-id (get-in runs [session-id :run-id]))
                      (dissoc runs session-id)
-                     runs))))))
+                     runs)))
+          (locking (idle-monitor)
+            (.notifyAll ^Object (idle-monitor))))))
     (f)))
 
 (defn- session-run-entry
@@ -418,37 +476,32 @@
   (or (some-> session-id session-bound-task-id task-run-entry)
       (session-run-entry session-id)))
 
+(defn- wait-for-idle!
+  [entry-fn id timeout-ms]
+  (let [timeout-ms* (long (max 0 (long timeout-ms)))
+        deadline (+ (current-time-ms) timeout-ms*)
+        monitor (idle-monitor)]
+    (locking monitor
+      (loop []
+        (cond
+          (nil? (entry-fn id))
+          true
+
+          (>= (current-time-ms) deadline)
+          false
+
+          :else
+          (let [remaining-ms (max 1 (- deadline (current-time-ms)))]
+            (.wait ^Object monitor (long remaining-ms))
+            (recur)))))))
+
 (defn- wait-for-session-idle!
   [session-id timeout-ms]
-  (let [deadline (+ (current-time-ms) (long timeout-ms))]
-    (loop []
-      (cond
-        (nil? (session-run-entry session-id))
-        true
-
-        (>= (current-time-ms) deadline)
-        false
-
-        :else
-        (do
-          (Thread/sleep 50)
-          (recur))))))
+  (wait-for-idle! session-run-entry session-id timeout-ms))
 
 (defn- wait-for-task-idle!
   [task-id timeout-ms]
-  (let [deadline (+ (current-time-ms) (long timeout-ms))]
-    (loop []
-      (cond
-        (nil? (task-run-entry task-id))
-        true
-
-        (>= (current-time-ms) deadline)
-        false
-
-        :else
-        (do
-          (Thread/sleep 50)
-          (recur))))))
+  (wait-for-idle! task-run-entry task-id timeout-ms))
 
 (defn- update-session-run-entry!
   [session-id f]
@@ -491,6 +544,8 @@
                                               :task-id task-id
                                               :child-session-ids #{})
                                         run)))
+        (locking (idle-monitor)
+          (.notifyAll ^Object (idle-monitor)))
         task-entry))))
 
 (defn- clear-task-run!
@@ -516,7 +571,9 @@
                                      (if (= task-id (:task-id entry))
                                        (assoc entry
                                               :task-id nil)
-                                       entry)))))))
+                                       entry))))
+      (locking (idle-monitor)
+        (.notifyAll ^Object (idle-monitor))))))
 
 (defn- register-child-session!
   [parent-session-id child-session-id]
@@ -2341,7 +2398,7 @@
                                      max-tool-rounds resource-session-id
                                      persist-message? transient-messages
                                      working-memory-message task-id runtime-op
-                                     interrupting-turn-id]
+                                     interrupting-turn-id turn-reservation-token]
                               :or {channel :terminal
                                    tool-context {}
                                    persist-message? true}}]
@@ -2351,6 +2408,7 @@
        :session-message))
   (with-session-turn-lock
     session-id
+    turn-reservation-token
     (fn []
       (with-session-run
         session-id
@@ -2976,8 +3034,10 @@
   []
   (merge (task-runtime-deps)
          {:cancel-session! cancel-session!
+          :clear-session-turn-reservation! clear-session-turn-reservation!
           :process-message process-message
           :register-child-session! register-child-session!
+          :reserve-next-session-turn! reserve-next-session-turn!
           :session-run-entry session-run-entry
           :task-run-entry task-run-entry
           :task-control-wait-ms task-control-wait-ms
