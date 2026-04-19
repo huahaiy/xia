@@ -16,6 +16,7 @@
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
             [xia.checkpoint :as checkpoint]
+            [xia.rate-limit :as rate-limit]
             [xia.runtime-health :as runtime-health]
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
@@ -29,7 +30,8 @@
     [java.nio.file Files LinkOption Path Paths]
     [java.security SecureRandom]
     [java.util Base64 Date]
-    [java.util.concurrent Executors ScheduledExecutorService ScheduledFuture TimeUnit]))
+    [java.util.concurrent ConcurrentHashMap Executors ScheduledExecutorService ScheduledFuture TimeUnit]
+    [java.util.concurrent.atomic AtomicLong]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -47,11 +49,24 @@
 (def ^:private websocket-receive-retry-delay-ms 5000)
 (def ^:private session-finalize-lock-count 256)
 (def ^:private http-port-search-limit 100)
+(def ^:private ingress-rate-limit-window-ms 60000)
 (def ^:private rest-session-channels #{:http :command})
 (def ^:private local-ui-session-channels #{:http :websocket})
 (def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
 (def ^:private byte-array-class (class (byte-array 0)))
 (declare install-runtime! clear-runtime!)
+
+(defn- default-ingress-rate-limit-per-minute
+  []
+  1200)
+
+(defn- chat-ingress-rate-limit-per-minute
+  []
+  60)
+
+(defn- session-create-ingress-rate-limit-per-minute
+  []
+  120)
 
 (defn- make-runtime
   []
@@ -68,6 +83,8 @@
                                           (let [bytes (byte-array 32)
                                                 _     (.nextBytes (SecureRandom.) bytes)]
                                             (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes)))
+   :ingress-rate-limits                 (ConcurrentHashMap.)
+   :ingress-rate-limit-cleanup          (AtomicLong. 0)
    :rest-session-finalizer-executor-atom (atom nil)
    :rest-session-finalizers-atom        (atom {})
    :session-finalize-locks              (vec (repeatedly session-finalize-lock-count #(Object.)))})
@@ -117,6 +134,14 @@
 (defn- command-shutdown-handler-atom
   []
   (:command-shutdown-handler-atom (current-runtime)))
+
+(defn- ingress-rate-limits
+  []
+  (:ingress-rate-limits (current-runtime)))
+
+(defn- ingress-rate-limit-cleanup
+  []
+  (:ingress-rate-limit-cleanup (current-runtime)))
 
 (defn- maybe-command-shutdown-handler-atom
   []
@@ -705,6 +730,116 @@
    :headers {"Content-Type" "application/json"}
    :body    (json/write-json-str body)})
 
+(defn- ingress-route-class
+  [req]
+  (let [uri    (:uri req)
+        method (:request-method req)]
+    (cond
+      (and (= method :post)
+           (#{
+              "/chat"
+              "/command/chat"} uri))
+      :chat
+
+      (and (= method :post)
+           (#{
+              "/sessions"
+              "/command/sessions"} uri))
+      :session-create
+
+      :else
+      :default)))
+
+(defn- ingress-rate-limit-per-minute
+  [route-class]
+  (case route-class
+    :chat (chat-ingress-rate-limit-per-minute)
+    :session-create (session-create-ingress-rate-limit-per-minute)
+    (default-ingress-rate-limit-per-minute)))
+
+(defn- request-client-id
+  [req]
+  (or (some-> (:remote-addr req) str str/trim not-empty)
+      (some-> (request-header req "x-real-ip") str str/trim not-empty)
+      (first-forwarded (request-header req "x-forwarded-for"))
+      "unknown"))
+
+(defn- ingress-rate-limit-key
+  [req scope route-class]
+  [scope route-class (request-client-id req)])
+
+(defn- ingress-rate-limit-state
+  [bucket-key now]
+  (let [states (ingress-rate-limits)]
+    (rate-limit/maybe-prune-states! states
+                                    (ingress-rate-limit-cleanup)
+                                    now
+                                    ingress-rate-limit-window-ms)
+    (.computeIfAbsent states
+                      bucket-key
+                      (fn [_] (atom {:timestamps []
+                                     :cleaned 0})))))
+
+(defn- ingress-retry-after-ms
+  [state now]
+  (let [now*   (long now)
+        cutoff (- now* (long ingress-rate-limit-window-ms))
+        oldest (reduce (fn [acc timestamp]
+                         (let [timestamp* (long timestamp)]
+                           (if (> timestamp* cutoff)
+                             (if (or (nil? acc) (< timestamp* acc))
+                               timestamp*
+                               acc)
+                             acc)))
+                       nil
+                       (:timestamps @state))]
+    (-> (if oldest
+          (- (long ingress-rate-limit-window-ms)
+             (- now* oldest))
+          (long ingress-rate-limit-window-ms))
+        (util/long-max 0))))
+
+(defn- ingress-rate-limited-response
+  [scope route-class limit state now]
+  (let [retry-after-ms      (ingress-retry-after-ms state now)
+        retry-after-seconds (long (max 1 (Math/ceil (/ retry-after-ms 1000.0))))]
+    {:status 429
+     :headers {"Content-Type" "application/json"
+               "Retry-After" (str retry-after-seconds)}
+     :body (json/write-json-str
+            {:error "too many requests"
+             :channel (name scope)
+             :route_kind (name route-class)
+             :limit_per_minute (long limit)
+             :retry_after_seconds retry-after-seconds})}))
+
+(defn- check-ingress-rate-limit
+  [req scope]
+  (let [route-class (ingress-route-class req)
+        limit       (ingress-rate-limit-per-minute route-class)
+        now         (System/currentTimeMillis)
+        state       (ingress-rate-limit-state (ingress-rate-limit-key req scope route-class)
+                                              now)]
+    (try
+      (rate-limit/consume-slot! state
+                                now
+                                ingress-rate-limit-window-ms
+                                limit
+                                #(ex-info "too many requests"
+                                          {:type :http/ingress-rate-limit}))
+      nil
+      (catch clojure.lang.ExceptionInfo e
+        (if (= :http/ingress-rate-limit (some-> e ex-data :type))
+          (ingress-rate-limited-response scope route-class limit state now)
+          (throw e))))))
+
+(defn- reset-runtime-ingress-rate-limits!
+  [runtime]
+  (when runtime
+    (.clear ^ConcurrentHashMap (:ingress-rate-limits runtime))
+    (.set ^AtomicLong (:ingress-rate-limit-cleanup runtime) 0))
+  nil)
+
 (defn- utf8-download-media-type
   [media-type]
   (let [base (some-> media-type str str/trim not-empty)]
@@ -925,31 +1060,35 @@
 
 (defn- protected-route-response
   [req allowed-fn]
-  (cond
-    (not (trusted-local-origin? req))
-    (forbidden-response)
+  (if-let [response (check-ingress-rate-limit req :http)]
+    response
+    (cond
+      (not (trusted-local-origin? req))
+      (forbidden-response)
 
-    (not (valid-session-secret? req))
-    (unauthorized-response)
+      (not (valid-session-secret? req))
+      (unauthorized-response)
 
-    (not (runtime-available?))
-    (runtime-unavailable-response)
+      (not (runtime-available?))
+      (runtime-unavailable-response)
 
-    :else
-    (allowed-fn)))
+      :else
+      (allowed-fn))))
 
 (defn- command-route-response
   [req allowed-fn]
-  (cond
-    (not (runtime-available?))
-    (runtime-unavailable-response)
+  (if-let [response (check-ingress-rate-limit req :command)]
+    response
+    (cond
+      (not (runtime-available?))
+      (runtime-unavailable-response)
 
-    :else
-    (if-let [token (command-channel-token)]
-      (if (= (request-bearer-token req) token)
-        (allowed-fn)
-        (command-unauthorized-response))
-      (command-channel-unavailable-response))))
+      :else
+      (if-let [token (command-channel-token)]
+        (if (= (request-bearer-token req) token)
+          (allowed-fn)
+          (command-unauthorized-response))
+        (command-channel-unavailable-response)))))
 
 (defn- approval->body
   [{:keys [approval-id tool-id tool-name description arguments reason policy created-at]}]
@@ -2291,6 +2430,7 @@
     (reset! (websocket-receive-failures-atom) {})
     (reset! (session-statuses-atom) {})
     (reset! (task-runtime-events-atom) {})
+    (reset-runtime-ingress-rate-limits! (current-runtime))
     (clear-command-shutdown-handler!)
     (configure-web-dev! false)
     (reset! (server-atom) nil)
@@ -2326,6 +2466,7 @@
     (reset! (:web-dev-state-atom runtime) {:enabled? false
                                            :root nil})
     (reset! (:command-shutdown-handler-atom runtime) nil)
+    (reset-runtime-ingress-rate-limits! runtime)
     (reset! (:rest-session-finalizer-executor-atom runtime) nil)
     (reset! (:rest-session-finalizers-atom runtime) {})
     (reset! installed-runtime-atom nil))
