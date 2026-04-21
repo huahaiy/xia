@@ -104,7 +104,7 @@ The first instance may bind to `3008`, the next to `3009`, and the next to
 
 The local web UI is not the only HTTP surface anymore. If you want one Xia
 instance, script, or other local agent to drive another Xia instance, enable
-the command channel with a bearer token:
+the command channel with a command secret:
 
 ```bash
 XIA_COMMAND_TOKEN=shared-local-secret xia --instance ops --mode server
@@ -121,14 +121,37 @@ port:
 - `POST /command/sessions/<session-id>/approval`
 - `GET /command/sessions/<session-id>/messages`
 
-These routes use:
+Loopback clients may use the secret as a bearer token:
 
 ```text
 Authorization: Bearer <token>
 ```
 
-Unlike the browser UI routes, they do not require the local UI session cookie
-or browser-origin headers.
+Bearer command auth is accepted only from local clients. Network clients must
+use signed command auth so the command secret is never sent on the wire and
+captured requests cannot be replayed. Signed requests include:
+
+```text
+X-Xia-Command-Timestamp: <epoch-millis-or-seconds>
+X-Xia-Command-Nonce: <unique nonce>
+X-Xia-Command-Signature: <base64url HMAC-SHA256>
+```
+
+The signature uses the command secret as the HMAC key and signs:
+
+```text
+<METHOD>
+<URI>
+<QUERY_STRING_OR_EMPTY>
+<TIMESTAMP_HEADER_VALUE>
+<NONCE>
+<BASE64URL_SHA256_REQUEST_BODY>
+```
+
+Xia accepts timestamps within five minutes and rejects nonce replays.
+
+Unlike the browser UI routes, command routes do not require the local UI
+session cookie or browser-origin headers.
 
 Example:
 
@@ -147,6 +170,10 @@ chat history panel.
 Treat the bearer token like any other local secret. If you want to persist it
 inside the instance database instead of passing `XIA_COMMAND_TOKEN` at startup,
 store it under the config key `:secret/command-channel-token`.
+
+For rotation, set `XIA_COMMAND_TOKEN_NEXT` or
+`:secret/command-channel-token-next`; Xia accepts both current and next
+secrets while callers move over.
 
 ## Letting Xia Start Another Xia
 

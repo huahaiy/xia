@@ -28,10 +28,12 @@
     [java.net BindException]
     [java.nio.charset StandardCharsets]
     [java.nio.file Files LinkOption Path Paths]
-    [java.security SecureRandom]
+    [java.security MessageDigest SecureRandom]
     [java.util Base64 Date]
     [java.util.concurrent ConcurrentHashMap Executors ScheduledExecutorService ScheduledFuture TimeUnit]
-    [java.util.concurrent.atomic AtomicLong]))
+    [java.util.concurrent.atomic AtomicLong]
+    [javax.crypto Mac]
+    [javax.crypto.spec SecretKeySpec]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -43,6 +45,7 @@
 (def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private local-session-cookie-name "xia-local-session")
 (def ^:private command-channel-token-config-key :secret/command-channel-token)
+(def ^:private command-channel-next-token-config-key :secret/command-channel-token-next)
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private max-live-task-runtime-events 200)
@@ -50,6 +53,9 @@
 (def ^:private session-finalize-lock-count 256)
 (def ^:private http-port-search-limit 100)
 (def ^:private ingress-rate-limit-window-ms 60000)
+(def ^:private command-signature-max-skew-ms (* 5 60 1000))
+(def ^:private command-auth-nonce-cleanup-interval-ms (* 60 1000))
+(def ^:private command-auth-nonce-max-length 200)
 (def ^:private rest-session-channels #{:http :command})
 (def ^:private local-ui-session-channels #{:http :websocket})
 (def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
@@ -85,6 +91,8 @@
                                             (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes)))
    :ingress-rate-limits                 (ConcurrentHashMap.)
    :ingress-rate-limit-cleanup          (AtomicLong. 0)
+   :command-auth-nonces                 (ConcurrentHashMap.)
+   :command-auth-nonce-cleanup          (AtomicLong. 0)
    :rest-session-finalizer-executor-atom (atom nil)
    :rest-session-finalizers-atom        (atom {})
    :session-finalize-locks              (vec (repeatedly session-finalize-lock-count #(Object.)))})
@@ -142,6 +150,14 @@
 (defn- ingress-rate-limit-cleanup
   []
   (:ingress-rate-limit-cleanup (current-runtime)))
+
+(defn- command-auth-nonces
+  []
+  (:command-auth-nonces (current-runtime)))
+
+(defn- command-auth-nonce-cleanup
+  []
+  (:command-auth-nonce-cleanup (current-runtime)))
 
 (defn- maybe-command-shutdown-handler-atom
   []
@@ -691,6 +707,51 @@
   (or (some-> (env-value "XIA_COMMAND_TOKEN") nonblank-str)
       (some-> (cfg/string-option command-channel-token-config-key nil) nonblank-str)))
 
+(defn- command-channel-next-token
+  []
+  (or (some-> (env-value "XIA_COMMAND_TOKEN_NEXT") nonblank-str)
+      (some-> (cfg/string-option command-channel-next-token-config-key nil) nonblank-str)))
+
+(defn- command-channel-tokens
+  []
+  (->> [(command-channel-token)
+        (command-channel-next-token)]
+       (keep #(some-> % str str/trim not-empty))
+       distinct
+       vec))
+
+(defn- local-command-client?
+  [req]
+  (let [remote-addr (some-> (:remote-addr req) str str/trim not-empty)]
+    (or (nil? remote-addr)
+        (contains? local-hosts remote-addr)
+        (= "0:0:0:0:0:0:0:1" remote-addr))))
+
+(defn- constant-time-string=
+  [a b]
+  (and (string? a)
+       (string? b)
+       (MessageDigest/isEqual
+        (.getBytes ^String a StandardCharsets/UTF_8)
+        (.getBytes ^String b StandardCharsets/UTF_8))))
+
+(defn- base64url
+  [^bytes bytes]
+  (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes))
+
+(defn- sha256-base64url
+  [^bytes bytes]
+  (base64url (.digest (doto (MessageDigest/getInstance "SHA-256")
+                        (.update bytes)))))
+
+(defn- hmac-sha256-base64url
+  [secret message]
+  (let [mac (Mac/getInstance "HmacSHA256")]
+    (.init mac (SecretKeySpec.
+                (.getBytes ^String secret StandardCharsets/UTF_8)
+                "HmacSHA256"))
+    (base64url (.doFinal mac (.getBytes ^String message StandardCharsets/UTF_8)))))
+
 (defn- cookie-map
   [req]
   (let [cookie-header (request-header req "cookie")]
@@ -840,6 +901,13 @@
     (.set ^AtomicLong (:ingress-rate-limit-cleanup runtime) 0))
   nil)
 
+(defn- reset-runtime-command-auth!
+  [runtime]
+  (when runtime
+    (.clear ^ConcurrentHashMap (:command-auth-nonces runtime))
+    (.set ^AtomicLong (:command-auth-nonce-cleanup runtime) 0))
+  nil)
+
 (defn- utf8-download-media-type
   [media-type]
   (let [base (some-> media-type str str/trim not-empty)]
@@ -931,6 +999,111 @@
 
 (defn- command-unauthorized-response []
   (json-response 401 {:error "missing or invalid command token"}))
+
+(defn- parse-command-timestamp-ms
+  [value]
+  (when-let [text (some-> value str str/trim not-empty)]
+    (try
+      (let [parsed (Long/parseLong text)]
+        (when (pos? parsed)
+          (if (< parsed 1000000000000)
+            (* parsed 1000)
+            parsed)))
+      (catch NumberFormatException _
+        nil))))
+
+(defn- command-signature-attempt?
+  [req]
+  (or (some? (request-header req "x-xia-command-timestamp"))
+      (some? (request-header req "x-xia-command-nonce"))
+      (some? (request-header req "x-xia-command-signature"))))
+
+(defn- command-request-body-bytes
+  [req]
+  (if (contains? req :body)
+    (let [body (:body req)]
+      (if (nil? body)
+        [(byte-array 0) req]
+        (let [body-bytes (or (read-body-bytes body)
+                             (byte-array 0))]
+          [body-bytes (assoc req :body body-bytes)])))
+    [(byte-array 0) req]))
+
+(defn- command-signing-payload
+  [req timestamp nonce body-bytes]
+  (str (str/upper-case (name (:request-method req)))
+       "\n"
+       (:uri req)
+       "\n"
+       (or (:query-string req) "")
+       "\n"
+       timestamp
+       "\n"
+       nonce
+       "\n"
+       (sha256-base64url body-bytes)))
+
+(defn- prune-command-auth-nonces!
+  [now]
+  (let [now* (long now)
+        cleanup (command-auth-nonce-cleanup)]
+    (loop []
+      (let [last-cleanup (.get cleanup)]
+        (cond
+          (< (- now* last-cleanup) command-auth-nonce-cleanup-interval-ms)
+          nil
+
+          (not (.compareAndSet cleanup last-cleanup now*))
+          (recur)
+
+          :else
+          (let [cutoff (- now* command-signature-max-skew-ms)]
+            (doseq [entry (iterator-seq (.iterator (.entrySet (command-auth-nonces))))]
+              (let [nonce (.getKey entry)
+                    timestamp (long (.getValue entry))]
+                (when (< timestamp cutoff)
+                  (.remove (command-auth-nonces) nonce timestamp))))))))))
+
+(defn- reserve-command-auth-nonce!
+  [nonce timestamp now]
+  (prune-command-auth-nonces! now)
+  (nil? (.putIfAbsent (command-auth-nonces) nonce (long timestamp))))
+
+(defn- signed-command-auth
+  [req token]
+  (let [timestamp-text (some-> (request-header req "x-xia-command-timestamp")
+                               str str/trim not-empty)
+        nonce          (some-> (request-header req "x-xia-command-nonce")
+                               str str/trim not-empty)
+        signature      (some-> (request-header req "x-xia-command-signature")
+                               str str/trim not-empty)
+        timestamp      (parse-command-timestamp-ms timestamp-text)
+        now            (System/currentTimeMillis)]
+    (when (and timestamp-text nonce signature)
+      (when (and timestamp
+                 (<= (Math/abs (- (long now) (long timestamp)))
+                     command-signature-max-skew-ms)
+                 (<= (count nonce) command-auth-nonce-max-length))
+        (let [[body-bytes req*] (command-request-body-bytes req)
+              expected          (hmac-sha256-base64url
+                                 token
+                                 (command-signing-payload req timestamp-text nonce body-bytes))]
+          (when (and (constant-time-string= expected signature)
+                     (reserve-command-auth-nonce! nonce timestamp now))
+            req*))))))
+
+(defn- authenticated-command-req
+  [req token]
+  (cond
+    (command-signature-attempt? req)
+    (signed-command-auth req token)
+
+    (and (local-command-client? req)
+         (constant-time-string= (request-bearer-token req) token))
+    req
+
+    :else
+    nil))
 
 (defn register-command-shutdown-handler!
   [handler]
@@ -1084,9 +1257,9 @@
       (runtime-unavailable-response)
 
       :else
-      (if-let [token (command-channel-token)]
-        (if (= (request-bearer-token req) token)
-          (allowed-fn)
+      (if-let [tokens (seq (command-channel-tokens))]
+        (if-let [req* (some #(authenticated-command-req req %) tokens)]
+          (allowed-fn req*)
           (command-unauthorized-response))
         (command-channel-unavailable-response)))))
 
@@ -1972,10 +2145,10 @@
 
         ;; Machine command channel
         (and (= method :post) (= uri "/command/sessions"))
-        (command-route-response req #(handle-create-session :command))
+        (command-route-response req (fn [_req] (handle-create-session :command)))
 
         (and (= method :post) (= uri "/command/chat"))
-        (command-route-response req #(handle-chat req :command))
+        (command-route-response req #(handle-chat % :command))
 
         (and (= method :post) (= uri "/hooks/slack/events"))
         (http-messaging/handle-slack-events (workspace-handler-deps) req)
@@ -1984,53 +2157,69 @@
         (http-messaging/handle-telegram-webhook (workspace-handler-deps) req)
 
         (and (= method :post) (= uri "/command/shutdown"))
-        (command-route-response req #(handle-command-shutdown req))
+        (command-route-response req #(handle-command-shutdown %))
 
         (and (= method :get) command-runtime-status-match)
-        (command-route-response req #(handle-command-runtime-status req))
+        (command-route-response req #(handle-command-runtime-status %))
 
         (and (= method :post) command-runtime-drain-match)
-        (command-route-response req #(handle-command-runtime-drain req))
+        (command-route-response req #(handle-command-runtime-drain %))
 
         (and (= method :post) command-runtime-undrain-match)
-        (command-route-response req #(handle-command-runtime-undrain req))
+        (command-route-response req #(handle-command-runtime-undrain %))
 
         (and (= method :post) command-managed-checkpoints-match)
-        (command-route-response req #(handle-command-create-checkpoint req))
+        (command-route-response req #(handle-command-create-checkpoint %))
 
         (and (= method :get) command-managed-checkpoint-match)
-        (command-route-response req #(handle-command-get-checkpoint
-                                      (second command-managed-checkpoint-match)))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-command-get-checkpoint
+                                   (second command-managed-checkpoint-match))))
 
         (and (= method :get) command-wake-projection-match)
-        (command-route-response req #(handle-command-wake-projection req))
+        (command-route-response req #(handle-command-wake-projection %))
 
         (and (= method :delete) command-session-close-match)
-        (command-route-response req #(handle-close-session (second command-session-close-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-close-session (second command-session-close-match) :command)))
 
         (and (= method :get) command-status-match)
-        (command-route-response req #(handle-get-status (second command-status-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-get-status (second command-status-match) :command)))
 
         (and (= method :get) command-session-task-match)
-        (command-route-response req #(handle-get-current-task (second command-session-task-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-get-current-task (second command-session-task-match) :command)))
 
         (and (= method :get) command-prompt-match)
-        (command-route-response req #(handle-get-prompt (second command-prompt-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-get-prompt (second command-prompt-match) :command)))
 
         (and (= method :post) command-prompt-match)
-        (command-route-response req #(handle-submit-prompt (second command-prompt-match) req :command))
+        (command-route-response req #(handle-submit-prompt (second command-prompt-match) % :command))
 
         (and (= method :get) command-approval-match)
-        (command-route-response req #(handle-get-approval (second command-approval-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-get-approval (second command-approval-match) :command)))
 
         (and (= method :post) command-approval-match)
-        (command-route-response req #(handle-submit-approval (second command-approval-match) req :command))
+        (command-route-response req #(handle-submit-approval (second command-approval-match) % :command))
 
         (and (= method :get) command-session-match)
-        (command-route-response req #(handle-session-messages (second command-session-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-session-messages (second command-session-match) :command)))
 
         (and (= method :get) command-session-audit-match)
-        (command-route-response req #(handle-session-audit (second command-session-audit-match) :command))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-session-audit (second command-session-audit-match) :command)))
 
         (and (= method :delete) session-close-match)
         (protected-route-response req #(handle-local-close-session (second session-close-match)))
@@ -2431,6 +2620,7 @@
     (reset! (session-statuses-atom) {})
     (reset! (task-runtime-events-atom) {})
     (reset-runtime-ingress-rate-limits! (current-runtime))
+    (reset-runtime-command-auth! (current-runtime))
     (clear-command-shutdown-handler!)
     (configure-web-dev! false)
     (reset! (server-atom) nil)
@@ -2467,6 +2657,7 @@
                                            :root nil})
     (reset! (:command-shutdown-handler-atom runtime) nil)
     (reset-runtime-ingress-rate-limits! runtime)
+    (reset-runtime-command-auth! runtime)
     (reset! (:rest-session-finalizer-executor-atom runtime) nil)
     (reset! (:rest-session-finalizers-atom runtime) {})
     (reset! installed-runtime-atom nil))
