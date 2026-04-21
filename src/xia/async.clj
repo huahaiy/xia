@@ -7,12 +7,14 @@
             ThreadPoolExecutor TimeUnit]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private default-shutdown-await-ms 10000)
 
 (declare clear-runtime!)
 
 (defn- make-runtime
   []
   {:executors-atom    (atom {})
+   :accepting-atom    (atom true)
    :thread-counter    (atom 0)
    :runtime-lock      (Object.)})
 
@@ -29,6 +31,10 @@
 (defn- executors-atom
   []
   (:executors-atom (current-runtime)))
+
+(defn- accepting-atom
+  []
+  (:accepting-atom (current-runtime)))
 
 (defn- thread-counter-atom
   []
@@ -101,6 +107,9 @@
 (defn- ensure-executor!
   [kind]
   (locking (runtime-lock)
+    (when-not @(accepting-atom)
+      (throw (RejectedExecutionException.
+              "Async runtime is shutting down")))
     (let [executors* (executors-atom)
           ^ExecutorService exec (get @executors* kind)]
       (if (and exec (not (.isShutdown exec)))
@@ -119,17 +128,24 @@
   ([kind f]
    (submit! kind nil f))
   ([kind description f]
-   (let [^ExecutorService exec (ensure-executor! kind)
-         task-fn (convey-bindings f)]
+   (let [task-fn (convey-bindings f)]
      (try
-       (.submit exec
-                ^Callable
-                (fn []
-                  (task-fn)))
+       (let [^ExecutorService exec (ensure-executor! kind)]
+         (.submit exec
+                  ^Callable
+                  (fn []
+                    (try
+                      (task-fn)
+                      (catch Throwable t
+                        (log/error t "Async task failed"
+                                   {:kind kind
+                                    :description description})
+                        (throw t))))))
        (catch RejectedExecutionException e
-         (log/warn e "Async task submission rejected"
-                   {:kind kind
-                    :description description})
+         (when-not (= "Async runtime is shutting down" (.getMessage e))
+           (log/warn e "Async task submission rejected"
+                     {:kind kind
+                      :description description}))
          nil)))))
 
 (defn submit-background!
@@ -144,14 +160,67 @@
   ([description f]
    (submit! :parallel description f)))
 
-(defn- shutdown-executor!
+(defn- executor-snapshot
+  [runtime]
+  (locking (:runtime-lock runtime)
+    (vec @(:executors-atom runtime))))
+
+(defn- shutdown-executor-gracefully!
   [^ExecutorService exec]
-  (.shutdownNow exec)
+  (.shutdown exec))
+
+(defn- force-shutdown-executor!
+  [^ExecutorService exec]
+  (.shutdownNow exec))
+
+(defn- await-executor!
+  [kind ^ExecutorService exec timeout-ms]
   (try
-    (.awaitTermination exec 25 TimeUnit/MILLISECONDS)
-    (catch InterruptedException _
+    (let [terminated? (.awaitTermination exec (long timeout-ms) TimeUnit/MILLISECONDS)]
+      (when-not terminated?
+        (log/warn "Timed out waiting for async executor to stop"
+                  {:kind kind
+                   :timeout-ms timeout-ms
+                   :active-count (when (instance? ThreadPoolExecutor exec)
+                                   (.getActiveCount ^ThreadPoolExecutor exec))
+                   :queued-count (when (instance? ThreadPoolExecutor exec)
+                                   (.size (.getQueue ^ThreadPoolExecutor exec)))}))
+      terminated?)
+    (catch InterruptedException e
       (.interrupt (Thread/currentThread))
-      (.shutdownNow exec))))
+      (log/warn e "Interrupted while waiting for async executor shutdown"
+                {:kind kind})
+      false)))
+
+(defn prepare-shutdown!
+  "Stop accepting new async work and let already accepted work drain."
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (locking (:runtime-lock runtime)
+      (reset! (:accepting-atom runtime) false)
+      (doseq [[_ ^ExecutorService exec] @(:executors-atom runtime)]
+        (shutdown-executor-gracefully! exec))
+      (count @(:executors-atom runtime)))))
+
+(defn await-background-tasks!
+  "Wait for accepted async tasks to finish after prepare-shutdown!.
+
+   The name is intentionally aligned with subsystem shutdown hooks; this waits
+   for both background and parallel executors because either kind may hold DB
+   work."
+  ([] (await-background-tasks! default-shutdown-await-ms))
+  ([timeout-ms]
+   (if-let [runtime (maybe-current-runtime)]
+     (do
+       (prepare-shutdown!)
+       (let [deadline-ms (+ (System/currentTimeMillis) (long timeout-ms))
+             results     (doall
+                           (for [[kind exec] (executor-snapshot runtime)
+                                 :let [remaining-ms (max 1 (- deadline-ms
+                                                              (System/currentTimeMillis)))]]
+                             (await-executor! kind exec remaining-ms)))]
+         (every? true? results)))
+     true)))
 
 (defn install-runtime!
   ([] (install-runtime! (make-runtime)))
@@ -159,16 +228,20 @@
    (when-let [current (maybe-current-runtime)]
      (when-not (identical? current runtime)
        (clear-runtime!)))
+   (reset! (:accepting-atom runtime) true)
    (reset! installed-runtime-atom runtime)
    runtime))
 
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
+    (prepare-shutdown!)
     (locking (:runtime-lock runtime)
-      (doseq [[_ ^ExecutorService exec] @(:executors-atom runtime)]
-        (shutdown-executor! exec))
+      (doseq [[kind ^ExecutorService exec] @(:executors-atom runtime)]
+        (force-shutdown-executor! exec)
+        (await-executor! kind exec 25))
       (reset! (:executors-atom runtime) {})
+      (reset! (:accepting-atom runtime) true)
       (reset! (:thread-counter runtime) 0)
       (reset! installed-runtime-atom nil)))
   nil)

@@ -134,8 +134,9 @@
   (wm/clear-runtime!))
 
 (defmethod ig/init-key :xia/async-runtime
-  [_ _]
-  {:runtime (async/install-runtime!)})
+  [_ {:keys [db]}]
+  {:runtime (async/install-runtime!)
+   :db db})
 
 (defmethod ig/halt-key! :xia/async-runtime
   [_ _]
@@ -187,12 +188,16 @@
   [_ _]
   (agent/cancel-all-sessions! "runtime stopping")
   (browser/release-all-sessions!)
+  (async/prepare-shutdown!)
   (hippo/prepare-shutdown!)
   (checkpoint/prepare-shutdown!)
   (llm/prepare-shutdown!)
   (hippo/await-background-tasks!)
   (checkpoint/await-background-tasks!)
+  (checkpoint/reset-runtime!)
   (llm/await-background-tasks!)
+  (async/await-background-tasks!)
+  (async/clear-runtime!)
   (local-ocr/reset-runtime!))
 
 (defmethod ig/init-key :xia/http-runtime

@@ -238,7 +238,7 @@
       :connect-options connect-options}
 
      :xia/async-runtime
-     {}
+     {:db (ig/ref :xia/db)}
 
      :xia/prompt-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
