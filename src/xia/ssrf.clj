@@ -1,5 +1,9 @@
 (ns xia.ssrf
-  "Helpers for validating outbound URLs against SSRF risks."
+  "Helpers for validating outbound URLs against SSRF risks.
+
+   Callers that will open a network connection must connect to one of the
+   returned addresses rather than resolving the hostname again. Validation-only
+   use is not sufficient for rebinding-safe HTTP clients."
   (:require [clojure.string :as str])
   (:import [java.net InetAddress URI UnknownHostException]))
 
@@ -20,7 +24,8 @@
 
    By default private/internal addresses are blocked. Callers that
    intentionally need to reach loopback or private-network services must opt in
-   with :allow-private-network?."
+   with :allow-private-network?. The returned :addresses are the pinned
+   connection targets for rebinding-safe transports."
   ([url]
    (resolve-url! resolve-host-addresses url {}))
   ([url opts]

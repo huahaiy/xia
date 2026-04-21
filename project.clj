@@ -8,7 +8,6 @@
                  [integrant/integrant "0.13.1"]
                  [org.datalevin/datalevin-embedded "0.10.15"]
                  [org.clojure/tools.cli "1.4.256"]
-                 [hato/hato "1.0.0"]
                  [com.cnuernber/charred "1.038"]
                  [org.babashka/sci "0.12.51"]
                  [org.jsoup/jsoup "1.22.1"]

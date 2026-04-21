@@ -6,7 +6,7 @@
      search-web   — web search, return structured results
      extract-data — fetch a URL, extract elements by CSS selectors
 
-   All HTTP requests go through this module (not raw hato) so we can
+   Web-tool HTTP requests go through this module's pinned-socket transport so we can
    enforce SSRF protection, rate limiting, and content size limits."
   (:require [clojure.string :as str]
             [charred.api :as json]
