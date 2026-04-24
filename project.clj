@@ -36,9 +36,7 @@
                        :main xia.core
                        :omit-source true
                        :uberjar-name "xia.jar"}
-             :native-test {:source-paths ^:replace ["src" "dev" "test"]
+             :native-test {:source-paths ^:replace ["src" "test"]
                            :resource-paths ^:replace ["resources"]
-                           :dependencies [[nrepl/nrepl "1.3.1"]
-                                          [org.clojure/tools.namespace "1.5.1"]]
                            :main xia.test-runner
                            :uberjar-name "xia-tests.jar"}})

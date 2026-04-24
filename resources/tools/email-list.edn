@@ -1,9 +1,9 @@
-;; List recent Gmail messages from the configured Gmail service.
+;; List Gmail messages from the configured Gmail service.
 ;; Import with: /import-tool resources/tools/email-list.edn
 
 {:id          :email-list
  :name        "email-list"
- :description "List recent Gmail messages so you can inspect an inbox, search mail, or find a message id to read. By default it searches the inbox."
+ :description "List Gmail messages so you can inspect an inbox, search mail, page through results, or find a message id to read. By default it searches the inbox."
  :tags        #{:email :gmail :inbox :communication}
  :approval    :session
  :parameters  {"type"       "object"
@@ -13,16 +13,22 @@
                                              "description" "Optional Gmail search query, for example \"from:alice newer_than:7d\""}
                              "max_results" {"type"        "integer"
                                              "description" "Maximum number of messages to return, default 10"}
+                             "page_token"  {"type"        "string"
+                                             "description" "Optional Gmail page token from a previous email-list result"}
                              "unread_only" {"type"        "boolean"
                                              "description" "When true, only return unread messages"}
                              "inbox_only"  {"type"        "boolean"
-                                             "description" "When true, restrict results to the inbox. Defaults to true."}}}
+                                             "description" "When true, restrict results to the inbox. Defaults to true."}
+                             "include_spam_trash" {"type"        "boolean"
+                                                   "description" "When true, include matches from Spam and Trash."}}}
  :handler     "(fn [args]
                  (xia.email/list-messages
                    :service-id (get args \"service_id\")
                    :query (get args \"query\")
                    :max-results (or (get args \"max_results\") 10)
+                   :page-token (get args \"page_token\")
                    :unread-only? (boolean (get args \"unread_only\"))
                    :inbox-only? (if (contains? args \"inbox_only\")
                                   (boolean (get args \"inbox_only\"))
-                                  true)))"}
+                                  true)
+                   :include-spam-trash? (boolean (get args \"include_spam_trash\"))))"}

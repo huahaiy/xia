@@ -68,10 +68,17 @@
    "tools/artifact-search.edn"
    "tools/artifact-read.edn"
    "tools/artifact-delete.edn"
+   "tools/email-label-list.edn"
    "tools/email-list.edn"
    "tools/email-read.edn"
    "tools/email-send.edn"
    "tools/email-delete.edn"
+   "tools/email-update.edn"
+   "tools/email-draft-list.edn"
+   "tools/email-draft-read.edn"
+   "tools/email-draft-save.edn"
+   "tools/email-draft-send.edn"
+   "tools/email-draft-delete.edn"
    "tools/memory-correct-fact.edn"
    "tools/local-doc-search.edn"
    "tools/local-doc-read.edn"
@@ -111,6 +118,12 @@
    :workspace/payload-missing
    :workspace/missing-content
    :email/invalid-body
+   :email/invalid-attachment-bytes
+   :email/invalid-attachment-bytes-base64
+   :email/missing-attachment-content
+   :email/attachment-artifact-not-found
+   :email/missing-message-id
+   :email/missing-draft-id
    :instance-supervisor/capability-disabled
    :instance-supervisor/command-unavailable
    :instance-supervisor/invalid-instance-id

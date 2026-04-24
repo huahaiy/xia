@@ -156,7 +156,7 @@
                                     :webhook_secret (secret-resolution->admin (:telegram-webhook-secret resolutions))}}
      :imessage {:enabled (imessage-enabled?)
                 :available (boolean (and (mac-os?)
-                                         (.exists (java.io.File. imessage-chat-db-path))))
+                                         (.exists (java.io.File. ^String imessage-chat-db-path))))
                 :poll_interval_ms (imessage-poll-interval-ms)
                 :sources {:enabled (some-> (get-in resolutions [:imessage-enabled :source]) name)
                           :poll_interval_ms (some-> (get-in resolutions [:imessage-poll-interval-ms :source]) name)}
@@ -1054,7 +1054,7 @@
   []
   (when (and (imessage-enabled?)
              (mac-os?)
-             (.exists (java.io.File. imessage-chat-db-path)))
+             (.exists (java.io.File. ^String imessage-chat-db-path)))
     (try
       (let [after-rowid @imessage-last-rowid
             rows        (fetch-new-imessages after-rowid)]
@@ -1123,7 +1123,7 @@
   (stop-imessage-poller!)
   (when (and (imessage-enabled?)
              (mac-os?)
-             (.exists (java.io.File. imessage-chat-db-path)))
+             (.exists (java.io.File. ^String imessage-chat-db-path)))
     (reset! imessage-last-rowid (or (current-imessage-max-rowid) 0))
     (let [exec (Executors/newSingleThreadScheduledExecutor)]
       (.scheduleWithFixedDelay exec

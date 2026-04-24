@@ -11,8 +11,8 @@
             [xia.crypto :as crypto]
             [xia.db :as db]
             [xia.paths :as paths])
-  (:import [java.io File]
-           [java.nio.file Files Path Paths StandardCopyOption]
+  (:import [java.io File FileInputStream FileOutputStream]
+           [java.nio.file Files Path Paths]
            [java.nio.file.attribute FileAttribute]
            [java.time Instant]
            [java.util UUID]))
@@ -56,18 +56,23 @@
 
 (defn- ensure-directory!
   [path]
-  (let [^Path p (Paths/get path (make-array String 0))]
+  (let [^Path p (Paths/get ^String path (make-array String 0))]
     (Files/createDirectories p (make-array FileAttribute 0))
     path))
 
 (defn- copy-file!
   [^File source ^File target]
-  (when-let [^Path parent (.getParent (.toPath target))]
-    (Files/createDirectories parent (make-array FileAttribute 0)))
-  (Files/copy (.toPath source)
-              (.toPath target)
-              (into-array java.nio.file.CopyOption
-                          [StandardCopyOption/REPLACE_EXISTING])))
+  (let [^Path target-path (.toPath target)]
+    (when-let [^Path parent (.getParent target-path)]
+      (Files/createDirectories parent (make-array FileAttribute 0)))
+    (with-open [in  (FileInputStream. source)
+                out (FileOutputStream. target)]
+      (let [buffer (byte-array 8192)]
+        (loop []
+          (let [read-count (.read in buffer)]
+            (when-not (neg? read-count)
+              (.write out buffer 0 read-count)
+              (recur))))))))
 
 (defn- copy-required-support-files!
   [source-db-path staged-db-path]
@@ -87,7 +92,7 @@
   (let [root (io/file path)]
     (when (.exists root)
       (doseq [file (reverse (file-seq root))]
-        (Files/deleteIfExists (.toPath ^File file))))))
+        (Files/deleteIfExists ^Path (.toPath ^File file))))))
 
 (defn- restore-requires
   [source]
@@ -206,11 +211,13 @@
            checkpoint-id*  (or checkpoint-id (str "ckpt_" (UUID/randomUUID)))
            db-snapshot*    (or db-snapshot @(db/conn))
            workspace-tx    (some-> (:max-tx db-snapshot*) long)
-           staging-root* (ensure-directory! (checkpoint-directory staging-root))
-           stage-path*   (str (Files/createTempDirectory
-                                (Paths/get staging-root* (make-array String 0))
-                                checkpoint-prefix
-                                (make-array FileAttribute 0)))
+          staging-root* (ensure-directory! (checkpoint-directory staging-root))
+          ^Path staging-root-path (Paths/get ^String staging-root*
+                                             (make-array String 0))
+          stage-path*   (str (Files/createTempDirectory
+                               staging-root-path
+                               checkpoint-prefix
+                               (make-array FileAttribute 0)))
            stage-root    (volatile! stage-path*)]
        (try
          (let [staged-db-path    (str (Paths/get stage-path* (into-array String ["db"])))

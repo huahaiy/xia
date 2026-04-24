@@ -1,24 +1,24 @@
-;; Read a Gmail message by id.
-;; Import with: /import-tool resources/tools/email-read.edn
+;; Read a Gmail draft by id.
+;; Import with: /import-tool resources/tools/email-draft-read.edn
 
-{:id          :email-read
- :name        "email-read"
- :description "Read a Gmail message by id and return the best available body plus common headers. Attachment metadata is included by default; attachment content is optional."
- :tags        #{:email :gmail :read :communication}
+{:id          :email-draft-read
+ :name        "email-draft-read"
+ :description "Read a Gmail draft by id and return the current draft body, headers, and attachment metadata."
+ :tags        #{:email :gmail :draft :communication}
  :approval    :session
  :parameters  {"type"       "object"
-               "properties" {"message_id" {"type"        "string"
-                                           "description" "Gmail message id to read"}
+               "properties" {"draft_id" {"type"        "string"
+                                         "description" "Gmail draft id to read"}
                              "include_attachment_data" {"type"        "boolean"
                                                         "description" "When true, include attachment content when it fits within max_attachment_bytes"}
                              "max_attachment_bytes" {"type"        "integer"
                                                      "description" "Maximum attachment payload bytes to inline when include_attachment_data is true. Defaults to 262144"}
                              "service_id" {"type"        "string"
                                            "description" "Optional Gmail service id if you have more than one configured"}}
-               "required"   ["message_id"]}
+               "required"   ["draft_id"]}
  :handler     "(fn [args]
-                 (xia.email/read-message
-                   (get args \"message_id\")
+                 (xia.email/read-draft
+                   (get args \"draft_id\")
                    :include-attachment-data? (boolean (get args \"include_attachment_data\"))
                    :max-attachment-bytes (or (get args \"max_attachment_bytes\") 262144)
                    :service-id (get args \"service_id\")))"}

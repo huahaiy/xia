@@ -1,0 +1,34 @@
+;; Update Gmail message or thread state.
+;; Import with: /import-tool resources/tools/email-update.edn
+
+{:id          :email-update
+ :name        "email-update"
+ :description "Update Gmail thread state for a selected message id. Supports archive or unarchive, mark read or unread, and add or remove labels."
+ :tags        #{:email :gmail :labels :archive :communication}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"message_id"    {"type"        "string"
+                                              "description" "Gmail message id whose thread state should be updated"}
+                             "archive"       {"type"        "boolean"
+                                              "description" "When true archive the thread by removing INBOX. When false, restore the thread to INBOX."}
+                             "read"          {"type"        "boolean"
+                                              "description" "When true mark the thread read. When false, mark the thread unread."}
+                             "add_labels"    {"type"        "array"
+                                              "description" "Optional Gmail label ids to add to the thread"
+                                              "items"       {"type" "string"}}
+                             "remove_labels" {"type"        "array"
+                                              "description" "Optional Gmail label ids to remove from the thread"
+                                              "items"       {"type" "string"}}
+                             "service_id"    {"type"        "string"
+                                              "description" "Optional Gmail service id if you have more than one configured"}}
+               "required"   ["message_id"]}
+ :handler     "(fn [args]
+                 (xia.email/update-message
+                   (get args \"message_id\")
+                   :archive? (when (contains? args \"archive\")
+                               (boolean (get args \"archive\")))
+                   :read? (when (contains? args \"read\")
+                            (boolean (get args \"read\")))
+                   :add-labels (get args \"add_labels\")
+                   :remove-labels (get args \"remove_labels\")
+                   :service-id (get args \"service_id\")))"}

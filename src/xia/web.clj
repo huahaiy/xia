@@ -610,8 +610,9 @@
    content area."
   [url html & {:keys [title include-links]
                :or   {include-links true}}]
-  (let [^String base-url (or url "about:blank")
-        ^Document doc    (Jsoup/parse ^String (or html "") ^String base-url)
+  (let [^String base-url  (or url "about:blank")
+        ^String html-text (or html "")
+        ^Document doc     (Jsoup/parse html-text base-url)
         _                (doseq [^Element el (.select doc ^String noise-selectors)]
                            (.remove el))
         ^Element main    (find-main-content doc)

@@ -26,6 +26,12 @@
         "pattern": "\\Qweb/\\E.*"
       },
       {
+        "pattern": "\\Qxia/schema/\\E.*"
+      },
+      {
+        "pattern": "\\Qfixtures/\\E.*"
+      },
+      {
         "pattern": "\\Qorg/openpdf/\\E.*"
       }
     ]

@@ -52,7 +52,7 @@
                   local-ocr/invoke-local-model!            (fn [image-path mode]
                                                              (swap! calls conj {:image-path image-path
                                                                                 :mode mode})
-                                                             (is (.exists (java.io.File. image-path)))
+                                                             (is (.exists (java.io.File. ^String image-path)))
                                                              "Formula Recognition:\nE = mc^2")]
       (let [text (local-ocr/ocr-image-bytes (.getBytes "fake-image" StandardCharsets/UTF_8)
                                             {:name "formula.png"

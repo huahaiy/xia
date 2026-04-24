@@ -1,0 +1,18 @@
+;; Delete an existing Gmail draft.
+;; Import with: /import-tool resources/tools/email-draft-delete.edn
+
+{:id          :email-draft-delete
+ :name        "email-draft-delete"
+ :description "Delete an existing Gmail draft by id."
+ :tags        #{:email :gmail :draft :delete :communication}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"draft_id" {"type"        "string"
+                                         "description" "Gmail draft id to delete"}
+                             "service_id" {"type"        "string"
+                                           "description" "Optional Gmail service id if you have more than one configured"}}
+               "required"   ["draft_id"]}
+ :handler     "(fn [args]
+                 (xia.email/delete-draft
+                   (get args \"draft_id\")
+                   :service-id (get args \"service_id\")))"}

@@ -49,7 +49,7 @@
   (reify ThreadFactory
     (newThread [_ runnable]
       (doto (Thread. ^Runnable runnable
-                     (str prefix "-" (swap! (thread-counter-atom) inc)))
+                     ^String (str prefix "-" (swap! (thread-counter-atom) inc)))
         (.setDaemon true)))))
 
 (defn- caller-runs-unless-shutdown-handler

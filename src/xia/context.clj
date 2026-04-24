@@ -801,8 +801,8 @@
                                           (str (clojure.core/name type) "→" target)))
                detail-builder
                (take 3 (:outgoing edges)))
-       (let [detail (when (pos? (.length detail-builder))
-                      (.toString detail-builder))]
+	       (let [detail (when (pos? (.length ^StringBuilder detail-builder))
+	                      (.toString ^StringBuilder detail-builder))]
          {:content        (str "- " name type-str
                                (when-not (str/blank? detail) (str ": " detail)))
           :used-fact-eids (into [] (keep :eid) selected-facts)

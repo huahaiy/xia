@@ -12,11 +12,35 @@
    [nil "--list-suites" "Print available suites and exit"]
    ["-h" "--help" "Show help"]])
 
-(defn- load-suites
+(defn- read-suite-config
   []
   (if-let [resource (io/resource "xia/test_suites.edn")]
     (edn/read-string (slurp resource))
     {}))
+
+(defmacro ^:private compiled-suite-config
+  []
+  (list 'quote (read-suite-config)))
+
+(defmacro ^:private require-compiled-suite-namespaces!
+  []
+  (let [targets (->> (read-suite-config)
+                     vals
+                     (apply concat)
+                     distinct)]
+    `(do
+       ~@(for [target targets]
+           `(require '~target)))))
+
+(def ^:private compiled-suites
+  (compiled-suite-config))
+
+(require-compiled-suite-namespaces!)
+
+(defn- load-suites
+  []
+  (or (not-empty (read-suite-config))
+      compiled-suites))
 
 (defn- all-suite-targets
   [suites]

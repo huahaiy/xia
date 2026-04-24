@@ -442,7 +442,7 @@
   [{:keys [connect-timeout timeout on-event]
     :as req}]
   (try
-    (with-open [socket (open-pinned-socket! req)]
+    (with-open [^Socket socket (open-pinned-socket! req)]
       (let [in  (BufferedInputStream. (.getInputStream socket))
             out (BufferedOutputStream. (.getOutputStream socket))]
         (write-http-request! out req)
@@ -454,7 +454,7 @@
               (when-not on-event
                 (throw (ex-info "Streaming HTTP request requires :on-event callback"
                                 {:url (request-url req)})))
-              (let [stream (response-body-stream in headers)
+              (let [^InputStream stream (response-body-stream in headers)
                     reader (BufferedReader.
                              (InputStreamReader. stream StandardCharsets/UTF_8))]
                 (loop [event-type nil
@@ -493,7 +493,7 @@
     :or   {as :string}
     :as   req}]
   (try
-    (with-open [socket (open-pinned-socket! req)]
+    (with-open [^Socket socket (open-pinned-socket! req)]
       (let [in  (BufferedInputStream. (.getInputStream socket))
             out (BufferedOutputStream. (.getOutputStream socket))]
         (write-http-request! out req)

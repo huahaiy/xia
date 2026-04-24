@@ -1,0 +1,64 @@
+;; Create or update a Gmail draft.
+;; Import with: /import-tool resources/tools/email-draft-save.edn
+
+{:id          :email-draft-save
+ :name        "email-draft-save"
+ :description "Create or update a Gmail draft. Supports reply threading, optional HTML, and optional attachments."
+ :tags        #{:email :gmail :draft :communication}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"draft_id"     {"type"        "string"
+                                             "description" "Existing Gmail draft id to update. Omit to create a new draft."}
+                             "to"           {"type"        "string"
+                                             "description" "Primary recipient email address or RFC 5322 To header value"}
+                             "cc"           {"type"        "string"
+                                             "description" "Optional CC recipient list"}
+                             "bcc"          {"type"        "string"
+                                             "description" "Optional BCC recipient list"}
+                             "reply_to"     {"type"        "string"
+                                             "description" "Optional Reply-To header value"}
+                             "subject"      {"type"        "string"
+                                             "description" "Draft subject"}
+                             "body"         {"type"        "string"
+                                             "description" "Literal plain-text draft body only. Do not wrap it in JSON, code fences, or an object with nested content fields."}
+                             "html_body"    {"type"        "string"
+                                             "description" "Optional literal HTML draft body"}
+                             "in_reply_to"  {"type"        "string"
+                                             "description" "Optional Message-Id of the message being replied to"}
+                             "references"   {"type"        "string"
+                                             "description" "Optional References header value. Provide as a single string; if passing multiple message ids, join them with a space."}
+                             "thread_id"    {"type"        "string"
+                                             "description" "Optional Gmail thread id to attach the draft to"}
+                             "attachments"  {"type"        "array"
+                                             "description" "Optional attachments. Each item can reference an existing artifact by artifact_id, or provide filename plus content or bytes_base64."
+                                             "items"       {"type"       "object"
+                                                            "properties" {"artifact_id"  {"type"        "string"
+                                                                                           "description" "Existing Xia artifact id to attach"}
+                                                                          "filename"     {"type"        "string"
+                                                                                           "description" "Attachment filename when not using artifact_id"}
+                                                                          "media_type"   {"type"        "string"
+                                                                                           "description" "Optional attachment media type"}
+                                                                          "content"      {"type"        "string"
+                                                                                           "description" "UTF-8 text attachment content"}
+                                                                          "bytes_base64" {"type"        "string"
+                                                                                           "description" "Base64-encoded attachment bytes"}
+                                                                          "inline"       {"type"        "boolean"
+                                                                                           "description" "When true, mark the MIME disposition as inline"}}}}
+                             "service_id"   {"type"        "string"
+                                             "description" "Optional Gmail service id if you have more than one configured"}}
+               "required"   ["to" "subject" "body"]}
+ :handler     "(fn [args]
+                 (xia.email/save-draft
+                   (get args \"to\")
+                   (get args \"subject\")
+                   (get args \"body\")
+                   :draft-id (get args \"draft_id\")
+                   :cc (get args \"cc\")
+                   :bcc (get args \"bcc\")
+                   :reply-to (get args \"reply_to\")
+                   :html-body (get args \"html_body\")
+                   :in-reply-to (get args \"in_reply_to\")
+                   :references (get args \"references\")
+                   :thread-id (get args \"thread_id\")
+                   :attachments (get args \"attachments\")
+                   :service-id (get args \"service_id\")))"}

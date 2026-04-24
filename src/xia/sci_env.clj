@@ -165,10 +165,17 @@
    'import-item-as-local-doc! workspace/import-item-as-local-doc!})
 
 (def ^:private xia-email-ns
-  {'list-messages email/list-messages
-   'read-message  email/read-message
-   'send-message  email/send-message
-   'delete-message email/delete-message})
+  {'list-labels    email/list-labels
+   'list-messages  email/list-messages
+   'read-message   email/read-message
+   'send-message   email/send-message
+   'delete-message email/delete-message
+   'update-message email/update-message
+   'list-drafts    email/list-drafts
+   'read-draft     email/read-draft
+   'save-draft     email/save-draft
+   'send-draft     email/send-draft
+   'delete-draft   email/delete-draft})
 
 (def ^:private xia-web-ns
   {'fetch-page   web/fetch-page
@@ -544,7 +551,7 @@
             (reify Runnable
               (run [_]
                 (runner)))
-            (str "xia-sci-" (name stage) "-" (System/nanoTime)))
+            ^String (str "xia-sci-" (name stage) "-" (System/nanoTime)))
       (.setDaemon true))))
 
 (defn- interrupt-sci-worker!

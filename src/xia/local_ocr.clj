@@ -407,7 +407,7 @@
   [prefix]
   (reify ThreadFactory
     (newThread [_ runnable]
-      (doto (Thread. ^Runnable runnable prefix)
+      (doto (Thread. ^Runnable runnable ^String prefix)
         (.setDaemon true)))))
 
 (defn- create-vision-generator!
@@ -496,10 +496,10 @@
   ;; Native llama.cpp work is not interruptible here, so timeout is best-effort
   ;; at the caller boundary. The shared single-thread executor preserves
   ;; generator safety even when a timed-out task keeps running underneath.
-  (let [task (.submit executor
-                      ^Callable
-                      (fn []
-                        (thunk)))]
+  (let [^java.util.concurrent.Future task (.submit executor
+                                                   ^Callable
+                                                   (fn []
+                                                     (thunk)))]
     (try
       (.get task timeout-ms TimeUnit/MILLISECONDS)
       (catch TimeoutException _

@@ -1458,7 +1458,7 @@ Rules:
                       runtime))]
     (locking (runtime-lock)
       (let [runtime-state-atom* (runtime-state-atom)]
-        (when-let [future (:reaper-future @runtime-state-atom*)]
+        (when-let [^java.util.concurrent.Future future (:reaper-future @runtime-state-atom*)]
           (.cancel future true))
         (let [generation (inc (long (:generation @runtime-state-atom*)))
               future     (async/submit-background! "wm-reaper"
@@ -1473,7 +1473,7 @@ Rules:
   []
   (when (maybe-current-runtime)
     (locking (runtime-lock)
-      (when-let [future (:reaper-future @(runtime-state-atom))]
+      (when-let [^java.util.concurrent.Future future (:reaper-future @(runtime-state-atom))]
         (.cancel future true))
       (swap! (runtime-state-atom)
              (fn [state]

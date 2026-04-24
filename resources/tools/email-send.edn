@@ -3,10 +3,10 @@
 
 {:id          :email-send
  :name        "email-send"
- :description "Send a plain-text email through Gmail. Supports basic reply threading fields so you can continue an existing conversation. The body must be the literal email text only, not JSON, code fences, or a structured tool-argument wrapper."
+ :description "Send an email through Gmail. Supports reply threading, optional HTML, and optional attachments. The plain-text body must still be the literal email text only, not JSON, code fences, or a structured tool-argument wrapper."
  :tags        #{:email :gmail :send :communication}
  :approval    :session
- :parameters  {"type"       "object"
+  :parameters  {"type"       "object"
                "properties" {"to"          {"type"        "string"
                                              "description" "Primary recipient email address or RFC 5322 To header value"}
                              "cc"          {"type"        "string"
@@ -19,12 +19,29 @@
                                              "description" "Message subject"}
                              "body"        {"type"        "string"
                                              "description" "Literal plain-text email body only. Do not wrap it in JSON, code fences, or an object with nested content fields."}
+                             "html_body"   {"type"        "string"
+                                             "description" "Optional literal HTML body. When provided with body, Xia sends multipart/alternative."}
                              "in_reply_to" {"type"        "string"
                                              "description" "Optional Message-Id of the message being replied to"}
                              "references"  {"type"        "string"
                                              "description" "Optional References header value. Provide as a single string; if passing multiple message ids, join them with a space."}
                              "thread_id"   {"type"        "string"
                                              "description" "Optional Gmail thread id to attach the send to"}
+                             "attachments" {"type"        "array"
+                                            "description" "Optional attachments. Each item can reference an existing artifact by artifact_id, or provide filename plus content or bytes_base64."
+                                            "items"       {"type"       "object"
+                                                           "properties" {"artifact_id"  {"type"        "string"
+                                                                                          "description" "Existing Xia artifact id to attach"}
+                                                                         "filename"     {"type"        "string"
+                                                                                          "description" "Attachment filename when not using artifact_id"}
+                                                                         "media_type"   {"type"        "string"
+                                                                                          "description" "Optional attachment media type"}
+                                                                         "content"      {"type"        "string"
+                                                                                          "description" "UTF-8 text attachment content"}
+                                                                         "bytes_base64" {"type"        "string"
+                                                                                          "description" "Base64-encoded attachment bytes"}
+                                                                         "inline"       {"type"        "boolean"
+                                                                                          "description" "When true, mark the MIME disposition as inline"}}}}
                              "service_id"  {"type"        "string"
                                              "description" "Optional Gmail service id if you have more than one configured"}}
                "required"   ["to" "subject" "body"]}
@@ -36,7 +53,9 @@
                    :cc (get args \"cc\")
                    :bcc (get args \"bcc\")
                    :reply-to (get args \"reply_to\")
+                   :html-body (get args \"html_body\")
                    :in-reply-to (get args \"in_reply_to\")
                    :references (get args \"references\")
                    :thread-id (get args \"thread_id\")
+                   :attachments (get args \"attachments\")
                    :service-id (get args \"service_id\")))"}

@@ -467,11 +467,13 @@
 
 (defn- register-shutdown-hook!
   [cleanup]
-  (let [hook (Thread.
+  (let [^String hook-name "xia-shutdown"
+        hook (Thread.
+               ^Runnable
                (reify Runnable
                  (run [_]
                    (cleanup)))
-               "xia-shutdown")]
+               hook-name)]
     (.addShutdownHook (Runtime/getRuntime) hook)
     hook))
 

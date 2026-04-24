@@ -143,19 +143,19 @@
   []
   (:command-shutdown-handler-atom (current-runtime)))
 
-(defn- ingress-rate-limits
+(defn- ^ConcurrentHashMap ingress-rate-limits
   []
   (:ingress-rate-limits (current-runtime)))
 
-(defn- ingress-rate-limit-cleanup
+(defn- ^AtomicLong ingress-rate-limit-cleanup
   []
   (:ingress-rate-limit-cleanup (current-runtime)))
 
-(defn- command-auth-nonces
+(defn- ^ConcurrentHashMap command-auth-nonces
   []
   (:command-auth-nonces (current-runtime)))
 
-(defn- command-auth-nonce-cleanup
+(defn- ^AtomicLong command-auth-nonce-cleanup
   []
   (:command-auth-nonce-cleanup (current-runtime)))
 
@@ -829,17 +829,22 @@
   [req scope route-class]
   [scope route-class (request-client-id req)])
 
+(defn- new-ingress-rate-limit-state
+  []
+  (atom {:timestamps []
+         :cleaned 0}))
+
 (defn- ingress-rate-limit-state
   [bucket-key now]
-  (let [states (ingress-rate-limits)]
+  (let [^ConcurrentHashMap states (ingress-rate-limits)]
     (rate-limit/maybe-prune-states! states
                                     (ingress-rate-limit-cleanup)
                                     now
                                     ingress-rate-limit-window-ms)
-    (.computeIfAbsent states
-                      bucket-key
-                      (fn [_] (atom {:timestamps []
-                                     :cleaned 0})))))
+    (or (.get states bucket-key)
+        (let [state (new-ingress-rate-limit-state)]
+          (or (.putIfAbsent states bucket-key state)
+              state)))))
 
 (defn- ingress-retry-after-ms
   [state now]
@@ -1046,7 +1051,7 @@
 (defn- prune-command-auth-nonces!
   [now]
   (let [now* (long now)
-        cleanup (command-auth-nonce-cleanup)]
+        ^AtomicLong cleanup (command-auth-nonce-cleanup)]
     (loop []
       (let [last-cleanup (.get cleanup)]
         (cond

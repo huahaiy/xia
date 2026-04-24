@@ -25,13 +25,13 @@
   :notes "Create a Google OAuth client of type Web application and add Xia's /oauth/callback as an authorized redirect URI."}
  {:id :gmail
   :name "Gmail"
-  :description "Preset for Gmail send and read access via Google OAuth 2."
+  :description "Preset for Gmail read, send, draft, label, and state-management access via Google OAuth 2."
   :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
   :token-url "https://oauth2.googleapis.com/token"
   :api-base-url "https://gmail.googleapis.com"
   :service-id "gmail"
   :service-name "Gmail"
-  :scopes "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send"
+  :scopes "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"
   :auth-params {:access_type "offline"
                 :prompt "consent"}
   :token-params {}

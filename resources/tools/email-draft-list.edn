@@ -1,0 +1,26 @@
+;; List Gmail drafts.
+;; Import with: /import-tool resources/tools/email-draft-list.edn
+
+{:id          :email-draft-list
+ :name        "email-draft-list"
+ :description "List Gmail drafts so you can review saved drafts, search them, and page through large draft mailboxes."
+ :tags        #{:email :gmail :draft :communication}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"service_id" {"type"        "string"
+                                           "description" "Optional Gmail service id if you have more than one configured"}
+                             "query" {"type"        "string"
+                                      "description" "Optional Gmail search query for drafts"}
+                             "max_results" {"type"        "integer"
+                                            "description" "Maximum number of drafts to return, default 10"}
+                             "page_token" {"type"        "string"
+                                           "description" "Optional Gmail page token from a previous email-draft-list result"}
+                             "include_spam_trash" {"type"        "boolean"
+                                                   "description" "When true, include drafts from Spam and Trash."}}}
+ :handler     "(fn [args]
+                 (xia.email/list-drafts
+                   :service-id (get args \"service_id\")
+                   :query (get args \"query\")
+                   :max-results (or (get args \"max_results\") 10)
+                   :page-token (get args \"page_token\")
+                   :include-spam-trash? (boolean (get args \"include_spam_trash\"))))"}
