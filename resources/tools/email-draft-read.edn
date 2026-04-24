@@ -1,20 +1,20 @@
-;; Read a Gmail draft by id.
+;; Read a draft by id.
 ;; Import with: /import-tool resources/tools/email-draft-read.edn
 
 {:id          :email-draft-read
  :name        "email-draft-read"
- :description "Read a Gmail draft by id and return the current draft body, headers, and attachment metadata."
- :tags        #{:email :gmail :draft :communication}
+ :description "Read a draft by id and return the current draft body, headers, and attachment metadata."
+ :tags        #{:email :draft :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"draft_id" {"type"        "string"
-                                         "description" "Gmail draft id to read"}
+                                         "description" "Draft id to read"}
                              "include_attachment_data" {"type"        "boolean"
                                                         "description" "When true, include attachment content when it fits within max_attachment_bytes"}
                              "max_attachment_bytes" {"type"        "integer"
                                                      "description" "Maximum attachment payload bytes to inline when include_attachment_data is true. Defaults to 262144"}
                              "service_id" {"type"        "string"
-                                           "description" "Optional Gmail service id if you have more than one configured"}}
+                                           "description" "Optional email service id if you have more than one configured"}}
                "required"   ["draft_id"]}
  :handler     "(fn [args]
                  (xia.email/read-draft

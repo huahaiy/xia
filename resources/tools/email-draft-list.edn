@@ -1,22 +1,22 @@
-;; List Gmail drafts.
+;; List drafts from the configured email backend.
 ;; Import with: /import-tool resources/tools/email-draft-list.edn
 
 {:id          :email-draft-list
  :name        "email-draft-list"
- :description "List Gmail drafts so you can review saved drafts, search them, and page through large draft mailboxes."
- :tags        #{:email :gmail :draft :communication}
+ :description "List drafts so you can review saved drafts, search them, and page through large draft mailboxes."
+ :tags        #{:email :draft :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"service_id" {"type"        "string"
-                                           "description" "Optional Gmail service id if you have more than one configured"}
+                                           "description" "Optional email service id if you have more than one configured"}
                              "query" {"type"        "string"
-                                      "description" "Optional Gmail search query for drafts"}
+                                      "description" "Optional backend-specific search query for drafts"}
                              "max_results" {"type"        "integer"
                                             "description" "Maximum number of drafts to return, default 10"}
                              "page_token" {"type"        "string"
-                                           "description" "Optional Gmail page token from a previous email-draft-list result"}
+                                           "description" "Optional page token from a previous email-draft-list result"}
                              "include_spam_trash" {"type"        "boolean"
-                                                   "description" "When true, include drafts from Spam and Trash."}}}
+                                                   "description" "When true, include drafts from spam or trash folders when the backend supports it."}}}
  :handler     "(fn [args]
                  (xia.email/list-drafts
                    :service-id (get args \"service_id\")

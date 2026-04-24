@@ -41,10 +41,22 @@
   :description "Preset for Microsoft identity platform v2 applications."
   :authorize-url "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
   :token-url "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+ :api-base-url "https://graph.microsoft.com/v1.0"
+ :service-id "microsoft-graph"
+ :service-name "Microsoft Graph"
+ :scopes "offline_access openid profile User.Read"
+ :auth-params {}
+ :token-params {}
+  :notes "Register an Azure app and add Xia's /oauth/callback as a web redirect URI."}
+ {:id :microsoft-mail
+  :name "Microsoft Mail"
+  :description "Preset for Outlook and Microsoft 365 mail access through Microsoft Graph."
+  :authorize-url "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  :token-url "https://login.microsoftonline.com/common/oauth2/v2.0/token"
   :api-base-url "https://graph.microsoft.com/v1.0"
-  :service-id "microsoft-graph"
-  :service-name "Microsoft Graph"
-  :scopes "offline_access openid profile User.Read"
+  :service-id "microsoft-mail"
+  :service-name "Microsoft Mail"
+  :scopes "offline_access openid profile Mail.ReadWrite Mail.Send MailboxSettings.Read"
   :auth-params {}
   :token-params {}
-  :notes "Register an Azure app and add Xia's /oauth/callback as a web redirect URI."}]
+  :notes "Register an Azure app, enable Microsoft Graph delegated mail permissions, and add Xia's /oauth/callback as a web redirect URI."}]

@@ -1,16 +1,16 @@
-;; Send an existing Gmail draft.
+;; Send an existing draft.
 ;; Import with: /import-tool resources/tools/email-draft-send.edn
 
 {:id          :email-draft-send
  :name        "email-draft-send"
- :description "Send an existing Gmail draft by id."
- :tags        #{:email :gmail :draft :communication}
+ :description "Send an existing draft by id."
+ :tags        #{:email :draft :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"draft_id" {"type"        "string"
-                                         "description" "Gmail draft id to send"}
+                                         "description" "Draft id to send"}
                              "service_id" {"type"        "string"
-                                           "description" "Optional Gmail service id if you have more than one configured"}}
+                                           "description" "Optional email service id if you have more than one configured"}}
                "required"   ["draft_id"]}
  :handler     "(fn [args]
                  (xia.email/send-draft

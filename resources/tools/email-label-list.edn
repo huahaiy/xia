@@ -1,14 +1,14 @@
-;; List Gmail labels.
+;; List backend labels or categories.
 ;; Import with: /import-tool resources/tools/email-label-list.edn
 
 {:id          :email-label-list
  :name        "email-label-list"
- :description "List Gmail labels so you can inspect built-in labels and discover custom label ids before using email-update."
- :tags        #{:email :gmail :labels :communication}
+ :description "List backend labels or categories so you can inspect available label ids or category names before using email-update."
+ :tags        #{:email :labels :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"service_id" {"type"        "string"
-                                           "description" "Optional Gmail service id if you have more than one configured"}}}
+                                           "description" "Optional email service id if you have more than one configured"}}}
  :handler     "(fn [args]
                  (xia.email/list-labels
                    :service-id (get args \"service_id\")))"}

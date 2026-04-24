@@ -11,13 +11,19 @@
             [xia.db :as db]
             [xia.service :as service])
   (:import [java.nio.charset StandardCharsets]
+           [java.time Instant]
            [java.util Base64 UUID]
            [org.jsoup Jsoup]))
 
 (def default-service-id :gmail)
+(def ^:private microsoft-mail-service-id :microsoft-mail)
 (def ^:private default-max-results 10)
 (def ^:private default-max-attachment-bytes (* 256 1024))
 (def ^:private gmail-api-base-url "https://gmail.googleapis.com")
+(def ^:private microsoft-graph-root-url "https://graph.microsoft.com")
+(def ^:private microsoft-graph-api-base-url "https://graph.microsoft.com/v1.0")
+(def ^:private microsoft-max-inline-attachment-bytes (* 3 1024 1024))
+(def ^:private microsoft-immutable-id-prefer "IdType=\"ImmutableId\"")
 (def ^:private default-attachment-media-type "application/octet-stream")
 (def ^:private textual-attachment-media-types
   #{"application/json"
@@ -128,6 +134,36 @@
   (= gmail-api-base-url
      (normalize-base-url (:service/base-url service))))
 
+(defn- microsoft-graph-service?
+  [service]
+  (contains? #{microsoft-graph-root-url
+               microsoft-graph-api-base-url}
+             (normalize-base-url (:service/base-url service))))
+
+(defn- service-id-value
+  [service]
+  (or (:service/id service)
+      (:id service)))
+
+(defn- service-oauth-account-id
+  [service]
+  (or (:service/oauth-account service)
+      (:oauth-account service)))
+
+(defn- service-oauth-provider-template
+  [service]
+  (some-> (service-oauth-account-id service)
+          db/get-oauth-account
+          :oauth.account/provider-template))
+
+(defn- microsoft-mail-service?
+  [service]
+  (and (microsoft-graph-service? service)
+       (or (= microsoft-mail-service-id
+              (normalize-service-id (service-id-value service)))
+           (= :microsoft-mail
+              (service-oauth-provider-template service)))))
+
 (defn- connected-oauth-account?
   [account]
   (boolean (or (nonblank-str (:oauth.account/access-token account))
@@ -136,6 +172,10 @@
 (defn- gmail-oauth-account?
   [account]
   (= :gmail (:oauth.account/provider-template account)))
+
+(defn- microsoft-mail-oauth-account?
+  [account]
+  (= :microsoft-mail (:oauth.account/provider-template account)))
 
 (defn- auto-gmail-oauth-account
   []
@@ -159,6 +199,28 @@
                        :oauth-account (:oauth.account/id account)})
     default-service-id))
 
+(defn- auto-microsoft-mail-oauth-account
+  []
+  (let [accounts  (->> (db/list-oauth-accounts)
+                       (filter microsoft-mail-oauth-account?)
+                       (sort-by #(some-> % :oauth.account/id name))
+                       vec)
+        connected (into [] (filter connected-oauth-account?) accounts)]
+    (cond
+      (= 1 (count connected)) (first connected)
+      (= 1 (count accounts))  (first accounts)
+      :else                   nil)))
+
+(defn- ensure-auto-microsoft-mail-service!
+  []
+  (when-let [account (auto-microsoft-mail-oauth-account)]
+    (db/save-service! {:id            microsoft-mail-service-id
+                       :name          "Microsoft Mail"
+                       :base-url      microsoft-graph-api-base-url
+                       :auth-type     :oauth-account
+                       :oauth-account (:oauth.account/id account)})
+    microsoft-mail-service-id))
+
 (defn- gmail-detect-service-id
   []
   (or (when (some-> (db/get-service default-service-id) gmail-service?)
@@ -169,6 +231,17 @@
                first
                :service/id)
       (ensure-auto-gmail-service!)))
+
+(defn- microsoft-detect-service-id
+  []
+  (or (when (some-> (db/get-service microsoft-mail-service-id) microsoft-mail-service?)
+        microsoft-mail-service-id)
+      (some->> (db/list-services)
+               (filter microsoft-mail-service?)
+               (sort-by #(some-> % :service/id name))
+               first
+               :service/id)
+      (ensure-auto-microsoft-mail-service!)))
 
 (defn- pad-base64url
   [s]
@@ -702,6 +775,40 @@
         (catch Exception _
           nil)))))
 
+(defn- parse-instant-ms
+  [value]
+  (when-let [text (nonblank-str value)]
+    (try
+      (.toEpochMilli (Instant/parse text))
+      (catch Exception _
+        nil))))
+
+(defn- recipient-address
+  [recipient]
+  (let [email-address (or (get-in recipient ["emailAddress" "address"])
+                          (get-in recipient [:emailAddress :address]))
+        display-name  (or (get-in recipient ["emailAddress" "name"])
+                          (get-in recipient [:emailAddress :name]))
+        address       (nonblank-str email-address)
+        name          (nonblank-str display-name)]
+    (cond
+      (and name address (not= (str/lower-case name)
+                              (str/lower-case address)))
+      (str name " <" address ">")
+
+      address
+      address
+
+      :else
+      name)))
+
+(defn- recipient-list
+  [recipients]
+  (some->> recipients
+           (keep recipient-address)
+           seq
+           (str/join ", ")))
+
 (defn- message-summary
   [message]
   {:id             (get message "id")
@@ -720,6 +827,68 @@
 (defn- gmail-request
   [service-id method path & {:as opts}]
   (apply service/request (normalize-service-id service-id) method path (mapcat identity opts)))
+
+(defn- microsoft-api-prefix
+  [service-id]
+  (let [base-url (some-> service-id normalize-service-id db/get-service :service/base-url normalize-base-url)]
+    (if (= base-url microsoft-graph-root-url)
+      "/v1.0"
+      "")))
+
+(defn- microsoft-request-path
+  [service-id path]
+  (str (microsoft-api-prefix service-id) path))
+
+(defn- microsoft-request
+  [service-id method path & {:as opts}]
+  (let [headers (cond
+                  (nil? (:headers opts))
+                  {"Prefer" microsoft-immutable-id-prefer}
+
+                  (contains? (:headers opts) "Prefer")
+                  (update (:headers opts) "Prefer"
+                          (fn [value]
+                            (let [parts (->> (str/split (str value) #"\s*,\s*")
+                                             (remove str/blank?)
+                                             vec)]
+                              (if (some #{microsoft-immutable-id-prefer} parts)
+                                value
+                                (str value ", " microsoft-immutable-id-prefer)))))
+
+                  :else
+                  (assoc (:headers opts) "Prefer" microsoft-immutable-id-prefer))]
+    (apply service/request
+           (normalize-service-id service-id)
+           method
+           (microsoft-request-path service-id path)
+           (mapcat identity (assoc opts :headers headers)))))
+
+(defn- microsoft-page-path
+  [service-id page-token]
+  (when-let [token (nonblank-str page-token)]
+    (if (str/starts-with? token "/")
+      token
+      (let [uri           (java.net.URI. token)
+            host          (some-> (.getHost uri) str/lower-case)
+            request-path  (or (.getRawPath uri) "")
+            request-query (.getRawQuery uri)
+            base-path     (or (some-> service-id normalize-service-id db/get-service :service/base-url java.net.URI. .getPath)
+                              "")
+            strip-path    (if (seq base-path) base-path "/v1.0")
+            relative-path (cond
+                            (str/starts-with? request-path strip-path)
+                            (subs request-path (count strip-path))
+
+                            :else
+                            request-path)
+            relative-path (if (seq relative-path) relative-path "/")]
+        (when-not (= "graph.microsoft.com" host)
+          (throw (ex-info "Unsupported Microsoft Graph page token host"
+                          {:page-token token
+                           :host       host})))
+        (str relative-path
+             (when (seq request-query)
+               (str "?" request-query)))))))
 
 (defn- gmail-fetch-message
   [service-id message-id format]
@@ -937,6 +1106,309 @@
    :threads-unread         (get label "threadsUnread")
    :color                  (get label "color")})
 
+(def ^:private microsoft-message-select
+  "id,conversationId,subject,from,toRecipients,ccRecipients,internetMessageId,bodyPreview,categories,isRead,receivedDateTime,sentDateTime,parentFolderId")
+
+(defn- microsoft-search-query
+  [query]
+  (when-let [text (nonblank-str query)]
+    (str "\"" (str/replace text "\"" "\\\"") "\"")))
+
+(defn- microsoft-list-query-params
+  [{:keys [query max-results unread-only?]}]
+  (cond-> {"$top"    (long max-results)
+           "$select" microsoft-message-select}
+    (and (not query) unread-only?)
+    (assoc "$filter" "isRead eq false")
+
+    (not query)
+    (assoc "$orderby" "receivedDateTime DESC")
+
+    query
+    (assoc "$search" (microsoft-search-query query))))
+
+(defn- parse-recipient-text
+  [text]
+  (when-let [value (nonblank-str text)]
+    (if-let [[_ display-name address] (re-matches #"(?s)(.+?)\s*<([^>]+)>" value)]
+      {"emailAddress" (cond-> {"address" (str/trim address)}
+                        (seq (str/trim display-name))
+                        (assoc "name" (-> display-name
+                                          str/trim
+                                          (str/replace #"^\"|\"$" ""))))}
+      {"emailAddress" {"address" value}})))
+
+(defn- graph-recipient-objects
+  [value]
+  (let [items (cond
+                (nil? value)
+                nil
+
+                (sequential? value)
+                value
+
+                :else
+                (str/split (str value) #"\s*[;,]\s*"))]
+    (some->> items
+             (keep (fn [item]
+                     (cond
+                       (map? item)
+                       (let [address (recipient-address item)]
+                         (parse-recipient-text address))
+
+                       :else
+                       (parse-recipient-text item))))
+             seq
+             vec)))
+
+(defn- microsoft-internet-message-headers
+  [{:keys [in-reply-to references]}]
+  (let [headers (remove nil?
+                        [(when-let [value (nonblank-str in-reply-to)]
+                           {"name" "In-Reply-To"
+                            "value" value})
+                         (when-let [value (some-> references references-header (str/replace #"^References:\s*" "") nonblank-str)]
+                           {"name" "References"
+                            "value" value})])]
+    (when (seq headers)
+      (vec headers))))
+
+(defn- microsoft-attachment-payloads
+  [attachments]
+  (some->> (normalize-attachments attachments)
+           (mapv (fn [{:keys [filename media-type inline? bytes size-bytes]}]
+                   (when (>= (long size-bytes) microsoft-max-inline-attachment-bytes)
+                     (throw (ex-info "Microsoft Graph inline attachments must be smaller than 3 MB"
+                                     {:type       :email/attachment-too-large
+                                      :filename   filename
+                                      :size-bytes size-bytes
+                                      :backend    :microsoft-mail})))
+                   {"@odata.type" "#microsoft.graph.fileAttachment"
+                    "name"        filename
+                    "contentType" media-type
+                    "isInline"    inline?
+                    "contentBytes" (.encodeToString (Base64/getEncoder) ^bytes bytes)}))))
+
+(defn- microsoft-message-payload
+  [to subject body {:keys [cc bcc reply-to in-reply-to references html-body attachments]}]
+  (let [plain-body          (normalize-message-body body)
+        html-body*          (normalize-html-body html-body)
+        content-type        (if (seq html-body*) "HTML" "Text")
+        content             (if (seq html-body*) html-body* plain-body)
+        attachment-payloads (microsoft-attachment-payloads attachments)]
+    (cond-> {"subject" subject
+             "body"    {"contentType" content-type
+                        "content"     content}
+             "toRecipients" (or (graph-recipient-objects to) [])}
+      (graph-recipient-objects cc)
+      (assoc "ccRecipients" (graph-recipient-objects cc))
+
+      (graph-recipient-objects bcc)
+      (assoc "bccRecipients" (graph-recipient-objects bcc))
+
+      (graph-recipient-objects reply-to)
+      (assoc "replyTo" (graph-recipient-objects reply-to))
+
+      (microsoft-internet-message-headers {:in-reply-to in-reply-to
+                                           :references  references})
+      (assoc "internetMessageHeaders" (microsoft-internet-message-headers {:in-reply-to in-reply-to
+                                                                           :references  references}))
+
+      (seq attachment-payloads)
+      (assoc "attachments" attachment-payloads))))
+
+(defn- microsoft-message-summary
+  [message]
+  {:id             (get message "id")
+   :thread-id      (get message "conversationId")
+   :subject        (nonblank-str (get message "subject"))
+   :from           (recipient-address (get message "from"))
+   :to             (recipient-list (get message "toRecipients"))
+   :cc             (recipient-list (get message "ccRecipients"))
+   :date           (or (nonblank-str (get message "sentDateTime"))
+                       (nonblank-str (get message "receivedDateTime")))
+   :message-id     (nonblank-str (get message "internetMessageId"))
+   :snippet        (or (nonblank-str (get message "bodyPreview")) "")
+   :labels         (vec (or (get message "categories") []))
+   :unread?        (not (boolean (get message "isRead")))
+   :received-at-ms (parse-instant-ms (get message "receivedDateTime"))})
+
+(defn- microsoft-body
+  [message]
+  (let [body         (get message "body")
+        content-type (some-> (get body "contentType") nonblank-str str/lower-case)
+        content      (some-> (get body "content") nonblank-text)
+        preview      (some-> (get message "bodyPreview") nonblank-text)]
+    (cond
+      (and (= "text" content-type) content)
+      {:kind :plain
+       :text content}
+
+      (and (= "html" content-type) content)
+      {:kind :html
+       :text (or (html->text content) preview "")
+       :html content}
+
+      preview
+      {:kind :snippet
+       :text preview}
+
+      :else
+      nil)))
+
+(defn- microsoft-fetch-message
+  [service-id message-id]
+  (let [response (microsoft-request service-id
+                                    :get
+                                    (str "/me/messages/" message-id)
+                                    :query-params {"$select" (str microsoft-message-select ",body")})]
+    (:body response)))
+
+(defn- microsoft-list-attachments
+  [service-id message-id]
+  (let [response (microsoft-request service-id
+                                    :get
+                                    (str "/me/messages/" message-id "/attachments"))]
+    (or (get-in response [:body "value"]) [])))
+
+(defn- microsoft-fetch-attachment
+  [service-id message-id attachment-id]
+  (let [response (microsoft-request service-id
+                                    :get
+                                    (str "/me/messages/" message-id "/attachments/" attachment-id))]
+    (:body response)))
+
+(defn- microsoft-attachment-bytes
+  [service-id message-id attachment]
+  (or (some-> (get attachment "contentBytes")
+              decode-base64)
+      (some-> (microsoft-fetch-attachment service-id message-id (get attachment "id"))
+              (get "contentBytes")
+              decode-base64)))
+
+(defn- microsoft-attachment-summary
+  [service-id message-id attachment {:keys [include-attachment-data? max-attachment-bytes]}]
+  (let [kind            (some-> (get attachment "@odata.type") nonblank-str (str/replace #"^#" ""))
+        filename        (nonblank-str (get attachment "name"))
+        mime-type       (nonblank-str (get attachment "contentType"))
+        size            (or (parse-long-safe (get attachment "size")) 0)
+        attachment-id   (nonblank-str (get attachment "id"))
+        inline?         (boolean (get attachment "isInline"))
+        base-summary    {:part-id        attachment-id
+                         :filename       filename
+                         :mime-type      mime-type
+                         :size-bytes     size
+                         :attachment-id  attachment-id
+                         :inline?        inline?
+                         :content-id     (get attachment "contentId")
+                         :disposition    nil}]
+    (if-not include-attachment-data?
+      base-summary
+      (let [bytes (when (str/ends-with? (or kind "") "fileAttachment")
+                    (microsoft-attachment-bytes service-id message-id attachment))]
+        (cond
+          (nil? bytes)
+          (assoc base-summary :content-available? false)
+
+          (> (long (alength ^bytes bytes)) (long max-attachment-bytes))
+          (assoc base-summary
+                 :content-available? true
+                 :content-included? false
+                 :content-reason "attachment exceeds max_attachment_bytes")
+
+          (textual-media-type? mime-type)
+          (assoc base-summary
+                 :content-available? true
+                 :content-included? true
+                 :content-text (String. ^bytes bytes StandardCharsets/UTF_8))
+
+          :else
+          (assoc base-summary
+                 :content-available? true
+                 :content-included? true
+                 :content-bytes-base64 (.encodeToString (Base64/getEncoder) ^bytes bytes)))))))
+
+(defn- microsoft-message-detail
+  [service-id message opts]
+  (let [body        (microsoft-body message)
+        attachments (->> (microsoft-list-attachments service-id (get message "id"))
+                         (mapv #(microsoft-attachment-summary service-id (get message "id") % opts)))]
+    (cond-> (microsoft-message-summary message)
+      body
+      (assoc :body (:text body)
+             :body-kind (:kind body))
+
+      (seq (:html body))
+      (assoc :html-body (:html body))
+
+      (seq attachments)
+      (assoc :attachments attachments))))
+
+(defn- microsoft-category-summary
+  [category]
+  {:id                      (get category "displayName")
+   :name                    (get category "displayName")
+   :type                    :user
+   :message-list-visibility nil
+   :label-list-visibility   nil
+   :messages-total          nil
+   :messages-unread         nil
+   :threads-total           nil
+   :threads-unread          nil
+   :color                   (get category "color")})
+
+(defn- microsoft-mail-folder-id
+  [service-id well-known-name]
+  (some-> (microsoft-request service-id
+                             :get
+                             (str "/me/mailFolders/" well-known-name)
+                             :query-params {"$select" "id"})
+          :body
+          (get "id")))
+
+(defn- microsoft-move-message
+  [service-id message-id destination-id]
+  (:body (microsoft-request service-id
+                            :post
+                            (str "/me/messages/" message-id "/move")
+                            :body {"destinationId" destination-id})))
+
+(defn- microsoft-delete-existing-attachments!
+  [service-id message-id]
+  (doseq [attachment (microsoft-list-attachments service-id message-id)]
+    (when-let [attachment-id (nonblank-str (get attachment "id"))]
+      (microsoft-request service-id
+                         :delete
+                         (str "/me/messages/" message-id "/attachments/" attachment-id)))))
+
+(defn- microsoft-add-attachments!
+  [service-id message-id attachments]
+  (doseq [attachment (or (microsoft-attachment-payloads attachments) [])]
+    (microsoft-request service-id
+                       :post
+                       (str "/me/messages/" message-id "/attachments")
+                       :body attachment)))
+
+(defn- microsoft-save-draft-message
+  [service-id draft-id to subject body opts]
+  (let [payload  (microsoft-message-payload to subject body opts)
+        draft-id (nonblank-str draft-id)
+        replace-attachments? (some? (:attachments opts))]
+    (if draft-id
+      (do
+        (microsoft-request service-id
+                           :patch
+                           (str "/me/messages/" draft-id)
+                           :body (dissoc payload "attachments"))
+        (when replace-attachments?
+          (microsoft-delete-existing-attachments! service-id draft-id)
+          (microsoft-add-attachments! service-id draft-id (:attachments opts)))
+        (microsoft-fetch-message service-id draft-id))
+      (:body (microsoft-request service-id
+                                :post
+                                "/me/messages"
+                                :body payload)))))
+
 (defrecord GmailBackend []
   EmailBackend
   (backend-key [_]
@@ -1145,8 +1617,189 @@
        :status     "deleted"
        :draft-id   draft-id*})))
 
+(defrecord MicrosoftGraphBackend []
+  EmailBackend
+  (backend-key [_]
+    :microsoft-mail)
+  (backend-label [_]
+    "Microsoft Mail")
+  (backend-default-service-id [_]
+    microsoft-mail-service-id)
+  (supports-service? [_ service]
+    (microsoft-mail-service? service))
+  (auto-detect-service-id [_]
+    (microsoft-detect-service-id))
+  (backend-list-labels [_ service-id _]
+    (let [response   (microsoft-request service-id
+                                        :get
+                                        "/me/outlook/masterCategories")
+          categories (mapv microsoft-category-summary
+                           (or (get-in response [:body "value"]) []))]
+      {:service-id     (name service-id)
+       :returned-count (count categories)
+       :labels         categories}))
+  (backend-list-messages [_ service-id {:keys [query max-results unread-only? inbox-only? page-token]}]
+    (let [path       (if inbox-only?
+                       "/me/mailFolders/inbox/messages"
+                       "/me/messages")
+          response   (if-let [page-path (microsoft-page-path service-id page-token)]
+                       (microsoft-request service-id :get page-path)
+                       (microsoft-request service-id
+                                          :get
+                                          path
+                                          :query-params (microsoft-list-query-params {:query        query
+                                                                                      :max-results  max-results
+                                                                                      :unread-only? unread-only?})))
+          messages*  (or (get-in response [:body "value"]) [])
+          messages   (cond->> messages*
+                       (and query unread-only?)
+                       (filter #(not (boolean (get % "isRead"))))
+
+                       true
+                       (take max-results))
+          messages   (mapv microsoft-message-summary messages)]
+      {:service-id           (name service-id)
+       :query                (nonblank-str query)
+       :page-token           (nonblank-str page-token)
+       :next-page-token      (get-in response [:body "@odata.nextLink"])
+       :returned-count       (count messages)
+       :result-size-estimate (count messages)
+       :messages             messages}))
+  (backend-read-message [_ service-id message-id opts]
+    (assoc (microsoft-message-detail service-id
+                                     (microsoft-fetch-message service-id message-id)
+                                     opts)
+           :service-id (name service-id)))
+  (backend-send-message [_ service-id to subject body opts]
+    (let [draft   (microsoft-save-draft-message service-id nil to subject body opts)
+          draft-id (get draft "id")]
+      (microsoft-request service-id
+                         :post
+                         (str "/me/messages/" draft-id "/send"))
+      {:service-id (name service-id)
+       :status     "sent"
+       :id         draft-id
+       :thread-id  (get draft "conversationId")
+       :labels     (vec (or (get draft "categories") []))}))
+  (backend-delete-message [_ service-id message-id {:keys [permanent?]}]
+    (let [message-id* (nonblank-str message-id)]
+      (when-not message-id*
+        (throw (ex-info "message-id is required"
+                        {:type :email/missing-message-id})))
+      (if permanent?
+        (do
+          (microsoft-request service-id
+                             :post
+                             (str "/me/messages/" message-id* "/permanentDelete"))
+          {:service-id (name service-id)
+           :status     "deleted"
+           :id         message-id*
+           :thread-id  nil
+           :labels     []})
+        (let [moved (microsoft-move-message service-id message-id* "deleteditems")]
+          {:service-id (name service-id)
+           :status     "trashed"
+           :id         (or (get moved "id") message-id*)
+           :thread-id  (get moved "conversationId")
+           :labels     (vec (or (get moved "categories") []))}))))
+  (backend-update-message [_ service-id message-id {:keys [archive? read? add-labels remove-labels]}]
+    (let [message-id*      (nonblank-str message-id)
+          _                (when-not message-id*
+                             (throw (ex-info "message-id is required"
+                                             {:type :email/missing-message-id})))
+          moved-message    (when (some? archive?)
+                             (microsoft-move-message service-id
+                                                     message-id*
+                                                     (if archive? "archive" "inbox")))
+          current-id       (or (get moved-message "id") message-id*)
+          current-message  (or moved-message
+                               (microsoft-fetch-message service-id current-id))
+          current-cats     (into #{} (keep nonblank-str) (or (get current-message "categories") []))
+          updated-cats     (-> current-cats
+                               (into (keep nonblank-str) add-labels)
+                               (#(apply disj % (keep nonblank-str remove-labels))))
+          patch-body       (cond-> {}
+                             (some? read?)
+                             (assoc "isRead" (boolean read?))
+
+                             (or (seq add-labels) (seq remove-labels))
+                             (assoc "categories" (vec (sort updated-cats))))
+          _                (when (seq patch-body)
+                             (microsoft-request service-id
+                                                :patch
+                                                (str "/me/messages/" current-id)
+                                                :body patch-body))
+          updated-message  (microsoft-fetch-message service-id current-id)
+          archive-folder-id (microsoft-mail-folder-id service-id "archive")]
+      (assoc (microsoft-message-summary updated-message)
+             :service-id (name service-id)
+             :status "updated"
+             :archived? (if archive-folder-id
+                          (= archive-folder-id (get updated-message "parentFolderId"))
+                          (boolean archive?)))))
+  (backend-list-drafts [_ service-id {:keys [query max-results page-token]}]
+    (let [response (if-let [page-path (microsoft-page-path service-id page-token)]
+                     (microsoft-request service-id :get page-path)
+                     (microsoft-request service-id
+                                        :get
+                                        "/me/mailFolders/drafts/messages"
+                                        :query-params (microsoft-list-query-params {:query        query
+                                                                                    :max-results  max-results
+                                                                                    :unread-only? false})))
+          drafts   (->> (or (get-in response [:body "value"]) [])
+                        (map #(assoc (microsoft-message-summary %) :draft-id (get % "id")))
+                        vec)]
+      {:service-id           (name service-id)
+       :query                (nonblank-str query)
+       :page-token           (nonblank-str page-token)
+       :next-page-token      (get-in response [:body "@odata.nextLink"])
+       :returned-count       (count drafts)
+       :result-size-estimate (count drafts)
+       :drafts               drafts}))
+  (backend-read-draft [_ service-id draft-id opts]
+    (assoc (microsoft-message-detail service-id
+                                     (microsoft-fetch-message service-id draft-id)
+                                     opts)
+           :service-id (name service-id)
+           :draft-id draft-id))
+  (backend-save-draft [_ service-id to subject body {:keys [draft-id] :as opts}]
+    (let [draft (microsoft-save-draft-message service-id draft-id to subject body opts)]
+      {:service-id (name service-id)
+       :status     "saved"
+       :draft-id   (get draft "id")
+       :id         (get draft "id")
+       :thread-id  (get draft "conversationId")
+       :labels     (vec (or (get draft "categories") []))}))
+  (backend-send-draft [_ service-id draft-id _]
+    (let [draft-id* (nonblank-str draft-id)]
+      (when-not draft-id*
+        (throw (ex-info "draft-id is required"
+                        {:type :email/missing-draft-id})))
+      (let [draft (microsoft-fetch-message service-id draft-id*)]
+        (microsoft-request service-id
+                           :post
+                           (str "/me/messages/" draft-id* "/send"))
+        {:service-id (name service-id)
+         :status     "sent"
+         :draft-id   draft-id*
+         :id         draft-id*
+         :thread-id  (get draft "conversationId")
+         :labels     (vec (or (get draft "categories") []))})))
+  (backend-delete-draft [_ service-id draft-id _]
+    (let [draft-id* (nonblank-str draft-id)]
+      (when-not draft-id*
+        (throw (ex-info "draft-id is required"
+                        {:type :email/missing-draft-id})))
+      (microsoft-request service-id
+                         :delete
+                         (str "/me/messages/" draft-id*))
+      {:service-id (name service-id)
+       :status     "deleted"
+       :draft-id   draft-id*})))
+
 (def ^:private backends
-  [(->GmailBackend)])
+  [(->GmailBackend)
+   (->MicrosoftGraphBackend)])
 
 (defn- primary-backend
   []

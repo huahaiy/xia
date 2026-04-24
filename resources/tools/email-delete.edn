@@ -1,18 +1,18 @@
-;; Delete a Gmail message.
+;; Delete a message.
 ;; Import with: /import-tool resources/tools/email-delete.edn
 
 {:id          :email-delete
  :name        "email-delete"
- :description "Delete a Gmail email. Xia uses the selected message id to trash the whole Gmail thread by default so the conversation leaves Inbox; set permanent to true only when the user explicitly wants permanent deletion."
- :tags        #{:email :gmail :delete :trash :communication}
+ :description "Delete an email message. Xia moves the selected message to trash by default when the backend supports it; set permanent to true only when the user explicitly wants permanent deletion."
+ :tags        #{:email :delete :trash :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"message_id" {"type"        "string"
-                                           "description" "Gmail message id to remove"}
+                                           "description" "Message id to remove"}
                              "permanent"  {"type"        "boolean"
                                            "description" "When true, permanently deletes the message instead of moving it to Trash"}
                              "service_id" {"type"        "string"
-                                           "description" "Optional Gmail service id if you have more than one configured"}}
+                                           "description" "Optional email service id if you have more than one configured"}}
                "required"   ["message_id"]}
  :handler     "(fn [args]
                  (xia.email/delete-message

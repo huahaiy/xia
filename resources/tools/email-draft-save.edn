@@ -1,14 +1,14 @@
-;; Create or update a Gmail draft.
+;; Create or update a draft.
 ;; Import with: /import-tool resources/tools/email-draft-save.edn
 
 {:id          :email-draft-save
  :name        "email-draft-save"
- :description "Create or update a Gmail draft. Supports reply threading, optional HTML, and optional attachments."
- :tags        #{:email :gmail :draft :communication}
+ :description "Create or update a draft. Supports reply threading when the backend allows it, optional HTML, and optional attachments."
+ :tags        #{:email :draft :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"draft_id"     {"type"        "string"
-                                             "description" "Existing Gmail draft id to update. Omit to create a new draft."}
+                                             "description" "Existing draft id to update. Omit to create a new draft."}
                              "to"           {"type"        "string"
                                              "description" "Primary recipient email address or RFC 5322 To header value"}
                              "cc"           {"type"        "string"
@@ -28,7 +28,7 @@
                              "references"   {"type"        "string"
                                              "description" "Optional References header value. Provide as a single string; if passing multiple message ids, join them with a space."}
                              "thread_id"    {"type"        "string"
-                                             "description" "Optional Gmail thread id to attach the draft to"}
+                                             "description" "Optional backend-specific thread or conversation id to attach the draft to"}
                              "attachments"  {"type"        "array"
                                              "description" "Optional attachments. Each item can reference an existing artifact by artifact_id, or provide filename plus content or bytes_base64."
                                              "items"       {"type"       "object"
@@ -45,7 +45,7 @@
                                                                           "inline"       {"type"        "boolean"
                                                                                            "description" "When true, mark the MIME disposition as inline"}}}}
                              "service_id"   {"type"        "string"
-                                             "description" "Optional Gmail service id if you have more than one configured"}}
+                                             "description" "Optional email service id if you have more than one configured"}}
                "required"   ["to" "subject" "body"]}
  :handler     "(fn [args]
                  (xia.email/save-draft

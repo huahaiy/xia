@@ -1,20 +1,20 @@
-;; Read a Gmail message by id.
+;; Read a message by id.
 ;; Import with: /import-tool resources/tools/email-read.edn
 
 {:id          :email-read
  :name        "email-read"
- :description "Read a Gmail message by id and return the best available body plus common headers. Attachment metadata is included by default; attachment content is optional."
- :tags        #{:email :gmail :read :communication}
+ :description "Read a message by id and return the best available body plus common headers. Attachment metadata is included by default; attachment content is optional."
+ :tags        #{:email :read :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"message_id" {"type"        "string"
-                                           "description" "Gmail message id to read"}
+                                           "description" "Message id to read"}
                              "include_attachment_data" {"type"        "boolean"
                                                         "description" "When true, include attachment content when it fits within max_attachment_bytes"}
                              "max_attachment_bytes" {"type"        "integer"
                                                      "description" "Maximum attachment payload bytes to inline when include_attachment_data is true. Defaults to 262144"}
                              "service_id" {"type"        "string"
-                                           "description" "Optional Gmail service id if you have more than one configured"}}
+                                           "description" "Optional email service id if you have more than one configured"}}
                "required"   ["message_id"]}
  :handler     "(fn [args]
                  (xia.email/read-message

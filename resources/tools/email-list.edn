@@ -1,26 +1,26 @@
-;; List Gmail messages from the configured Gmail service.
+;; List messages from the configured email backend.
 ;; Import with: /import-tool resources/tools/email-list.edn
 
 {:id          :email-list
  :name        "email-list"
- :description "List Gmail messages so you can inspect an inbox, search mail, page through results, or find a message id to read. By default it searches the inbox."
- :tags        #{:email :gmail :inbox :communication}
+ :description "List messages so you can inspect an inbox, search mail, page through results, or find a message id to read. By default it searches the inbox."
+ :tags        #{:email :inbox :communication}
  :approval    :session
  :parameters  {"type"       "object"
                "properties" {"service_id"  {"type"        "string"
-                                             "description" "Optional Gmail service id if you have more than one configured"}
+                                             "description" "Optional email service id if you have more than one configured"}
                              "query"       {"type"        "string"
-                                             "description" "Optional Gmail search query, for example \"from:alice newer_than:7d\""}
+                                             "description" "Optional backend-specific search query"}
                              "max_results" {"type"        "integer"
                                              "description" "Maximum number of messages to return, default 10"}
                              "page_token"  {"type"        "string"
-                                             "description" "Optional Gmail page token from a previous email-list result"}
+                                             "description" "Optional page token from a previous email-list result"}
                              "unread_only" {"type"        "boolean"
                                              "description" "When true, only return unread messages"}
                              "inbox_only"  {"type"        "boolean"
                                              "description" "When true, restrict results to the inbox. Defaults to true."}
                              "include_spam_trash" {"type"        "boolean"
-                                                   "description" "When true, include matches from Spam and Trash."}}}
+                                                   "description" "When true, include matches from spam or trash folders when the backend supports it."}}}
  :handler     "(fn [args]
                  (xia.email/list-messages
                    :service-id (get args \"service_id\")

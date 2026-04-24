@@ -1,10 +1,10 @@
-;; Send an email through Gmail.
+;; Send an email through the configured email backend.
 ;; Import with: /import-tool resources/tools/email-send.edn
 
 {:id          :email-send
  :name        "email-send"
- :description "Send an email through Gmail. Supports reply threading, optional HTML, and optional attachments. The plain-text body must still be the literal email text only, not JSON, code fences, or a structured tool-argument wrapper."
- :tags        #{:email :gmail :send :communication}
+ :description "Send an email through the configured email backend. Supports reply threading when the backend allows it, optional HTML, and optional attachments. The plain-text body must still be the literal email text only, not JSON, code fences, or a structured tool-argument wrapper."
+ :tags        #{:email :send :communication}
  :approval    :session
   :parameters  {"type"       "object"
                "properties" {"to"          {"type"        "string"
@@ -26,7 +26,7 @@
                              "references"  {"type"        "string"
                                              "description" "Optional References header value. Provide as a single string; if passing multiple message ids, join them with a space."}
                              "thread_id"   {"type"        "string"
-                                             "description" "Optional Gmail thread id to attach the send to"}
+                                             "description" "Optional backend-specific thread or conversation id to attach the send to"}
                              "attachments" {"type"        "array"
                                             "description" "Optional attachments. Each item can reference an existing artifact by artifact_id, or provide filename plus content or bytes_base64."
                                             "items"       {"type"       "object"
@@ -43,7 +43,7 @@
                                                                          "inline"       {"type"        "boolean"
                                                                                           "description" "When true, mark the MIME disposition as inline"}}}}
                              "service_id"  {"type"        "string"
-                                             "description" "Optional Gmail service id if you have more than one configured"}}
+                                             "description" "Optional email service id if you have more than one configured"}}
                "required"   ["to" "subject" "body"]}
  :handler     "(fn [args]
                  (xia.email/send-message
