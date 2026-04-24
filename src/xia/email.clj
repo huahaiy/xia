@@ -10,7 +10,8 @@
             [xia.artifact :as artifact]
             [xia.db :as db]
             [xia.service :as service])
-  (:import [java.nio.charset StandardCharsets]
+  (:import [java.net URLEncoder]
+           [java.nio.charset StandardCharsets]
            [java.time Instant]
            [java.util Base64 UUID]
            [org.jsoup Jsoup]))
@@ -24,6 +25,7 @@
 (def ^:private microsoft-graph-api-base-url "https://graph.microsoft.com/v1.0")
 (def ^:private microsoft-max-inline-attachment-bytes (* 3 1024 1024))
 (def ^:private microsoft-immutable-id-prefer "IdType=\"ImmutableId\"")
+(def ^:private microsoft-filtered-page-token-prefix "msmail:")
 (def ^:private default-attachment-media-type "application/octet-stream")
 (def ^:private textual-attachment-media-types
   #{"application/json"
@@ -287,6 +289,10 @@
       (throw (ex-info "attachment bytes_base64 must be valid base64"
                       {:type :email/invalid-attachment-bytes-base64}
                       e)))))
+
+(defn- encode-base64-bytes
+  [^bytes data]
+  (.encodeToString (Base64/getEncoder) data))
 
 (defn- encode-mime-base64
   [^bytes data]
@@ -802,12 +808,55 @@
       :else
       name)))
 
+(defn- recipient-header-address
+  [recipient]
+  (let [email-address (or (get-in recipient ["emailAddress" "address"])
+                          (get-in recipient [:emailAddress :address]))
+        display-name  (or (get-in recipient ["emailAddress" "name"])
+                          (get-in recipient [:emailAddress :name]))
+        address       (nonblank-str email-address)
+        name          (nonblank-str display-name)
+        rendered-name (when name
+                        (if (re-find #"[;,]" name)
+                          (str "\"" (escape-header-param name) "\"")
+                          name))]
+    (cond
+      (and rendered-name address
+           (not= (str/lower-case name)
+                 (str/lower-case address)))
+      (str rendered-name " <" address ">")
+
+      address
+      address
+
+      :else
+      rendered-name)))
+
 (defn- recipient-list
   [recipients]
   (some->> recipients
            (keep recipient-address)
            seq
            (str/join ", ")))
+
+(defn- recipient-header-list
+  [recipients]
+  (some->> recipients
+           (keep recipient-header-address)
+           seq
+           (str/join ", ")))
+
+(defn- provided-value?
+  [value]
+  (cond
+    (string? value)
+    (boolean (nonblank-str value))
+
+    (sequential? value)
+    (boolean (seq value))
+
+    :else
+    (some? value)))
 
 (defn- message-summary
   [message]
@@ -863,32 +912,87 @@
            (microsoft-request-path service-id path)
            (mapcat identity (assoc opts :headers headers)))))
 
+(defn- encode-query-param
+  [value]
+  (URLEncoder/encode (str value) "UTF-8"))
+
+(defn- path-with-query-params
+  [path query-params]
+  (let [pairs (->> (or query-params {})
+                   (map (fn [[k v]]
+                          (str (encode-query-param k)
+                               "="
+                               (encode-query-param v))))
+                   seq)]
+    (if pairs
+      (str path "?" (str/join "&" pairs))
+      path)))
+
+(defn- microsoft-filtered-page-token
+  [page-path skip-filtered next-page-path]
+  (str microsoft-filtered-page-token-prefix
+       (encode-base64url
+         (json/write-json-str {"page_path"       page-path
+                               "skip_filtered"  (long skip-filtered)
+                               "next_page_path" next-page-path}))))
+
 (defn- microsoft-page-path
   [service-id page-token]
   (when-let [token (nonblank-str page-token)]
-    (if (str/starts-with? token "/")
-      token
-      (let [uri           (java.net.URI. token)
-            host          (some-> (.getHost uri) str/lower-case)
-            request-path  (or (.getRawPath uri) "")
-            request-query (.getRawQuery uri)
-            base-path     (or (some-> service-id normalize-service-id db/get-service :service/base-url java.net.URI. .getPath)
-                              "")
-            strip-path    (if (seq base-path) base-path "/v1.0")
-            relative-path (cond
-                            (str/starts-with? request-path strip-path)
-                            (subs request-path (count strip-path))
+    (if (str/starts-with? token microsoft-filtered-page-token-prefix)
+      (throw (ex-info "Filtered Microsoft page tokens must be decoded before path resolution"
+                      {:page-token token}))
+      (if (str/starts-with? token "/")
+        token
+        (let [uri           (java.net.URI. token)
+              host          (some-> (.getHost uri) str/lower-case)
+              request-path  (or (.getRawPath uri) "")
+              request-query (.getRawQuery uri)
+              base-path     (or (some-> service-id normalize-service-id db/get-service :service/base-url java.net.URI. .getPath)
+                                "")
+              strip-path    (if (seq base-path) base-path "/v1.0")
+              relative-path (cond
+                              (str/starts-with? request-path strip-path)
+                              (subs request-path (count strip-path))
 
-                            :else
-                            request-path)
-            relative-path (if (seq relative-path) relative-path "/")]
-        (when-not (= "graph.microsoft.com" host)
-          (throw (ex-info "Unsupported Microsoft Graph page token host"
-                          {:page-token token
-                           :host       host})))
-        (str relative-path
-             (when (seq request-query)
-               (str "?" request-query)))))))
+                              :else
+                              request-path)
+              relative-path (if (seq relative-path) relative-path "/")]
+          (when-not (= "graph.microsoft.com" host)
+            (throw (ex-info "Unsupported Microsoft Graph page token host"
+                            {:page-token token
+                             :host       host})))
+          (str relative-path
+               (when (seq request-query)
+                 (str "?" request-query))))))))
+
+(defn- microsoft-page-state
+  [service-id initial-page-path page-token]
+  (if-let [token (nonblank-str page-token)]
+    (if (str/starts-with? token microsoft-filtered-page-token-prefix)
+      (let [payload (some-> token
+                            (subs (count microsoft-filtered-page-token-prefix))
+                            decode-base64url
+                            json/read-json)
+            page-path (some-> (get payload "page_path")
+                              nonblank-str
+                              (#(microsoft-page-path service-id %)))
+            skip-filtered (or (parse-long-safe (get payload "skip_filtered")) 0)
+            next-page-path (some-> (get payload "next_page_path")
+                                   nonblank-str
+                                   (#(microsoft-page-path service-id %)))]
+        (when-not page-path
+          (throw (ex-info "Invalid Microsoft filtered page token"
+                          {:page-token token})))
+        {:page-path       page-path
+         :skip-filtered   (long skip-filtered)
+         :next-page-path  next-page-path})
+      {:page-path      (microsoft-page-path service-id token)
+       :skip-filtered  0
+       :next-page-path nil})
+    {:page-path      initial-page-path
+     :skip-filtered  0
+     :next-page-path nil}))
 
 (defn- gmail-fetch-message
   [service-id message-id format]
@@ -1107,7 +1211,10 @@
    :color                  (get label "color")})
 
 (def ^:private microsoft-message-select
-  "id,conversationId,subject,from,toRecipients,ccRecipients,internetMessageId,bodyPreview,categories,isRead,receivedDateTime,sentDateTime,parentFolderId")
+  "id,conversationId,subject,from,toRecipients,ccRecipients,internetMessageId,bodyPreview,categories,isRead,receivedDateTime,sentDateTime,parentFolderId,hasAttachments")
+
+(def ^:private microsoft-fetch-message-select
+  (str microsoft-message-select ",body,replyTo,internetMessageHeaders"))
 
 (defn- microsoft-search-query
   [query]
@@ -1138,6 +1245,59 @@
                                           (str/replace #"^\"|\"$" ""))))}
       {"emailAddress" {"address" value}})))
 
+(defn- split-recipient-header
+  [value]
+  (when-let [text (nonblank-str value)]
+    (let [flush-part (fn [parts current]
+                       (if-let [part (some-> (.toString ^StringBuilder current) nonblank-str)]
+                         (conj parts part)
+                         parts))]
+      (loop [chars       (seq text)
+             current     (StringBuilder.)
+             parts       []
+             in-quote?   false
+             escaped?    false
+             angle-depth 0]
+        (if-let [ch (first chars)]
+          (cond
+            escaped?
+            (do
+              (.append current ^char ch)
+              (recur (next chars) current parts in-quote? false angle-depth))
+
+            (= ch \\)
+            (do
+              (.append current ^char ch)
+              (recur (next chars) current parts in-quote? true angle-depth))
+
+            (= ch \")
+            (do
+              (.append current ^char ch)
+              (recur (next chars) current parts (not in-quote?) false angle-depth))
+
+            (and (not in-quote?) (= ch \<))
+            (do
+              (.append current ^char ch)
+              (recur (next chars) current parts in-quote? false (inc angle-depth)))
+
+            (and (not in-quote?) (= ch \>) (pos? angle-depth))
+            (do
+              (.append current ^char ch)
+              (recur (next chars) current parts in-quote? false (dec angle-depth)))
+
+            (and (not in-quote?)
+                 (zero? angle-depth)
+                 (or (= ch \,) (= ch \;)))
+            (recur (next chars) (StringBuilder.) (flush-part parts current) in-quote? false angle-depth)
+
+            :else
+            (do
+              (.append current ^char ch)
+              (recur (next chars) current parts in-quote? false angle-depth)))
+          (let [parts* (flush-part parts current)]
+            (when (seq parts*)
+              parts*)))))))
+
 (defn- graph-recipient-objects
   [value]
   (let [items (cond
@@ -1148,7 +1308,7 @@
                 value
 
                 :else
-                (str/split (str value) #"\s*[;,]\s*"))]
+                (split-recipient-header (str value)))]
     (some->> items
              (keep (fn [item]
                      (cond
@@ -1172,6 +1332,21 @@
                             "value" value})])]
     (when (seq headers)
       (vec headers))))
+
+(defn- microsoft-message-header-value
+  [message header-name]
+  (let [target (some-> header-name name str/lower-case)]
+    (some->> (or (get message "internetMessageHeaders") [])
+             (keep (fn [header]
+                     (let [name*  (some-> (get header "name") nonblank-str str/lower-case)
+                           value* (some-> (get header "value") sanitize-header-value nonblank-str)]
+                       (when (and (= target name*) value*)
+                         value*))))
+             first)))
+
+(defn- microsoft-compose-requires-mime?
+  [{:keys [html-body]}]
+  (boolean (seq (normalize-html-body html-body))))
 
 (defn- microsoft-attachment-payloads
   [attachments]
@@ -1217,6 +1392,21 @@
       (seq attachment-payloads)
       (assoc "attachments" attachment-payloads))))
 
+(defn- microsoft-mime-message-body
+  [to subject body {:keys [cc bcc reply-to in-reply-to references html-body attachments]}]
+  (let [attachments* (normalize-attachments attachments)
+        raw          (raw-message {:to          to
+                                   :cc          cc
+                                   :bcc         bcc
+                                   :subject     subject
+                                   :body        body
+                                   :reply-to    reply-to
+                                   :in-reply-to in-reply-to
+                                   :references  references
+                                   :html-body   html-body
+                                   :attachments attachments*})]
+    (encode-base64-bytes (utf8-bytes raw))))
+
 (defn- microsoft-message-summary
   [message]
   {:id             (get message "id")
@@ -1261,7 +1451,7 @@
   (let [response (microsoft-request service-id
                                     :get
                                     (str "/me/messages/" message-id)
-                                    :query-params {"$select" (str microsoft-message-select ",body")})]
+                                    :query-params {"$select" microsoft-fetch-message-select})]
     (:body response)))
 
 (defn- microsoft-list-attachments
@@ -1285,6 +1475,28 @@
       (some-> (microsoft-fetch-attachment service-id message-id (get attachment "id"))
               (get "contentBytes")
               decode-base64)))
+
+(defn- microsoft-existing-attachment-specs
+  [service-id message-id]
+  (mapv (fn [attachment]
+          (let [kind (some-> (get attachment "@odata.type") nonblank-str (str/replace #"^#" ""))]
+            (when-not (str/ends-with? (or kind "") "fileAttachment")
+              (throw (ex-info "Only file attachments can be preserved when updating Microsoft drafts"
+                              {:type          :email/unsupported-microsoft-attachment
+                               :backend       :microsoft-mail
+                               :message-id    message-id
+                               :attachment-id (get attachment "id")
+                               :attachment-type kind})))
+            {:filename   (nonblank-str (get attachment "name"))
+             :media-type (nonblank-str (get attachment "contentType"))
+             :inline?    (boolean (get attachment "isInline"))
+             :bytes      (or (microsoft-attachment-bytes service-id message-id attachment)
+                             (throw (ex-info "Microsoft attachment content is unavailable for draft preservation"
+                                             {:type          :email/microsoft-attachment-content-unavailable
+                                              :backend       :microsoft-mail
+                                              :message-id    message-id
+                                              :attachment-id (get attachment "id")})))}))
+        (microsoft-list-attachments service-id message-id)))
 
 (defn- microsoft-attachment-summary
   [service-id message-id attachment {:keys [include-attachment-data? max-attachment-bytes]}]
@@ -1331,8 +1543,9 @@
 (defn- microsoft-message-detail
   [service-id message opts]
   (let [body        (microsoft-body message)
-        attachments (->> (microsoft-list-attachments service-id (get message "id"))
-                         (mapv #(microsoft-attachment-summary service-id (get message "id") % opts)))]
+        attachments (when (boolean (get message "hasAttachments"))
+                      (->> (microsoft-list-attachments service-id (get message "id"))
+                           (mapv #(microsoft-attachment-summary service-id (get message "id") % opts))))]
     (cond-> (microsoft-message-summary message)
       body
       (assoc :body (:text body)
@@ -1389,12 +1602,65 @@
                        (str "/me/messages/" message-id "/attachments")
                        :body attachment)))
 
+(defn- microsoft-create-draft-message
+  [service-id to subject body opts]
+  (if (microsoft-compose-requires-mime? opts)
+    (:body (microsoft-request service-id
+                              :post
+                              "/me/messages"
+                              :headers {"Content-Type" "text/plain"}
+                              :body (microsoft-mime-message-body to subject body opts)))
+    (:body (microsoft-request service-id
+                              :post
+                              "/me/messages"
+                              :body (microsoft-message-payload to subject body opts)))))
+
+(defn- microsoft-replacement-draft-opts
+  [service-id draft-id opts]
+  (let [current-message (microsoft-fetch-message service-id draft-id)
+        attachments     (if (some? (:attachments opts))
+                          (:attachments opts)
+                          (when (boolean (get current-message "hasAttachments"))
+                            (microsoft-existing-attachment-specs service-id draft-id)))]
+    {:cc          (if (provided-value? (:cc opts))
+                    (:cc opts)
+                    (recipient-header-list (get current-message "ccRecipients")))
+     :bcc         (if (provided-value? (:bcc opts))
+                    (:bcc opts)
+                    (recipient-header-list (get current-message "bccRecipients")))
+     :reply-to    (if (provided-value? (:reply-to opts))
+                    (:reply-to opts)
+                    (recipient-header-list (get current-message "replyTo")))
+     :in-reply-to (if (provided-value? (:in-reply-to opts))
+                    (:in-reply-to opts)
+                    (microsoft-message-header-value current-message :in-reply-to))
+     :references  (if (provided-value? (:references opts))
+                    (:references opts)
+                    (microsoft-message-header-value current-message :references))
+     :html-body   (:html-body opts)
+     :attachments attachments}))
+
 (defn- microsoft-save-draft-message
   [service-id draft-id to subject body opts]
   (let [payload  (microsoft-message-payload to subject body opts)
         draft-id (nonblank-str draft-id)
-        replace-attachments? (some? (:attachments opts))]
-    (if draft-id
+        replace-attachments? (some? (:attachments opts))
+        replacement-required? (and draft-id
+                                   (or replace-attachments?
+                                       (microsoft-compose-requires-mime? opts)))]
+    (cond
+      replacement-required?
+      (let [replacement (microsoft-create-draft-message service-id
+                                                        to
+                                                        subject
+                                                        body
+                                                        (microsoft-replacement-draft-opts service-id draft-id opts))]
+        (microsoft-request service-id
+                           :delete
+                           (str "/me/messages/" draft-id))
+        replacement)
+
+      draft-id
       (do
         (microsoft-request service-id
                            :patch
@@ -1404,10 +1670,25 @@
           (microsoft-delete-existing-attachments! service-id draft-id)
           (microsoft-add-attachments! service-id draft-id (:attachments opts)))
         (microsoft-fetch-message service-id draft-id))
-      (:body (microsoft-request service-id
-                                :post
-                                "/me/messages"
-                                :body payload)))))
+
+      :else
+      (microsoft-create-draft-message service-id to subject body opts))))
+
+(defn- microsoft-list-message-page
+  [service-id page-path unread-only?]
+  (let [response       (microsoft-request service-id :get page-path)
+        messages       (or (get-in response [:body "value"]) [])
+        next-page-token (get-in response [:body "@odata.nextLink"])
+        filtered       (cond->> messages
+                         unread-only?
+                         (filter #(not (boolean (get % "isRead"))))
+                         true
+                         vec)
+        next-page-path (some-> next-page-token
+                               (#(microsoft-page-path service-id %)))]
+    {:messages       filtered
+     :next-page-token next-page-token
+     :next-page-path next-page-path}))
 
 (defrecord GmailBackend []
   EmailBackend
@@ -1639,32 +1920,64 @@
        :returned-count (count categories)
        :labels         categories}))
   (backend-list-messages [_ service-id {:keys [query max-results unread-only? inbox-only? page-token]}]
-    (let [path       (if inbox-only?
-                       "/me/mailFolders/inbox/messages"
-                       "/me/messages")
-          response   (if-let [page-path (microsoft-page-path service-id page-token)]
-                       (microsoft-request service-id :get page-path)
-                       (microsoft-request service-id
-                                          :get
-                                          path
-                                          :query-params (microsoft-list-query-params {:query        query
-                                                                                      :max-results  max-results
-                                                                                      :unread-only? unread-only?})))
-          messages*  (or (get-in response [:body "value"]) [])
-          messages   (cond->> messages*
-                       (and query unread-only?)
-                       (filter #(not (boolean (get % "isRead"))))
+    (let [path             (if inbox-only?
+                             "/me/mailFolders/inbox/messages"
+                             "/me/messages")
+          unread-filter?   (and query unread-only?)
+          initial-page-path (path-with-query-params path
+                                                    (microsoft-list-query-params {:query        query
+                                                                                 :max-results  max-results
+                                                                                 :unread-only? unread-only?}))
+          {:keys [page-path skip-filtered next-page-path]}
+          (microsoft-page-state service-id initial-page-path page-token)]
+      (loop [current-page-path page-path
+             current-skip      skip-filtered
+             fallback-next-path next-page-path
+             acc               []]
+        (if-not current-page-path
+          {:service-id           (name service-id)
+           :query                (nonblank-str query)
+           :page-token           (nonblank-str page-token)
+           :next-page-token      nil
+           :returned-count       (count acc)
+           :result-size-estimate (count acc)
+           :messages             (mapv microsoft-message-summary acc)}
+          (let [{:keys [messages next-page-token next-page-path]}
+                (microsoft-list-message-page service-id current-page-path unread-filter?)
+                messages*       (vec (drop current-skip messages))
+                remaining       (max 0 (- (long max-results) (count acc)))
+                taken           (vec (take remaining messages*))
+                acc*            (into acc taken)
+                filtered-count  (count messages*)
+                consumed-count  (+ current-skip (count taken))
+                effective-next-path (or next-page-path fallback-next-path)
+                effective-next-token (or next-page-token fallback-next-path)
+                partial-page?   (> filtered-count remaining)
+                next-token*     (cond
+                                  partial-page?
+                                  (microsoft-filtered-page-token current-page-path
+                                                                 consumed-count
+                                                                 effective-next-path)
 
-                       true
-                       (take max-results))
-          messages   (mapv microsoft-message-summary messages)]
-      {:service-id           (name service-id)
-       :query                (nonblank-str query)
-       :page-token           (nonblank-str page-token)
-       :next-page-token      (get-in response [:body "@odata.nextLink"])
-       :returned-count       (count messages)
-       :result-size-estimate (count messages)
-       :messages             messages}))
+                                  (seq effective-next-token)
+                                  effective-next-token
+
+                                  :else
+                                  nil)]
+            (if (or partial-page?
+                    (>= (count acc*) (long max-results))
+                    (nil? effective-next-path))
+              {:service-id           (name service-id)
+               :query                (nonblank-str query)
+               :page-token           (nonblank-str page-token)
+               :next-page-token      next-token*
+               :returned-count       (count acc*)
+               :result-size-estimate (count acc*)
+               :messages             (mapv microsoft-message-summary acc*)}
+              (recur effective-next-path
+                     0
+                     nil
+                     acc*)))))))
   (backend-read-message [_ service-id message-id opts]
     (assoc (microsoft-message-detail service-id
                                      (microsoft-fetch-message service-id message-id)

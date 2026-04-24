@@ -124,6 +124,14 @@
   [req header-name header-value]
   (update req :headers merge-protected-headers {header-name header-value}))
 
+(defn- header-present?
+  [headers header-name]
+  (let [target (some-> header-name map-key-name str/lower-case)]
+    (boolean
+      (some (fn [[k _]]
+              (= target (some-> k map-key-name str/lower-case)))
+            (or headers {})))))
+
 (defn- inject-auth
   "Add authentication to a request map based on the service's auth-type."
   [req {:keys [auth-type auth-key auth-header oauth-account]}]
@@ -332,6 +340,8 @@
                    (string? body) body
                    (map? body)    (json/write-json-str body)
                    :else          (str body))
+        default-content-type? (and body-str
+                                   (not (header-present? headers "Content-Type")))
         _       (ensure-autonomous-service-access! service-id svc method path)
         oauth-account (when (= :oauth-account (:auth-type svc))
                         (oauth/ensure-account-ready! (:oauth-account-id svc)))
@@ -343,7 +353,7 @@
                          :policy-observer prompt/policy-decision!
                          :request-label (str "Service request " (name service-id))}
                   body-str     (assoc :body body-str)
-                  body-str     (assoc-in [:headers "Content-Type"] "application/json")
+                  default-content-type? (assoc-in [:headers "Content-Type"] "application/json")
                   timeout      (assoc :timeout timeout)
                   query-params (assoc :query-params query-params))
         ;; Inject service auth — this is the key security boundary
