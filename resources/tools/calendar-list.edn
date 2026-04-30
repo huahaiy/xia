@@ -3,7 +3,7 @@
 
 {:id          :calendar-list
  :name        "calendar-list"
- :description "List calendars available from Google Calendar or Microsoft Calendar so you can find calendar ids before reading or changing events."
+ :description "List calendars available from Google Calendar, Microsoft Calendar, CalDAV, or iCalendar feed services so you can find calendar ids before reading or changing events."
  :tags        #{:calendar :schedule :time}
  :approval    :session
  :parameters  {"type"       "object"

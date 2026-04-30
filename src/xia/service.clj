@@ -82,9 +82,11 @@
   (when (str/includes? path "..")
     (throw (ex-info "Path traversal not allowed"
                     {:base-url base-url :path path})))
-  (let [base (str/replace base-url #"/+$" "")
-        p    (if (str/starts-with? path "/") path (str "/" path))]
-    (str base p)))
+  (let [base (str/replace base-url #"/+$" "")]
+    (if (str/blank? path)
+      base
+      (let [p (if (str/starts-with? path "/") path (str "/" path))]
+        (str base p)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Auth injection
@@ -320,7 +322,7 @@
 
    Arguments:
      service-id — keyword id of the registered service
-     method     — :get :post :put :patch :delete
+     method     — HTTP method keyword (e.g. :get :post :put :patch :delete :propfind :report)
      path       — relative path (e.g. \"/users/me/messages\")
      opts       — optional map:
        :body          — request body (string or map; maps are JSON-encoded)

@@ -136,6 +136,8 @@
    :calendar/missing-summary
    :calendar/missing-event-time
    :calendar/unsupported-recurrence
+   :calendar/read-only-backend
+   :calendar/event-not-found
    :instance-supervisor/capability-disabled
    :instance-supervisor/command-unavailable
    :instance-supervisor/invalid-instance-id

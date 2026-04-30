@@ -171,7 +171,7 @@ The local browser UI is intended to be the main interface for non-technical user
 - **Admin panel:** configure LLM providers, OAuth accounts, services, site logins, local-document summarization settings, and the notification bridge foundation.
 - **OAuth templates:** start from common provider presets and edit as needed.
 - **OAuth-to-service handoff:** prefill service forms from saved OAuth accounts.
-- **Calendar integrations:** manage Google Calendar and Microsoft Calendar events and availability through OAuth-backed services.
+- **Calendar integrations:** manage Google Calendar, Microsoft Calendar, generic CalDAV collections, and read-only iCalendar feeds for events and availability.
 - **Local document workflows:** upload text, PDF, and Office docs, then insert summaries or excerpts into chat and notes.
 - **Skill import:** install Xia skills directly and import a safe prompt-only subset of OpenClaw skills from directories, zip files, or ClawHub zip URLs.
 - **Local trust boundary:** Xia binds to localhost by default and uses a local session secret cookie, while privileged actions still go through approval policy.

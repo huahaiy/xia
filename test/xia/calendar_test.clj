@@ -1,5 +1,6 @@
 (ns xia.calendar-test
   (:require [clojure.test :refer :all]
+            [clojure.string :as str]
             [xia.calendar :as calendar]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -23,6 +24,22 @@
   (db/register-service! {:id        :microsoft-calendar
                          :name      "Microsoft Calendar"
                          :base-url  "https://graph.microsoft.com/v1.0"
+                         :auth-type :bearer
+                         :auth-key  "token"}))
+
+(defn- register-caldav-calendar-service!
+  []
+  (db/register-service! {:id        :caldav-calendar
+                         :name      "CalDAV Calendar"
+                         :base-url  "https://calendar.example/dav/user/calendar"
+                         :auth-type :basic
+                         :auth-key  "user:pass"}))
+
+(defn- register-ical-calendar-service!
+  []
+  (db/register-service! {:id        :ical-calendar
+                         :name      "Holidays"
+                         :base-url  "https://calendar.example/holidays.ics"
                          :auth-type :bearer
                          :auth-key  "token"}))
 
@@ -181,6 +198,136 @@
        clojure.lang.ExceptionInfo
        #"not configured for .*calendar"
        (calendar/list-calendars :service-id :microsoft-mail))))
+
+(deftest caldav-list-events-uses-calendar-query-report
+  (register-caldav-calendar-service!)
+  (let [calls (atom [])
+        calendar-data "BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:evt-1@example.com
+SUMMARY:Standup
+LOCATION:Room 4
+DTSTART:20260429T160000Z
+DTEND:20260429T163000Z
+ATTENDEE;CN=Ana;PARTSTAT=ACCEPTED:mailto:a@example.com
+END:VEVENT
+END:VCALENDAR"
+        xml (str "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
+                 "<d:response>"
+                 "<d:href>/dav/user/calendar/evt-1.ics</d:href>"
+                 "<d:propstat><d:prop><c:calendar-data><![CDATA["
+                 calendar-data
+                 "]]></c:calendar-data></d:prop></d:propstat>"
+                 "</d:response>"
+                 "</d:multistatus>")]
+    (with-redefs [service/request
+                  (fn [service-id method path & {:as opts}]
+                    (swap! calls conj {:service-id service-id
+                                       :method     method
+                                       :path       path
+                                       :opts       opts})
+                    {:status 207
+                     :body   xml})]
+      (let [result (calendar/list-events
+                    :service-id :caldav-calendar
+                    :calendar-id "/"
+                    :time-min "2026-04-29T00:00:00Z"
+                    :time-max "2026-04-30T00:00:00Z")
+            call   (first @calls)
+            event  (first (:events result))]
+        (is (= :caldav-calendar (:service-id call)))
+        (is (= :report (:method call)))
+        (is (= "/" (:path call)))
+        (is (= "1" (get-in call [:opts :headers "Depth"])))
+        (is (str/includes? (get-in call [:opts :body])
+                           "<c:time-range start=\"20260429T000000Z\" end=\"20260430T000000Z\"/>"))
+        (is (= "caldav-calendar" (:provider result)))
+        (is (= "/evt-1.ics" (:id event)))
+        (is (= "evt-1@example.com" (:uid event)))
+        (is (= "Standup" (:summary event)))
+        (is (= "2026-04-29T16:00:00Z" (get-in event [:start :date-time])))
+        (is (= [{:email "a@example.com"
+                 :display-name "Ana"
+                 :response-status "accepted"
+                 :optional? false
+                 :organizer? false
+                 :self? false}]
+               (:attendees event)))))))
+
+(deftest caldav-create-event-puts-icalendar-resource
+  (register-caldav-calendar-service!)
+  (let [calls (atom [])]
+    (with-redefs [service/request
+                  (fn [service-id method path & {:as opts}]
+                    (swap! calls conj {:service-id service-id
+                                       :method     method
+                                       :path       path
+                                       :opts       opts})
+                    {:status 201
+                     :body   ""})]
+      (let [result (calendar/create-event
+                    "Planning"
+                    "2026-04-29T10:00:00-07:00"
+                    "2026-04-29T11:00:00-07:00"
+                    :service-id :caldav-calendar
+                    :calendar-id "/"
+                    :attendees ["a@example.com"])
+            call   (first @calls)
+            body   (get-in call [:opts :body])]
+        (is (= :put (:method call)))
+        (is (re-matches #"/.+\.ics" (:path call)))
+        (is (= "text/calendar; charset=utf-8"
+               (get-in call [:opts :headers "Content-Type"])))
+        (is (str/includes? body "BEGIN:VCALENDAR"))
+        (is (str/includes? body "SUMMARY:Planning"))
+        (is (str/includes? body "DTSTART:20260429T170000Z"))
+        (is (str/includes? body "ATTENDEE:mailto:a@example.com"))
+        (is (= "created" (:status result)))
+        (is (= "caldav-calendar" (:provider result)))))))
+
+(deftest ical-feed-lists-events-and-rejects-writes
+  (register-ical-calendar-service!)
+  (let [calls (atom [])
+        feed "BEGIN:VCALENDAR
+VERSION:2.0
+X-WR-CALNAME:Holidays
+BEGIN:VEVENT
+UID:holiday-1
+SUMMARY:Founders Day
+DTSTART;VALUE=DATE:20260429
+DTEND;VALUE=DATE:20260430
+END:VEVENT
+END:VCALENDAR"]
+    (with-redefs [service/request
+                  (fn [service-id method path & {:as opts}]
+                    (swap! calls conj {:service-id service-id
+                                       :method     method
+                                       :path       path
+                                       :opts       opts})
+                    {:status 200
+                     :body   feed})]
+      (let [result (calendar/list-events
+                    :service-id :ical-calendar
+                    :time-min "2026-04-29"
+                    :time-max "2026-04-30")
+            call   (first @calls)
+            event  (first (:events result))]
+        (is (= :ical-calendar (:service-id call)))
+        (is (= :get (:method call)))
+        (is (= "" (:path call)))
+        (is (= "ical-calendar" (:provider result)))
+        (is (= "default" (:calendar-id result)))
+        (is (= "holiday-1" (:id event)))
+        (is (= "2026-04-29" (get-in event [:start :date])))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"read-only"
+             (calendar/create-event
+              "Planning"
+              "2026-04-29T10:00:00-07:00"
+              "2026-04-29T11:00:00-07:00"
+              :service-id :ical-calendar)))))))
 
 (deftest auto-detects-google-calendar-oauth-account
   (db/register-oauth-account! (oauth-account :calendar-account :google-calendar))

@@ -12,8 +12,8 @@
                              "time_max"         {"type"        "string"
                                                   "description" "Exclusive upper bound as an ISO date-time string"}
                              "calendars"        {"type"        "array"
-                                                  "items"       {"type" "string"}
-                                                  "description" "Provider calendar ids or schedule ids. Google defaults to primary; Microsoft defaults to me"}
+                                                 "items"       {"type" "string"}
+                                                 "description" "Provider calendar ids, schedule ids, or CalDAV collection paths. Google defaults to primary; Microsoft defaults to me; iCalendar feeds use default"}
                              "calendar_ids"     {"type"        "array"
                                                   "items"       {"type" "string"}
                                                   "description" "Alias for calendars"}

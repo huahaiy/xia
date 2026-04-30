@@ -10,7 +10,7 @@
                "properties" {"service_id"        {"type"        "string"
                                                    "description" "Optional calendar service id if more than one is configured"}
                              "calendar_id"       {"type"        "string"
-                                                   "description" "Optional provider calendar id. Google defaults to primary; Microsoft defaults to the user's default calendar"}
+                                                  "description" "Optional provider calendar id. Google defaults to primary; Microsoft defaults to the user's default calendar; CalDAV accepts a collection path; iCalendar feeds use default"}
                              "time_min"          {"type"        "string"
                                                    "description" "Inclusive lower bound as an ISO date-time string"}
                              "time_max"          {"type"        "string"
