@@ -18,6 +18,7 @@
             [taoensso.timbre :as log]
             [xia.artifact :as artifact]
             [xia.browser :as browser]
+            [xia.calendar :as calendar]
             [xia.cron :as cron]
             [xia.email :as email]
             [xia.instance-supervisor :as instance-supervisor]
@@ -177,6 +178,15 @@
    'send-draft     email/send-draft
    'delete-draft   email/delete-draft})
 
+(def ^:private xia-calendar-ns
+  {'list-calendars    calendar/list-calendars
+   'list-events       calendar/list-events
+   'read-event        calendar/read-event
+   'create-event      calendar/create-event
+   'update-event      calendar/update-event
+   'delete-event      calendar/delete-event
+   'find-availability calendar/find-availability})
+
 (def ^:private xia-web-ns
   {'fetch-page   web/fetch-page
    'search-web   web/search-web
@@ -319,6 +329,7 @@
                   'xia.instance-supervisor xia-instance-supervisor-ns
                   'xia.workspace      xia-workspace-ns
                   'xia.email          xia-email-ns
+                  'xia.calendar       xia-calendar-ns
                   'xia.web            xia-web-ns
                   'xia.browser        xia-browser-ns
                   'xia.agent          xia-agent-ns

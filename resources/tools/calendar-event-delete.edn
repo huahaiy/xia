@@ -1,0 +1,24 @@
+;; Delete a calendar event.
+;; Import with: /import-tool resources/tools/calendar-event-delete.edn
+
+{:id          :calendar-event-delete
+ :name        "calendar-event-delete"
+ :description "Delete a calendar event by id."
+ :tags        #{:calendar :event :delete}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"event_id"     {"type"        "string"
+                                              "description" "Provider event id to delete"}
+                             "calendar_id"  {"type"        "string"
+                                              "description" "Optional provider calendar id"}
+                             "service_id"   {"type"        "string"
+                                              "description" "Optional calendar service id if more than one is configured"}
+                             "send_updates" {"type"        "string"
+                                              "description" "Google sendUpdates value: all, externalOnly, or none"}}
+               "required"   ["event_id"]}
+ :handler     "(fn [args]
+                 (xia.calendar/delete-event
+                   (get args \"event_id\")
+                   :calendar-id (get args \"calendar_id\")
+                   :service-id (get args \"service_id\")
+                   :send-updates (get args \"send_updates\")))"}

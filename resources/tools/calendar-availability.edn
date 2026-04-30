@@ -1,0 +1,35 @@
+;; Find calendar availability/free-busy blocks.
+;; Import with: /import-tool resources/tools/calendar-availability.edn
+
+{:id          :calendar-availability
+ :name        "calendar-availability"
+ :description "Find busy blocks for one or more calendars over a required time range."
+ :tags        #{:calendar :availability :freebusy :time}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"time_min"         {"type"        "string"
+                                                  "description" "Inclusive lower bound as an ISO date-time string"}
+                             "time_max"         {"type"        "string"
+                                                  "description" "Exclusive upper bound as an ISO date-time string"}
+                             "calendars"        {"type"        "array"
+                                                  "items"       {"type" "string"}
+                                                  "description" "Provider calendar ids or schedule ids. Google defaults to primary; Microsoft defaults to me"}
+                             "calendar_ids"     {"type"        "array"
+                                                  "items"       {"type" "string"}
+                                                  "description" "Alias for calendars"}
+                             "service_id"       {"type"        "string"
+                                                  "description" "Optional calendar service id if more than one is configured"}
+                             "time_zone"        {"type"        "string"
+                                                  "description" "Optional time zone for the availability query"}
+                             "interval_minutes" {"type"        "integer"
+                                                  "description" "Microsoft availability view interval, default 30"}}
+               "required"   ["time_min" "time_max"]}
+ :handler     "(fn [args]
+                 (xia.calendar/find-availability
+                   :service-id (get args \"service_id\")
+                   :calendars (or (get args \"calendars\")
+                                  (get args \"calendar_ids\"))
+                   :time-min (get args \"time_min\")
+                   :time-max (get args \"time_max\")
+                   :time-zone (get args \"time_zone\")
+                   :interval-minutes (get args \"interval_minutes\")))"}

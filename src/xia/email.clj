@@ -2,22 +2,28 @@
   "Email helpers for bundled tools.
 
    Public email operations are provider-neutral and dispatch through an
-   `EmailBackend` protocol. Gmail is the only backend today, but the contract is
+   `EmailBackend` protocol. Gmail, Microsoft Graph mail, and IMAP/SMTP are
+   supported today, and the contract is
    designed so additional API-backed or protocol-backed mail providers can be
    added without changing the tool-facing call surface."
   (:require [charred.api :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [xia.artifact :as artifact]
             [xia.db :as db]
             [xia.service :as service])
-  (:import [java.net URLEncoder]
+  (:import [jakarta.mail Address Flags Flags$Flag Folder Message Message$RecipientType Multipart Part Session Transport UIDFolder]
+           [jakarta.mail.internet InternetAddress MimeMessage MimeUtility]
+           [java.io ByteArrayInputStream ByteArrayOutputStream]
+           [java.net URI URLEncoder]
            [java.nio.charset StandardCharsets]
            [java.time Instant]
-           [java.util Base64 UUID]
+           [java.util Base64 Date Properties UUID]
            [org.jsoup Jsoup]))
 
 (def default-service-id :gmail)
 (def ^:private microsoft-mail-service-id :microsoft-mail)
+(def ^:private imap-smtp-service-id :imap-smtp-mail)
 (def ^:private default-max-results 10)
 (def ^:private default-max-attachment-bytes (* 256 1024))
 (def ^:private gmail-api-base-url "https://gmail.googleapis.com")
@@ -26,6 +32,11 @@
 (def ^:private microsoft-max-inline-attachment-bytes (* 3 1024 1024))
 (def ^:private microsoft-immutable-id-prefer "IdType=\"ImmutableId\"")
 (def ^:private microsoft-filtered-page-token-prefix "msmail:")
+(def ^:private imap-message-page-token-prefix "imapmsg:")
+(def ^:private imap-draft-page-token-prefix "imapdraft:")
+(def ^:private imap-id-prefix "imap:")
+(def ^:private imap-schemes #{"imap" "imaps"})
+(def ^:private smtp-schemes #{"smtp" "smtps"})
 (def ^:private default-attachment-media-type "application/octet-stream")
 (def ^:private textual-attachment-media-types
   #{"application/json"
@@ -50,6 +61,13 @@
    "text/html" "html"
    "text/markdown" "md"
    "text/plain" "txt"})
+
+(def ^:private imap-default-folders
+  {:inbox   ["INBOX"]
+   :drafts  ["Drafts" "INBOX/Drafts" "INBOX.Drafts" "[Gmail]/Drafts"]
+   :sent    ["Sent" "Sent Items" "INBOX/Sent" "INBOX.Sent" "[Gmail]/Sent Mail"]
+   :archive ["Archive" "Archives" "INBOX/Archive" "INBOX.Archive" "[Gmail]/All Mail"]
+   :trash   ["Trash" "Deleted Items" "Deleted Messages" "INBOX/Trash" "INBOX.Trash" "[Gmail]/Trash"]})
 
 (defprotocol EmailBackend
   (backend-key [backend]
@@ -131,6 +149,10 @@
   [base-url]
   (some-> base-url nonblank-str (str/replace #"/+$" "")))
 
+(defn- uri-scheme
+  [value]
+  (some-> value nonblank-str URI. .getScheme str/lower-case))
+
 (defn- gmail-service?
   [service]
   (= gmail-api-base-url
@@ -158,6 +180,26 @@
           db/get-oauth-account
           :oauth.account/provider-template))
 
+(defn- service-email-backend
+  [service]
+  (or (:service/email-backend service)
+      (:email-backend service)))
+
+(defn- service-smtp-url
+  [service]
+  (or (:service/smtp-url service)
+      (:smtp-url service)))
+
+(defn- service-auth-username
+  [service]
+  (or (:service/auth-username service)
+      (:auth-username service)))
+
+(defn- service-email-address
+  [service]
+  (or (:service/email-address service)
+      (:email-address service)))
+
 (defn- microsoft-mail-service?
   [service]
   (and (microsoft-graph-service? service)
@@ -165,6 +207,15 @@
               (normalize-service-id (service-id-value service)))
            (= :microsoft-mail
               (service-oauth-provider-template service)))))
+
+(defn- imap-service?
+  [service]
+  (let [backend     (service-email-backend service)
+        imap-scheme (some-> (:service/base-url service) uri-scheme)
+        smtp-scheme (some-> (service-smtp-url service) uri-scheme)]
+    (or (= :imap-smtp backend)
+        (and (contains? imap-schemes imap-scheme)
+             (contains? smtp-schemes smtp-scheme)))))
 
 (defn- connected-oauth-account?
   [account]
@@ -244,6 +295,15 @@
                first
                :service/id)
       (ensure-auto-microsoft-mail-service!)))
+
+(defn- imap-smtp-detect-service-id
+  []
+  (let [services (->> (db/list-services)
+                      (filter imap-service?)
+                      (sort-by #(some-> % :service/id name))
+                      vec)]
+    (when (= 1 (count services))
+      (:service/id (first services)))))
 
 (defn- pad-base64url
   [s]
@@ -1674,6 +1734,973 @@
       :else
       (microsoft-create-draft-message service-id to subject body opts))))
 
+(defn- parse-mail-uri!
+  [value field]
+  (try
+    (URI. (or value ""))
+    (catch Exception e
+      (throw (ex-info "Mail service URL must be a valid absolute URL"
+                      {:field field
+                       :value value}
+                      e)))))
+
+(defn- normalize-mail-security
+  [value scheme default-security]
+  (let [value* (cond
+                 (keyword? value) value
+                 (string? value) (some-> value nonblank-str keyword)
+                 :else nil)
+        inferred (case (some-> scheme nonblank-str str/lower-case)
+                   ("imaps" "smtps") :ssl
+                   ("imap" "smtp")   default-security
+                   default-security)
+        resolved (or value* inferred)]
+    (when-not (contains? #{:ssl :starttls :none} resolved)
+      (throw (ex-info "Unsupported mail security mode"
+                      {:value value
+                       :scheme scheme})))
+    resolved))
+
+(defn- default-port
+  [scheme security]
+  (case [(some-> scheme nonblank-str str/lower-case) security]
+    ["imaps" :ssl] 993
+    ["imap" :ssl] 993
+    ["imap" :starttls] 143
+    ["imap" :none] 143
+    ["smtps" :ssl] 465
+    ["smtp" :ssl] 465
+    ["smtp" :starttls] 587
+    ["smtp" :none] 25
+    nil))
+
+(defn- service-mail-config
+  [service-id]
+  (let [service          (or (db/get-service service-id)
+                             (throw (ex-info (str "Unknown mail service: " (name service-id))
+                                             {:service-id service-id})))
+        imap-uri         (parse-mail-uri! (:service/base-url service) "base_url")
+        smtp-url         (service-smtp-url service)
+        smtp-uri         (parse-mail-uri! smtp-url "smtp_url")
+        username         (or (nonblank-str (service-auth-username service))
+                             (nonblank-str (service-email-address service))
+                             (throw (ex-info "auth_username or email_address is required for IMAP/SMTP mail"
+                                             {:service-id service-id
+                                              :field "auth_username"})))
+        password         (or (nonblank-str (:service/auth-key service))
+                             (throw (ex-info "auth_key is required for IMAP/SMTP mail"
+                                             {:service-id service-id
+                                              :field "auth_key"})))
+        email-address    (or (nonblank-str (service-email-address service))
+                             username)
+        imap-scheme      (some-> (.getScheme imap-uri) str/lower-case)
+        smtp-scheme      (some-> (.getScheme smtp-uri) str/lower-case)
+        imap-security    (normalize-mail-security (:service/imap-security service)
+                                                  imap-scheme
+                                                  :starttls)
+        smtp-security    (normalize-mail-security (:service/smtp-security service)
+                                                  smtp-scheme
+                                                  :starttls)
+        imap-port        (let [port (.getPort imap-uri)]
+                           (if (neg? (long port))
+                             (default-port imap-scheme imap-security)
+                             port))
+        smtp-port        (let [port (.getPort smtp-uri)]
+                           (if (neg? (long port))
+                             (default-port smtp-scheme smtp-security)
+                             port))]
+    {:service-id      service-id
+     :service         service
+     :username        username
+     :password        password
+     :email-address   email-address
+     :imap-host       (.getHost imap-uri)
+     :imap-port       imap-port
+     :imap-security   imap-security
+     :smtp-host       (.getHost smtp-uri)
+     :smtp-port       smtp-port
+     :smtp-security   smtp-security
+     :folders         {:inbox   (nonblank-str (:service/inbox-folder service))
+                       :drafts  (nonblank-str (:service/drafts-folder service))
+                       :sent    (nonblank-str (:service/sent-folder service))
+                       :archive (nonblank-str (:service/archive-folder service))
+                       :trash   (nonblank-str (:service/trash-folder service))}}))
+
+(defn- imap-protocol
+  [{:keys [imap-security]}]
+  (if (= :ssl imap-security) "imaps" "imap"))
+
+(defn- smtp-protocol
+  [{:keys [smtp-security]}]
+  (if (= :ssl smtp-security) "smtps" "smtp"))
+
+(defn- mail-properties
+  [{:keys [imap-host imap-port imap-security smtp-host smtp-port smtp-security username email-address]
+    :as config}]
+  (let [props         (Properties.)
+        imap-proto    (imap-protocol config)
+        smtp-proto    (smtp-protocol config)
+        imap-prefix   (str "mail." imap-proto)
+        smtp-prefix   (str "mail." smtp-proto)]
+    (doto props
+      (.put "mail.store.protocol" imap-proto)
+      (.put "mail.transport.protocol" smtp-proto)
+      (.put "mail.mime.address.strict" "false")
+      (.put "mail.mime.decodefilename" "true")
+      (.put "mail.mime.encodefilename" "true")
+      (.put "mail.debug" "false")
+      (.put "mail.from" email-address)
+      (.put (str imap-prefix ".host") imap-host)
+      (.put (str imap-prefix ".port") (str imap-port))
+      (.put (str imap-prefix ".connectiontimeout") "30000")
+      (.put (str imap-prefix ".timeout") "30000")
+      (.put (str imap-prefix ".writetimeout") "30000")
+      (.put (str imap-prefix ".ssl.enable") (str (= :ssl imap-security)))
+      (.put (str imap-prefix ".starttls.enable") (str (= :starttls imap-security)))
+      (.put (str smtp-prefix ".host") smtp-host)
+      (.put (str smtp-prefix ".port") (str smtp-port))
+      (.put (str smtp-prefix ".auth") "true")
+      (.put (str smtp-prefix ".connectiontimeout") "30000")
+      (.put (str smtp-prefix ".timeout") "30000")
+      (.put (str smtp-prefix ".writetimeout") "30000")
+      (.put (str smtp-prefix ".ssl.enable") (str (= :ssl smtp-security)))
+      (.put (str smtp-prefix ".starttls.enable") (str (= :starttls smtp-security)))
+      (.put (str smtp-prefix ".user") username))))
+
+(defn- mail-session
+  [config]
+  (Session/getInstance (mail-properties config)))
+
+(defn- generated-message-id
+  [email-address]
+  (let [domain (or (some-> email-address nonblank-str (str/split #"@") second nonblank-str)
+                   "xia.local")]
+    (str "<" (UUID/randomUUID) "@" domain ">")))
+
+(defn- message-header
+  [^Message message header-name]
+  (some-> (.getHeader message header-name nil)
+          sanitize-header-value
+          nonblank-str))
+
+(defn- part-header-value
+  [^Part part header-name]
+  (some-> (.getHeader part header-name)
+          seq
+          first
+          sanitize-header-value
+          nonblank-str))
+
+(defn- ensure-mime-message-metadata!
+  [config ^MimeMessage message]
+  (when-not (.getFrom message)
+    (.setFrom message (InternetAddress. ^String (:email-address config))))
+  (when-not (.getSentDate message)
+    (.setSentDate message (Date.)))
+  (when-not (message-header message "Message-ID")
+    (.setHeader message "Message-ID" (generated-message-id (:email-address config))))
+  (.saveChanges message)
+  message)
+
+(defn- mime-message-from-raw
+  [config raw]
+  (let [session (mail-session config)
+        message (MimeMessage. session (ByteArrayInputStream. (utf8-bytes raw)))]
+    (ensure-mime-message-metadata! config message)))
+
+(defn- with-imap-store
+  [config f]
+  (let [session (mail-session config)
+        store   (.getStore session (imap-protocol config))]
+    (try
+      (.connect store ^String (:imap-host config) (int (:imap-port config)) ^String (:username config) ^String (:password config))
+      (f session store)
+      (finally
+        (when (.isConnected store)
+          (.close store))))))
+
+(defn- folder-leaf-name
+  [folder-name]
+  (some-> folder-name
+          nonblank-str
+          (str/split #"[/.]")
+          last
+          nonblank-str))
+
+(defn- folder-name-matches?
+  [folder-name candidate]
+  (let [folder*    (some-> folder-name nonblank-str str/lower-case)
+        candidate* (some-> candidate nonblank-str str/lower-case)
+        leaf*      (some-> folder-name folder-leaf-name str/lower-case)
+        cand-leaf* (some-> candidate folder-leaf-name str/lower-case)]
+    (or (= folder* candidate*)
+        (= leaf* candidate*)
+        (= leaf* cand-leaf*)
+        (= folder* cand-leaf*))))
+
+(defn- selectable-folder?
+  [^Folder folder]
+  (and (.exists folder)
+       (pos? (bit-and (.getType folder) Folder/HOLDS_MESSAGES))))
+
+(defn- store-folders
+  [store]
+  (->> (.list (.getDefaultFolder store) "*")
+       (filter selectable-folder?)
+       vec))
+
+(defn- folder-candidates
+  [config folder-kind]
+  (cond-> []
+    (get-in config [:folders folder-kind])
+    (conj (get-in config [:folders folder-kind]))
+
+    (seq (get imap-default-folders folder-kind))
+    (into (get imap-default-folders folder-kind))))
+
+(defn- resolve-folder
+  [store config folder-kind]
+  (let [folders     (store-folders store)
+        candidates  (folder-candidates config folder-kind)]
+    (or (some (fn [candidate]
+                (some (fn [^Folder folder]
+                        (when (folder-name-matches? (.getFullName folder) candidate)
+                          folder))
+                      folders))
+              candidates)
+        (throw (ex-info (str "Mail folder for " (name folder-kind) " was not found")
+                        {:service-id  (:service-id config)
+                         :folder-kind folder-kind
+                         :candidates  candidates})))))
+
+(defn- open-folder!
+  [^Folder folder mode]
+  (when-not (.isOpen folder)
+    (.open folder mode))
+  folder)
+
+(defn- close-folder!
+  [^Folder folder expunge?]
+  (when (and folder (.isOpen folder))
+    (.close folder expunge?)))
+
+(defn- encode-page-token
+  [prefix payload]
+  (str prefix (encode-base64url (json/write-json-str payload))))
+
+(defn- decode-page-token
+  [prefix token]
+  (when-let [text (nonblank-str token)]
+    (when-not (str/starts-with? text prefix)
+      (throw (ex-info "Unexpected mail page token"
+                      {:page-token token
+                       :expected-prefix prefix})))
+    (some-> text
+            (subs (count prefix))
+            decode-base64url
+            json/read-json)))
+
+(defn- encode-imap-message-id
+  [folder-name uid]
+  (str imap-id-prefix
+       (encode-base64url (json/write-json-str {"folder" folder-name
+                                               "uid"    (long uid)}))))
+
+(defn- decode-imap-message-id
+  [message-id]
+  (let [text (or (nonblank-str message-id)
+                 (throw (ex-info "message-id is required"
+                                 {:type :email/missing-message-id})))]
+    (when-not (str/starts-with? text imap-id-prefix)
+      (throw (ex-info "Unsupported IMAP message id"
+                      {:message-id message-id})))
+    (let [payload (some-> text
+                          (subs (count imap-id-prefix))
+                          decode-base64url
+                          json/read-json)
+          folder-name (nonblank-str (get payload "folder"))
+          uid         (parse-long-safe (get payload "uid"))]
+      (when-not (and folder-name uid)
+        (throw (ex-info "Invalid IMAP message id"
+                        {:message-id message-id})))
+      {:folder-name folder-name
+       :uid         uid})))
+
+(defn- message-uid
+  [^Folder folder ^Message message]
+  (let [uid (.getUID ^UIDFolder folder message)]
+    (when (neg? (long uid))
+      (throw (ex-info "IMAP server did not return a stable UID for the message"
+                      {:folder (.getFullName folder)})))
+    uid))
+
+(defn- address->text
+  [^Address address]
+  (cond
+    (instance? InternetAddress address)
+    (.toUnicodeString ^InternetAddress address)
+
+    (nil? address)
+    nil
+
+    :else
+    (str address)))
+
+(defn- addresses->text
+  [addresses]
+  (some->> addresses
+           seq
+           (map address->text)
+           (remove str/blank?)
+           seq
+           (str/join ", ")))
+
+(defn- date->instant-text
+  [^Date date]
+  (some-> date .toInstant str))
+
+(defn- date->epoch-ms
+  [^Date date]
+  (some-> date .toInstant .toEpochMilli))
+
+(defn- part-disposition
+  [^Part part]
+  (some-> (.getDisposition part) sanitize-header-value nonblank-str))
+
+(defn- decode-filename
+  [filename]
+  (when-let [text (nonblank-str filename)]
+    (try
+      (MimeUtility/decodeText text)
+      (catch Exception _
+        text))))
+
+(defn- read-stream-bytes
+  [stream]
+  (with-open [in stream
+              out (ByteArrayOutputStream.)]
+    (io/copy in out)
+    (.toByteArray out)))
+
+(defn- message-preview-text
+  [part]
+  (cond
+    (.isMimeType part "text/plain")
+    (some-> (.getContent part) str nonblank-text)
+
+    (.isMimeType part "text/html")
+    (some-> (.getContent part) str html->text nonblank-text)
+
+    (.isMimeType part "multipart/*")
+    (let [content (.getContent part)]
+      (when (instance? Multipart content)
+        (loop [idx 0]
+          (when (< idx (.getCount ^Multipart content))
+            (or (message-preview-text (.getBodyPart ^Multipart content idx))
+                (recur (inc idx)))))))
+
+    (.isMimeType part "message/rfc822")
+    (some-> (.getContent part) message-preview-text)
+
+    :else
+    nil))
+
+(defn- attachment-part?
+  [^Part part]
+  (let [filename    (decode-filename (.getFileName part))
+        disposition (some-> (part-disposition part) str/lower-case)]
+    (or (seq filename)
+        (contains? #{"attachment" "inline"} disposition))))
+
+(declare collect-message-parts)
+
+(defn- attachment-summary-from-part
+  [^Part part {:keys [include-attachment-data? max-attachment-bytes]}]
+  (let [filename        (decode-filename (.getFileName part))
+        mime-type       (some-> (.getContentType part) base-media-type)
+        size            (let [raw-size (.getSize part)]
+                          (if (neg? (long raw-size)) 0 raw-size))
+        disposition     (part-disposition part)
+        inline?         (or (boolean (re-find #"(?i)\binline\b" (or disposition "")))
+                            (boolean (part-header-value part "Content-ID")))
+        content-id      (part-header-value part "Content-ID")
+        base-summary    {:part-id        (or content-id filename (str (UUID/randomUUID)))
+                         :filename       filename
+                         :mime-type      mime-type
+                         :size-bytes     size
+                         :attachment-id  nil
+                         :inline?        inline?
+                         :content-id     content-id
+                         :disposition    disposition}]
+    (if-not include-attachment-data?
+      base-summary
+      (let [bytes (read-stream-bytes (.getInputStream part))
+            size* (long (alength ^bytes bytes))]
+        (cond
+          (> size* (long max-attachment-bytes))
+          (assoc base-summary
+                 :size-bytes size*
+                 :content-available? true
+                 :content-included? false
+                 :content-reason "attachment exceeds max_attachment_bytes")
+
+          (textual-media-type? mime-type)
+          (assoc base-summary
+                 :size-bytes size*
+                 :content-available? true
+                 :content-included? true
+                 :content-text (String. ^bytes bytes StandardCharsets/UTF_8))
+
+          :else
+          (assoc base-summary
+                 :size-bytes size*
+                 :content-available? true
+                 :content-included? true
+                 :content-bytes-base64 (.encodeToString (Base64/getEncoder) ^bytes bytes)))))))
+
+(defn- collect-message-parts
+  [^Part part opts state]
+  (cond
+    (and (.isMimeType part "text/plain")
+         (not (attachment-part? part)))
+    (update state :plain-body #(or % (some-> (.getContent part) str nonblank-text)))
+
+    (and (.isMimeType part "text/html")
+         (not (attachment-part? part)))
+    (update state :html-body #(or % (some-> (.getContent part) str nonblank-text)))
+
+    (.isMimeType part "multipart/*")
+    (let [content (.getContent part)]
+      (if (instance? Multipart content)
+        (reduce (fn [acc idx]
+                  (collect-message-parts (.getBodyPart ^Multipart content idx) opts acc))
+                state
+                (range (.getCount ^Multipart content)))
+        state))
+
+    (.isMimeType part "message/rfc822")
+    (if-let [content (.getContent part)]
+      (collect-message-parts content opts state)
+      state)
+
+    (attachment-part? part)
+    (update state :attachments conj (attachment-summary-from-part part opts))
+
+    :else
+    state))
+
+(defn- message-body-data
+  [^Message message opts]
+  (let [state (collect-message-parts message opts {:plain-body nil
+                                                   :html-body nil
+                                                   :attachments []})
+        plain (:plain-body state)
+        html  (:html-body state)
+        text  (cond
+                (seq plain) plain
+                (seq html) (or (html->text html) "")
+                :else nil)
+        kind  (cond
+                (seq plain) :plain
+                (seq html)  :html
+                :else nil)]
+    {:body-kind   kind
+     :body        text
+     :html-body   html
+     :attachments (vec (:attachments state))}))
+
+(defn- message-date*
+  [^Message message]
+  (or (.getReceivedDate message)
+      (.getSentDate message)))
+
+(defn- imap-message-summary
+  [^Folder folder ^Message message]
+  (let [folder-name (.getFullName folder)
+        uid         (message-uid folder message)
+        date        (message-date* message)
+        snippet     (or (message-preview-text message) "")]
+    {:id             (encode-imap-message-id folder-name uid)
+     :thread-id      (message-header message "References")
+     :subject        (some-> (.getSubject message) sanitize-header-value nonblank-str)
+     :from           (addresses->text (.getFrom message))
+     :to             (addresses->text (.getRecipients message Message$RecipientType/TO))
+     :cc             (addresses->text (.getRecipients message Message$RecipientType/CC))
+     :date           (date->instant-text date)
+     :message-id     (message-header message "Message-ID")
+     :snippet        snippet
+     :labels         [folder-name]
+     :unread?        (not (.isSet message Flags$Flag/SEEN))
+     :received-at-ms (date->epoch-ms date)}))
+
+(defn- imap-message-detail
+  [^Folder folder ^Message message opts]
+  (let [body-data (message-body-data message opts)]
+    (cond-> (imap-message-summary folder message)
+      (:body body-data)
+      (assoc :body (:body body-data)
+             :body-kind (:body-kind body-data))
+
+      (seq (:html-body body-data))
+      (assoc :html-body (:html-body body-data))
+
+      (seq (:attachments body-data))
+      (assoc :attachments (:attachments body-data)))))
+
+(defn- query-tokens
+  [query]
+  (mapv #(or (second %) (nth % 2))
+        (re-seq #"\"([^\"]+)\"|(\S+)" (or query ""))))
+
+(defn- token->matcher
+  [token]
+  (let [token* (or (nonblank-str token) "")
+        token* (str/lower-case token*)]
+    (cond
+      (str/starts-with? token* "from:")
+      [:from (subs token* 5)]
+
+      (str/starts-with? token* "to:")
+      [:to (subs token* 3)]
+
+      (str/starts-with? token* "cc:")
+      [:cc (subs token* 3)]
+
+      (str/starts-with? token* "subject:")
+      [:subject (subs token* 8)]
+
+      (str/starts-with? token* "body:")
+      [:body (subs token* 5)]
+
+      :else
+      [:any token*])))
+
+(defn- summary-matches-token?
+  [summary [field needle]]
+  (let [needle* (some-> needle nonblank-str str/lower-case)]
+    (or (nil? needle*)
+        (case field
+          :from    (str/includes? (str/lower-case (or (:from summary) "")) needle*)
+          :to      (str/includes? (str/lower-case (or (:to summary) "")) needle*)
+          :cc      (str/includes? (str/lower-case (or (:cc summary) "")) needle*)
+          :subject (str/includes? (str/lower-case (or (:subject summary) "")) needle*)
+          :body    (str/includes? (str/lower-case (or (:snippet summary) "")) needle*)
+          :any     (some #(str/includes? (str/lower-case (or % "")) needle*)
+                         [(:subject summary) (:from summary) (:to summary) (:cc summary) (:snippet summary)])
+          false))))
+
+(defn- summary-matches-query?
+  [summary query]
+  (let [matchers (->> (query-tokens query)
+                      (map token->matcher)
+                      vec)]
+    (every? #(summary-matches-token? summary %) matchers)))
+
+(defn- folder-message-seq
+  [^Folder folder]
+  (let [count (.getMessageCount folder)]
+    (when (pos? (long count))
+      (->> (.getMessages folder 1 count)
+           seq
+           (sort-by (fn [^Message message]
+                      [(or (date->epoch-ms (message-date* message)) 0)
+                       (.getMessageNumber message)])
+                    #(compare %2 %1))))))
+
+(defn- list-folder-entries
+  [^Folder folder query unread-only? offset max-results]
+  (let [matches (->> (folder-message-seq folder)
+                     (map (fn [^Message message]
+                            (let [summary (imap-message-summary folder message)]
+                              {:summary summary
+                               :message message})))
+                     (filter (fn [{:keys [summary]}]
+                               (and (if unread-only? (:unread? summary) true)
+                                    (summary-matches-query? summary query))))
+                     vec)
+        page    (->> matches
+                     (drop offset)
+                     (take max-results)
+                     (mapv :summary))
+        next-offset (+ offset (count page))]
+    {:entries         page
+     :next-page-token (when (< next-offset (count matches))
+                        next-offset)}))
+
+(defn- list-page-offset
+  [prefix page-token]
+  (or (some-> (decode-page-token prefix page-token)
+              (get "offset")
+              parse-long-safe)
+      0))
+
+(defn- page-token-for-offset
+  [prefix offset]
+  (encode-page-token prefix {"offset" offset}))
+
+(defn- folder-label-type
+  [folder-name]
+  (let [name* (str/lower-case (or folder-name ""))]
+    (cond
+      (some #(folder-name-matches? folder-name %) (mapcat val imap-default-folders))
+      :system
+
+      :else
+      :user)))
+
+(defn- imap-list-labels*
+  [config]
+  (with-imap-store config
+    (fn [_ store]
+      (let [labels (->> (store-folders store)
+                        (mapv (fn [^Folder folder]
+                                {:id                      (.getFullName folder)
+                                 :name                    (.getFullName folder)
+                                 :type                    (folder-label-type (.getFullName folder))
+                                 :message-list-visibility nil
+                                 :label-list-visibility   nil
+                                 :messages-total          (let [count (.getMessageCount folder)]
+                                                            (when (not (neg? (long count))) count))
+                                 :messages-unread         nil
+                                 :threads-total           nil
+                                 :threads-unread          nil
+                                 :color                   nil})))]
+        {:service-id     (name (:service-id config))
+         :returned-count (count labels)
+         :labels         labels}))))
+
+(defn- imap-list-messages*
+  [config {:keys [query max-results unread-only? inbox-only? page-token]}]
+  (with-imap-store config
+    (fn [_ store]
+      (let [folder      (resolve-folder store config :inbox)
+            offset      (list-page-offset imap-message-page-token-prefix page-token)]
+        (try
+          (open-folder! folder Folder/READ_ONLY)
+          (let [{:keys [entries next-page-token]}
+                (list-folder-entries folder query unread-only? offset max-results)]
+            {:service-id           (name (:service-id config))
+             :query                (nonblank-str query)
+             :page-token           (nonblank-str page-token)
+             :next-page-token      (some-> next-page-token
+                                           (page-token-for-offset imap-message-page-token-prefix))
+             :returned-count       (count entries)
+             :result-size-estimate (count entries)
+             :messages             entries})
+          (finally
+            (close-folder! folder false)))))))
+
+(defn- with-message-ref
+  [config message-id mode f]
+  (with-imap-store config
+    (fn [_ store]
+      (let [{:keys [folder-name uid]} (decode-imap-message-id message-id)
+            folder (or (some (fn [^Folder candidate]
+                               (when (= (.getFullName candidate) folder-name)
+                                 candidate))
+                             (store-folders store))
+                       (throw (ex-info "Mail folder for message id was not found"
+                                       {:service-id (:service-id config)
+                                        :folder folder-name})))]
+        (try
+          (open-folder! folder mode)
+          (let [message (.getMessageByUID ^UIDFolder folder uid)]
+            (when-not message
+              (throw (ex-info "Mail message was not found"
+                              {:service-id (:service-id config)
+                               :message-id message-id
+                               :folder folder-name
+                               :uid uid})))
+            (f folder message))
+          (finally
+            (close-folder! folder false)))))))
+
+(defn- imap-read-message*
+  [config message-id opts]
+  (with-message-ref config message-id Folder/READ_ONLY
+    (fn [folder message]
+      (assoc (imap-message-detail folder message opts)
+             :service-id (name (:service-id config))))))
+
+(defn- find-message-in-folder-by-header
+  [^Folder folder header-name header-value]
+  (let [count (.getMessageCount folder)
+        start (max 1 (- count 50))]
+    (some (fn [^Message message]
+            (when (= header-value (message-header message header-name))
+              message))
+          (reverse (seq (.getMessages folder start count))))))
+
+(defn- append-message-to-folder!
+  [store config folder-kind ^MimeMessage message]
+  (let [folder (resolve-folder store config folder-kind)
+        header-value (or (message-header message "Message-ID")
+                         (generated-message-id (:email-address config)))]
+    (.setHeader message "Message-ID" header-value)
+    (.saveChanges message)
+    (try
+      (open-folder! folder Folder/READ_WRITE)
+      (.appendMessages folder (into-array Message [message]))
+      (let [saved (or (find-message-in-folder-by-header folder "Message-ID" header-value)
+                      (let [count (.getMessageCount folder)]
+                        (when (pos? (long count))
+                          (.getMessage folder count))))]
+        (when-not saved
+          (throw (ex-info "Unable to locate appended mail message"
+                          {:service-id (:service-id config)
+                           :folder-kind folder-kind})))
+        {:id        (encode-imap-message-id (.getFullName folder) (message-uid folder saved))
+         :folder    (.getFullName folder)
+         :summary   (imap-message-summary folder saved)
+         :message-id header-value})
+      (finally
+        (close-folder! folder false)))))
+
+(defn- smtp-send-message!
+  [config ^MimeMessage message]
+  (let [session   (mail-session config)
+        transport (.getTransport session (smtp-protocol config))]
+    (try
+      (.connect transport ^String (:smtp-host config) (int (:smtp-port config)) ^String (:username config) ^String (:password config))
+      (.sendMessage transport message (.getAllRecipients message))
+      {:message-id (message-header message "Message-ID")}
+      (finally
+        (.close transport)))))
+
+(defn- imap-send-message*
+  [config to subject body opts]
+  (let [raw          (raw-message {:to          to
+                                   :cc          (:cc opts)
+                                   :bcc         (:bcc opts)
+                                   :subject     subject
+                                   :body        body
+                                   :reply-to    (:reply-to opts)
+                                   :in-reply-to (:in-reply-to opts)
+                                   :references  (:references opts)
+                                   :html-body   (:html-body opts)
+                                   :attachments (normalize-attachments (:attachments opts))})
+        message      (mime-message-from-raw config raw)
+        _            (smtp-send-message! config message)
+        stored       (with-imap-store config
+                       (fn [_ store]
+                         (try
+                           (append-message-to-folder! store config :sent message)
+                           (catch Exception _
+                             nil))))]
+    {:service-id (name (:service-id config))
+     :status     "sent"
+     :id         (or (:id stored) (message-header message "Message-ID"))
+     :thread-id  (message-header message "References")
+     :labels     (vec (cond-> []
+                        (:folder stored) (conj (:folder stored))))}))
+
+(defn- move-message-to-folder!
+  [store config ^Folder source-folder ^Message message folder-kind]
+  (let [target-folder (resolve-folder store config folder-kind)
+        source-name   (.getFullName source-folder)
+        target-name   (.getFullName target-folder)
+        header-value  (or (message-header message "Message-ID")
+                          (generated-message-id (:email-address config)))]
+    (if (= source-name target-name)
+      {:id      (encode-imap-message-id source-name (message-uid source-folder message))
+       :folder  source-name
+       :summary (imap-message-summary source-folder message)}
+      (do
+        (.copyMessages source-folder (into-array Message [message]) target-folder)
+        (.setFlag message Flags$Flag/DELETED true)
+        (close-folder! source-folder true)
+        (try
+          (open-folder! target-folder Folder/READ_WRITE)
+          (let [copied (or (find-message-in-folder-by-header target-folder "Message-ID" header-value)
+                           (let [count (.getMessageCount target-folder)]
+                             (when (pos? (long count))
+                               (.getMessage target-folder count))))]
+            (when-not copied
+              (throw (ex-info "Unable to locate moved mail message"
+                              {:service-id (:service-id config)
+                               :folder-kind folder-kind})))
+            {:id      (encode-imap-message-id target-name (message-uid target-folder copied))
+             :folder  target-name
+             :summary (imap-message-summary target-folder copied)})
+          (finally
+            (close-folder! target-folder false)))))))
+
+(defn- imap-delete-message*
+  [config message-id {:keys [permanent?]}]
+  (with-imap-store config
+    (fn [_ store]
+      (let [{:keys [folder-name uid]} (decode-imap-message-id message-id)
+            folder (or (some (fn [^Folder candidate]
+                               (when (= (.getFullName candidate) folder-name)
+                                 candidate))
+                             (store-folders store))
+                       (throw (ex-info "Mail folder for message id was not found"
+                                       {:service-id (:service-id config)
+                                        :folder folder-name})))]
+        (open-folder! folder Folder/READ_WRITE)
+        (let [message (.getMessageByUID ^UIDFolder folder uid)]
+          (when-not message
+            (throw (ex-info "Mail message was not found"
+                            {:service-id (:service-id config)
+                             :message-id message-id})))
+          (if permanent?
+            (do
+              (.setFlag message Flags$Flag/DELETED true)
+              (close-folder! folder true)
+              {:service-id (name (:service-id config))
+               :status     "deleted"
+               :id         message-id
+               :thread-id  nil
+               :labels     []})
+            (let [moved (try
+                          (move-message-to-folder! store config folder message :trash)
+                          (catch Exception _
+                            (.setFlag message Flags$Flag/DELETED true)
+                            (close-folder! folder true)
+                            nil))]
+              (if moved
+                {:service-id (name (:service-id config))
+                 :status     "trashed"
+                 :id         (:id moved)
+                 :thread-id  nil
+                 :labels     [(:folder moved)]}
+                {:service-id (name (:service-id config))
+                 :status     "deleted"
+                 :id         message-id
+                 :thread-id  nil
+                 :labels     []}))))))))
+
+(defn- imap-update-message*
+  [config message-id {:keys [archive? read? add-labels remove-labels]}]
+  (when (or (seq add-labels) (seq remove-labels))
+    (throw (ex-info "IMAP/SMTP mail does not support generic label mutation"
+                    {:service-id (:service-id config)
+                     :backend    :imap-smtp
+                     :type       :email/unsupported-label-update})))
+  (with-imap-store config
+    (fn [_ store]
+      (let [{:keys [folder-name uid]} (decode-imap-message-id message-id)
+            folder (or (some (fn [^Folder candidate]
+                               (when (= (.getFullName candidate) folder-name)
+                                 candidate))
+                             (store-folders store))
+                       (throw (ex-info "Mail folder for message id was not found"
+                                       {:service-id (:service-id config)
+                                        :folder folder-name})))]
+        (open-folder! folder Folder/READ_WRITE)
+        (let [message (.getMessageByUID ^UIDFolder folder uid)]
+          (when-not message
+            (throw (ex-info "Mail message was not found"
+                            {:service-id (:service-id config)
+                             :message-id message-id})))
+          (when (some? read?)
+            (.setFlag message Flags$Flag/SEEN (boolean read?)))
+          (let [moved (when (some? archive?)
+                        (move-message-to-folder! store
+                                                 config
+                                                 folder
+                                                 message
+                                                 (if archive? :archive :inbox)))
+                summary (if moved
+                          (:summary moved)
+                          (imap-message-summary folder message))]
+            (assoc summary
+                   :service-id (name (:service-id config))
+                   :status "updated"
+                   :archived? (boolean archive?))))))))
+
+(defn- imap-list-drafts*
+  [config {:keys [query max-results page-token]}]
+  (with-imap-store config
+    (fn [_ store]
+      (let [folder (resolve-folder store config :drafts)
+            offset (list-page-offset imap-draft-page-token-prefix page-token)]
+        (try
+          (open-folder! folder Folder/READ_ONLY)
+          (let [{:keys [entries next-page-token]}
+                (list-folder-entries folder query false offset max-results)
+                drafts (mapv #(assoc % :draft-id (:id %)) entries)]
+            {:service-id           (name (:service-id config))
+             :query                (nonblank-str query)
+             :page-token           (nonblank-str page-token)
+             :next-page-token      (some-> next-page-token
+                                           (page-token-for-offset imap-draft-page-token-prefix))
+             :returned-count       (count drafts)
+             :result-size-estimate (count drafts)
+             :drafts               drafts})
+          (finally
+            (close-folder! folder false)))))))
+
+(defn- imap-read-draft*
+  [config draft-id opts]
+  (with-message-ref config draft-id Folder/READ_ONLY
+    (fn [folder message]
+      (assoc (imap-message-detail folder message opts)
+             :service-id (name (:service-id config))
+             :draft-id draft-id))))
+
+(defn- imap-save-draft*
+  [config to subject body {:keys [draft-id] :as opts}]
+  (let [raw        (raw-message {:to          to
+                                 :cc          (:cc opts)
+                                 :bcc         (:bcc opts)
+                                 :subject     subject
+                                 :body        body
+                                 :reply-to    (:reply-to opts)
+                                 :in-reply-to (:in-reply-to opts)
+                                 :references  (:references opts)
+                                 :html-body   (:html-body opts)
+                                 :attachments (normalize-attachments (:attachments opts))})
+        message    (mime-message-from-raw config raw)]
+    (with-imap-store config
+      (fn [_ store]
+        (when-let [draft-id* (nonblank-str draft-id)]
+          (with-message-ref config draft-id* Folder/READ_WRITE
+            (fn [folder existing]
+              (.setFlag existing Flags$Flag/DELETED true)
+              (close-folder! folder true))))
+        (let [stored (append-message-to-folder! store config :drafts message)]
+          {:service-id (name (:service-id config))
+           :status     "saved"
+           :draft-id   (:id stored)
+           :id         (:id stored)
+           :thread-id  (message-header message "References")
+           :labels     [(:folder stored)]})))))
+
+(defn- imap-send-draft*
+  [config draft-id]
+  (with-message-ref config draft-id Folder/READ_WRITE
+    (fn [folder message]
+      (let [out (ByteArrayOutputStream.)]
+        (.writeTo message out)
+        (let [prepared (mime-message-from-raw config (String. (.toByteArray out) StandardCharsets/UTF_8))
+              _        (smtp-send-message! config prepared)
+              stored   (with-imap-store config
+                         (fn [_ store]
+                           (try
+                             (append-message-to-folder! store config :sent prepared)
+                             (catch Exception _
+                               nil))))]
+          (.setFlag message Flags$Flag/DELETED true)
+          (close-folder! folder true)
+          {:service-id (name (:service-id config))
+           :status     "sent"
+           :draft-id   draft-id
+           :id         (or (:id stored) (message-header prepared "Message-ID"))
+           :thread-id  (message-header prepared "References")
+           :labels     (vec (cond-> []
+                              (:folder stored) (conj (:folder stored))))})))))
+
+(defn- imap-delete-draft*
+  [config draft-id]
+  (with-message-ref config draft-id Folder/READ_WRITE
+    (fn [folder message]
+      (.setFlag message Flags$Flag/DELETED true)
+      (close-folder! folder true)
+      {:service-id (name (:service-id config))
+       :status     "deleted"
+       :draft-id   draft-id})))
+
 (defn- microsoft-list-message-page
   [service-id page-path unread-only?]
   (let [response       (microsoft-request service-id :get page-path)
@@ -2110,9 +3137,45 @@
        :status     "deleted"
        :draft-id   draft-id*})))
 
+(defrecord ImapSmtpBackend []
+  EmailBackend
+  (backend-key [_]
+    :imap-smtp)
+  (backend-label [_]
+    "IMAP/SMTP")
+  (backend-default-service-id [_]
+    imap-smtp-service-id)
+  (supports-service? [_ service]
+    (imap-service? service))
+  (auto-detect-service-id [_]
+    (imap-smtp-detect-service-id))
+  (backend-list-labels [_ service-id _]
+    (imap-list-labels* (service-mail-config service-id)))
+  (backend-list-messages [_ service-id opts]
+    (imap-list-messages* (service-mail-config service-id) opts))
+  (backend-read-message [_ service-id message-id opts]
+    (imap-read-message* (service-mail-config service-id) message-id opts))
+  (backend-send-message [_ service-id to subject body opts]
+    (imap-send-message* (service-mail-config service-id) to subject body opts))
+  (backend-delete-message [_ service-id message-id opts]
+    (imap-delete-message* (service-mail-config service-id) message-id opts))
+  (backend-update-message [_ service-id message-id opts]
+    (imap-update-message* (service-mail-config service-id) message-id opts))
+  (backend-list-drafts [_ service-id opts]
+    (imap-list-drafts* (service-mail-config service-id) opts))
+  (backend-read-draft [_ service-id draft-id opts]
+    (imap-read-draft* (service-mail-config service-id) draft-id opts))
+  (backend-save-draft [_ service-id to subject body opts]
+    (imap-save-draft* (service-mail-config service-id) to subject body opts))
+  (backend-send-draft [_ service-id draft-id _]
+    (imap-send-draft* (service-mail-config service-id) draft-id))
+  (backend-delete-draft [_ service-id draft-id _]
+    (imap-delete-draft* (service-mail-config service-id) draft-id)))
+
 (def ^:private backends
   [(->GmailBackend)
-   (->MicrosoftGraphBackend)])
+   (->MicrosoftGraphBackend)
+   (->ImapSmtpBackend)])
 
 (defn- primary-backend
   []

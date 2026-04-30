@@ -1,0 +1,26 @@
+;; List calendars from the configured calendar backend.
+;; Import with: /import-tool resources/tools/calendar-list.edn
+
+{:id          :calendar-list
+ :name        "calendar-list"
+ :description "List calendars available from Google Calendar or Microsoft Calendar so you can find calendar ids before reading or changing events."
+ :tags        #{:calendar :schedule :time}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"service_id"     {"type"        "string"
+                                                "description" "Optional calendar service id if more than one is configured"}
+                             "max_results"    {"type"        "integer"
+                                                "description" "Maximum calendars to return, default 10"}
+                             "page_token"     {"type"        "string"
+                                                "description" "Optional page token from a previous calendar-list result"}
+                             "include_hidden" {"type"        "boolean"
+                                                "description" "When true, include hidden Google calendars when supported"}
+                             "time_zone"      {"type"        "string"
+                                                "description" "Optional preferred time zone for Microsoft responses"}}}
+ :handler     "(fn [args]
+                 (xia.calendar/list-calendars
+                   :service-id (get args \"service_id\")
+                   :max-results (or (get args \"max_results\") 10)
+                   :page-token (get args \"page_token\")
+                   :include-hidden? (boolean (get args \"include_hidden\"))
+                   :time-zone (get args \"time_zone\")))"}

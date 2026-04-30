@@ -36,17 +36,30 @@
                 :prompt "consent"}
   :token-params {}
   :notes "Create a Google OAuth client of type Web application, enable the Gmail API, and add Xia's /oauth/callback as an authorized redirect URI."}
+ {:id :google-calendar
+  :name "Google Calendar"
+  :description "Preset for Google Calendar event and availability management via Google OAuth 2."
+  :authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+  :token-url "https://oauth2.googleapis.com/token"
+  :api-base-url "https://www.googleapis.com/calendar/v3"
+  :service-id "google-calendar"
+  :service-name "Google Calendar"
+  :scopes "https://www.googleapis.com/auth/calendar"
+  :auth-params {:access_type "offline"
+                :prompt "consent"}
+  :token-params {}
+  :notes "Create a Google OAuth client of type Web application, enable the Google Calendar API, and add Xia's /oauth/callback as an authorized redirect URI."}
  {:id :microsoft
   :name "Microsoft"
   :description "Preset for Microsoft identity platform v2 applications."
   :authorize-url "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
   :token-url "https://login.microsoftonline.com/common/oauth2/v2.0/token"
- :api-base-url "https://graph.microsoft.com/v1.0"
- :service-id "microsoft-graph"
- :service-name "Microsoft Graph"
- :scopes "offline_access openid profile User.Read"
- :auth-params {}
- :token-params {}
+  :api-base-url "https://graph.microsoft.com/v1.0"
+  :service-id "microsoft-graph"
+  :service-name "Microsoft Graph"
+  :scopes "offline_access openid profile User.Read"
+  :auth-params {}
+  :token-params {}
   :notes "Register an Azure app and add Xia's /oauth/callback as a web redirect URI."}
  {:id :microsoft-mail
   :name "Microsoft Mail"
@@ -59,4 +72,16 @@
   :scopes "offline_access openid profile Mail.ReadWrite Mail.Send MailboxSettings.Read"
   :auth-params {}
   :token-params {}
-  :notes "Register an Azure app, enable Microsoft Graph delegated mail permissions, and add Xia's /oauth/callback as a web redirect URI."}]
+  :notes "Register an Azure app, enable Microsoft Graph delegated mail permissions, and add Xia's /oauth/callback as a web redirect URI."}
+ {:id :microsoft-calendar
+  :name "Microsoft Calendar"
+  :description "Preset for Outlook and Microsoft 365 calendar management through Microsoft Graph."
+  :authorize-url "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  :token-url "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  :api-base-url "https://graph.microsoft.com/v1.0"
+  :service-id "microsoft-calendar"
+  :service-name "Microsoft Calendar"
+  :scopes "offline_access openid profile User.Read Calendars.ReadWrite"
+  :auth-params {}
+  :token-params {}
+  :notes "Register an Azure app, enable Microsoft Graph delegated calendar permissions, and add Xia's /oauth/callback as a web redirect URI."}]

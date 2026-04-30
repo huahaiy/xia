@@ -1,0 +1,66 @@
+;; Create a calendar event.
+;; Import with: /import-tool resources/tools/calendar-event-create.edn
+
+{:id          :calendar-event-create
+ :name        "calendar-event-create"
+ :description "Create a calendar event. Use ISO date-time strings for timed events, or YYYY-MM-DD dates for all-day events. For all-day events, end is the exclusive ending date."
+ :tags        #{:calendar :event :create}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"summary"      {"type"        "string"
+                                              "description" "Event title"}
+                             "start"        {"type"        "string"
+                                              "description" "Start date-time or all-day date"}
+                             "end"          {"type"        "string"
+                                              "description" "End date-time or all-day exclusive end date"}
+                             "description"  {"type"        "string"
+                                              "description" "Optional event description/body"}
+                             "location"     {"type"        "string"
+                                              "description" "Optional event location"}
+                             "attendees"    {"type"        "array"
+                                              "description" "Optional attendees as email strings or objects with email, name, type, and optional"
+                                              "items"       {"anyOf" [{"type" "string"}
+                                                                     {"type" "object"}]}}
+                             "calendar_id"  {"type"        "string"
+                                              "description" "Optional provider calendar id"}
+                             "service_id"   {"type"        "string"
+                                              "description" "Optional calendar service id if more than one is configured"}
+                             "time_zone"    {"type"        "string"
+                                              "description" "Optional event time zone"}
+                             "all_day"      {"type"        "boolean"
+                                              "description" "When true, create an all-day event"}
+                             "recurrence"   {"type"        "array"
+                                              "items"       {"type" "string"}
+                                              "description" "Optional Google recurrence lines, for example RRULE:FREQ=WEEKLY;COUNT=4"}
+                             "transparency" {"type"        "string"
+                                              "description" "Google transparency value, such as opaque or transparent"}
+                             "visibility"   {"type"        "string"
+                                              "description" "Google visibility value"}
+                             "show_as"      {"type"        "string"
+                                              "description" "Microsoft showAs value, such as busy, free, tentative, or oof"}
+                             "sensitivity"  {"type"        "string"
+                                              "description" "Microsoft sensitivity value"}
+                             "send_updates" {"type"        "string"
+                                              "description" "Google sendUpdates value: all, externalOnly, or none"}
+                             "html"         {"type"        "boolean"
+                                              "description" "When true, treat description as HTML for Microsoft"}}
+               "required"   ["summary" "start" "end"]}
+ :handler     "(fn [args]
+                 (xia.calendar/create-event
+                   (get args \"summary\")
+                   (get args \"start\")
+                   (get args \"end\")
+                   :description (get args \"description\")
+                   :location (get args \"location\")
+                   :attendees (get args \"attendees\")
+                   :calendar-id (get args \"calendar_id\")
+                   :service-id (get args \"service_id\")
+                   :time-zone (get args \"time_zone\")
+                   :all-day? (boolean (get args \"all_day\"))
+                   :recurrence (get args \"recurrence\")
+                   :transparency (get args \"transparency\")
+                   :visibility (get args \"visibility\")
+                   :show-as (get args \"show_as\")
+                   :sensitivity (get args \"sensitivity\")
+                   :send-updates (get args \"send_updates\")
+                   :html? (boolean (get args \"html\"))))"}

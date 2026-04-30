@@ -11,6 +11,7 @@
                  [com.cnuernber/charred "1.038"]
                  [org.babashka/sci "0.12.51"]
                  [org.jsoup/jsoup "1.22.1"]
+                 [org.eclipse.angus/jakarta.mail "2.0.5"]
                  [com.github.librepdf/openpdf "3.0.0"
                   :exclusions [com.ibm.icu/icu4j
                                org.bouncycastle/bcprov-jdk18on

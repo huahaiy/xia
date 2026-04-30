@@ -1,6 +1,7 @@
 (ns xia.runtime-overlay-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is use-fixtures]]
+            [xia.db-schema :as db-schema]
             [xia.runtime-overlay :as runtime-overlay]))
 
 (use-fixtures :each
@@ -24,7 +25,7 @@
   (let [overlay-file (temp-overlay-file
                        {:overlay/version 1
                         :snapshot/id "snapshot-42"
-                        :overlay/requires-db-schema-version 1
+                        :overlay/requires-db-schema-version db-schema/current-version
                         :config-overrides {:browser/backend-default :remote}
                         :forced-keys #{:browser/backend-default}
                         :tx-data [{:llm.provider/id :platform-openai
@@ -41,8 +42,10 @@
     (is (= overlay-file (runtime-overlay/source-path)))
     (is (number? (runtime-overlay/loaded-at-ms)))
     (is (= 1 (get (runtime-overlay/admin-summary) :source_overlay_version)))
-    (is (= 1 (get (runtime-overlay/admin-summary) :required_db_schema_version)))
-    (is (= 1 (get (runtime-overlay/admin-summary) :current_db_schema_version)))
+    (is (= db-schema/current-version
+           (get (runtime-overlay/admin-summary) :required_db_schema_version)))
+    (is (= db-schema/current-version
+           (get (runtime-overlay/admin-summary) :current_db_schema_version)))
     (is (= true (get (runtime-overlay/admin-summary) :reloadable)))))
 
 (deftest activate-migrates-versionless-legacy-overlay

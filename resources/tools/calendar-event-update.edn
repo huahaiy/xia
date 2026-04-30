@@ -1,0 +1,69 @@
+;; Update a calendar event.
+;; Import with: /import-tool resources/tools/calendar-event-update.edn
+
+{:id          :calendar-event-update
+ :name        "calendar-event-update"
+ :description "Patch a calendar event by id. Provide only the fields that should change."
+ :tags        #{:calendar :event :update}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"event_id"     {"type"        "string"
+                                              "description" "Provider event id to update"}
+                             "summary"      {"type"        "string"
+                                              "description" "New event title"}
+                             "start"        {"type"        "string"
+                                              "description" "New start date-time or all-day date"}
+                             "end"          {"type"        "string"
+                                              "description" "New end date-time or all-day exclusive end date"}
+                             "description"  {"type"        "string"
+                                              "description" "New event description/body"}
+                             "location"     {"type"        "string"
+                                              "description" "New event location"}
+                             "attendees"    {"type"        "array"
+                                              "description" "Replacement attendees as email strings or objects with email, name, type, and optional"
+                                              "items"       {"anyOf" [{"type" "string"}
+                                                                     {"type" "object"}]}}
+                             "calendar_id"  {"type"        "string"
+                                              "description" "Optional provider calendar id"}
+                             "service_id"   {"type"        "string"
+                                              "description" "Optional calendar service id if more than one is configured"}
+                             "time_zone"    {"type"        "string"
+                                              "description" "Optional event time zone"}
+                             "all_day"      {"type"        "boolean"
+                                              "description" "When true, update as an all-day event"}
+                             "recurrence"   {"type"        "array"
+                                              "items"       {"type" "string"}
+                                              "description" "Replacement Google recurrence lines"}
+                             "transparency" {"type"        "string"
+                                              "description" "Google transparency value"}
+                             "visibility"   {"type"        "string"
+                                              "description" "Google visibility value"}
+                             "show_as"      {"type"        "string"
+                                              "description" "Microsoft showAs value"}
+                             "sensitivity"  {"type"        "string"
+                                              "description" "Microsoft sensitivity value"}
+                             "send_updates" {"type"        "string"
+                                              "description" "Google sendUpdates value: all, externalOnly, or none"}
+                             "html"         {"type"        "boolean"
+                                              "description" "When true, treat description as HTML for Microsoft"}}
+               "required"   ["event_id"]}
+ :handler     "(fn [args]
+                 (xia.calendar/update-event
+                   (get args \"event_id\")
+                   :summary (get args \"summary\")
+                   :start (get args \"start\")
+                   :end (get args \"end\")
+                   :description (get args \"description\")
+                   :location (get args \"location\")
+                   :attendees (get args \"attendees\")
+                   :calendar-id (get args \"calendar_id\")
+                   :service-id (get args \"service_id\")
+                   :time-zone (get args \"time_zone\")
+                   :all-day? (get args \"all_day\")
+                   :recurrence (get args \"recurrence\")
+                   :transparency (get args \"transparency\")
+                   :visibility (get args \"visibility\")
+                   :show-as (get args \"show_as\")
+                   :sensitivity (get args \"sensitivity\")
+                   :send-updates (get args \"send_updates\")
+                   :html? (boolean (get args \"html\"))))"}

@@ -32,6 +32,8 @@
            [java.util Date]))
 
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
+(def ^:private service-email-backends #{:imap-smtp})
+(def ^:private mail-security-modes #{:ssl :starttls :none})
 (def ^:private provider-access-modes #{:local :api :account})
 (def ^:private provider-credential-sources #{:none :api-key :oauth-account})
 (def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
@@ -384,6 +386,24 @@
                       {:field "auth_type"
                        :value value})))
     auth-type))
+
+(defn- parse-optional-service-email-backend
+  [value]
+  (when-let [backend (some-> value nonblank-str keyword)]
+    (when-not (contains? service-email-backends backend)
+      (throw (ex-info "invalid email_backend"
+                      {:field "email_backend"
+                       :value value})))
+    backend))
+
+(defn- parse-optional-mail-security
+  [value field]
+  (when-let [security (some-> value nonblank-str keyword)]
+    (when-not (contains? mail-security-modes security)
+      (throw (ex-info (str "invalid " field)
+                      {:field field
+                       :value value})))
+    security))
 
 (defn- parse-provider-access-mode
   [value]
@@ -741,8 +761,19 @@
      :runtime_source                   runtime-source
      :name                             (:service/name service)
      :base_url                         (:service/base-url service)
+     :smtp_url                         (:service/smtp-url service)
      :auth_type                        (some-> (:service/auth-type service) name)
+     :email_backend                    (some-> (:service/email-backend service) name)
      :auth_header                      (:service/auth-header service)
+     :auth_username                    (:service/auth-username service)
+     :email_address                    (:service/email-address service)
+     :imap_security                    (some-> (:service/imap-security service) name)
+     :smtp_security                    (some-> (:service/smtp-security service) name)
+     :inbox_folder                     (:service/inbox-folder service)
+     :drafts_folder                    (:service/drafts-folder service)
+     :sent_folder                      (:service/sent-folder service)
+     :archive_folder                   (:service/archive-folder service)
+     :trash_folder                     (:service/trash-folder service)
      :oauth_account                    (some-> (:service/oauth-account service) name)
      :oauth_account_name               (:oauth.account/name oauth-account)
      :oauth_account_connected          (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
@@ -1598,10 +1629,34 @@
           service-id             (parse-keyword-id (get data "id") "id")
           existing               (db/get-service service-id)
           base-url               (nonblank-str (get data "base_url"))
+          smtp-url               (if (contains? data "smtp_url")
+                                   (nonblank-str (get data "smtp_url"))
+                                   (:service/smtp-url existing))
           name                   (or (nonblank-str (get data "name"))
                                      (name service-id))
           auth-type              (parse-auth-type (get data "auth_type"))
+          email-backend          (if (contains? data "email_backend")
+                                   (parse-optional-service-email-backend (get data "email_backend"))
+                                   (:service/email-backend existing))
           entered-auth-key       (nonblank-str (get data "auth_key"))
+          auth-username          (or (nonblank-str (get data "auth_username"))
+                                     (:service/auth-username existing))
+          email-address          (or (nonblank-str (get data "email_address"))
+                                     (:service/email-address existing))
+          imap-security          (or (parse-optional-mail-security (get data "imap_security") "imap_security")
+                                     (:service/imap-security existing))
+          smtp-security          (or (parse-optional-mail-security (get data "smtp_security") "smtp_security")
+                                     (:service/smtp-security existing))
+          inbox-folder           (or (nonblank-str (get data "inbox_folder"))
+                                     (:service/inbox-folder existing))
+          drafts-folder          (or (nonblank-str (get data "drafts_folder"))
+                                     (:service/drafts-folder existing))
+          sent-folder            (or (nonblank-str (get data "sent_folder"))
+                                     (:service/sent-folder existing))
+          archive-folder         (or (nonblank-str (get data "archive_folder"))
+                                     (:service/archive-folder existing))
+          trash-folder           (or (nonblank-str (get data "trash_folder"))
+                                     (:service/trash-folder existing))
           rate-limit-per-minute  (parse-optional-positive-long (get data "rate_limit_per_minute")
                                                                "rate_limit_per_minute")
           allow-private-network? (when (contains? data "allow_private_network")
@@ -1640,9 +1695,20 @@
       (db/save-service! {:id                     service-id
                          :name                   name
                          :base-url               base-url
+                         :smtp-url               smtp-url
                          :auth-type              auth-type
+                         :email-backend          email-backend
                          :auth-key               (or auth-key "")
+                         :auth-username          auth-username
                          :auth-header            auth-header
+                         :email-address          email-address
+                         :imap-security          imap-security
+                         :smtp-security          smtp-security
+                         :inbox-folder           inbox-folder
+                         :drafts-folder          drafts-folder
+                         :sent-folder            sent-folder
+                         :archive-folder         archive-folder
+                         :trash-folder           trash-folder
                          :oauth-account          oauth-account-id
                          :rate-limit-per-minute  rate-limit-per-minute
                          :allow-private-network? allow-private-network?

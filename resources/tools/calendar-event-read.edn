@@ -1,0 +1,24 @@
+;; Read a calendar event by id.
+;; Import with: /import-tool resources/tools/calendar-event-read.edn
+
+{:id          :calendar-event-read
+ :name        "calendar-event-read"
+ :description "Read a calendar event by id, including normalized timing, attendees, location, and recurrence metadata."
+ :tags        #{:calendar :event :read}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"event_id"    {"type"        "string"
+                                             "description" "Provider event id to read"}
+                             "calendar_id" {"type"        "string"
+                                             "description" "Optional provider calendar id"}
+                             "service_id"  {"type"        "string"
+                                             "description" "Optional calendar service id if more than one is configured"}
+                             "time_zone"   {"type"        "string"
+                                             "description" "Optional preferred time zone for Microsoft responses"}}
+               "required"   ["event_id"]}
+ :handler     "(fn [args]
+                 (xia.calendar/read-event
+                   (get args \"event_id\")
+                   :calendar-id (get args \"calendar_id\")
+                   :service-id (get args \"service_id\")
+                   :time-zone (get args \"time_zone\")))"}

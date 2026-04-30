@@ -1,0 +1,38 @@
+;; List calendar events.
+;; Import with: /import-tool resources/tools/calendar-event-list.edn
+
+{:id          :calendar-event-list
+ :name        "calendar-event-list"
+ :description "List upcoming or bounded calendar events. If no time range is supplied, Xia returns the next seven days."
+ :tags        #{:calendar :event :time}
+ :approval    :session
+ :parameters  {"type"       "object"
+               "properties" {"service_id"        {"type"        "string"
+                                                   "description" "Optional calendar service id if more than one is configured"}
+                             "calendar_id"       {"type"        "string"
+                                                   "description" "Optional provider calendar id. Google defaults to primary; Microsoft defaults to the user's default calendar"}
+                             "time_min"          {"type"        "string"
+                                                   "description" "Inclusive lower bound as an ISO date-time string"}
+                             "time_max"          {"type"        "string"
+                                                   "description" "Exclusive upper bound as an ISO date-time string"}
+                             "query"             {"type"        "string"
+                                                   "description" "Optional text query. Google sends this to the API; Microsoft filters returned events locally"}
+                             "max_results"       {"type"        "integer"
+                                                   "description" "Maximum events to return, default 10"}
+                             "page_token"        {"type"        "string"
+                                                   "description" "Optional page token from a previous calendar-event-list result"}
+                             "include_cancelled" {"type"        "boolean"
+                                                   "description" "When true, include cancelled/deleted events when supported"}
+                             "time_zone"         {"type"        "string"
+                                                   "description" "Optional time zone for provider responses"}}}
+ :handler     "(fn [args]
+                 (xia.calendar/list-events
+                   :service-id (get args \"service_id\")
+                   :calendar-id (get args \"calendar_id\")
+                   :time-min (get args \"time_min\")
+                   :time-max (get args \"time_max\")
+                   :query (get args \"query\")
+                   :max-results (or (get args \"max_results\") 10)
+                   :page-token (get args \"page_token\")
+                   :include-cancelled? (boolean (get args \"include_cancelled\"))
+                   :time-zone (get args \"time_zone\")))"}

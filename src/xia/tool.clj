@@ -79,6 +79,13 @@
    "tools/email-draft-save.edn"
    "tools/email-draft-send.edn"
    "tools/email-draft-delete.edn"
+   "tools/calendar-list.edn"
+   "tools/calendar-event-list.edn"
+   "tools/calendar-event-read.edn"
+   "tools/calendar-event-create.edn"
+   "tools/calendar-event-update.edn"
+   "tools/calendar-event-delete.edn"
+   "tools/calendar-availability.edn"
    "tools/memory-correct-fact.edn"
    "tools/local-doc-search.edn"
    "tools/local-doc-read.edn"
@@ -124,6 +131,11 @@
    :email/attachment-artifact-not-found
    :email/missing-message-id
    :email/missing-draft-id
+   :calendar/missing-event-id
+   :calendar/missing-time-range
+   :calendar/missing-summary
+   :calendar/missing-event-time
+   :calendar/unsupported-recurrence
    :instance-supervisor/capability-disabled
    :instance-supervisor/command-unavailable
    :instance-supervisor/invalid-instance-id

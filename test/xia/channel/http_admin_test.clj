@@ -5,6 +5,7 @@
             [xia.browser :as browser]
             [xia.channel.http.admin :as http-admin]
             [xia.db :as db]
+            [xia.db-schema :as db-schema]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.test-helpers :as th]))
@@ -117,16 +118,20 @@
              (get db-schema "schema_version")))
       (is (= db/current-schema-version
              (get db-schema "supported_schema_version")))
-      (is (= db/current-schema-version
+      (is (= (db-schema/released-schema-version)
              (get db-schema "released_schema_version")))
-      (is (= [db/current-schema-version]
+      (is (= (db-schema/frozen-schema-versions)
              (get db-schema "frozen_schema_versions")))
       (is (= (str "xia/schema/" db/current-schema-version ".edn")
              (get db-schema "schema_resource_path")))
       (is (= (str "xia/schema/" db/current-schema-version ".edn")
              (get db-schema "supported_schema_resource_path")))
       (is (string? (get db-schema "schema_applied_at")))
-      (is (= []
+      (is (= (mapv (fn [{:keys [from-version to-version description]}]
+                     {"from_version" from-version
+                      "to_version" to-version
+                      "description" description})
+                   (db-schema/migration-registry-summary))
              (get db-schema "available_migrations")))
       (is (= []
              (get db-schema "migration_history")))

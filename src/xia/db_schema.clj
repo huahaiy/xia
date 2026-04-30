@@ -8,7 +8,7 @@
            [java.security MessageDigest]
            [java.util Date]))
 
-(def current-version 1)
+(def current-version 2)
 
 (def ^:private frozen-schema-digests
   {1 "9bde4d7aa57384b041ff356140deeedbd62e4f858b32b1a89d24de98c1caabda"})
@@ -71,8 +71,15 @@
         next-history (conj (or history []) entry)]
     (set-meta! conn schema-migration-history-meta-key (pr-str next-history))))
 
+(defn- now-text
+  []
+  (.toString (java.time.Instant/now)))
+
 (def ^:private migration-registry
-  {})
+  {1 {:to-version 2
+      :description "Add mail service fields for IMAP/SMTP support."
+      :apply! (fn [_conn]
+                nil)}})
 
 (defn ensure-current-metadata!
   [conn]
@@ -170,3 +177,25 @@
                :description description}))
        (sort-by (juxt :from-version :to-version))
        vec))
+
+(defn apply-migrations!
+  [conn from-version]
+  (when (and (some? from-version)
+             (pos? (long from-version))
+             (< from-version current-version))
+    (let [steps (migration-path from-version)]
+      (when-not steps
+        (throw (ex-info "Database schema migration path is missing."
+                        {:from-version from-version
+                         :current-schema-version current-version
+                         :reason :db-schema/migration-path-missing})))
+      (doseq [{:keys [from-version to-version description apply!]} steps]
+        (when apply!
+          (apply! conn))
+        (record-migration-history! conn
+                                   {:from-version from-version
+                                    :to-version to-version
+                                    :description description
+                                    :resource-path (schema-resource-path to-version)
+                                    :applied-at (now-text)}))))
+  true)

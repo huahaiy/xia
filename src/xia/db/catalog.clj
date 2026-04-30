@@ -21,6 +21,8 @@
   ((:decrypt-entity deps) entity-map))
 
 (def ^:private service-loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
+(def ^:private imap-schemes #{"imap" "imaps"})
+(def ^:private smtp-schemes #{"smtp" "smtps"})
 
 (defn- loopback-service-base-url?
   [base-url]
@@ -33,29 +35,68 @@
     (catch Exception _
       false)))
 
-(defn- validate-service-base-url!
-  [base-url allow-private-network?]
-  (when (str/blank? (or base-url ""))
-    (throw (ex-info "Service base URL is required"
-                    {:field "base_url"})))
-  (let [uri (try
-              (URI. base-url)
-              (catch Exception e
-                (throw (ex-info "Service base URL must be a valid absolute URL"
-                                {:field "base_url"
-                                 :value base-url}
-                                e))))
+(defn- parse-absolute-uri!
+  [value field]
+  (try
+    (URI. value)
+    (catch Exception e
+      (throw (ex-info "Service URL must be a valid absolute URL"
+                      {:field field
+                       :value value}
+                      e)))))
+
+(defn- absolute-uri-with-scheme!
+  [value field allowed-schemes]
+  (when (str/blank? (or value ""))
+    (throw (ex-info "Service URL is required"
+                    {:field field})))
+  (let [uri    (parse-absolute-uri! value field)
         scheme (some-> (.getScheme uri) str/lower-case)
         host   (.getHost uri)]
     (when-not (and (some? host)
-                   (or (= "https" scheme)
-                       (and allow-private-network?
-                            (loopback-service-base-url? base-url))))
-      (throw (ex-info "Service base URL must use HTTPS (loopback HTTP is allowed only when private-network access is enabled)"
-                      {:field "base_url"
-                       :value base-url
-                       :allow-private-network? (boolean allow-private-network?)})))
-    base-url))
+                   (contains? allowed-schemes scheme))
+      (throw (ex-info (str "Service URL must use one of: "
+                           (str/join ", " (sort allowed-schemes)))
+                      {:field field
+                       :value value})))
+    value))
+
+(defn- imap-service-config?
+  [{:keys [base-url smtp-url email-backend]
+    :as _service}]
+  (let [base-scheme (some-> (parse-absolute-uri! (or base-url "") "base_url")
+                            .getScheme
+                            str/lower-case)
+        smtp-scheme (when (seq (str/trim (or smtp-url "")))
+                      (some-> (parse-absolute-uri! smtp-url "smtp_url")
+                              .getScheme
+                              str/lower-case))]
+    (or (= :imap-smtp email-backend)
+        (contains? imap-schemes base-scheme)
+        (contains? smtp-schemes smtp-scheme))))
+
+(defn- validate-service-base-url!
+  [base-url allow-private-network? service]
+  (when (str/blank? (or base-url ""))
+    (throw (ex-info "Service base URL is required"
+                    {:field "base_url"})))
+  (if (imap-service-config? service)
+    (do
+      (absolute-uri-with-scheme! base-url "base_url" imap-schemes)
+      (absolute-uri-with-scheme! (:smtp-url service) "smtp_url" smtp-schemes)
+      base-url)
+    (let [uri (parse-absolute-uri! base-url "base_url")
+          scheme (some-> (.getScheme uri) str/lower-case)
+          host   (.getHost uri)]
+      (when-not (and (some? host)
+                     (or (= "https" scheme)
+                         (and allow-private-network?
+                              (loopback-service-base-url? base-url))))
+        (throw (ex-info "Service base URL must use HTTPS (loopback HTTP is allowed only when private-network access is enabled)"
+                        {:field "base_url"
+                         :value base-url
+                         :allow-private-network? (boolean allow-private-network?)})))
+      base-url)))
 
 (defn install-skill!
   [deps
@@ -242,9 +283,35 @@
   [deps
    {:keys [id name base-url auth-type auth-key auth-header oauth-account enabled?
            autonomous-approved?] :as service}]
-  (let [allow-private-network?     (or (:service/allow-private-network? service)
+  (let [email-backend              (or (:service/email-backend service)
+                                       (:email-backend service))
+        smtp-url                   (or (:service/smtp-url service)
+                                       (:smtp-url service))
+        auth-username              (or (:service/auth-username service)
+                                       (:auth-username service))
+        email-address              (or (:service/email-address service)
+                                       (:email-address service))
+        imap-security              (or (:service/imap-security service)
+                                       (:imap-security service))
+        smtp-security              (or (:service/smtp-security service)
+                                       (:smtp-security service))
+        inbox-folder               (or (:service/inbox-folder service)
+                                       (:inbox-folder service))
+        drafts-folder              (or (:service/drafts-folder service)
+                                       (:drafts-folder service))
+        sent-folder                (or (:service/sent-folder service)
+                                       (:sent-folder service))
+        archive-folder             (or (:service/archive-folder service)
+                                       (:archive-folder service))
+        trash-folder               (or (:service/trash-folder service)
+                                       (:trash-folder service))
+        allow-private-network?     (or (:service/allow-private-network? service)
                                        (:allow-private-network? service))
-        base-url                   (validate-service-base-url! base-url allow-private-network?)
+        base-url                   (validate-service-base-url! base-url
+                                                              allow-private-network?
+                                                              {:base-url base-url
+                                                               :smtp-url smtp-url
+                                                               :email-backend email-backend})
         eid                        (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current                    (when eid (raw-entity* deps eid))
         rate-limit-per-minute      (or (:service/rate-limit-per-minute service)
@@ -264,11 +331,44 @@
                                                                               (:service/autonomous-approved? current)
                                                                               true))
                                              :service/enabled?  (if (nil? enabled?) true enabled?)}]
+                                     email-backend
+                                     (update 0 assoc :service/email-backend email-backend)
+
                                      auth-header
                                      (update 0 assoc :service/auth-header auth-header)
 
                                      oauth-account
                                      (update 0 assoc :service/oauth-account oauth-account)
+
+                                     smtp-url
+                                     (update 0 assoc :service/smtp-url smtp-url)
+
+                                     auth-username
+                                     (update 0 assoc :service/auth-username auth-username)
+
+                                     email-address
+                                     (update 0 assoc :service/email-address email-address)
+
+                                     imap-security
+                                     (update 0 assoc :service/imap-security imap-security)
+
+                                     smtp-security
+                                     (update 0 assoc :service/smtp-security smtp-security)
+
+                                     inbox-folder
+                                     (update 0 assoc :service/inbox-folder inbox-folder)
+
+                                     drafts-folder
+                                     (update 0 assoc :service/drafts-folder drafts-folder)
+
+                                     sent-folder
+                                     (update 0 assoc :service/sent-folder sent-folder)
+
+                                     archive-folder
+                                     (update 0 assoc :service/archive-folder archive-folder)
+
+                                     trash-folder
+                                     (update 0 assoc :service/trash-folder trash-folder)
 
                                      (and has-rate-limit?
                                           (some? rate-limit-per-minute))
@@ -290,6 +390,83 @@
                                      (conj [:db/retract eid
                                             :service/oauth-account
                                             (:service/oauth-account current)])
+
+                                     (and eid
+                                          (nil? email-backend)
+                                          (contains? current :service/email-backend))
+                                     (conj [:db/retract eid
+                                            :service/email-backend
+                                            (:service/email-backend current)])
+
+                                     (and eid
+                                          (nil? smtp-url)
+                                          (contains? current :service/smtp-url))
+                                     (conj [:db/retract eid
+                                            :service/smtp-url
+                                            (:service/smtp-url current)])
+
+                                     (and eid
+                                          (nil? auth-username)
+                                          (contains? current :service/auth-username))
+                                     (conj [:db/retract eid
+                                            :service/auth-username
+                                            (:service/auth-username current)])
+
+                                     (and eid
+                                          (nil? email-address)
+                                          (contains? current :service/email-address))
+                                     (conj [:db/retract eid
+                                            :service/email-address
+                                            (:service/email-address current)])
+
+                                     (and eid
+                                          (nil? imap-security)
+                                          (contains? current :service/imap-security))
+                                     (conj [:db/retract eid
+                                            :service/imap-security
+                                            (:service/imap-security current)])
+
+                                     (and eid
+                                          (nil? smtp-security)
+                                          (contains? current :service/smtp-security))
+                                     (conj [:db/retract eid
+                                            :service/smtp-security
+                                            (:service/smtp-security current)])
+
+                                     (and eid
+                                          (nil? inbox-folder)
+                                          (contains? current :service/inbox-folder))
+                                     (conj [:db/retract eid
+                                            :service/inbox-folder
+                                            (:service/inbox-folder current)])
+
+                                     (and eid
+                                          (nil? drafts-folder)
+                                          (contains? current :service/drafts-folder))
+                                     (conj [:db/retract eid
+                                            :service/drafts-folder
+                                            (:service/drafts-folder current)])
+
+                                     (and eid
+                                          (nil? sent-folder)
+                                          (contains? current :service/sent-folder))
+                                     (conj [:db/retract eid
+                                            :service/sent-folder
+                                            (:service/sent-folder current)])
+
+                                     (and eid
+                                          (nil? archive-folder)
+                                          (contains? current :service/archive-folder))
+                                     (conj [:db/retract eid
+                                            :service/archive-folder
+                                            (:service/archive-folder current)])
+
+                                     (and eid
+                                          (nil? trash-folder)
+                                          (contains? current :service/trash-folder))
+                                     (conj [:db/retract eid
+                                            :service/trash-folder
+                                            (:service/trash-folder current)])
 
                                      (and eid
                                           has-rate-limit?
