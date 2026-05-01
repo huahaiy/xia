@@ -5,7 +5,7 @@
  :name        "email-send"
  :description "Send an email through the configured email backend. Supports reply threading when the backend allows it, optional HTML, and optional attachments. The plain-text body must still be the literal email text only, not JSON, code fences, or a structured tool-argument wrapper."
  :tags        #{:email :send :communication}
- :approval    :session
+ :approval    :auto
   :parameters  {"type"       "object"
                "properties" {"to"          {"type"        "string"
                                              "description" "Primary recipient email address or RFC 5322 To header value"}

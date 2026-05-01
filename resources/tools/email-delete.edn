@@ -5,7 +5,7 @@
  :name        "email-delete"
  :description "Delete an email message. Xia moves the selected message to trash by default when the backend supports it; set permanent to true only when the user explicitly wants permanent deletion."
  :tags        #{:email :delete :trash :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"message_id" {"type"        "string"
                                            "description" "Message id to remove"}

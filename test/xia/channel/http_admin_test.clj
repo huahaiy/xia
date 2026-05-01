@@ -112,7 +112,8 @@
             provider-by-id (into {} (map (juxt #(get % "id") identity)) (get body "providers"))
             service-by-id  (into {} (map (juxt #(get % "id") identity)) (get body "services"))
             oauth-by-id    (into {} (map (juxt #(get % "id") identity)) (get body "oauth_accounts"))
-            site-by-id     (into {} (map (juxt #(get % "id") identity)) (get body "sites"))]
+            site-by-id     (into {} (map (juxt #(get % "id") identity)) (get body "sites"))
+            templates      (get body "oauth_provider_templates")]
       (is (= 200 (:status response)))
       (is (= db/current-schema-version
              (get db-schema "schema_version")))
@@ -196,7 +197,10 @@
       (is (= "runtime-overlay" (get-in oauth-by-id ["platform-oauth" "runtime_source"])))
       (is (= "tenant-db" (get-in oauth-by-id ["tenant-oauth" "runtime_source"])))
       (is (= "runtime-overlay" (get-in site-by-id ["platform-site" "runtime_source"])))
-      (is (= "tenant-db" (get-in site-by-id ["tenant-site" "runtime_source"])))))
+      (is (= "tenant-db" (get-in site-by-id ["tenant-site" "runtime_source"])))
+      (is (= #{"github" "google" "gmail" "google-calendar"
+               "microsoft" "microsoft-mail" "microsoft-calendar"}
+             (set (map #(get % "id") templates))))))
     (finally
       (runtime-overlay/clear!)
       (instance-supervisor/configure! {:enabled? false}))))

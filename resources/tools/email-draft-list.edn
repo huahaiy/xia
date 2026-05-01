@@ -5,7 +5,7 @@
  :name        "email-draft-list"
  :description "List drafts so you can review saved drafts, search them, and page through large draft mailboxes."
  :tags        #{:email :draft :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"service_id" {"type"        "string"
                                            "description" "Optional email service id if you have more than one configured"}

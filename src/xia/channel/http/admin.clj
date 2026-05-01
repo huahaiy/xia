@@ -855,17 +855,60 @@
            :name     (or service-name (name service-id))
            :base-url api-base-url})))))
 
+(defn- approve-template-oauth-account!
+  [account]
+  (if (and (oauth-account-template-service-spec account)
+           (not (autonomous/oauth-account-autonomous-approved? account)))
+    (let [account-id (:oauth.account/id account)]
+      (db/save-oauth-account!
+       (cond-> {:id account-id
+                :name (:oauth.account/name account)
+                :scopes (:oauth.account/scopes account)
+                :autonomous-approved? true}
+         (contains? account :oauth.account/connection-mode)
+         (assoc :connection-mode (:oauth.account/connection-mode account))
+         (contains? account :oauth.account/authorize-url)
+         (assoc :authorize-url (:oauth.account/authorize-url account))
+         (contains? account :oauth.account/token-url)
+         (assoc :token-url (:oauth.account/token-url account))
+         (contains? account :oauth.account/client-id)
+         (assoc :client-id (:oauth.account/client-id account))
+         (contains? account :oauth.account/client-secret)
+         (assoc :client-secret (:oauth.account/client-secret account))
+         (contains? account :oauth.account/provider-template)
+         (assoc :provider-template (:oauth.account/provider-template account))
+         (contains? account :oauth.account/redirect-uri)
+         (assoc :redirect-uri (:oauth.account/redirect-uri account))
+         (contains? account :oauth.account/auth-params)
+         (assoc :auth-params (:oauth.account/auth-params account))
+         (contains? account :oauth.account/token-params)
+         (assoc :token-params (:oauth.account/token-params account))
+         (contains? account :oauth.account/access-token)
+         (assoc :access-token (:oauth.account/access-token account))
+         (contains? account :oauth.account/refresh-token)
+         (assoc :refresh-token (:oauth.account/refresh-token account))
+         (contains? account :oauth.account/token-type)
+         (assoc :token-type (:oauth.account/token-type account))
+         (contains? account :oauth.account/expires-at)
+         (assoc :expires-at (:oauth.account/expires-at account))
+         (contains? account :oauth.account/connected-at)
+         (assoc :connected-at (:oauth.account/connected-at account))))
+      (db/get-oauth-account account-id))
+    account))
+
 (defn- sync-template-service-for-oauth-account!
   [account]
-  (when-let [{:keys [id name base-url]} (oauth-account-template-service-spec account)]
+  (let [account (approve-template-oauth-account! account)]
+    (when-let [{:keys [id name base-url]} (oauth-account-template-service-spec account)]
     (let [existing (db/get-service id)]
       (db/save-service! {:id            id
                          :name          (or (some-> (:service/name existing) nonblank-str)
                                             name)
                          :base-url      base-url
                          :auth-type     :oauth-account
-                         :oauth-account (:oauth.account/id account)})
-      (db/get-service id))))
+                         :oauth-account (:oauth.account/id account)
+                         :autonomous-approved? true})
+      (db/get-service id)))))
 
 (defn- auto-managed-template-service-for-oauth-account
   [account]
@@ -1763,8 +1806,14 @@
           redirect-uri          (nonblank-str (get data "redirect_uri"))
           auth-params           (parse-json-object-string (get data "auth_params") "auth_params")
           token-params          (parse-json-object-string (get data "token_params") "token_params")
-          autonomous-approved?  (when (contains? data "autonomous_approved")
-                                  (true? (get data "autonomous_approved")))]
+          autonomous-approved?  (let [requested (when (contains? data "autonomous_approved")
+                                                  (true? (get data "autonomous_approved")))
+                                      template-account (cond-> {:oauth.account/provider-template provider-template-id}
+                                                         provider-template-id
+                                                         (assoc :oauth.account/id account-id))]
+                                  (if (oauth-account-template-service-spec template-account)
+                                    true
+                                    requested))]
       (when (= connection-mode :oauth-flow)
         (when-not authorize-url
           (throw (ex-info "missing 'authorize_url' field" {:field "authorize_url"})))

@@ -21,6 +21,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.agent :as agent]
             [xia.prompt :as prompt]
+            [xia.snapshot :as snapshot]
             [xia.util :as util]
             [xia.wake-projection :as wake-projection]
             [xia.working-memory :as wm])
@@ -1209,6 +1210,36 @@
     (json-response 200 status)
     (json-response 404 {:error "checkpoint not found"})))
 
+(defn- snapshot-command-body
+  [snapshot*]
+  {:snapshot_id (:snapshot/id snapshot*)
+   :label (:snapshot/label snapshot*)
+   :created_at (:snapshot/created-at snapshot*)
+   :path (:snapshot/path snapshot*)
+   :db {:source_path (get-in snapshot* [:db :source-path])
+        :archive (get-in snapshot* [:db :archive])}
+   :workspace {:included (boolean (get-in snapshot* [:workspace :included?]))
+               :source_root (get-in snapshot* [:workspace :source-root])
+               :entry (get-in snapshot* [:workspace :entry])}})
+
+(defn- handle-command-list-snapshots
+  [_req]
+  (json-response 200
+                 {:snapshots (mapv snapshot-command-body
+                                    (snapshot/list-snapshots))}))
+
+(defn- handle-command-create-snapshot
+  [req]
+  (let [body               (or (read-body req) {})
+        label              (some-> (get body "label") nonblank-str)
+        snapshot-root      (some-> (get body "snapshot_root") nonblank-str)
+        include-workspace? (not= false (get body "include_workspace"))
+        snapshot*          (snapshot/create-snapshot!
+                            :label label
+                            :snapshot-root snapshot-root
+                            :include-workspace? include-workspace?)]
+    (json-response 201 (snapshot-command-body snapshot*))))
+
 (defn- runtime-available?
   []
   (try
@@ -2081,6 +2112,7 @@
           command-runtime-undrain-match (= uri "/command/runtime/undrain")
           command-managed-checkpoints-match (= uri "/command/managed/checkpoints")
           command-managed-checkpoint-match (re-matches #"/command/managed/checkpoints/([^/]+)" uri)
+          command-managed-snapshots-match (= uri "/command/managed/snapshots")
           command-wake-projection-match (= uri "/command/managed/wake-projection")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
@@ -2181,6 +2213,12 @@
                                 (fn [_req]
                                   (handle-command-get-checkpoint
                                    (second command-managed-checkpoint-match))))
+
+        (and (= method :get) command-managed-snapshots-match)
+        (command-route-response req #(handle-command-list-snapshots %))
+
+        (and (= method :post) command-managed-snapshots-match)
+        (command-route-response req #(handle-command-create-snapshot %))
 
         (and (= method :get) command-wake-projection-match)
         (command-route-response req #(handle-command-wake-projection %))

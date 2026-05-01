@@ -5,7 +5,7 @@
  :name        "email-draft-read"
  :description "Read a draft by id and return the current draft body, headers, and attachment metadata."
  :tags        #{:email :draft :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"draft_id" {"type"        "string"
                                          "description" "Draft id to read"}

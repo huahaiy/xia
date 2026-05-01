@@ -5,7 +5,7 @@
  :name        "email-label-list"
  :description "List backend labels or categories so you can inspect available label ids or category names before using email-update."
  :tags        #{:email :labels :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"service_id" {"type"        "string"
                                            "description" "Optional email service id if you have more than one configured"}}}

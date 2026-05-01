@@ -5,7 +5,7 @@
  :name        "email-update"
  :description "Update message state for a selected message id. Supports archive or unarchive, mark read or unread, and add or remove labels or categories depending on the backend."
  :tags        #{:email :labels :archive :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"message_id"    {"type"        "string"
                                               "description" "Message id whose state should be updated"}

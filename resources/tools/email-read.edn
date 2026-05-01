@@ -5,7 +5,7 @@
  :name        "email-read"
  :description "Read a message by id and return the best available body plus common headers. Attachment metadata is included by default; attachment content is optional."
  :tags        #{:email :read :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"message_id" {"type"        "string"
                                            "description" "Message id to read"}

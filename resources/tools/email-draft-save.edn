@@ -5,7 +5,7 @@
  :name        "email-draft-save"
  :description "Create or update a draft. Supports reply threading when the backend allows it, optional HTML, and optional attachments."
  :tags        #{:email :draft :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"draft_id"     {"type"        "string"
                                              "description" "Existing draft id to update. Omit to create a new draft."}

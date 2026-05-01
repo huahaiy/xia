@@ -542,14 +542,16 @@
                                         :live? false
                                         :resumable? true}])))
                              (backend-snapshots ops))
-          live-map     (try
-                         (into {}
-                               (filter (fn [[session-id _]]
-                                         (contains? snapshot-map session-id)))
-                               (remote-live-sessions))
-                         (catch Exception e
-                           (log/debug e "Unable to fetch remote live browser sessions")
-                           {}))]
+          live-map     (if (configured?)
+                         (try
+                           (into {}
+                                 (filter (fn [[session-id _]]
+                                           (contains? snapshot-map session-id)))
+                                 (remote-live-sessions))
+                           (catch Exception e
+                             (log/debug e "Unable to fetch remote live browser sessions")
+                             {}))
+                         {})]
       (->> (merge snapshot-map live-map)
            vals
            (sort-by :session-id)

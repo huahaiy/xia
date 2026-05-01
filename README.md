@@ -81,6 +81,19 @@ Open that archive later on this or another machine:
 xia backup.xia
 ```
 
+Create a local safety snapshot before risky work:
+
+```bash
+xia snapshot create before-risky-work
+```
+
+Restore one later, with Xia stopped:
+
+```bash
+xia snapshot list
+xia snapshot restore SNAPSHOT_ID --force
+```
+
 What to expect:
 
 - You still provide your own LLM provider credentials, and you can use multiple
@@ -88,6 +101,8 @@ What to expect:
 - Xia stores its state in its
   [database](https://github.com/datalevin/datalevin), so conversations, memory,
   settings, and saved connections travel together.
+- Safety snapshots store Xia's database plus the shared workspace by default,
+  and restore moves existing directories aside instead of deleting them.
 - The [local web UI](http://localhost:3008) is intended to be the main
   interface for users.
 - Browser automation uses [Playwright](https://playwright.dev/). On first use,

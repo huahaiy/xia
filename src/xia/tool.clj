@@ -460,20 +460,28 @@
             missing (filterv #(nil? (db/get-tool (:id %))) defs)]
         (doseq [tool-def missing]
           (import-tool! tool-def))
-        (doseq [{:keys [id execution-mode tags]} defs]
-          (let [tool (db/get-tool id)]
+        (doseq [{:keys [id execution-mode tags approval]} defs]
+          (let [tool      (db/get-tool id)
+                approval* (cond
+                            (keyword? approval) approval
+                            (string? approval) (keyword approval)
+                            :else nil)]
             (when (and tool
                        (or (and execution-mode
                                 (nil? (:tool/execution-mode tool)))
                            (and (seq tags)
-                                (empty? (:tool/tags tool)))))
+                                (empty? (:tool/tags tool)))
+                           (and approval*
+                                (not= approval* (:tool/approval tool)))))
               (db/install-tool! (cond-> {:id id}
                                   execution-mode
                                   (assoc :execution-mode (if (keyword? execution-mode)
                                                            execution-mode
                                                            (keyword execution-mode)))
                                   (seq tags)
-                                  (assoc :tags tags)))
+                                  (assoc :tags tags)
+                                  approval*
+                                  (assoc :approval approval*)))
               (when (contains? @registry id)
                 (load-tool! id)))))
         (+ (long installed-count) (long (clojure.core/count missing)))))

@@ -5,7 +5,7 @@
  :name        "email-draft-delete"
  :description "Delete an existing draft by id."
  :tags        #{:email :draft :delete :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"draft_id" {"type"        "string"
                                          "description" "Draft id to delete"}

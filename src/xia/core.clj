@@ -13,6 +13,7 @@
             [xia.paths :as paths]
             [xia.logging :as logging]
             [xia.pack :as pack]
+            [xia.snapshot :as snapshot]
             [xia.runtime-state :as runtime-state]
             [xia.system]
             [xia.channel.terminal :as terminal]
@@ -58,6 +59,14 @@
    ["-f" "--force" "Overwrite existing archive"]
    ["-h" "--help" "Show help"]])
 
+(def snapshot-cli-options
+  [["-i" "--instance ID" "Instance id for instance-scoped default storage (or set XIA_INSTANCE)"]
+   ["-d" "--db PATH" "Database path"]
+   [nil "--snapshot-root PATH" "Safety snapshot directory"]
+   [nil "--no-workspace" "Do not include or restore the shared workspace"]
+   ["-f" "--force" "Move existing DB/workspace paths aside during restore"]
+   ["-h" "--help" "Show help"]])
+
 (defn- print-help [summary]
   (println)
   (println "Xia — your portable personal assistant")
@@ -72,6 +81,8 @@
   (println "  xia backup.xia          Open a packed Xia archive directly")
   (println "  xia pack                Create a portable archive at <db>.xia")
   (println "  xia pack backup.xia     Create a portable archive at a specific path")
+  (println "  xia snapshot create before-upgrade")
+  (println "  xia snapshot restore SNAPSHOT_ID --force")
   (println "  xia --mode terminal     Start terminal mode")
   (println "  xia --mode server       Start HTTP/WebSocket server only")
   (println "  xia --mode both         Start both terminal and server")
@@ -98,6 +109,22 @@
   (println "  xia pack --instance ops")
   (println "  xia pack backup.xia --db /path/to/db")
   (println "  xia pack backup.xia --force"))
+
+(defn- print-snapshot-help [summary]
+  (println)
+  (println "`xia snapshot` — create and restore safety snapshots")
+  (println)
+  (println "Usage: xia snapshot <create|list|restore> [args] [options]")
+  (println)
+  (println "Options:")
+  (println summary)
+  (println)
+  (println "Examples:")
+  (println "  xia snapshot create before-risky-work")
+  (println "  xia snapshot list")
+  (println "  xia snapshot restore SNAPSHOT_ID --force")
+  (println "  xia snapshot create before-risky-work --no-workspace")
+  (println "  xia snapshot restore /path/to/snapshot-dir --db /path/to/db --force"))
 
 (defn- local-ui-url [bind port]
   (str "http://"
@@ -511,18 +538,105 @@
         (doseq [req (:restore-requires result)]
           (println (str "restore: " req)))))))
 
+(defn- print-snapshot-summary!
+  [snapshot*]
+  (println (str (:snapshot/id snapshot*)
+                (when-let [label (:snapshot/label snapshot*)]
+                  (str "  " label))))
+  (println (str "created: " (:snapshot/created-at snapshot*)))
+  (println (str "path: " (:snapshot/path snapshot*)))
+  (println (str "db archive: " (get-in snapshot* [:db :archive])))
+  (println (str "workspace: "
+                (if (get-in snapshot* [:workspace :included?])
+                  "included"
+                  "not included"))))
+
+(defn- run-snapshot!
+  [args]
+  (let [[subcommand & rest-args] args
+        help-command? (#{"-h" "--help"} subcommand)
+        {:keys [options arguments errors summary]} (parse-opts rest-args snapshot-cli-options)]
+    (cond
+      (or help-command? (:help options) (nil? subcommand))
+      (print-snapshot-help summary)
+
+      errors
+      (do (doseq [e errors] (println "Error:" e))
+          (print-snapshot-help summary)
+          (System/exit 1))
+
+      :else
+      (let [options* (apply-run-defaults options)]
+        (case subcommand
+          "create"
+          (if (> (count arguments) 1)
+            (do (println "Error: snapshot create accepts at most one label")
+                (print-snapshot-help summary)
+                (System/exit 1))
+            (let [result (snapshot/create-snapshot!
+                          :db-path (:db options*)
+                          :snapshot-root (:snapshot-root options*)
+                          :label (first arguments)
+                          :include-workspace? (not (:no-workspace options*)))]
+              (println (str "snapshot created " (:snapshot/id result)))
+              (print-snapshot-summary! result)))
+
+          "list"
+          (if (seq arguments)
+            (do (println "Error: snapshot list accepts no positional arguments")
+                (print-snapshot-help summary)
+                (System/exit 1))
+            (let [snapshots (snapshot/list-snapshots
+                             :db-path (:db options*)
+                             :snapshot-root (:snapshot-root options*))]
+              (if (seq snapshots)
+                (doseq [snapshot* snapshots]
+                  (println (str (:snapshot/id snapshot*)
+                                "\t"
+                                (:snapshot/created-at snapshot*)
+                                "\t"
+                                (or (:snapshot/label snapshot*) ""))))
+                (println "No safety snapshots found."))))
+
+          "restore"
+          (if (not= 1 (count arguments))
+            (do (println "Error: snapshot restore requires exactly one snapshot id or path")
+                (print-snapshot-help summary)
+                (System/exit 1))
+            (if-not (:force options*)
+              (do (println "Error: snapshot restore requires --force so existing state can be moved aside")
+                  (System/exit 1))
+              (let [result (snapshot/restore-snapshot!
+                            (first arguments)
+                            :db-path (:db options*)
+                            :snapshot-root (:snapshot-root options*)
+                            :force? true
+                            :include-workspace? (not (:no-workspace options*)))]
+                (println (str "snapshot restored " (:snapshot/id result)))
+                (println (str "db: " (get-in result [:db :path])))
+                (when-let [aside (get-in result [:db :moved-aside])]
+                  (println (str "previous db moved aside: " aside)))
+                (when-let [aside (get-in result [:workspace :moved-aside])]
+                  (println (str "previous workspace moved aside: " aside))))))
+
+          (do (println (str "Error: unknown snapshot subcommand " subcommand))
+              (print-snapshot-help summary)
+              (System/exit 1)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Main
 ;; ---------------------------------------------------------------------------
 
 (defn -main [& args]
   (let [[command & rest-args] args]
-    (if (= "pack" command)
+    (if (#{"pack" "snapshot"} command)
       (try
-        (run-pack! rest-args)
+        (if (= "pack" command)
+          (run-pack! rest-args)
+          (run-snapshot! rest-args))
         (catch Exception e
-          (log/error e "Pack failed")
-          (println (str "Pack failed: " (.getMessage e)))
+          (log/error e "Command failed")
+          (println (str "Command failed: " (.getMessage e)))
           (System/exit 1)))
       (let [{:keys [options arguments errors summary]} (parse-opts args cli-options)]
         (cond

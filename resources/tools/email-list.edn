@@ -5,7 +5,7 @@
  :name        "email-list"
  :description "List messages so you can inspect an inbox, search mail, page through results, or find a message id to read. By default it searches the inbox."
  :tags        #{:email :inbox :communication}
- :approval    :session
+ :approval    :auto
  :parameters  {"type"       "object"
                "properties" {"service_id"  {"type"        "string"
                                              "description" "Optional email service id if you have more than one configured"}
