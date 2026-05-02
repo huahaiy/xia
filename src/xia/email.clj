@@ -26,6 +26,7 @@
 (def ^:private imap-smtp-service-id :imap-smtp-mail)
 (def ^:private default-max-results 10)
 (def ^:private default-max-attachment-bytes (* 256 1024))
+(def ^:private default-max-saved-attachment-bytes (* 25 1024 1024))
 (def ^:private gmail-api-base-url "https://gmail.googleapis.com")
 (def ^:private microsoft-graph-root-url "https://graph.microsoft.com")
 (def ^:private microsoft-graph-api-base-url "https://graph.microsoft.com/v1.0")
@@ -1173,6 +1174,123 @@
 
       (seq attachments)
       (assoc :attachments attachments))))
+
+(def ^:private attachment-content-result-keys
+  [:content-text :content-bytes-base64])
+
+(defn- attachment-result-bytes
+  [attachment]
+  (cond
+    (string? (:content-text attachment))
+    (utf8-bytes (:content-text attachment))
+
+    (string? (:content-bytes-base64 attachment))
+    (decode-base64 (:content-bytes-base64 attachment))
+
+    :else
+    nil))
+
+(defn- attachment-artifact-name
+  [attachment idx]
+  (or (nonblank-str (:filename attachment))
+      (default-filename idx (:mime-type attachment))))
+
+(defn- save-attachment-artifact!
+  [attachment service-id source-id source-kind idx]
+  (if-let [bytes (attachment-result-bytes attachment)]
+    (let [name      (attachment-artifact-name attachment idx)
+          artifact* (artifact/create-artifact!
+                      {:name       name
+                       :title      name
+                       :media-type (:mime-type attachment)
+                       :bytes      bytes
+                       :source     :email-attachment
+                       :meta       {:email/service-id   (clojure.core/name service-id)
+                                    :email/source-kind  (clojure.core/name source-kind)
+                                    :email/source-id    source-id
+                                    :email/attachment-id (:attachment-id attachment)
+                                    :email/part-id      (:part-id attachment)
+                                    :email/filename     (:filename attachment)
+                                    :email/mime-type    (:mime-type attachment)}})]
+      (assoc attachment
+             :artifact-id (str (:id artifact*))
+             :artifact-name (:name artifact*)
+             :artifact-status "saved"
+             :artifact-kind (:kind artifact*)
+             :artifact-size-bytes (:size-bytes artifact*)))
+    (assoc attachment
+           :artifact-status "not-saved"
+           :artifact-reason (or (:content-reason attachment)
+                                (if (false? (:content-available? attachment))
+                                  "attachment content is unavailable"
+                                  "attachment content was not included")))))
+
+(defn- strip-inline-attachment-content
+  [attachment include-attachment-data? max-attachment-bytes]
+  (let [has-inline-content? (some #(contains? attachment %) attachment-content-result-keys)
+        size-bytes          (long (or (parse-long-safe (:size-bytes attachment)) 0))
+        inline-too-large?   (> size-bytes (long max-attachment-bytes))]
+    (if (and include-attachment-data?
+             (not inline-too-large?))
+      attachment
+      (cond-> (apply dissoc attachment attachment-content-result-keys)
+        has-inline-content?
+        (assoc :content-included? false
+               :content-reason (if (:artifact-id attachment)
+                                 (if inline-too-large?
+                                   "attachment saved as artifact; inline content exceeds max_attachment_bytes"
+                                   "attachment saved as artifact; inline content not requested")
+                                 (if inline-too-large?
+                                   "attachment exceeds max_attachment_bytes"
+                                   "attachment content not requested")))))))
+
+(defn- saved-attachment-artifact-summary
+  [attachment]
+  (when-let [artifact-id (:artifact-id attachment)]
+    {:artifact-id   artifact-id
+     :artifact-name (:artifact-name attachment)
+     :filename      (:filename attachment)
+     :mime-type     (:mime-type attachment)
+     :size-bytes    (:artifact-size-bytes attachment)}))
+
+(defn- attachment-fetch-opts
+  [{:keys [save-attachments?
+           include-attachment-data?
+           max-attachment-bytes
+           max-saved-attachment-bytes] :as opts}]
+  (if save-attachments?
+    (assoc opts
+           :include-attachment-data? true
+           :max-attachment-bytes (max (long max-attachment-bytes)
+                                      (long max-saved-attachment-bytes)))
+    (assoc opts
+           :include-attachment-data? include-attachment-data?
+           :max-attachment-bytes max-attachment-bytes)))
+
+(defn- finalize-attachment-artifacts
+  [detail service-id source-id source-kind
+   {:keys [save-attachments?
+           include-attachment-data?
+           max-attachment-bytes]}]
+  (if-not (seq (:attachments detail))
+    detail
+    (let [attachments* (->> (:attachments detail)
+                            (map-indexed
+                              (fn [idx attachment]
+                                (cond-> attachment
+                                  save-attachments?
+                                  (save-attachment-artifact! service-id
+                                                             source-id
+                                                             source-kind
+                                                             idx))))
+                            (mapv #(strip-inline-attachment-content
+                                     %
+                                     include-attachment-data?
+                                     max-attachment-bytes)))
+          saved        (into [] (keep saved-attachment-artifact-summary) attachments*)]
+      (cond-> (assoc detail :attachments attachments*)
+        (seq saved)
+        (assoc :saved-attachment-artifacts saved)))))
 
 (defn- draft-summary
   [draft message]
@@ -3248,15 +3366,26 @@
 
 (defn read-message
   "Read a message by id using the detected email backend."
-  [message-id & {:keys [service-id include-attachment-data? max-attachment-bytes]
+  [message-id & {:keys [service-id include-attachment-data? max-attachment-bytes
+                        save-attachments? max-saved-attachment-bytes]
                  :or   {include-attachment-data? false
-                        max-attachment-bytes default-max-attachment-bytes}}]
-  (let [{:keys [backend service-id]} (resolve-email-target service-id)]
-    (backend-read-message backend
-                          service-id
-                          message-id
-                          {:include-attachment-data? include-attachment-data?
-                           :max-attachment-bytes     max-attachment-bytes})))
+                        max-attachment-bytes default-max-attachment-bytes
+                        save-attachments? false
+                        max-saved-attachment-bytes default-max-saved-attachment-bytes}}]
+  (let [{:keys [backend service-id]} (resolve-email-target service-id)
+        opts {:include-attachment-data? include-attachment-data?
+              :max-attachment-bytes max-attachment-bytes
+              :save-attachments? save-attachments?
+              :max-saved-attachment-bytes max-saved-attachment-bytes}]
+    (finalize-attachment-artifacts
+      (backend-read-message backend
+                            service-id
+                            message-id
+                            (attachment-fetch-opts opts))
+      service-id
+      message-id
+      :message
+      opts)))
 
 (defn send-message
   "Send an email through the detected email backend."
@@ -3317,15 +3446,26 @@
 
 (defn read-draft
   "Read a draft by id using the detected email backend."
-  [draft-id & {:keys [service-id include-attachment-data? max-attachment-bytes]
+  [draft-id & {:keys [service-id include-attachment-data? max-attachment-bytes
+                      save-attachments? max-saved-attachment-bytes]
                :or   {include-attachment-data? false
-                      max-attachment-bytes default-max-attachment-bytes}}]
-  (let [{:keys [backend service-id]} (resolve-email-target service-id)]
-    (backend-read-draft backend
-                        service-id
-                        draft-id
-                        {:include-attachment-data? include-attachment-data?
-                         :max-attachment-bytes     max-attachment-bytes})))
+                      max-attachment-bytes default-max-attachment-bytes
+                      save-attachments? false
+                      max-saved-attachment-bytes default-max-saved-attachment-bytes}}]
+  (let [{:keys [backend service-id]} (resolve-email-target service-id)
+        opts {:include-attachment-data? include-attachment-data?
+              :max-attachment-bytes max-attachment-bytes
+              :save-attachments? save-attachments?
+              :max-saved-attachment-bytes max-saved-attachment-bytes}]
+    (finalize-attachment-artifacts
+      (backend-read-draft backend
+                          service-id
+                          draft-id
+                          (attachment-fetch-opts opts))
+      service-id
+      draft-id
+      :draft
+      opts)))
 
 (defn save-draft
   "Create or update a draft using the detected email backend."

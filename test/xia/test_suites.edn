@@ -6,6 +6,7 @@
   xia.core-test
   xia.crypto-test
   xia.db-security-test
+  xia.email-test
   xia.identity-test
   xia.llm-smoke-test
   xia.local-doc-smoke-test

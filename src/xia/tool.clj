@@ -330,6 +330,42 @@
     (log/info "Imported tool:" (or name (clojure.core/name id)))
     tool-def))
 
+(defn- bundled-tool-install-map
+  [{:keys [id name description tags parameters handler approval execution-mode]}]
+  {:id          id
+   :name        (or name (clojure.core/name id))
+   :description (or description "")
+   :tags        (or tags #{})
+   :parameters  (or parameters {})
+   :handler     (if (string? handler) handler (pr-str handler))
+   :approval    (cond
+                  (keyword? approval) approval
+                  (string? approval) (keyword approval)
+                  :else :auto)
+   :execution-mode (cond
+                     (keyword? execution-mode) execution-mode
+                     (string? execution-mode) (keyword execution-mode)
+                     :else nil)})
+
+(defn- installed-tool-install-map
+  [tool]
+  {:id             (:tool/id tool)
+   :name           (:tool/name tool)
+   :description    (:tool/description tool)
+   :tags           (:tool/tags tool)
+   :parameters     (:tool/parameters tool)
+   :handler        (:tool/handler tool)
+   :approval       (:tool/approval tool)
+   :execution-mode (:tool/execution-mode tool)})
+
+(defn- bundled-tool-refresh-needed?
+  [installed desired]
+  (let [keys* (cond-> [:name :description :tags :parameters :handler :approval]
+                (some? (:execution-mode desired)) (conj :execution-mode))]
+    (some (fn [k]
+            (not= (get installed k) (get desired k)))
+          keys*)))
+
 (defn- tool-approval-policy
   [tool]
   (task-policy/tool-approval-policy tool))
@@ -444,7 +480,7 @@
       (import-tool! data))))
 
 (defn ensure-bundled-tools!
-  "Install bundled tool definitions that are not already present in the DB."
+  "Install bundled tool definitions and refresh existing bundled definitions."
   []
   (reduce
     (fn [installed-count resource-path]
@@ -456,35 +492,26 @@
             _        (when (nil? data)
                        (throw (ex-info "Bundled tool resource was empty"
                                        {:resource-path resource-path})))
-            defs (if (vector? data) data [data])
-            missing (filterv #(nil? (db/get-tool (:id %))) defs)]
-        (doseq [tool-def missing]
-          (import-tool! tool-def))
-        (doseq [{:keys [id execution-mode tags approval]} defs]
-          (let [tool      (db/get-tool id)
-                approval* (cond
-                            (keyword? approval) approval
-                            (string? approval) (keyword approval)
-                            :else nil)]
-            (when (and tool
-                       (or (and execution-mode
-                                (nil? (:tool/execution-mode tool)))
-                           (and (seq tags)
-                                (empty? (:tool/tags tool)))
-                           (and approval*
-                                (not= approval* (:tool/approval tool)))))
-              (db/install-tool! (cond-> {:id id}
-                                  execution-mode
-                                  (assoc :execution-mode (if (keyword? execution-mode)
-                                                           execution-mode
-                                                           (keyword execution-mode)))
-                                  (seq tags)
-                                  (assoc :tags tags)
-                                  approval*
-                                  (assoc :approval approval*)))
-              (when (contains? @registry id)
-                (load-tool! id)))))
-        (+ (long installed-count) (long (clojure.core/count missing)))))
+            defs (if (vector? data) data [data])]
+        (+ (long installed-count)
+           (reduce
+             (fn [count* tool-def]
+               (let [desired (bundled-tool-install-map tool-def)
+                     id      (:id desired)]
+                 (if-let [tool (db/get-tool id)]
+                   (do
+                     (when (bundled-tool-refresh-needed?
+                             (installed-tool-install-map tool)
+                             desired)
+                       (db/install-tool! desired)
+                       (when (contains? @registry id)
+                         (load-tool! id)))
+                     count*)
+                   (do
+                     (import-tool! tool-def)
+                     (inc count*)))))
+             0
+             defs))))
     0
     bundled-tool-resources))
 

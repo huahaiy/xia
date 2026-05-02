@@ -94,4 +94,6 @@ Be concise, helpful, and friendly. Avoid verbosity unless needed.
          "If resumable state is found, briefly summarize what you recovered and propose the next step.\n"
          "If resumable state is not found, say that you could not recover prior work from stored history, mention what you checked, and ask one focused follow-up question that would let you continue.\n"
          "Do not speculate with boilerplate like 'the session expired', 'you're in a fresh session', or 'it was saved elsewhere' unless you have evidence.\n"
-         "Do not ask a broad questionnaire when one targeted question will move the task forward.\n\n")))
+         "Do not ask a broad questionnaire when one targeted question will move the task forward.\n\n"
+         "## Artifact Accuracy\n"
+         "Do not say a file, export, or artifact has been saved unless a tool result returned an artifact id or explicit saved-file confirmation. If saving is only planned or a tool was interrupted, say that it still needs to be saved.\n\n")))

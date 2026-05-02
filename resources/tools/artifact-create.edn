@@ -3,7 +3,7 @@
 
 {:id             :artifact-create
  :name           "artifact-create"
- :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, or plain text that the user can later inspect and download from Xia. You must provide exactly one of: `content` (raw text), `rows` (CSV array), or `data` (JSON value). Do not call this tool without at least one of these fields."
+ :description    "Create a downloadable artifact for the current session. Use this when you want to produce a file-like output such as markdown, CSV, JSON, HTML, plain text, PDF, or another binary file that the user can later inspect and download from Xia. You must provide exactly one of: `content` (raw text), `rows` (CSV array), `data` (JSON value), or `bytes_base64` (binary content). Do not call this tool without at least one of these fields."
  :tags           #{:artifact :output :file :export}
  :parameters     {"type"       "object"
                   "properties" {"name"       {"type"        "string"
@@ -11,27 +11,34 @@
                                 "title"      {"type"        "string"
                                              "description" "Optional display title shown in the UI."}
                                 "kind"       {"type"        "string"
-                                             "enum"        ["txt" "markdown" "csv" "json" "html"]
-                                             "description" "Artifact format. Defaults to txt if omitted."}
+                                             "enum"        ["txt" "markdown" "csv" "json" "html" "pdf" "docx" "xlsx" "pptx" "binary"]
+                                             "description" "Artifact format. Defaults to txt if omitted, or is inferred from name/media_type when possible."}
+                                "media_type" {"type"        "string"
+                                             "description" "Optional media type, such as application/pdf. Useful for bytes_base64 artifacts."}
                                 "content"    {"type"        "string"
                                              "description" "Raw text content for txt, markdown, html, or pre-rendered csv/json. Required unless you provide `rows` or `data`."}
                                 "rows"       {"type"        "array"
                                              "description" "Optional CSV rows as arrays or objects. Use this instead of `content` for structured CSV output."}
                                 "data"       {"description" "Optional structured JSON value. Use this instead of `content` for JSON artifacts."}
+                                "bytes_base64" {"type"        "string"
+                                                "description" "Optional base64-encoded bytes for binary artifacts such as PDFs. Use with kind/media_type/name."}
                                 "meta"       {"type"        "object"
                                              "description" "Optional metadata to store alongside the artifact."}}
                   "required"   []
                   "anyOf"      [{"required" ["content"]}
                                 {"required" ["rows"]}
-                                {"required" ["data"]}]}
+                                {"required" ["data"]}
+                                {"required" ["bytes_base64"]}]}
  :handler        "(fn [args]
                     (let [artifact (xia.artifact/create-artifact!
                                      {:name    (get args \"name\")
                                       :title   (get args \"title\")
                                       :kind    (get args \"kind\")
+                                      :media-type (get args \"media_type\")
                                       :content (get args \"content\")
                                       :rows    (get args \"rows\")
                                       :data    (get args \"data\")
+                                      :bytes-base64 (get args \"bytes_base64\")
                                       :meta    (get args \"meta\")
                                       :source  :agent})]
                       (dissoc artifact :text :sha256 :meta)))"}

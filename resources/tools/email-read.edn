@@ -3,7 +3,7 @@
 
 {:id          :email-read
  :name        "email-read"
- :description "Read a message by id and return the best available body plus common headers. Attachment metadata is included by default; attachment content is optional."
+ :description "Read a message by id and return the best available body plus common headers. Attachment metadata is included by default; attachment content is optional. Use save_attachments when the user wants attached files, especially PDFs or other binary files, saved into Xia's Artifacts list."
  :tags        #{:email :read :communication}
  :approval    :auto
  :parameters  {"type"       "object"
@@ -13,6 +13,10 @@
                                                         "description" "When true, include attachment content when it fits within max_attachment_bytes"}
                              "max_attachment_bytes" {"type"        "integer"
                                                      "description" "Maximum attachment payload bytes to inline when include_attachment_data is true. Defaults to 262144"}
+                             "save_attachments" {"type"        "boolean"
+                                                 "description" "When true, save message attachments as Xia artifacts and return artifact ids. Prefer this for PDFs or binary files instead of inlining attachment data."}
+                             "max_saved_attachment_bytes" {"type"        "integer"
+                                                           "description" "Maximum attachment bytes to save as artifacts. Defaults to 26214400"}
                              "service_id" {"type"        "string"
                                            "description" "Optional email service id if you have more than one configured"}}
                "required"   ["message_id"]}
@@ -21,4 +25,6 @@
                    (get args \"message_id\")
                    :include-attachment-data? (boolean (get args \"include_attachment_data\"))
                    :max-attachment-bytes (or (get args \"max_attachment_bytes\") 262144)
+                   :save-attachments? (boolean (get args \"save_attachments\"))
+                   :max-saved-attachment-bytes (or (get args \"max_saved_attachment_bytes\") 26214400)
                    :service-id (get args \"service_id\")))"}

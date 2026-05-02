@@ -1,8 +1,9 @@
 (ns xia.tool-smoke-test
   (:require [clojure.test :refer :all]
+            [xia.artifact :as artifact]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.test-helpers :refer [with-test-db]]
+            [xia.test-helpers :refer [minimal-pdf-base64 with-test-db]]
             [xia.tool :as tool]))
 
 (use-fixtures :each with-test-db)
@@ -71,3 +72,37 @@
                      :handler     "(fn [_] {})"})
   (tool/ensure-bundled-tools!)
   (is (= :auto (:tool/approval (db/get-tool :email-list)))))
+
+(deftest ensure-bundled-tools-refreshes-bundled-parameters-and-handler
+  (db/install-tool! {:id          :email-read
+                     :name        "email-read"
+                     :description "Old email read"
+                     :approval    :auto
+                     :parameters  {"type" "object"
+                                   "properties" {}}
+                     :handler     "(fn [_] {})"})
+  (tool/ensure-bundled-tools!)
+  (is (contains? (get-in (db/get-tool :email-read)
+                         [:tool/parameters "properties"])
+                 "save_attachments"))
+  (is (re-find #"save-attachments\?"
+               (:tool/handler (db/get-tool :email-read)))))
+
+(deftest artifact-create-tool-supports-binary-pdf-artifacts
+  (tool/ensure-bundled-tools!)
+  (tool/load-tool! :artifact-create)
+  (let [session-id (db/create-session! :terminal)
+        result     (tool/execute-tool :artifact-create
+                                      {"name" "found.pdf"
+                                       "kind" "pdf"
+                                       "media_type" "application/pdf"
+                                       "bytes_base64" (minimal-pdf-base64 "artifact pdf")}
+                                      {:channel :terminal
+                                       :session-id session-id})
+        download   (artifact/visible-artifact-download-data (:id result))]
+    (is (= :pdf (:kind result)))
+    (is (= "found.pdf" (:name result)))
+    (is (= "application/pdf" (:media-type result)))
+    (is (= "found.pdf" (:name download)))
+    (is (= "application/pdf" (:media-type download)))
+    (is (pos? (count (:bytes download))))))

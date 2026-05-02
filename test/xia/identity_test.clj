@@ -27,4 +27,6 @@
     (is (str/includes? prompt
                        "Do not speculate with boilerplate like 'the session expired', 'you're in a fresh session', or 'it was saved elsewhere' unless you have evidence."))
     (is (str/includes? prompt
-                       "Do not ask a broad questionnaire when one targeted question will move the task forward."))))
+                       "Do not ask a broad questionnaire when one targeted question will move the task forward."))
+    (is (str/includes? prompt
+                       "Do not say a file, export, or artifact has been saved unless a tool result returned an artifact id"))))
