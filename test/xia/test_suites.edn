@@ -15,6 +15,7 @@
   xia.runtime-overlay-test
   xia.schedule-test
   xia.secret-test
+  xia.service-test
   xia.snapshot-test
   xia.summarizer-test
   xia.system-test

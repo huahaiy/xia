@@ -250,6 +250,7 @@
                        :base-url      gmail-api-base-url
                        :auth-type     :oauth-account
                        :oauth-account (:oauth.account/id account)
+                       :rate-limit-per-minute service/gmail-rate-limit-per-minute
                        :autonomous-approved? true})
     default-service-id))
 

@@ -30,6 +30,8 @@
            [java.util.concurrent.atomic AtomicLong]))
 
 (def default-rate-limit-per-minute 60)
+(def gmail-rate-limit-per-minute 600)
+(def ^:private gmail-api-base-url "https://gmail.googleapis.com")
 (def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 
 ;; ---------------------------------------------------------------------------
@@ -183,11 +185,28 @@
   []
   (reset-runtime!))
 
+(defn- normalize-base-url
+  [base-url]
+  (some-> base-url
+          str
+          str/trim
+          (str/replace #"/+$" "")
+          str/lower-case
+          not-empty))
+
+(defn- gmail-service?
+  [service]
+  (= gmail-api-base-url
+     (normalize-base-url (or (:service/base-url service)
+                             (:base-url service)))))
+
 (defn effective-rate-limit-per-minute
   "Return the effective per-service request cap for a minute window."
   [service]
   (long (or (:service/rate-limit-per-minute service)
             (:rate-limit-per-minute service)
+            (when (gmail-service? service)
+              gmail-rate-limit-per-minute)
             default-rate-limit-per-minute)))
 
 (defn- current-time-ms []
