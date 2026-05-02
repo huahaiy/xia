@@ -62,3 +62,12 @@
     (is (= :browser-open (:tool/id (db/get-tool :browser-open))))
     (is (= :calendar-event-create (:tool/id (db/get-tool :calendar-event-create))))
     (is (= :local-doc-search (:tool/id (db/get-tool :local-doc-search))))))
+
+(deftest ensure-bundled-tools-refreshes-bundled-approval-policy
+  (db/install-tool! {:id          :email-list
+                     :name        "email-list"
+                     :description "Old email list"
+                     :approval    :session
+                     :handler     "(fn [_] {})"})
+  (tool/ensure-bundled-tools!)
+  (is (= :auto (:tool/approval (db/get-tool :email-list)))))

@@ -1554,6 +1554,57 @@
                                       :intent-tool-args-summary (:tool-args-summary intent)}}
                         (intent-status-fields intent)))))
 
+(defn- actionable-agenda-item
+  [tip]
+  (some (fn [{:keys [item status]}]
+          (when (and (some-> item str str/blank? not)
+                     (not (contains? #{:completed :skipped} status)))
+            item))
+        (:agenda tip)))
+
+(defn- synthesize-tool-call-intent
+  [session-id execution-context tool-calls]
+  (let [autonomy-state (when session-id
+                         (wm/autonomy-state session-id))
+        tip            (some-> autonomy-state autonomous/current-frame)
+        tool-names     (tool-call-names tool-calls)
+        tool-name      (when (seq tool-names)
+                         (str/join ", " tool-names))
+        tool-count     (count tool-calls)
+        plan-step      (cond
+                         (= 1 tool-count)
+                         (str "Call " (or (first tool-names) "the requested tool"))
+
+                         (pos? tool-count)
+                         (str "Call " tool-count " requested tools")
+
+                         :else
+                         "Call the requested tool")
+        args-summary   (some-> (tool-call-summary tool-calls)
+                               pr-str
+                               (truncate-summary 240))]
+    {:focus (or (some-> tip :title str str/trim not-empty)
+                (some-> execution-context :user-message str str/trim not-empty)
+                "Current task")
+     :agenda-item (or (actionable-agenda-item tip)
+                      (some-> tip :next-step str str/trim not-empty))
+     :plan-step plan-step
+     :why "The model requested tool execution for the current task."
+     :tool-name tool-name
+     :tool-args-summary args-summary}))
+
+(defn- ensure-tool-call-intent
+  [session-id execution-context round parsed-response tool-calls]
+  (if (and (zero? round)
+           (= :missing (:intent-status parsed-response))
+           (seq tool-calls))
+    (assoc parsed-response
+           :intent-status :synthesized
+           :intent (synthesize-tool-call-intent session-id
+                                                execution-context
+                                                tool-calls))
+    parsed-response))
+
 (defn- emit-worker-event!
   [worker-state event]
   (let [now-ms (current-time-ms)]
@@ -1719,13 +1770,13 @@
 (defn- validate-tool-round-protocol!
   [session-id execution-context round parsed-response]
   (when (and (zero? round)
-             (not= :parsed (:intent-status parsed-response)))
+             (= :malformed (:intent-status parsed-response)))
     (throw (autonomous-protocol-ex
             session-id
             execution-context
             round
             parsed-response
-            "First tool-calling response is missing a valid ACTION_INTENT_JSON envelope")))
+            "First tool-calling response has a malformed ACTION_INTENT_JSON envelope")))
   (when (contains? #{:parsed :malformed} (:control-status parsed-response))
     (throw (autonomous-protocol-ex
             session-id
@@ -2223,8 +2274,17 @@
                                                (progress-reporter delta)
                                                (throw-if-cancelled! session-id)))
               _ (throw-if-cancelled! session-id)
-              parsed-response (autonomous/parse-controller-response
-                               (response-content response))
+              tool-calls (if (map? response)
+                           (vec (or (get response "tool_calls") []))
+                           [])
+              has-tools? (seq tool-calls)
+              parsed-response (ensure-tool-call-intent
+                               session-id
+                               execution-context
+                               round
+                               (autonomous/parse-controller-response
+                                (response-content response))
+                               tool-calls)
               explicit-used-fact-eids (explicit-used-fact-eids used-fact-refs
                                                                parsed-response)
               assistant-content (or (:assistant-text parsed-response)
@@ -2234,8 +2294,7 @@
               _ (when (zero? round)
                   (emit-intent-event! emit-event!
                                       execution-context
-                                      parsed-response))
-              has-tools? (and (map? response) (seq (get response "tool_calls")))]
+                                      parsed-response))]
           (if has-tools?
             (if budget-status
               (do
@@ -2268,7 +2327,6 @@
                                    :rounds rounds
                                    :max-tool-rounds max-tool-rounds}))))
               (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
-                    tool-calls (get response "tool_calls")
                     assistant-msg {:role "assistant"
                                    :content assistant-content
                                    :tool_calls tool-calls}

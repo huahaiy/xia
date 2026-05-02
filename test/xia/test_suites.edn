@@ -1,5 +1,6 @@
 {:test0
- [xia.autonomous-smoke-test
+ [xia.agent-test
+  xia.autonomous-smoke-test
   xia.calendar-test
   xia.config-test
   xia.core-test

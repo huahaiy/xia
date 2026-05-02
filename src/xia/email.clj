@@ -249,7 +249,8 @@
                        :name          "Gmail"
                        :base-url      gmail-api-base-url
                        :auth-type     :oauth-account
-                       :oauth-account (:oauth.account/id account)})
+                       :oauth-account (:oauth.account/id account)
+                       :autonomous-approved? true})
     default-service-id))
 
 (defn- auto-microsoft-mail-oauth-account
@@ -271,7 +272,8 @@
                        :name          "Microsoft Mail"
                        :base-url      microsoft-graph-api-base-url
                        :auth-type     :oauth-account
-                       :oauth-account (:oauth.account/id account)})
+                       :oauth-account (:oauth.account/id account)
+                       :autonomous-approved? true})
     microsoft-mail-service-id))
 
 (defn- gmail-detect-service-id
