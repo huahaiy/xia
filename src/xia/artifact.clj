@@ -13,7 +13,9 @@
            [java.math BigInteger]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
-           [java.util Base64 UUID]))
+           [java.util Base64 UUID]
+           [org.openpdf.text.pdf PdfReader]
+           [org.openpdf.text.pdf.parser PdfTextExtractor]))
 
 (def ^:private default-kind :txt)
 (def ^:private default-source :generated)
@@ -24,6 +26,7 @@
 (def ^:private default-blob-codec :zstd)
 (def ^:private zstd-level 3)
 (def ^:private byte-array-class (class (byte-array 0)))
+(def ^:private pdf-media-type "application/pdf")
 
 (defn- epoch-millis->date
   [millis]
@@ -223,6 +226,42 @@
                        :field field})))
     value))
 
+(defn- normalize-extracted-text
+  [text]
+  (let [value (-> (or text "")
+                  (str/replace #"\r\n?" "\n")
+                  (str/replace #"[ \t\f]+" " ")
+                  (str/replace #"\n[ \t]+" "\n")
+                  (str/replace #"\n{3,}" "\n\n")
+                  str/trim)]
+    (when (seq value)
+      value)))
+
+(defn- extract-pdf-text
+  [name media-type ^bytes pdf-bytes]
+  (try
+    (with-open [reader (PdfReader. pdf-bytes)]
+      (let [extractor  (PdfTextExtractor. reader)
+            page-texts (->> (range 1 (inc (.getNumberOfPages reader)))
+                            (map #(.getTextFromPage extractor %))
+                            (remove str/blank?))]
+        (normalize-extracted-text (str/join "\n\n" page-texts))))
+    (catch Exception e
+      (throw (ex-info "Failed to extract PDF artifact text"
+                      {:type :artifact/pdf-extraction-failed
+                       :name name
+                       :media-type media-type}
+                      e)))))
+
+(defn- maybe-extract-pdf-text
+  [name media-type ^bytes pdf-bytes]
+  (when (and (= pdf-media-type media-type)
+             (some? pdf-bytes))
+    (try
+      (extract-pdf-text name media-type pdf-bytes)
+      (catch Exception _
+        nil))))
+
 (defn- normalize-preview
   [preview]
   (let [value (some-> preview str str/trim)]
@@ -346,7 +385,11 @@
                                                 "content")))
         {:keys [name title]} (normalize-name-and-title {:name (value-of spec :name)
                                                         :title (value-of spec :title)}
-                                                       extension)]
+                                                       extension)
+        extracted-pdf-text (when (and (= pdf-media-type media-type)
+                                      bytes)
+                             (maybe-extract-pdf-text name media-type bytes))
+        text*      (or rendered extracted-pdf-text)]
     (when (and (not (contains? textual-kinds kind))
                (nil? bytes))
       (throw (ex-info "binary artifacts require 'bytes' or 'bytes_base64'"
@@ -357,11 +400,13 @@
      :kind       kind
      :media-type (or (base-media-type media-type) media-type)
      :extension  extension
-     :text       rendered
-     :bytes      (when-not rendered bytes)
+     :text       text*
+     :bytes      (when (and bytes
+                            (not (contains? textual-kinds kind)))
+                   bytes)
      :preview    (or (normalize-preview (value-of spec :preview))
-                     (when rendered
-                       (preview-text rendered))
+                     (when text*
+                       (preview-text text*))
                      (when bytes
                        (binary-preview {:kind kind
                                         :media-type (or (base-media-type media-type) media-type)
@@ -708,6 +753,8 @@
      :total-chars text-length
      :truncated?  (< end text-length)}))
 
+(declare ensure-artifact-text!)
+
 (defn- read-session-artifact
   [session-id artifact-id & {:keys [offset max-chars]
                              :or {offset 0
@@ -715,7 +762,7 @@
   (let [session-id*  (normalize-session-id session-id)
         artifact-id* (normalize-artifact-id artifact-id)]
     (when-let [artifact (get-session-artifact session-id* artifact-id*)]
-      (artifact-slice artifact offset max-chars))))
+      (artifact-slice (ensure-artifact-text! artifact) offset max-chars))))
 
 (defn read-visible-artifact
   "Read an artifact by id across current and prior sessions."
@@ -723,7 +770,7 @@
                   :or {offset 0
                        max-chars read-char-limit}}]
   (when-let [artifact (get-artifact artifact-id)]
-    (artifact-slice artifact offset max-chars)))
+    (artifact-slice (ensure-artifact-text! artifact) offset max-chars)))
 
 (defn read-artifact
   [artifact-id & {:keys [offset max-chars]
@@ -734,14 +781,41 @@
                          :offset offset
                          :max-chars max-chars))
 
+(defn- pdf-artifact-without-text?
+  [artifact]
+  (and artifact
+       (= pdf-media-type (:media-type artifact))
+       (nil? (:text artifact))
+       (:has-blob? artifact)))
+
+(defn- ensure-artifact-text!
+  [artifact]
+  (if-not (pdf-artifact-without-text? artifact)
+    artifact
+    (if-let [bytes (load-blob-bytes (:blob-id artifact)
+                                    (:blob-codec artifact))]
+      (if-let [text (maybe-extract-pdf-text (:name artifact)
+                                            (:media-type artifact)
+                                            bytes)]
+        (let [preview (preview-text text)]
+          (db/transact! [{:artifact/id (:id artifact)
+                          :artifact/text text
+                          :artifact/preview preview}])
+          (assoc artifact
+                 :text text
+                 :text-available? true
+                 :preview preview))
+        artifact)
+      artifact)))
+
 (defn artifact-download-data
   [session-id artifact-id]
   (let [session-id*  (normalize-session-id session-id)
         artifact-id* (normalize-artifact-id artifact-id)]
     (when-let [artifact (get-session-artifact session-id* artifact-id*)]
-      (let [bytes (or (some-> (:text artifact) utf8-bytes)
-                      (load-blob-bytes (:blob-id artifact)
-                                       (:blob-codec artifact)))]
+      (let [bytes (or (load-blob-bytes (:blob-id artifact)
+                                       (:blob-codec artifact))
+                      (some-> (:text artifact) utf8-bytes))]
         (when (and (:has-blob? artifact) (nil? bytes))
           (throw (ex-info "artifact blob missing"
                           {:type :artifact/blob-missing
@@ -758,9 +832,9 @@
   [artifact-id]
   (let [artifact-id* (normalize-artifact-id artifact-id)]
     (when-let [artifact (get-artifact artifact-id*)]
-      (let [bytes (or (some-> (:text artifact) utf8-bytes)
-                      (load-blob-bytes (:blob-id artifact)
-                                       (:blob-codec artifact)))]
+      (let [bytes (or (load-blob-bytes (:blob-id artifact)
+                                       (:blob-codec artifact))
+                      (some-> (:text artifact) utf8-bytes))]
         (when (and (:has-blob? artifact) (nil? bytes))
           (throw (ex-info "artifact blob missing"
                           {:type :artifact/blob-missing

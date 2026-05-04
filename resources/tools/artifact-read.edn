@@ -3,7 +3,7 @@
 
 {:id             :artifact-read
  :name           "artifact-read"
- :description    "Read a previously created artifact by id across current and prior sessions. Returns a text slice plus metadata so larger artifacts can be inspected incrementally while resuming work."
+ :description    "Read a previously created artifact by id across current and prior sessions. Returns a text slice plus metadata so larger artifacts can be inspected incrementally while resuming work. For PDF artifacts, Xia attempts embedded text extraction on read before reporting that text is unavailable."
  :tags           #{:artifact :output :read :retrieval}
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"

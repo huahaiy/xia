@@ -34,19 +34,9 @@
             <button type="button" class="secondary" id="new-chat">New session</button>
           </div>
         </div>
-        <section class="hero-task-tray" id="current-task-tray">
-          <div class="hero-task-tray-head">
-            <div class="hero-task-tray-copy">
-              <div class="eyebrow">Current Task</div>
-              <p class="task-tray-note" id="current-task-note">No active task.</p>
-            </div>
-          </div>
-          <div id="current-task-panel" class="task-panel-body">
-            <div class="scratch-empty">No active task.</div>
-          </div>
-        </section>
         <nav class="tabs" role="tablist" aria-label="Main">
           <button type="button" role="tab" class="tab-link active" id="tab-chat" data-tab="chat-tab" aria-selected="true" aria-controls="chat-tab">Chat</button>
+          <button type="button" role="tab" class="tab-link" id="tab-task" data-tab="task-tab" aria-selected="false" aria-controls="task-tab" tabindex="-1">Task</button>
           <button type="button" role="tab" class="tab-link" id="tab-history" data-tab="history-tab" aria-selected="false" aria-controls="history-tab" tabindex="-1">History</button>
           <button type="button" role="tab" class="tab-link" id="tab-settings" data-tab="settings-tab" aria-selected="false" aria-controls="settings-tab" tabindex="-1">Settings</button>
         </nav>
@@ -280,6 +270,20 @@
             </details>
           </aside>
         </main>
+      </div>
+
+      <div id="task-tab" class="tab-panel" role="tabpanel" aria-labelledby="tab-task">
+        <section class="panel task-panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">Current Task</h2>
+              <p class="panel-note" id="current-task-note">No active task.</p>
+            </div>
+          </div>
+          <div id="current-task-panel" class="task-panel-body">
+            <div class="scratch-empty">No active task.</div>
+          </div>
+        </section>
       </div>
 
       <div id="history-tab" class="tab-panel" role="tabpanel" aria-labelledby="tab-history">

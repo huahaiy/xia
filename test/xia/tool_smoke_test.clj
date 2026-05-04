@@ -1,5 +1,6 @@
 (ns xia.tool-smoke-test
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
             [xia.artifact :as artifact]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -99,10 +100,13 @@
                                        "bytes_base64" (minimal-pdf-base64 "artifact pdf")}
                                       {:channel :terminal
                                        :session-id session-id})
-        download   (artifact/visible-artifact-download-data (:id result))]
+        download   (artifact/visible-artifact-download-data (:id result))
+        read-back  (artifact/read-visible-artifact (:id result))]
     (is (= :pdf (:kind result)))
     (is (= "found.pdf" (:name result)))
     (is (= "application/pdf" (:media-type result)))
     (is (= "found.pdf" (:name download)))
     (is (= "application/pdf" (:media-type download)))
-    (is (pos? (count (:bytes download))))))
+    (is (str/starts-with? (String. ^bytes (:bytes download)) "%PDF"))
+    (is (true? (:text-available? read-back)))
+    (is (str/includes? (:text read-back) "artifact pdf"))))
