@@ -1650,6 +1650,15 @@
 (defn enable-skill! [skill-id enabled?]
   (db-catalog/enable-skill! (catalog-deps) skill-id enabled?))
 
+(defn record-skill-usage! [skill-id usage-kind]
+  (db-catalog/record-skill-usage! (catalog-deps) skill-id usage-kind))
+
+(defn update-skill-lifecycle! [skill-id lifecycle-update]
+  (db-catalog/update-skill-lifecycle! (catalog-deps) skill-id lifecycle-update))
+
+(defn record-skill-update-check! [skill-id update-check]
+  (db-catalog/record-skill-update-check! (catalog-deps) skill-id update-check))
+
 (defn find-skills-by-tags
   "Find skills matching any of the given tags."
   [tags]

@@ -17,6 +17,7 @@
             [sci.core :as sci]
             [taoensso.timbre :as log]
             [xia.artifact :as artifact]
+            [xia.board :as board]
             [xia.browser :as browser]
             [xia.calendar :as calendar]
             [xia.cron :as cron]
@@ -140,6 +141,15 @@
    'create-scratch-pad-from-artifact! artifact/create-scratch-pad-from-artifact!
    'delete-artifact!               artifact/delete-artifact!})
 
+(def ^:private xia-board-ns
+  {'create-card!    board/create-card!
+   'get-card        board/get-card
+   'list-cards      board/list-cards
+   'claim-card!     board/claim-card!
+   'heartbeat-card! board/heartbeat-card!
+   'update-card!    board/update-card!
+   'comment-card!   board/comment-card!})
+
 (def ^:private xia-service-ns
   {'request       service/request
    'list-services service/list-services})
@@ -237,7 +247,9 @@
    'match-skills        skill/match-skills
    'skill-section       skill/skill-section
    'skill-headings      skill/skill-headings
-   'patch-skill-section! skill/patch-skill-section!})
+   'patch-skill-section! skill/patch-skill-section!
+   'check-import-update! skill/check-import-update!
+   'curate-skills!     skill/curate-skills!})
 
 (def ^:private sci-core-overrides
   {'slurp       (blocked-sci-fn 'clojure.core/slurp)
@@ -323,6 +335,7 @@
                   'xia.scratch        xia-scratch-ns
                   'xia.local-doc      xia-local-doc-ns
                   'xia.artifact       xia-artifact-ns
+                  'xia.board          xia-board-ns
                   'xia.cron           xia-cron-ns
                   'xia.service        xia-service-ns
                   'xia.peer           xia-peer-ns

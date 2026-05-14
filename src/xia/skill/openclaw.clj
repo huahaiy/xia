@@ -426,6 +426,54 @@
     :imported-with-warnings
     :imported))
 
+(defn- source-snapshot
+  [{:keys [source-format source-path source-url source-name bundle-root]} strict?]
+  (let [skill-file (io/file bundle-root "SKILL.md")
+        {:keys [frontmatter body]} (split-frontmatter (slurp skill-file))
+        metadata (parse-frontmatter frontmatter)
+        frontmatter-report (validate-frontmatter metadata strict?)
+        resource-report (collect-resources bundle-root strict?)
+        aliases (detected-tool-aliases body)
+        warnings (vec (concat (:warnings frontmatter-report)
+                              (:warnings resource-report)))
+        errors (vec (concat (:errors frontmatter-report)
+                            (:errors resource-report)))
+        skill-id (infer-skill-id metadata source-name)
+        skill-name (or (get metadata "name")
+                       (name skill-id))
+        content (normalize-content body aliases (:resources resource-report))
+        content-hash (skill/content-sha256 content)
+        report {:status (if (seq errors) :rejected (report-status warnings))
+                :skill-id skill-id
+                :name skill-name
+                :warnings warnings
+                :errors errors
+                :ignored-fields (:ignored-fields frontmatter-report)
+                :resources (mapv #(select-keys % [:path :size-bytes]) (:resources resource-report))
+                :tool-aliases (mapv (fn [{:keys [id source-label target-label]}]
+                                      {:id id
+                                       :from source-label
+                                       :to target-label})
+                                    aliases)
+                :source {:format source-format
+                         :path source-path
+                         :url source-url
+                         :name source-name}
+                :content-sha256 content-hash}]
+    {:report report
+     :metadata metadata
+     :content content
+     :content-sha256 content-hash}))
+
+(defn openclaw-source-snapshot!
+  "Read and validate an OpenClaw source without installing it."
+  [source & {:keys [strict?] :or {strict? false}}]
+  (let [{:keys [cleanup] :as acquired} (acquire-source! source)]
+    (try
+      (source-snapshot acquired strict?)
+      (finally
+        (cleanup)))))
+
 (defn import-openclaw-source!
   "Import an OpenClaw skill from a directory, a zip archive, or a zip URL.
 
@@ -434,53 +482,66 @@
    - :source-url     overrides the stored source URL
   "
   [source & {:keys [strict?] :or {strict? true}}]
-  (let [{:keys [source-format source-path source-url source-name bundle-root cleanup]} (acquire-source! source)]
-    (try
-      (let [skill-file (io/file bundle-root "SKILL.md")
-            {:keys [frontmatter body]} (split-frontmatter (slurp skill-file))
-            metadata (parse-frontmatter frontmatter)
-            frontmatter-report (validate-frontmatter metadata strict?)
-            resource-report (collect-resources bundle-root strict?)
-            aliases (detected-tool-aliases body)
-            warnings (vec (concat (:warnings frontmatter-report)
-                                  (:warnings resource-report)))
-            errors (vec (concat (:errors frontmatter-report)
-                                (:errors resource-report)))
-            skill-id (infer-skill-id metadata source-name)
-            skill-name (or (get metadata "name")
-                           (name skill-id))
-            content (normalize-content body aliases (:resources resource-report))
-            report {:status (report-status warnings)
-                    :skill-id skill-id
-                    :name skill-name
-                    :warnings warnings
-                    :ignored-fields (:ignored-fields frontmatter-report)
-                    :resources (mapv #(select-keys % [:path :size-bytes]) (:resources resource-report))
-                    :tool-aliases (mapv (fn [{:keys [id source-label target-label]}]
-                                          {:id id
-                                           :from source-label
-                                           :to target-label})
-                                        aliases)
-                    :source {:format source-format
-                             :path source-path
-                             :url source-url
-                             :name source-name}}]
-        (when (seq errors)
-          (throw (ex-info "OpenClaw skill import rejected" (assoc report :status :rejected :errors errors))))
-        (skill/import-skill-edn!
-          {:id skill-id
-           :name skill-name
-           :description (or (get metadata "description") "")
-           :version (or (get metadata "version") "0.1.0")
-           :tags (set (map (comp keyword slugify) (get metadata "tags")))
-           :content content
-           :source-format source-format
-           :source-path source-path
-           :source-url source-url
-           :source-name source-name
-           :import-warnings warnings
-           :imported-from-openclaw? true})
-        (log/info "Imported OpenClaw skill:" skill-name)
-        report)
-      (finally
-        (cleanup)))))
+  (let [{:keys [report metadata content content-sha256]} (openclaw-source-snapshot! source :strict? strict?)
+        {:keys [skill-id name warnings errors source]} report]
+    (when (seq errors)
+      (throw (ex-info "OpenClaw skill import rejected" report)))
+    (skill/import-skill-edn!
+     {:id skill-id
+      :name name
+      :description (or (get metadata "description") "")
+      :version (or (get metadata "version") "0.1.0")
+      :tags (set (map (comp keyword slugify) (get metadata "tags")))
+      :content content
+      :source-format (:format source)
+      :source-path (:path source)
+      :source-url (:url source)
+      :source-name (:name source)
+      :source-sha256 content-sha256
+      :content-sha256 content-sha256
+      :provenance {:origin (:format source)
+                   :importer :openclaw
+                   :source source}
+      :trust-level :imported
+      :import-warnings warnings
+      :imported-from-openclaw? true})
+    (log/info "Imported OpenClaw skill:" name)
+    (dissoc report :errors :content-sha256)))
+
+(defn check-openclaw-update!
+  "Safely check an imported OpenClaw skill for source changes.
+   This records update-check metadata but never applies the update."
+  [skill-entity]
+  (let [skill-id (:skill/id skill-entity)
+        source   (or (:skill/source-url skill-entity)
+                     (:skill/source-path skill-entity))
+        no-source (fn []
+                    (skill/record-update-check! skill-id {:status :no-source})
+                    {:status :no-source
+                     :skill-id skill-id
+                     :source {:format (:skill/source-format skill-entity)
+                              :path (:skill/source-path skill-entity)
+                              :url (:skill/source-url skill-entity)
+                              :name (:skill/source-name skill-entity)}})]
+    (if-not (seq (str source))
+      (no-source)
+      (let [{:keys [report content-sha256]} (openclaw-source-snapshot! source :strict? false)
+            current-sha (skill/content-sha256 (:skill/content skill-entity))
+            imported-sha (:skill/source-sha256 skill-entity)
+            local-edits? (and imported-sha (not= current-sha imported-sha))
+            status (cond
+                     (seq (:errors report)) :rejected
+                     local-edits? :local-edits
+                     (= content-sha256 current-sha) :current
+                     :else :update-available)]
+        (skill/record-update-check! skill-id {:status status
+                                              :source-sha256 content-sha256})
+        {:status status
+         :skill-id skill-id
+         :source (:source report)
+         :warnings (:warnings report)
+         :errors (:errors report)
+         :current_sha256 current-sha
+         :imported_sha256 imported-sha
+         :source_sha256 content-sha256
+         :safe_to_apply? (= status :update-available)}))))

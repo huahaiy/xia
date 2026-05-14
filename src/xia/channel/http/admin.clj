@@ -972,11 +972,13 @@
    :enabled     (boolean (:tool/enabled? tool))})
 
 (defn- skill->body
-  [skill]
+  [deps skill]
   {:id                    (some-> (:skill/id skill) name)
    :name                  (:skill/name skill)
    :description           (:skill/description skill)
    :version               (:skill/version skill)
+   :content_sha256        (:skill/content-sha256 skill)
+   :source_sha256         (:skill/source-sha256 skill)
    :tags                  (->> (or (:skill/tags skill) [])
                                (map name)
                                sort
@@ -986,14 +988,30 @@
    :source_path           (:skill/source-path skill)
    :source_url            (:skill/source-url skill)
    :source_name           (:skill/source-name skill)
+   :provenance            (:skill/provenance skill)
+   :trust_level           (some-> (:skill/trust-level skill) name)
+   :trust_note            (:skill/trust-note skill)
+   :lifecycle             (some-> (:skill/lifecycle skill) name)
+   :lifecycle_reason      (:skill/lifecycle-reason skill)
+   :installed_at          (instant->str* deps (:skill/installed-at skill))
+   :updated_at            (instant->str* deps (:skill/updated-at skill))
+   :archived_at           (instant->str* deps (:skill/archived-at skill))
+   :selected_count        (long (or (:skill/selected-count skill) 0))
+   :injected_count        (long (or (:skill/injected-count skill) 0))
+   :viewed_count          (long (or (:skill/viewed-count skill) 0))
+   :patched_count         (long (or (:skill/patched-count skill) 0))
+   :last_used_at          (instant->str* deps (:skill/last-used-at skill))
+   :last_update_check_at  (instant->str* deps (:skill/last-update-check-at skill))
+   :last_update_status    (some-> (:skill/last-update-status skill) name)
+   :last_update_source_sha256 (:skill/last-update-source-sha256 skill)
    :import_warnings       (->> (or (:skill/import-warnings skill) [])
                                sort
                                vec)
    :imported_from_openclaw (boolean (:skill/imported-from-openclaw? skill))})
 
 (defn- skill->detail-body
-  [skill]
-  (assoc (skill->body skill)
+  [deps skill]
+  (assoc (skill->body deps skill)
          :content (:skill/content skill)))
 
 (defn- parse-optional-bounded-double
@@ -1164,7 +1182,7 @@
                        (into [] (map tool->admin-body))
                        sort-by-name)
        :skills    (->> (db/list-skills)
-                       (into [] (map skill->body))
+                       (into [] (map #(skill->body deps %)))
                        sort-by-name)})))
 
 (defn handle-fetch-provider-models
@@ -2160,7 +2178,7 @@
                                           :version     version
                                           :tags        tags
                                           :enabled?    enabled?})]
-      (json-response* deps 200 {:skill (skill->detail-body saved)}))
+      (json-response* deps 200 {:skill (skill->detail-body deps saved)}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 
@@ -2170,7 +2188,9 @@
     (let [skill-key (parse-keyword-id skill-id "skill_id")
           saved     (db/get-skill skill-key)]
       (if saved
-        (json-response* deps 200 {:skill (skill->detail-body saved)})
+        (do
+          (skill/record-usage! skill-key :viewed)
+          (json-response* deps 200 {:skill (skill->detail-body deps (db/get-skill skill-key))}))
         (json-response* deps 404 {:error "skill not found"})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
@@ -2185,6 +2205,59 @@
           (json-response* deps 200 {:status "deleted"
                                     :skill_id (name skill-key)}))
         (json-response* deps 404 {:error "skill not found"})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))))
+
+(defn- skill-update-check->body
+  [result]
+  (cond-> {:status (some-> (:status result) name)
+           :skill_id (some-> (:skill-id result) name)
+           :source (:source result)
+           :current_sha256 (:current_sha256 result)
+           :imported_sha256 (:imported_sha256 result)
+           :source_sha256 (:source_sha256 result)
+           :safe_to_apply (boolean (:safe_to_apply? result))}
+    (seq (:warnings result)) (assoc :warnings (vec (:warnings result)))
+    (seq (:errors result)) (assoc :errors (vec (:errors result)))))
+
+(defn handle-check-skill-update
+  [deps skill-id]
+  (try
+    (let [skill-key (parse-keyword-id skill-id "skill_id")
+          saved     (db/get-skill skill-key)]
+      (if-not saved
+        (json-response* deps 404 {:error "skill not found"})
+        (let [result (if (:skill/imported-from-openclaw? saved)
+                       (openclaw-skill/check-openclaw-update! saved)
+                       (skill/check-import-update! skill-key))]
+          (json-response* deps 200 {:update (skill-update-check->body result)
+                                    :skill (skill->body deps (db/get-skill skill-key))}))))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))))
+
+(defn- curator-skill-summary->body
+  [deps summary]
+  (update summary :last_used_at #(instant->str* deps %)))
+
+(defn handle-curate-skills
+  [deps req]
+  (try
+    (let [data (or (read-body* deps req) {})
+          stale-days (if-let [value (get data "stale_days")]
+                       (Long/parseLong (str value))
+                       skill/default-stale-days)
+          archive-agent-authored? (if (contains? data "archive_agent_authored")
+                                    (true? (get data "archive_agent_authored"))
+                                    true)
+          report (skill/curate-skills! {:stale-days stale-days
+                                        :archive-agent-authored? archive-agent-authored?})]
+      (json-response* deps 200
+                      {:curator {:stale (mapv #(curator-skill-summary->body deps %) (:stale report))
+                                 :archived (mapv #(curator-skill-summary->body deps %) (:archived report))
+                                 :suggestions (:suggestions report)}
+                       :skills (mapv #(skill->body deps %) (db/list-skills))}))
+    (catch NumberFormatException _
+      (json-response* deps 400 {:error "stale_days must be an integer"}))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 
@@ -2221,10 +2294,10 @@
                                      :path   (get-in report [:source :path])
                                      :url    (get-in report [:source :url])
                                      :name   (get-in report [:source :name])}}
-           :skill  (skill->body skill)})))
+           :skill  (skill->body deps skill)})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 
 (defn handle-skills
   [deps _req]
-  (json-response* deps 200 {:skills (mapv skill->body (db/list-skills))}))
+  (json-response* deps 200 {:skills (mapv #(skill->body deps %) (db/list-skills))}))

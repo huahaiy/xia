@@ -1,0 +1,26 @@
+;; Create a durable coordination-board card.
+
+{:id          :board-create
+ :name        "board-create"
+ :description "Create a durable coordination-board card for work that should be tracked, claimed, handed off, or reviewed later."
+ :tags        #{:board :task :coordination :write}
+ :parameters  {"type"       "object"
+               "properties" {"title"       {"type"        "string"
+                                            "description" "Short card title."}
+                             "description" {"type"        "string"
+                                            "description" "Optional card details."}
+                             "priority"    {"type"        "string"
+                                            "enum"        ["low" "normal" "high" "urgent"]
+                                            "description" "Card priority. Defaults to normal."}
+                             "assignee"    {"type"        "string"
+                                            "description" "Optional assignee instance, role, or name."}
+                             "parent_id"   {"type"        "string"
+                                            "description" "Optional parent task/card UUID."}}
+               "required"   ["title"]}
+ :handler     "(fn [args]
+                 (xia.board/create-card!
+                   {:title (get args \"title\")
+                    :description (get args \"description\")
+                    :priority (get args \"priority\")
+                    :assignee (get args \"assignee\")
+                    :parent-id (get args \"parent_id\")}))"}

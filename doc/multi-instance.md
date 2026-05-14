@@ -120,6 +120,7 @@ port:
 - `GET /command/sessions/<session-id>/approval`
 - `POST /command/sessions/<session-id>/approval`
 - `GET /command/sessions/<session-id>/messages`
+- `POST /command/mcp`
 
 Loopback clients may use the secret as a bearer token:
 

@@ -1,0 +1,16 @@
+;; Refresh a claimed durable coordination-board card heartbeat.
+
+{:id          :board-heartbeat
+ :name        "board-heartbeat"
+ :description "Refresh the heartbeat timestamp for a claimed coordination-board card. Claimed cards require the claim token."
+ :tags        #{:board :task :coordination :heartbeat :write}
+ :parameters  {"type"       "object"
+               "properties" {"card_id"     {"type"        "string"
+                                            "description" "Board card UUID."}
+                             "claim_token" {"type"        "string"
+                                            "description" "Claim token returned by board-claim."}}
+               "required"   ["card_id" "claim_token"]}
+ :handler     "(fn [args]
+                 (xia.board/heartbeat-card!
+                   (get args \"card_id\")
+                   {:claim-token (get args \"claim_token\")}))"}

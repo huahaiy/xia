@@ -127,11 +127,14 @@ What the local web UI is for:
   docs along natural boundaries, and keeps summary plus chunk-level recall
 - use scratch pads for copied notes and working context
 - download Xia produced artifacts
+- view the current task and board-backed task lanes
 - configure LLM providers, OAuth accounts, services, saved site logins, local
   document summarization settings, and so on
-- author or import safe prompt-only OpenClaw skills from local bundles or
-  ClawHub zip URLs
+- author, import, update-check, and curate safe prompt-only skills from local
+  bundles or ClawHub zip URLs
 - manage scheduled tasks and other local assistant settings
+- expose an allowlisted MCP-compatible tool facade and durable coordination
+  board tools for other trusted local agents through the command channel
 
 The server binds to `127.0.0.1` by default. Use `--bind 0.0.0.0` only when you
 intentionally want to expose it beyond the local machine.
@@ -166,3 +169,4 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 
 - Technical and implementation details: [doc/impl.md](doc/impl.md)
 - Multi-instance setup and template seeding: [doc/multi-instance.md](doc/multi-instance.md)
+- MCP facade and coordination board: [doc/mcp-and-board.md](doc/mcp-and-board.md)

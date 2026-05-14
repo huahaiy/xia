@@ -1,0 +1,33 @@
+;; Update a durable coordination-board card.
+
+{:id          :board-update
+ :name        "board-update"
+ :description "Update a durable coordination-board card's title, details, status, priority, or assignee. Claimed cards require the claim token."
+ :tags        #{:board :task :coordination :update :write}
+ :parameters  {"type"       "object"
+               "properties" {"card_id"     {"type"        "string"
+                                            "description" "Board card UUID."}
+                             "claim_token" {"type"        "string"
+                                            "description" "Claim token for claimed cards."}
+                             "title"       {"type"        "string"
+                                            "description" "Optional new title."}
+                             "description" {"type"        "string"
+                                            "description" "Optional new details."}
+                             "status"      {"type"        "string"
+                                            "enum"        ["open" "claimed" "blocked" "completed" "cancelled"]
+                                            "description" "Optional new status."}
+                             "priority"    {"type"        "string"
+                                            "enum"        ["low" "normal" "high" "urgent"]
+                                            "description" "Optional new priority."}
+                             "assignee"    {"type"        "string"
+                                            "description" "Optional new assignee."}}
+               "required"   ["card_id"]}
+ :handler     "(fn [args]
+                 (xia.board/update-card!
+                   (get args \"card_id\")
+                   {:claim-token (get args \"claim_token\")
+                    :title (get args \"title\")
+                    :description (get args \"description\")
+                    :status (get args \"status\")
+                    :priority (get args \"priority\")
+                    :assignee (get args \"assignee\")}))"}

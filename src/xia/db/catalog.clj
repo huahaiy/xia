@@ -2,7 +2,8 @@
   "Catalog and registry persistence helpers for skills, credentials, services, tools,
    managed child instances, and OAuth accounts."
   (:require [clojure.string :as str])
-  (:import [java.net URI]))
+  (:import [java.net URI]
+           [java.util Date]))
 
 (defn- q*
   [deps query & inputs]
@@ -102,35 +103,61 @@
   [deps
    {:keys [id name description content doc version tags
            source-format source-path source-url source-name
+           provenance content-sha256 source-sha256
+           trust-level trust-note lifecycle lifecycle-reason updated-at
+           selected-count injected-count viewed-count patched-count last-used-at
+           last-update-check-at last-update-status last-update-source-sha256
            import-warnings
            imported-from-openclaw?]}]
-  (transact!*
-    deps
-    [(cond-> {:skill/id           id
-              :skill/name         (or name (clojure.core/name id))
-              :skill/description  (or description "")
-              :skill/content      (or content "")
-              :skill/version      (or version "0.1.0")
-              :skill/tags         (or tags #{})
-              :skill/enabled?     true
-              :skill/installed-at (java.util.Date.)}
-       source-format (assoc :skill/source-format source-format)
-       source-path (assoc :skill/source-path source-path)
-       source-url (assoc :skill/source-url source-url)
-       source-name (assoc :skill/source-name source-name)
-       (seq import-warnings) (assoc :skill/import-warnings import-warnings)
-       (some? imported-from-openclaw?) (assoc :skill/imported-from-openclaw? imported-from-openclaw?)
-       doc (assoc :skill/doc doc))]))
+  (let [now (Date.)]
+    (transact!*
+     deps
+     [(cond-> {:skill/id             id
+               :skill/name           (or name (clojure.core/name id))
+               :skill/description    (or description "")
+               :skill/content        (or content "")
+               :skill/version        (or version "0.1.0")
+               :skill/tags           (or tags #{})
+               :skill/enabled?       true
+               :skill/installed-at   now
+               :skill/updated-at     (or updated-at now)
+               :skill/trust-level    (or trust-level :user-authored)
+               :skill/lifecycle      (or lifecycle :active)
+               :skill/selected-count (long (or selected-count 0))
+               :skill/injected-count (long (or injected-count 0))
+               :skill/viewed-count   (long (or viewed-count 0))
+               :skill/patched-count  (long (or patched-count 0))}
+        source-format (assoc :skill/source-format source-format)
+        source-path (assoc :skill/source-path source-path)
+        source-url (assoc :skill/source-url source-url)
+        source-name (assoc :skill/source-name source-name)
+        provenance (assoc :skill/provenance provenance)
+        content-sha256 (assoc :skill/content-sha256 content-sha256)
+        source-sha256 (assoc :skill/source-sha256 source-sha256)
+        trust-note (assoc :skill/trust-note trust-note)
+        lifecycle-reason (assoc :skill/lifecycle-reason lifecycle-reason)
+        last-used-at (assoc :skill/last-used-at last-used-at)
+        last-update-check-at (assoc :skill/last-update-check-at last-update-check-at)
+        last-update-status (assoc :skill/last-update-status last-update-status)
+        last-update-source-sha256 (assoc :skill/last-update-source-sha256 last-update-source-sha256)
+        (seq import-warnings) (assoc :skill/import-warnings import-warnings)
+        (some? imported-from-openclaw?) (assoc :skill/imported-from-openclaw? imported-from-openclaw?)
+        doc (assoc :skill/doc doc))])))
 
 (defn save-skill!
   [deps
    {:keys [id name description content doc version tags enabled? installed-at
            source-format source-path source-url source-name
+           provenance content-sha256 source-sha256
+           trust-level trust-note lifecycle lifecycle-reason archived-at updated-at
+           selected-count injected-count viewed-count patched-count last-used-at
+           last-update-check-at last-update-status last-update-source-sha256
            import-warnings imported-from-openclaw?
            clear-doc?]}]
   (let [eid      (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :skill/id ?id]] id))
         existing (when eid (raw-entity* deps eid))
         new-tags (if (some? tags) tags (or (:skill/tags existing) #{}))
+        now      (Date.)
         base-map (cond-> {:skill/id           id
                           :skill/name         (or name
                                                   (:skill/name existing)
@@ -152,7 +179,26 @@
                                                   true))
                           :skill/installed-at (or installed-at
                                                   (:skill/installed-at existing)
-                                                  (java.util.Date.))}
+                                                  now)
+                          :skill/updated-at   (or updated-at now)
+                          :skill/trust-level  (or trust-level
+                                                  (:skill/trust-level existing)
+                                                  :user-authored)
+                          :skill/lifecycle    (or lifecycle
+                                                  (:skill/lifecycle existing)
+                                                  :active)
+                          :skill/selected-count (long (or selected-count
+                                                          (:skill/selected-count existing)
+                                                          0))
+                          :skill/injected-count (long (or injected-count
+                                                          (:skill/injected-count existing)
+                                                          0))
+                          :skill/viewed-count (long (or viewed-count
+                                                        (:skill/viewed-count existing)
+                                                        0))
+                          :skill/patched-count (long (or patched-count
+                                                         (:skill/patched-count existing)
+                                                         0))}
                    (or source-format
                        (:skill/source-format existing))
                    (assoc :skill/source-format (or source-format
@@ -169,6 +215,46 @@
                        (:skill/source-name existing))
                    (assoc :skill/source-name (or source-name
                                                  (:skill/source-name existing)))
+                   (or provenance
+                       (:skill/provenance existing))
+                   (assoc :skill/provenance (or provenance
+                                                (:skill/provenance existing)))
+                   (or content-sha256
+                       (:skill/content-sha256 existing))
+                   (assoc :skill/content-sha256 (or content-sha256
+                                                    (:skill/content-sha256 existing)))
+                   (or source-sha256
+                       (:skill/source-sha256 existing))
+                   (assoc :skill/source-sha256 (or source-sha256
+                                                   (:skill/source-sha256 existing)))
+                   (or trust-note
+                       (:skill/trust-note existing))
+                   (assoc :skill/trust-note (or trust-note
+                                                (:skill/trust-note existing)))
+                   (or lifecycle-reason
+                       (:skill/lifecycle-reason existing))
+                   (assoc :skill/lifecycle-reason (or lifecycle-reason
+                                                      (:skill/lifecycle-reason existing)))
+                   (or archived-at
+                       (:skill/archived-at existing))
+                   (assoc :skill/archived-at (or archived-at
+                                                 (:skill/archived-at existing)))
+                   (or last-used-at
+                       (:skill/last-used-at existing))
+                   (assoc :skill/last-used-at (or last-used-at
+                                                  (:skill/last-used-at existing)))
+                   (or last-update-check-at
+                       (:skill/last-update-check-at existing))
+                   (assoc :skill/last-update-check-at (or last-update-check-at
+                                                          (:skill/last-update-check-at existing)))
+                   (or last-update-status
+                       (:skill/last-update-status existing))
+                   (assoc :skill/last-update-status (or last-update-status
+                                                        (:skill/last-update-status existing)))
+                   (or last-update-source-sha256
+                       (:skill/last-update-source-sha256 existing))
+                   (assoc :skill/last-update-source-sha256 (or last-update-source-sha256
+                                                               (:skill/last-update-source-sha256 existing)))
                    (or (seq import-warnings)
                        (seq (:skill/import-warnings existing)))
                    (assoc :skill/import-warnings (or import-warnings
@@ -189,6 +275,45 @@
                        [[:db/retract eid :skill/doc (:skill/doc existing)]])
                      [base-map]))]
     (transact!* deps tx-data)))
+
+(def ^:private skill-usage-attrs
+  {:selected :skill/selected-count
+   :injected :skill/injected-count
+   :viewed   :skill/viewed-count
+   :patched  :skill/patched-count})
+
+(defn record-skill-usage!
+  [deps skill-id usage-kind]
+  (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
+    (when-let [attr (get skill-usage-attrs usage-kind)]
+      (let [existing (raw-entity* deps eid)
+            current  (long (or (get existing attr) 0))
+            now      (Date.)]
+        (transact!* deps [{:db/id eid
+                           attr (inc current)
+                           :skill/last-used-at now
+                           :skill/updated-at now}])))))
+
+(defn update-skill-lifecycle!
+  [deps skill-id {:keys [lifecycle reason enabled? archived-at]}]
+  (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
+    (let [now (Date.)]
+      (transact!* deps [(cond-> {:db/id eid
+                                 :skill/lifecycle lifecycle
+                                 :skill/updated-at now}
+                          reason (assoc :skill/lifecycle-reason reason)
+                          (some? enabled?) (assoc :skill/enabled? enabled?)
+                          archived-at (assoc :skill/archived-at archived-at))]))))
+
+(defn record-skill-update-check!
+  [deps skill-id {:keys [status source-sha256 checked-at]}]
+  (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :skill/id ?id]] skill-id))]
+    (let [now (or checked-at (Date.))]
+      (transact!* deps [(cond-> {:db/id eid
+                                 :skill/last-update-check-at now
+                                 :skill/updated-at now}
+                          status (assoc :skill/last-update-status status)
+                          source-sha256 (assoc :skill/last-update-source-sha256 source-sha256))]))))
 
 (defn get-skill
   [deps skill-id]

@@ -961,9 +961,11 @@
             (if (> (+ tokens section-tokens) budget*)
               {:content (str/join "\n" parts)
                :tokens  tokens}
-              (recur (rest sks)
-                     (conj parts section)
-                     (+ tokens section-tokens)))))))))
+              (do
+                (skill/record-usage! (:skill/id s) :injected)
+                (recur (rest sks)
+                       (conj parts section)
+                       (+ tokens section-tokens))))))))))
 
 (defn render-skills
   [skills budget]

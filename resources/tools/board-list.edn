@@ -1,0 +1,24 @@
+;; List durable coordination-board cards.
+
+{:id             :board-list
+ :name           "board-list"
+ :description    "List durable coordination-board cards. By default terminal cards are hidden."
+ :tags           #{:board :task :coordination :list}
+ :execution-mode :parallel-safe
+ :parameters     {"type"       "object"
+                  "properties" {"status"           {"type"        "string"
+                                                    "enum"        ["open" "claimed" "blocked" "completed" "cancelled"]
+                                                    "description" "Optional status filter."}
+                                "assignee"         {"type"        "string"
+                                                    "description" "Optional assignee filter."}
+                                "include_terminal" {"type"        "boolean"
+                                                    "description" "Include completed and cancelled cards."}
+                                "limit"            {"type"        "integer"
+                                                    "description" "Maximum cards to return, up to 500."}}
+                  "required"   []}
+ :handler        "(fn [args]
+                    (xia.board/list-cards
+                      {:status (get args \"status\")
+                       :assignee (get args \"assignee\")
+                       :include-terminal? (get args \"include_terminal\")
+                       :limit (get args \"limit\")}))"}

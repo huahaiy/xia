@@ -6,10 +6,12 @@
             [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
+            [xia.board :as board]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
             [xia.memory :as memory]
+            [xia.mcp :as mcp]
             [xia.channel.http.admin :as http-admin]
             [xia.channel.http.messaging :as http-messaging]
             [xia.channel.http.session :as http-session]
@@ -1193,6 +1195,17 @@
       (:projection_seq projection)
       (assoc-in [:headers "ETag"] (str "\"" (:projection_seq projection) "\"")))))
 
+(defn- handle-command-mcp
+  [req]
+  (let [request  (or (read-body req) {})
+        response (mcp/handle-json-rpc
+                  request
+                  {:request-id  (str (random-uuid))
+                   :remote-addr (:remote-addr req)})]
+    (if response
+      (json-response 200 response)
+      (json-response 202 {:ok true}))))
+
 (defn- handle-command-create-checkpoint
   [req]
   (let [body         (or (read-body req) {})
@@ -1923,6 +1936,39 @@
 (defn- handle-history-tasks []
   (http-session/handle-history-tasks (session-handler-deps)))
 
+(defn- board-comment->body
+  [comment]
+  (cond-> {:id   (some-> (:id comment) str)
+           :text (:text comment)}
+    (:author comment) (assoc :author (:author comment))
+    (:at comment) (assoc :at (instant->str (:at comment)))))
+
+(defn- board-card->body
+  [card]
+  (let [status (:status card)]
+    (cond-> {:id          (some-> (:id card) str)
+             :type        (name board/board-task-type)
+             :channel     (name board/board-channel)
+             :state       (some-> status name)
+             :status      (some-> status name)
+             :priority    (some-> (:priority card) name)
+             :title       (:title card)
+             :description (:description card)
+             :comments    (mapv board-comment->body (:comments card))
+             :created_at  (instant->str (:created-at card))
+             :updated_at  (instant->str (:updated-at card))}
+      (:assignee card) (assoc :assignee (:assignee card))
+      (:parent-id card) (assoc :parent_id (str (:parent-id card)))
+      (:claimed-at card) (assoc :claimed_at (instant->str (:claimed-at card)))
+      (:heartbeat-at card) (assoc :heartbeat_at (instant->str (:heartbeat-at card)))
+      (:finished-at card) (assoc :finished_at (instant->str (:finished-at card))))))
+
+(defn- handle-task-board []
+  (json-response 200
+                 {:tasks (mapv board-card->body
+                               (board/list-cards {:include-terminal? true
+                                                  :limit 200}))}))
+
 (defn- handle-get-task [task-id]
   (http-session/handle-get-task (session-handler-deps) task-id))
 
@@ -2110,12 +2156,14 @@
           command-runtime-status-match (= uri "/command/runtime/status")
           command-runtime-drain-match (= uri "/command/runtime/drain")
           command-runtime-undrain-match (= uri "/command/runtime/undrain")
+          command-mcp-match (= uri "/command/mcp")
           command-managed-checkpoints-match (= uri "/command/managed/checkpoints")
           command-managed-checkpoint-match (re-matches #"/command/managed/checkpoints/([^/]+)" uri)
           command-managed-snapshots-match (= uri "/command/managed/snapshots")
           command-wake-projection-match (= uri "/command/managed/wake-projection")
           command-prompt-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/prompt" uri)
           command-approval-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/approval" uri)
+          task-board-match    (= uri "/tasks/board")
           task-match         (re-matches #"/tasks/([0-9a-fA-F-]+)" uri)
           task-events-match  (re-matches #"/tasks/([0-9a-fA-F-]+)/events" uri)
           task-live-events-match (re-matches #"/tasks/([0-9a-fA-F-]+)/live-events" uri)
@@ -2148,6 +2196,7 @@
           admin-schedule-match (re-matches #"/admin/schedules/([^/]+)" uri)
           admin-schedule-pause-match (re-matches #"/admin/schedules/([^/]+)/pause" uri)
           admin-schedule-resume-match (re-matches #"/admin/schedules/([^/]+)/resume" uri)
+          admin-skill-update-check-match (re-matches #"/admin/skills/([^/]+)/update-check" uri)
           admin-skill-match  (re-matches #"/admin/skills/([^/]+)" uri)
           llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
           admin-oauth-match  (re-matches #"/admin/oauth-accounts/([^/]+)" uri)
@@ -2204,6 +2253,9 @@
 
         (and (= method :post) command-runtime-undrain-match)
         (command-route-response req #(handle-command-runtime-undrain %))
+
+        (and (= method :post) command-mcp-match)
+        (command-route-response req #(handle-command-mcp %))
 
         (and (= method :post) command-managed-checkpoints-match)
         (command-route-response req #(handle-command-create-checkpoint %))
@@ -2302,6 +2354,9 @@
 
         (and (= method :get) history-schedule-match)
         (protected-route-response req #(handle-history-schedule-runs (second history-schedule-match)))
+
+        (and (= method :get) task-board-match)
+        (protected-route-response req handle-task-board)
 
         (and (= method :get) task-events-match)
         (protected-route-response req #(handle-get-task-events (second task-events-match)))
@@ -2522,12 +2577,20 @@
         (and (= method :post) (= uri "/admin/skills"))
         (protected-route-response req #(http-admin/handle-save-skill (admin-handler-deps) req))
 
-	        (and (= method :post) (= uri "/admin/skills/import-openclaw"))
-	        (protected-route-response req #(http-admin/handle-import-openclaw-skill (admin-handler-deps) req))
+        (and (= method :post) (= uri "/admin/skills/import-openclaw"))
+        (protected-route-response req #(http-admin/handle-import-openclaw-skill (admin-handler-deps) req))
 
-	        (and (= method :delete) admin-site-match)
-	        (protected-route-response req #(http-admin/handle-delete-site (admin-handler-deps)
-                                                                             (second admin-site-match)))
+        (and (= method :post) (= uri "/admin/skills/curate"))
+        (protected-route-response req #(http-admin/handle-curate-skills (admin-handler-deps) req))
+
+        (and (= method :post) admin-skill-update-check-match)
+        (protected-route-response req #(http-admin/handle-check-skill-update
+                                         (admin-handler-deps)
+                                         (second admin-skill-update-check-match)))
+
+        (and (= method :delete) admin-site-match)
+        (protected-route-response req #(http-admin/handle-delete-site (admin-handler-deps)
+                                                                      (second admin-site-match)))
 
         (and (= method :delete) admin-schedule-match)
         (protected-route-response req #(http-admin/handle-delete-schedule (admin-handler-deps)

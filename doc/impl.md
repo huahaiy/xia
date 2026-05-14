@@ -173,7 +173,7 @@ The local browser UI is intended to be the main interface for non-technical user
 - **OAuth-to-service handoff:** prefill service forms from saved OAuth accounts.
 - **Calendar integrations:** manage Google Calendar, Microsoft Calendar, generic CalDAV collections, and read-only iCalendar feeds for events and availability.
 - **Local document workflows:** upload text, PDF, and Office docs, then insert summaries or excerpts into chat and notes.
-- **Skill import:** install Xia skills directly and import a safe prompt-only subset of OpenClaw skills from directories, zip files, or ClawHub zip URLs.
+- **Skill import and curation:** install Xia skills directly, import a safe prompt-only subset of OpenClaw skills from directories, zip files, or ClawHub zip URLs, track provenance/hash/trust/lifecycle metadata, check imported sources for updates without applying them, and run a curator pass that archives only stale agent-authored skills.
 - **Local trust boundary:** Xia binds to localhost by default and uses a local session secret cookie, while privileged actions still go through approval policy.
 
 ## Automation And Scheduling
@@ -198,7 +198,7 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 |----------------------|--------------------------------------------------------|
 | `xia.memory`         | Knowledge graph and episodic memory read/write         |
 | `xia.working-memory` | Current session context (`get`, `pin`, `unpin`)        |
-| `xia.skill`          | Skill search, section extraction, patching             |
+| `xia.skill`          | Skill search, section extraction, patching, curation   |
 | `xia.db`             | `get-config`, `set-config!`, `q` (all secret-filtered) |
 | `xia.service`        | `request`, `list-services` (capability proxy)          |
 

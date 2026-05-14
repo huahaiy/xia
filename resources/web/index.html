@@ -276,12 +276,31 @@
         <section class="panel task-panel">
           <div class="panel-header">
             <div>
-              <h2 class="panel-title">Current Task</h2>
+              <h2 class="panel-title">Tasks</h2>
               <p class="panel-note" id="current-task-note">No active task.</p>
             </div>
+            <div class="actions">
+              <button type="button" class="secondary" id="refresh-task-board">Refresh</button>
+            </div>
           </div>
-          <div id="current-task-panel" class="task-panel-body">
-            <div class="scratch-empty">No active task.</div>
+          <div class="task-tab-stack">
+            <section class="task-section" aria-labelledby="current-task-heading">
+              <h3 class="detail-header" id="current-task-heading">Current Task</h3>
+              <div id="current-task-panel" class="task-panel-body">
+                <div class="scratch-empty">No active task.</div>
+              </div>
+            </section>
+            <section class="task-section task-board-section" aria-labelledby="task-board-heading">
+              <div class="task-board-header">
+                <div>
+                  <h3 class="detail-header" id="task-board-heading">Board</h3>
+                  <p class="task-empty-note" id="task-board-note">Board cards are task records grouped by state.</p>
+                </div>
+              </div>
+              <div id="task-board-panel" class="task-board-panel">
+                <div class="scratch-empty">No board cards.</div>
+              </div>
+            </section>
           </div>
         </section>
       </div>
@@ -1263,6 +1282,18 @@
                     </div>
                   </div>
                   <div class="field full">
+                    <div class="skill-maintenance-grid">
+                      <div>
+                        <div class="field-label">Provenance</div>
+                        <div class="admin-status" id="skill-provenance">No skill selected.</div>
+                      </div>
+                      <div>
+                        <div class="field-label">Usage</div>
+                        <div class="admin-status" id="skill-usage">No usage recorded.</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="field full">
                     <label class="field-label" for="skill-content">Content</label>
                     <textarea id="skill-content" class="scratch-editor" placeholder="# Email Drafting&#10;&#10;## Tone&#10;&#10;Be concise and professional."></textarea>
                   </div>
@@ -1271,9 +1302,12 @@
                   <div class="admin-status" aria-live="polite" id="skill-status">Loading skills...</div>
                   <div class="actions">
                     <button type="button" class="secondary" id="delete-skill">Delete</button>
+                    <button type="button" class="secondary" id="check-skill-update">Check update</button>
+                    <button type="button" class="secondary" id="run-skill-curator">Run curator</button>
                     <button type="button" class="primary" id="save-skill">Save skill</button>
                   </div>
                 </div>
+                <pre class="history-code capability-import-result" id="skill-curator-result" hidden></pre>
               </div>
               <div class="detail-panel">
                 <div class="detail-header">Import Skill</div>

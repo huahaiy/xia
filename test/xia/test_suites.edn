@@ -1,6 +1,7 @@
 {:test0
  [xia.agent-test
   xia.autonomous-smoke-test
+  xia.board-test
   xia.calendar-test
   xia.config-test
   xia.core-test
@@ -11,12 +12,14 @@
   xia.llm-smoke-test
   xia.local-doc-smoke-test
   xia.local-ocr-test
+  xia.mcp-test
   xia.oauth-test
   xia.prompt-test
   xia.runtime-overlay-test
   xia.schedule-test
   xia.secret-test
   xia.service-test
+  xia.skill-test
   xia.snapshot-test
   xia.summarizer-test
   xia.system-test

@@ -61,6 +61,7 @@
     (is (= :branch-tasks (:tool/id (db/get-tool :branch-tasks))))
     (is (= :peer-list (:tool/id (db/get-tool :peer-list))))
     (is (= :artifact-create (:tool/id (db/get-tool :artifact-create))))
+    (is (= :board-list (:tool/id (db/get-tool :board-list))))
     (is (= :browser-open (:tool/id (db/get-tool :browser-open))))
     (is (= :calendar-event-create (:tool/id (db/get-tool :calendar-event-create))))
     (is (= :local-doc-search (:tool/id (db/get-tool :local-doc-search))))))

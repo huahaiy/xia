@@ -1,0 +1,19 @@
+;; Add a comment to a durable coordination-board card.
+
+{:id          :board-comment
+ :name        "board-comment"
+ :description "Add a comment to a durable coordination-board card."
+ :tags        #{:board :task :coordination :comment :write}
+ :parameters  {"type"       "object"
+               "properties" {"card_id" {"type"        "string"
+                                        "description" "Board card UUID."}
+                             "author"  {"type"        "string"
+                                        "description" "Optional author or instance label."}
+                             "text"    {"type"        "string"
+                                        "description" "Comment text."}}
+               "required"   ["card_id" "text"]}
+ :handler     "(fn [args]
+                 (xia.board/comment-card!
+                   (get args \"card_id\")
+                   {:author (get args \"author\")
+                    :text (get args \"text\")}))"}

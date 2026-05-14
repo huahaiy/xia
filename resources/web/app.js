@@ -5,6 +5,11 @@ const state = {
   sessionId: sessionStorage.getItem(storageKeys.sessionId) || '',
   currentTaskId: '',
   currentTask: null,
+  taskBoard: {
+    cards: [],
+    loading: false,
+    error: ''
+  },
   liveEventAfter: 0,
   liveEventReceivedAt: 0,
   messages: [],
@@ -109,6 +114,9 @@ const state = {
   siteSaving: false,
   scheduleSaving: false,
   skillSaving: false,
+  skillUpdateChecking: false,
+  skillCurating: false,
+  skillCuratorReport: null,
   managedInstanceStoppingId: '',
   messagingChannelsSaving: false,
   localDocSummarizationStatus: 'Loading document summary settings...',
@@ -134,6 +142,9 @@ const activityStatusEl = document.getElementById('activity-status');
 const sessionLabelEl = document.getElementById('session-label');
 const currentTaskNoteEl = document.getElementById('current-task-note');
 const currentTaskPanelEl = document.getElementById('current-task-panel');
+const taskBoardNoteEl = document.getElementById('task-board-note');
+const taskBoardPanelEl = document.getElementById('task-board-panel');
+const refreshTaskBoardEl = document.getElementById('refresh-task-board');
 const inputPanelEl = document.getElementById('input-panel');
 const inputLabelEl = document.getElementById('input-label');
 const inputValueEl = document.getElementById('input-value');
@@ -388,9 +399,14 @@ const skillDescriptionEl = document.getElementById('skill-description');
 const skillTagsEl = document.getElementById('skill-tags');
 const skillEnabledEl = document.getElementById('skill-enabled');
 const skillContentEl = document.getElementById('skill-content');
+const skillProvenanceEl = document.getElementById('skill-provenance');
+const skillUsageEl = document.getElementById('skill-usage');
 const skillStatusEl = document.getElementById('skill-status');
 const saveSkillEl = document.getElementById('save-skill');
 const deleteSkillEl = document.getElementById('delete-skill');
+const checkSkillUpdateEl = document.getElementById('check-skill-update');
+const runSkillCuratorEl = document.getElementById('run-skill-curator');
+const skillCuratorResultEl = document.getElementById('skill-curator-result');
 const openclawImportSourceEl = document.getElementById('openclaw-import-source');
 const openclawImportStrictEl = document.getElementById('openclaw-import-strict');
 const openclawImportButtonEl = document.getElementById('openclaw-import-button');
@@ -1163,6 +1179,208 @@ function renderCurrentTaskPanel() {
   }
 }
 
+const taskBoardLaneStatuses = ['open', 'claimed', 'blocked', 'completed', 'cancelled'];
+const taskBoardPriorityRanks = {
+  urgent: 0,
+  high: 1,
+  normal: 2,
+  low: 3
+};
+
+function taskBoardStatus(card) {
+  const status = firstPresentText(card && card.status, card && card.state, 'open').toLowerCase();
+  return taskBoardLaneStatuses.includes(status) ? status : 'open';
+}
+
+function taskBoardUpdatedAt(card) {
+  const parsed = Date.parse(firstPresentText(card && card.updated_at, card && card.created_at));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortedTaskBoardCards(cards) {
+  return cards.slice().sort((a, b) => {
+    const priorityAKey = firstPresentText(a && a.priority, 'normal').toLowerCase();
+    const priorityBKey = firstPresentText(b && b.priority, 'normal').toLowerCase();
+    const priorityA = Object.prototype.hasOwnProperty.call(taskBoardPriorityRanks, priorityAKey)
+      ? taskBoardPriorityRanks[priorityAKey]
+      : 2;
+    const priorityB = Object.prototype.hasOwnProperty.call(taskBoardPriorityRanks, priorityBKey)
+      ? taskBoardPriorityRanks[priorityBKey]
+      : 2;
+    if (priorityA !== priorityB) return priorityA - priorityB;
+    return taskBoardUpdatedAt(b) - taskBoardUpdatedAt(a);
+  });
+}
+
+function createTaskBoardCard(card) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'task-board-card';
+  if (card.id && card.id === state.currentTaskId) {
+    button.dataset.active = 'true';
+    button.setAttribute('aria-current', 'true');
+  }
+  button.addEventListener('click', () => selectTaskBoardCard(card));
+
+  const head = document.createElement('div');
+  head.className = 'task-board-card-head';
+  const title = document.createElement('div');
+  title.className = 'task-board-card-title';
+  title.textContent = firstPresentText(card.title, 'Untitled task');
+  head.appendChild(title);
+  const badge = document.createElement('span');
+  badge.className = 'task-state-badge';
+  badge.dataset.tone = taskBadgeTone(taskBoardStatus(card));
+  badge.textContent = titleizeToken(taskBoardStatus(card));
+  head.appendChild(badge);
+  button.appendChild(head);
+
+  const description = firstPresentText(card.description, card.summary);
+  if (description) {
+    const summary = document.createElement('p');
+    summary.className = 'task-board-card-summary';
+    summary.textContent = description;
+    button.appendChild(summary);
+  }
+
+  const metaParts = [];
+  const priority = firstPresentText(card.priority);
+  if (priority) metaParts.push(titleizeToken(priority));
+  if (card.assignee) metaParts.push(card.assignee);
+  const commentCount = asArray(card.comments).length;
+  if (commentCount) metaParts.push(commentCount + ' comment' + (commentCount === 1 ? '' : 's'));
+  const heartbeatAt = firstPresentText(card.heartbeat_at);
+  const updatedAt = firstPresentText(card.updated_at);
+  if (heartbeatAt) metaParts.push('Heartbeat ' + formatStamp(heartbeatAt));
+  else if (updatedAt) metaParts.push('Updated ' + formatStamp(updatedAt));
+  if (metaParts.length) {
+    const meta = document.createElement('div');
+    meta.className = 'task-board-card-meta';
+    meta.textContent = metaParts.join(' · ');
+    button.appendChild(meta);
+  }
+
+  return button;
+}
+
+function renderTaskBoard() {
+  if (!taskBoardPanelEl || !taskBoardNoteEl) return;
+  taskBoardPanelEl.replaceChildren();
+
+  const cards = Array.isArray(state.taskBoard.cards) ? state.taskBoard.cards : [];
+  if (state.taskBoard.loading && !cards.length) {
+    taskBoardNoteEl.textContent = 'Loading board...';
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = 'Loading board...';
+    taskBoardPanelEl.appendChild(empty);
+    return;
+  }
+
+  if (state.taskBoard.error && !cards.length) {
+    taskBoardNoteEl.textContent = state.taskBoard.error;
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = 'Board unavailable.';
+    taskBoardPanelEl.appendChild(empty);
+    return;
+  }
+
+  if (!cards.length) {
+    taskBoardNoteEl.textContent = 'No board cards yet.';
+    const empty = document.createElement('div');
+    empty.className = 'scratch-empty';
+    empty.textContent = 'No board cards.';
+    taskBoardPanelEl.appendChild(empty);
+    return;
+  }
+
+  const activeCount = cards.filter((card) => !['completed', 'cancelled'].includes(taskBoardStatus(card))).length;
+  taskBoardNoteEl.textContent = state.taskBoard.error
+    ? state.taskBoard.error
+    : (cards.length + ' board task' + (cards.length === 1 ? '' : 's') + ', ' + activeCount + ' active.');
+
+  const laneWrap = document.createElement('div');
+  laneWrap.className = 'task-board-lanes';
+  taskBoardLaneStatuses.forEach((status) => {
+    const laneCards = sortedTaskBoardCards(cards.filter((card) => taskBoardStatus(card) === status));
+    const lane = document.createElement('section');
+    lane.className = 'task-board-lane';
+    lane.dataset.status = status;
+
+    const header = document.createElement('div');
+    header.className = 'task-board-lane-header';
+    const label = document.createElement('div');
+    label.className = 'task-board-lane-title';
+    label.textContent = titleizeToken(status);
+    const count = document.createElement('span');
+    count.className = 'task-board-lane-count';
+    count.textContent = String(laneCards.length);
+    header.appendChild(label);
+    header.appendChild(count);
+    lane.appendChild(header);
+
+    const list = document.createElement('div');
+    list.className = 'task-board-card-list';
+    if (laneCards.length) {
+      laneCards.forEach((card) => list.appendChild(createTaskBoardCard(card)));
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'task-board-empty';
+      empty.textContent = 'Empty';
+      list.appendChild(empty);
+    }
+    lane.appendChild(list);
+    laneWrap.appendChild(lane);
+  });
+  taskBoardPanelEl.appendChild(laneWrap);
+}
+
+async function loadTaskBoard() {
+  return dedup('loadTaskBoard', loadTaskBoardImpl);
+}
+
+async function loadTaskBoardImpl() {
+  state.taskBoard.loading = true;
+  state.taskBoard.error = '';
+  renderTaskBoard();
+  try {
+    const data = await fetchJson('/tasks/board');
+    state.taskBoard.cards = Array.isArray(data.tasks) ? data.tasks : [];
+  } catch (err) {
+    state.taskBoard.error = err.message || 'Failed to load board.';
+  } finally {
+    state.taskBoard.loading = false;
+    renderTaskBoard();
+  }
+}
+
+async function selectTaskBoardCard(card) {
+  if (!card || !card.id) return;
+  setCurrentTaskId(card.id);
+  state.currentTask = {
+    id: card.id,
+    type: firstPresentText(card.type, 'board-card'),
+    channel: firstPresentText(card.channel, 'board'),
+    state: taskBoardStatus(card),
+    title: firstPresentText(card.title, 'Untitled task'),
+    summary: firstPresentText(card.description, card.summary),
+    created_at: firstPresentText(card.created_at),
+    updated_at: firstPresentText(card.updated_at)
+  };
+  renderCurrentTaskPanel();
+  renderTaskBoard();
+  try {
+    const data = await fetchJson('/tasks/' + encodeURIComponent(card.id));
+    const task = data.task || data;
+    if (task && task.id) {
+      applyTaskSnapshot(task, { markSending: false });
+    }
+  } catch (err) {
+    setStatus(err.message || 'Failed to load task');
+  }
+}
+
 function isClosedSessionResponse(response, data) {
   if (!response || ![404, 409].includes(response.status)) return false;
   const message = firstNonEmpty(data && data.error, '').toLowerCase();
@@ -1913,16 +2131,69 @@ function bindStaticInfoHints() {
 function skillMeta(skill) {
   const bits = [];
   if (skill.version) bits.push('version ' + skill.version);
+  if (skill.lifecycle && skill.lifecycle !== 'active') bits.push(skill.lifecycle);
+  if (skill.trust_level) bits.push(skill.trust_level);
   if (skill.imported_from_openclaw) bits.push('OpenClaw');
   if (skill.source_format) bits.push(skill.source_format);
   if (skill.source_name) bits.push(skill.source_name);
   else if (skill.source_url) bits.push(skill.source_url);
   else if (skill.source_path) bits.push(skill.source_path);
+  if (skill.last_update_status) bits.push('update ' + skill.last_update_status);
   if (Array.isArray(skill.import_warnings) && skill.import_warnings.length) {
     bits.push(skill.import_warnings.length + ' ' + pluralize(skill.import_warnings.length, 'warning'));
   }
   if (skill.description) bits.push(skill.description);
   return bits.join(' • ');
+}
+
+function formatSkillProvenance(skill) {
+  if (!skill || !skill.id) return 'No skill selected.';
+  const bits = [];
+  if (skill.source_format) bits.push(skill.source_format);
+  if (skill.source_name) bits.push(skill.source_name);
+  else if (skill.source_url) bits.push(skill.source_url);
+  else if (skill.source_path) bits.push(skill.source_path);
+  if (skill.trust_level) bits.push('trust ' + skill.trust_level);
+  if (skill.lifecycle) bits.push('lifecycle ' + skill.lifecycle);
+  if (skill.content_sha256) bits.push('hash ' + String(skill.content_sha256).slice(0, 12));
+  if (skill.lifecycle_reason) bits.push(skill.lifecycle_reason);
+  return bits.filter(Boolean).join(' • ') || 'Local skill.';
+}
+
+function formatSkillUsage(skill) {
+  if (!skill || !skill.id) return 'No usage recorded.';
+  const selected = Number(skill.selected_count || 0);
+  const injected = Number(skill.injected_count || 0);
+  const viewed = Number(skill.viewed_count || 0);
+  const patched = Number(skill.patched_count || 0);
+  const bits = [
+    'selected ' + selected,
+    'injected ' + injected,
+    'viewed ' + viewed,
+    'patched ' + patched
+  ];
+  if (skill.last_used_at) bits.push('last ' + formatDateTime(skill.last_used_at));
+  return bits.join(' • ');
+}
+
+function formatSkillCuratorReport(report) {
+  if (!report) return '';
+  const lines = [];
+  const stale = Array.isArray(report.stale) ? report.stale : [];
+  const archived = Array.isArray(report.archived) ? report.archived : [];
+  const suggestions = Array.isArray(report.suggestions) ? report.suggestions : [];
+  lines.push('Stale: ' + stale.length);
+  stale.forEach((entry) => lines.push('- ' + firstNonEmpty(entry.name, entry.id) + ' (' + firstNonEmpty(entry.trust_level, 'unknown') + ')'));
+  lines.push('');
+  lines.push('Archived: ' + archived.length);
+  archived.forEach((entry) => lines.push('- ' + firstNonEmpty(entry.name, entry.id)));
+  lines.push('');
+  lines.push('Consolidation suggestions: ' + suggestions.length);
+  suggestions.forEach((entry) => {
+    const ids = Array.isArray(entry.skill_ids) ? entry.skill_ids.join(', ') : '';
+    lines.push('- ' + ids + ': ' + firstNonEmpty(entry.reason, 'Review overlap.'));
+  });
+  return lines.join('\n');
 }
 
 function inferredSkillIdBase() {
@@ -4415,6 +4686,8 @@ function updateAdminButtons() {
   skillContentEl.disabled = state.skillSaving;
   saveSkillEl.disabled = state.skillSaving;
   deleteSkillEl.disabled = state.skillSaving || !state.activeSkillId;
+  checkSkillUpdateEl.disabled = state.skillSaving || state.skillUpdateChecking || !state.activeSkillId;
+  runSkillCuratorEl.disabled = state.skillSaving || state.skillCurating;
   messagingSlackEnabledEl.disabled = state.messagingChannelsSaving;
   messagingSlackBotTokenEl.disabled = state.messagingChannelsSaving;
   messagingSlackSigningSecretEl.disabled = state.messagingChannelsSaving;
@@ -4908,7 +5181,13 @@ function resetSkillForm(statusText) {
   skillTagsEl.value = '';
   skillEnabledEl.checked = true;
   skillContentEl.value = '';
+  skillProvenanceEl.textContent = 'No skill selected.';
+  skillUsageEl.textContent = 'No usage recorded.';
   skillStatusEl.textContent = statusText || 'Create a skill or select an existing one.';
+  if (skillCuratorResultEl && !state.skillCuratorReport) {
+    skillCuratorResultEl.hidden = true;
+    skillCuratorResultEl.textContent = '';
+  }
   renderSkillList();
   updateAdminButtons();
 }
@@ -5188,6 +5467,8 @@ async function loadSkill(skillId) {
     skillTagsEl.value = Array.isArray(skill.tags) ? skill.tags.join(', ') : '';
     skillEnabledEl.checked = skill.enabled !== false;
     skillContentEl.value = skill.content || '';
+    skillProvenanceEl.textContent = formatSkillProvenance(skill);
+    skillUsageEl.textContent = formatSkillUsage(skill);
     skillStatusEl.textContent = 'Loaded.';
     renderSkillList();
   } catch (err) {
@@ -6616,6 +6897,58 @@ async function saveSkill() {
   }
 }
 
+async function checkSkillUpdate() {
+  if (!state.activeSkillId || state.skillUpdateChecking) return;
+  state.skillUpdateChecking = true;
+  skillStatusEl.textContent = 'Checking update...';
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/skills/' + encodeURIComponent(state.activeSkillId) + '/update-check', {
+      method: 'POST'
+    });
+    const update = data.update || {};
+    const status = firstNonEmpty(update.status, 'unknown');
+    skillStatusEl.textContent = 'Update check: ' + status + '.';
+    setStatus('Skill update check complete');
+    await loadAdminConfig();
+    if (state.activeSkillId) await loadSkill(state.activeSkillId);
+  } catch (err) {
+    skillStatusEl.textContent = err.message || 'Failed to check update.';
+  } finally {
+    state.skillUpdateChecking = false;
+    updateAdminButtons();
+  }
+}
+
+async function runSkillCurator() {
+  if (state.skillCurating) return;
+  state.skillCurating = true;
+  skillStatusEl.textContent = 'Running curator...';
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/skills/curate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    state.skillCuratorReport = data.curator || null;
+    if (skillCuratorResultEl) {
+      skillCuratorResultEl.hidden = !state.skillCuratorReport;
+      skillCuratorResultEl.textContent = formatSkillCuratorReport(state.skillCuratorReport);
+    }
+    state.admin.skills = Array.isArray(data.skills) ? data.skills : state.admin.skills;
+    renderSkillList();
+    if (state.activeSkillId) await loadSkill(state.activeSkillId);
+    skillStatusEl.textContent = 'Curator complete.';
+    setStatus('Skill curator complete');
+  } catch (err) {
+    skillStatusEl.textContent = err.message || 'Failed to run curator.';
+  } finally {
+    state.skillCurating = false;
+    updateAdminButtons();
+  }
+}
+
 async function deleteSkill() {
   if (!state.activeSkillId || state.skillSaving) return;
   if (!window.confirm('Delete this skill?')) return;
@@ -6722,6 +7055,7 @@ function setCurrentTaskId(taskId) {
     state.liveEventReceivedAt = 0;
   }
   renderCurrentTaskPanel();
+  renderTaskBoard();
 }
 
 function supportsTaskEventStream() {
@@ -7971,7 +8305,7 @@ async function pollTaskSnapshot() {
     if (!response.ok) {
       throw new Error(data.error || 'Failed to load task');
     }
-    return applyTaskSnapshot(data, { markSending: state.sending });
+    return applyTaskSnapshot(data.task || data, { markSending: state.sending });
   } catch (_err) {
     return null;
   }
@@ -8150,6 +8484,7 @@ async function sendMessage(text, options) {
     await loadArtifacts();
     await loadSharedWorkspaceItems();
     await loadManagedInstances();
+    await loadTaskBoard();
     setStatus('Ready');
   } catch (err) {
     addMessage('error', err.message || 'Request failed');
@@ -8260,6 +8595,9 @@ artifactInsertEl.addEventListener('click', () => insertArtifactIntoComposer());
 artifactScratchEl.addEventListener('click', () => createScratchPadFromArtifact());
 artifactDownloadEl.addEventListener('click', () => downloadArtifact());
 artifactDeleteEl.addEventListener('click', () => deleteArtifact());
+if (refreshTaskBoardEl) {
+  refreshTaskBoardEl.addEventListener('click', () => loadTaskBoard());
+}
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
 refreshLlmCallsEl.addEventListener('click', () => loadLlmCalls());
@@ -8475,6 +8813,8 @@ scheduleViewRunsEl.addEventListener('click', () => {
 });
 saveSkillEl.addEventListener('click', () => saveSkill());
 deleteSkillEl.addEventListener('click', () => deleteSkill());
+checkSkillUpdateEl.addEventListener('click', () => checkSkillUpdate());
+runSkillCuratorEl.addEventListener('click', () => runSkillCurator());
 saveMessagingChannelsEl.addEventListener('click', () => saveMessagingChannels());
 messagingSlackEnabledEl.addEventListener('change', () => updateAdminButtons());
 messagingSlackBotTokenEl.addEventListener('input', () => updateAdminButtons());
@@ -8536,6 +8876,7 @@ renderInputRequest();
 renderApproval();
 renderMessages();
 renderCurrentTaskPanel();
+renderTaskBoard();
 syncLocalDocPanel('No local document selected.');
 syncArtifactPanel('No artifact selected.');
 syncScratchEditor('No note selected.');
@@ -8570,6 +8911,7 @@ Promise.all([
   loadAdminConfig(),
   loadHistorySessions(),
   loadHistorySchedules(),
+  loadTaskBoard(),
   loadLlmCalls()
 ]).catch(() => {
   setStatus('Some data failed to load — check your connection');

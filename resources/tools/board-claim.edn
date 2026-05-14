@@ -1,0 +1,19 @@
+;; Claim a durable coordination-board card.
+
+{:id          :board-claim
+ :name        "board-claim"
+ :description "Claim a durable coordination-board card for an assignee. Returns a claim token that should be supplied by later updates from that assignee."
+ :tags        #{:board :task :coordination :claim :write}
+ :parameters  {"type"       "object"
+               "properties" {"card_id"     {"type"        "string"
+                                            "description" "Board card UUID."}
+                             "assignee"    {"type"        "string"
+                                            "description" "Assignee instance, role, or name."}
+                             "claim_token" {"type"        "string"
+                                            "description" "Existing claim token when renewing or re-claiming an already claimed card."}}
+               "required"   ["card_id" "assignee"]}
+ :handler     "(fn [args]
+                 (xia.board/claim-card!
+                   (get args \"card_id\")
+                   {:assignee (get args \"assignee\")
+                    :claim-token (get args \"claim_token\")}))"}
