@@ -64,7 +64,8 @@
     (is (= :board-list (:tool/id (db/get-tool :board-list))))
     (is (= :browser-open (:tool/id (db/get-tool :browser-open))))
     (is (= :calendar-event-create (:tool/id (db/get-tool :calendar-event-create))))
-    (is (= :local-doc-search (:tool/id (db/get-tool :local-doc-search))))))
+    (is (= :local-doc-search (:tool/id (db/get-tool :local-doc-search))))
+    (is (= :pipeline-run (:tool/id (db/get-tool :pipeline-run))))))
 
 (deftest ensure-bundled-tools-refreshes-bundled-approval-policy
   (db/install-tool! {:id          :email-list

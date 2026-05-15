@@ -27,6 +27,7 @@
             [xia.memory :as memory]
             [xia.memory-edit :as memory-edit]
             [xia.peer :as peer]
+            [xia.pipeline :as pipeline]
             [xia.scratch :as scratch]
             [xia.schedule :as schedule]
             [xia.secret :as secret]
@@ -251,6 +252,9 @@
    'check-import-update! skill/check-import-update!
    'curate-skills!     skill/curate-skills!})
 
+(def ^:private xia-pipeline-ns
+  {'run! pipeline/run!})
+
 (def ^:private sci-core-overrides
   {'slurp       (blocked-sci-fn 'clojure.core/slurp)
    'spit        (blocked-sci-fn 'clojure.core/spit)
@@ -347,7 +351,8 @@
                   'xia.browser        xia-browser-ns
                   'xia.agent          xia-agent-ns
                   'xia.db             xia-db-ns
-                  'xia.sci-env        xia-sci-env-ns}
+                  'xia.sci-env        xia-sci-env-ns
+                  'xia.pipeline       xia-pipeline-ns}
      :deny       denied-sci-symbols
      :classes    {'java.util.Date java.util.Date
                   'java.util.UUID java.util.UUID}}))

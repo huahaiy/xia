@@ -61,6 +61,9 @@
 (def ^:private default-tool-sci-eval-timeout-ms 10000)
 (def ^:private default-tool-sci-handler-timeout-ms 120000)
 (def ^:private default-tool-max-active-sci-workers 32)
+(def ^:private default-tool-pipeline-timeout-ms 120000)
+(def ^:private default-tool-pipeline-max-calls 8)
+(def ^:private default-tool-pipeline-max-code-chars 12000)
 (def ^:private default-local-doc-ocr-timeout-ms 120000)
 (def ^:private default-local-doc-ocr-max-tokens 2048)
 (def ^:private default-browser-playwright-timeout-ms 15000)
@@ -435,6 +438,21 @@
   []
   (cfg/positive-long :tool/max-active-sci-workers
                      default-tool-max-active-sci-workers))
+
+(defn tool-pipeline-timeout-ms
+  []
+  (cfg/positive-long :tool/pipeline-timeout-ms
+                     default-tool-pipeline-timeout-ms))
+
+(defn tool-pipeline-max-calls
+  []
+  (cfg/positive-long :tool/pipeline-max-calls
+                     default-tool-pipeline-max-calls))
+
+(defn tool-pipeline-max-code-chars
+  []
+  (cfg/positive-long :tool/pipeline-max-code-chars
+                     default-tool-pipeline-max-code-chars))
 
 (defn local-doc-ocr-timeout-ms
   []

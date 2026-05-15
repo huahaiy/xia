@@ -15,6 +15,7 @@
   xia.local-ocr-test
   xia.mcp-test
   xia.oauth-test
+  xia.pipeline-test
   xia.prompt-test
   xia.runtime-overlay-test
   xia.schedule-test

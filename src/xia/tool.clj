@@ -16,6 +16,7 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.llm :as llm]
+            [xia.pipeline :as pipeline]
             [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]
             [xia.task-policy :as task-policy]
@@ -32,6 +33,7 @@
   ["tools/web-search.edn"
    "tools/web-fetch.edn"
    "tools/web-extract.edn"
+   "tools/pipeline-run.edn"
    "tools/browser-runtime-status.edn"
    "tools/browser-bootstrap-runtime.edn"
    "tools/browser-install-deps.edn"
@@ -717,81 +719,82 @@
    (if-let [{:keys [tool handler]} (get @registry tool-id)]
      (if (fn? handler)
         (try
-          (binding [prompt/*interaction-context* (assoc context
-                                                       :tool-id tool-id
-                                                       :tool-name (or (:tool/name tool)
-                                                                      (name tool-id)))
-                   wm/*session-id*            (or (:resource-session-id context)
-                                                  (:session-id context))]
-           (let [channel-blocked? (not (tool-channel-compatible? tool context))
-                 vision-compatible? (tool-vision-compatible? tool context)
-                 branch-worker? (:branch-worker? context)
-                 branch-allowed? (task-policy/branch-worker-tool-allowed?
-                                  tool
-                                  (tool-approval-policy tool))
-                 tool-name (or (:tool/name tool) (name tool-id))
-                 decision-context {:tool-id tool-id
-                                   :tool-name tool-name
-                                   :channel-compatible? (not channel-blocked?)
-                                   :channel-error (tool-channel-block-message tool)
-                                   :vision-compatible? vision-compatible?
-                                   :vision-error (tool-vision-block-message tool)
-                                   :branch-worker? branch-worker?
-                                   :branch-allowed? branch-allowed?
-                                   :branch-error (str "tool " (name tool-id)
-                                                      " is not available to branch workers")}
-                 preflight-decision (task-policy/tool-execution-decision decision-context)
-                 approval-decision (when (:allowed? preflight-decision)
-                                     (ensure-approved tool-id
-                                                      tool
-                                                      arguments
-                                                      context))
-                 {:keys [allowed? error policy mode] :as execution-decision}
-                 (if approval-decision
-                   (task-policy/tool-execution-decision
-                    (assoc decision-context :approval-decision approval-decision))
-                   preflight-decision)
-                 _ (prompt/policy-decision! execution-decision)]
-             (if allowed?
-               (do
-                 (prompt/status! {:state    :running
-                                  :phase    :tool
-                                  :message  (str "Running tool " tool-name)
-                                  :tool-id  tool-id
-                                  :tool-name tool-name})
-                 (try
-                   (let [result (normalize-tool-result tool-id
-                                                      (sci-env/call-fn handler arguments))]
-                     (audit-entry! context tool-id tool arguments
-                                   {:status          "success"
-                                    :approval-policy (name policy)
-                                    :approval-mode   (name mode)})
-                     (prompt/status! {:state    :running
-                                      :phase    :tool
-                                      :message  (str "Finished tool " tool-name)
-                                      :tool-id  tool-id
-                                      :tool-name tool-name})
-                     result)
-                   (catch Exception e
-                     (audit-entry! context tool-id tool arguments
-                                   {:status          "error"
-                                    :approval-policy (name policy)
-                                    :approval-mode   (name mode)
-                                    :error           (.getMessage e)})
-                     (throw e))))
-               (do
-                 (audit-entry! context tool-id tool arguments
-                               {:status          "blocked"
-                                :approval-policy (name policy)
-                                :approval-mode   (name mode)
-                                :error           error})
-                 (prompt/status! {:state    :running
-                                  :phase    :approval
-                                  :message  (str "Skipped tool " tool-name
-                                                 ": " error)
-                                  :tool-id  tool-id
-                                  :tool-name tool-name})
-                 (approval-error tool-id error)))))
+          (let [tool-name       (or (:tool/name tool) (name tool-id))
+                handler-context (assoc context
+                                       :tool-id tool-id
+                                       :tool-name tool-name)]
+            (binding [prompt/*interaction-context* handler-context
+                      pipeline/*tool-context*      handler-context
+                      wm/*session-id*              (or (:resource-session-id context)
+                                                       (:session-id context))]
+              (let [channel-blocked? (not (tool-channel-compatible? tool context))
+                    vision-compatible? (tool-vision-compatible? tool context)
+                    branch-worker? (:branch-worker? context)
+                    branch-allowed? (task-policy/branch-worker-tool-allowed?
+                                     tool
+                                     (tool-approval-policy tool))
+                    decision-context {:tool-id tool-id
+                                      :tool-name tool-name
+                                      :channel-compatible? (not channel-blocked?)
+                                      :channel-error (tool-channel-block-message tool)
+                                      :vision-compatible? vision-compatible?
+                                      :vision-error (tool-vision-block-message tool)
+                                      :branch-worker? branch-worker?
+                                      :branch-allowed? branch-allowed?
+                                      :branch-error (str "tool " (name tool-id)
+                                                         " is not available to branch workers")}
+                    preflight-decision (task-policy/tool-execution-decision decision-context)
+                    approval-decision (when (:allowed? preflight-decision)
+                                        (ensure-approved tool-id
+                                                         tool
+                                                         arguments
+                                                         context))
+                    {:keys [allowed? error policy mode] :as execution-decision}
+                    (if approval-decision
+                      (task-policy/tool-execution-decision
+                       (assoc decision-context :approval-decision approval-decision))
+                      preflight-decision)
+                    _ (prompt/policy-decision! execution-decision)]
+                (if allowed?
+                  (do
+                    (prompt/status! {:state    :running
+                                     :phase    :tool
+                                     :message  (str "Running tool " tool-name)
+                                     :tool-id  tool-id
+                                     :tool-name tool-name})
+                    (try
+                      (let [result (normalize-tool-result tool-id
+                                                         (sci-env/call-fn handler arguments))]
+                        (audit-entry! context tool-id tool arguments
+                                      {:status          "success"
+                                       :approval-policy (name policy)
+                                       :approval-mode   (name mode)})
+                        (prompt/status! {:state    :running
+                                         :phase    :tool
+                                         :message  (str "Finished tool " tool-name)
+                                         :tool-id  tool-id
+                                         :tool-name tool-name})
+                        result)
+                      (catch Exception e
+                        (audit-entry! context tool-id tool arguments
+                                      {:status          "error"
+                                       :approval-policy (name policy)
+                                       :approval-mode   (name mode)
+                                       :error           (.getMessage e)})
+                        (throw e))))
+                  (do
+                    (audit-entry! context tool-id tool arguments
+                                  {:status          "blocked"
+                                   :approval-policy (name policy)
+                                   :approval-mode   (name mode)
+                                   :error           error})
+                    (prompt/status! {:state    :running
+                                     :phase    :approval
+                                     :message  (str "Skipped tool " tool-name
+                                                    ": " error)
+                                     :tool-id  tool-id
+                                     :tool-name tool-name})
+                    (approval-error tool-id error))))))
          (catch Exception e
            (let [cancelled? (cancelled-tool-error? e)
                  message    (if cancelled?
@@ -828,3 +831,17 @@
                                 :error   (str "Unknown tool: " tool-id)
                                 :arguments arguments}))
        {:error (str "Unknown tool: " tool-id)}))))
+
+(defn execute-pipeline-tool
+  "Execute one whitelisted tool from a restricted pipeline."
+  [tool-id arguments context]
+  (let [tool-id* (pipeline/normalize-tool-id tool-id)]
+    (if (and tool-id* (pipeline/tool-allowed? tool-id*))
+      (execute-tool tool-id*
+                    arguments
+                    (assoc context
+                           :pipeline? true
+                           :pipeline-tool-id tool-id*))
+      {:error (str "Tool "
+                   (or (some-> tool-id* name) (str tool-id))
+                   " is not allowed in restricted pipelines")})))
