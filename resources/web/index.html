@@ -284,6 +284,24 @@
             </div>
           </div>
           <div class="task-tab-stack">
+            <section class="task-section persistent-goal-section" aria-labelledby="persistent-goal-heading">
+              <div class="task-board-header">
+                <div>
+                  <h3 class="detail-header" id="persistent-goal-heading">Persistent Goal</h3>
+                  <p class="task-empty-note" id="persistent-goal-note">No persistent goal.</p>
+                </div>
+              </div>
+              <div class="persistent-goal-editor">
+                <textarea id="persistent-goal-input" class="scratch-editor persistent-goal-input" placeholder="Keep working until..." rows="3"></textarea>
+                <div class="actions persistent-goal-actions">
+                  <button type="button" class="secondary" id="persistent-goal-status">Status</button>
+                  <button type="button" class="secondary" id="persistent-goal-pause" disabled>Pause</button>
+                  <button type="button" class="secondary" id="persistent-goal-resume" disabled>Resume</button>
+                  <button type="button" class="secondary" id="persistent-goal-clear" disabled>Clear</button>
+                  <button type="button" class="primary" id="persistent-goal-set">Set</button>
+                </div>
+              </div>
+            </section>
             <section class="task-section" aria-labelledby="current-task-heading">
               <h3 class="detail-header" id="current-task-heading">Current Task</h3>
               <div id="current-task-panel" class="task-panel-body">

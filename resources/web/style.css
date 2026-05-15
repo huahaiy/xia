@@ -1171,6 +1171,22 @@ textarea:focus-visible {
 .task-section > .detail-header {
   margin: 0;
 }
+.persistent-goal-section {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 16px;
+}
+.persistent-goal-editor {
+  display: grid;
+  gap: 10px;
+}
+.persistent-goal-input {
+  min-height: 82px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+.persistent-goal-actions {
+  justify-content: flex-end;
+}
 .task-panel-body {
   display: grid;
   gap: 12px;

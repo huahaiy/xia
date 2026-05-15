@@ -7,6 +7,7 @@
             [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
+            [xia.goal :as goal]
             [xia.prompt :as prompt]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
@@ -428,6 +429,31 @@
         (and (= kind :schedule) (contains? contract :trusted?)) (assoc :trusted? (:trusted? contract))
         (and (= kind :schedule) (:tool-id contract)) (assoc :tool-id (:tool-id contract))))))
 
+(defn- persistent-goal->body
+  [deps goal]
+  (when goal
+    (cond-> {:id (:id goal)
+             :text (:text goal)
+             :status (some-> (:status goal) name)
+             :source (some-> (:source goal) name)
+             :turn_count (long (or (:turn-count goal) 0))
+             :max_turns (:max-turns goal)}
+      (:last-task-id goal) (assoc :last_task_id (str (:last-task-id goal)))
+      (:last-task-state goal) (assoc :last_task_state (some-> (:last-task-state goal) name))
+      (:last-judge-status goal) (assoc :last_judge_status (some-> (:last-judge-status goal) name))
+      (:last-judge-reason goal) (assoc :last_judge_reason (:last-judge-reason goal))
+      (:last-guardrail goal) (assoc :last_guardrail (some-> (:last-guardrail goal) name))
+      (:last-summary goal) (assoc :last_summary (:last-summary goal))
+      (:next-step goal) (assoc :next_step (:next-step goal))
+      (:last-budget-status goal) (assoc :last_budget_status (:last-budget-status goal))
+      (:created-at goal) (assoc :created_at (instant->str* deps (:created-at goal)))
+      (:updated-at goal) (assoc :updated_at (instant->str* deps (:updated-at goal)))
+      (:last-used-at goal) (assoc :last_used_at (instant->str* deps (:last-used-at goal)))
+      (:last-judged-at goal) (assoc :last_judged_at (instant->str* deps (:last-judged-at goal)))
+      (:paused-at goal) (assoc :paused_at (instant->str* deps (:paused-at goal)))
+      (:resumed-at goal) (assoc :resumed_at (instant->str* deps (:resumed-at goal)))
+      (:completed-at goal) (assoc :completed_at (instant->str* deps (:completed-at goal))))))
+
 (defn- task->body
   ([deps task]
    (task->body deps
@@ -442,6 +468,7 @@
          checkpoint-at   (task-runtime/task-checkpoint-at task)
          resume-hint     (task-runtime/task-resume-hint task)
          recovery-brief  (task-runtime/task-recovery-brief task)
+         persistent-goal (get-in task [:meta :persistent-goal])
          contract        (:contract task)
          inspection      (task-inspection/task-inspection
                           {:instant->str #(instant->str* deps %)
@@ -474,6 +501,7 @@
        checkpoint-at (assoc :checkpoint_at (instant->str* deps checkpoint-at))
        resume-hint (assoc :resume_hint resume-hint)
        recovery-brief (assoc :recovery_brief recovery-brief)
+       persistent-goal (assoc :persistent_goal (persistent-goal->body deps persistent-goal))
        inspection (assoc :inspection inspection)
        session-links (assoc :session_links session-links)
        stack (assoc :stack stack)
@@ -654,6 +682,7 @@
                                           :artifact-ids artifact-ids)
           assistant-message (db/latest-session-message session-id #{:assistant})
           task              (db/current-session-task session-id)
+          persistent-goal   (goal/current-goal session-id)
           body              (cond-> {:session_id (str session-id)
                                      :role       "assistant"
                                      :content    response
@@ -661,6 +690,7 @@
                                                    (session-message->body deps assistant-message))}
                                task (assoc :task (task->body deps task))
                                task (assoc :task_id (some-> (:id task) str))
+                               persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
                                (:current-turn-id task) (assoc :current_turn_id
                                                               (str (:current-turn-id task))))]
       (touch-rest-session!* deps session-id)
@@ -727,6 +757,7 @@
        (do
          (touch-rest-session!* deps sid)
          (let [task   (db/current-session-task (java.util.UUID/fromString sid))
+               persistent-goal (goal/current-goal (java.util.UUID/fromString sid))
                status (or (when task
                             (task-runtime-status deps task))
                           (get @(session-statuses-atom deps) sid))]
@@ -734,6 +765,7 @@
                            (cond-> {:session_id sid
                                     :status     (status->body deps status)}
                              task (assoc :task_id (some-> (:id task) str))
+                             persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
                              (:current-turn-id task) (assoc :current_turn_id
                                                             (str (:current-turn-id task)))))))))))
 
@@ -757,15 +789,174 @@
        :else
        (do
          (touch-rest-session!* deps sid)
-         (let [task (db/current-session-task (java.util.UUID/fromString sid))]
+         (let [task (db/current-session-task (java.util.UUID/fromString sid))
+               persistent-goal (goal/current-goal (java.util.UUID/fromString sid))]
            (json-response* deps 200
                            (cond-> {:session_id sid
                                     :task       (when task
                                                   (task->body deps task))}
                              task (assoc :task_id (some-> (:id task) str))
                              task (assoc :task_live (boolean (live-task? task)))
+                             persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
                              (:current-turn-id task) (assoc :current_turn_id
                                                             (str (:current-turn-id task)))))))))))
+
+(defn- with-goal-session
+  [deps session-id expected-channel f]
+  (let [sid (parse-session-id* deps session-id)]
+    (when (and sid (= expected-channel :http))
+      (maybe-resume-http-session!* deps sid expected-channel))
+    (cond
+      (nil? sid)
+      (json-response* deps 400 {:error "invalid session id"})
+
+      (not (session-accessible?* deps sid expected-channel))
+      (json-response* deps 404 {:error "session not found"})
+
+      (not (session-active?* deps sid))
+      (json-response* deps 409 {:error "session closed"})
+
+      :else
+      (let [uuid (java.util.UUID/fromString sid)]
+        (touch-rest-session!* deps sid)
+        (f uuid)))))
+
+(defn- goal-task-id
+  [goal]
+  (let [value (:last-task-id goal)]
+    (cond
+      (uuid? value) value
+      (string? value) (try
+                        (java.util.UUID/fromString value)
+                        (catch IllegalArgumentException _ nil))
+      :else nil)))
+
+(defn- goal-task-control->body
+  [deps result]
+  (when result
+    (cond-> {:status (some-> (:status result) name)}
+      (:error result) (assoc :error (:error result))
+      (:task-id result) (assoc :task_id (str (:task-id result)))
+      (:session-id result) (assoc :session_id (str (:session-id result)))
+      (:task result) (assoc :task (task->body deps (:task result))))))
+
+(defn- goal-ex-response
+  [deps ^clojure.lang.ExceptionInfo e]
+  (let [data (ex-data e)]
+    (json-response* deps
+                    (long (or (:status data) 500))
+                    {:error (or (:error data) (.getMessage e))})))
+
+(defn- pause-goal-task!
+  [goal]
+  (when-let [task-id (goal-task-id goal)]
+    (when-let [task (db/get-task task-id)]
+      (when (contains? #{:running :waiting_input :waiting_approval :resumable :paused}
+                       (:state task))
+        (agent/pause-task! task-id)))))
+
+(defn- resume-goal-task!
+  [goal]
+  (when-let [task-id (goal-task-id goal)]
+    (when-let [task (db/get-task task-id)]
+      (when-not (contains? #{:cancelled :failed} (:state task))
+        (agent/resume-task! task-id
+                            :message (str "Continue working on persistent goal: "
+                                          (:text goal)))))))
+
+(defn handle-get-goal
+  ([deps session-id]
+   (handle-get-goal deps session-id nil))
+  ([deps session-id expected-channel]
+   (with-goal-session
+     deps
+     session-id
+     expected-channel
+     (fn [sid]
+       (json-response* deps 200
+                       {:session_id (str sid)
+                        :goal (persistent-goal->body deps (goal/current-goal sid))})))))
+
+(defn handle-set-goal
+  ([deps session-id req]
+   (handle-set-goal deps session-id req nil))
+  ([deps session-id req expected-channel]
+   (with-goal-session
+     deps
+     session-id
+     expected-channel
+     (fn [sid]
+       (try
+         (if (session-busy?* deps sid)
+           (json-response* deps 409 {:error "session is busy"})
+           (let [data (read-body* deps req)
+                 text (or (get data "goal")
+                          (get data "text"))
+                 max-turns (or (get data "max_turns")
+                               (get data "max-turns"))
+                 goal* (goal/set-goal! sid text :max-turns max-turns)]
+             (json-response* deps 200
+                             {:session_id (str sid)
+                              :goal (persistent-goal->body deps goal*)})))
+         (catch clojure.lang.ExceptionInfo e
+           (goal-ex-response deps e)))))))
+
+(defn handle-pause-goal
+  ([deps session-id]
+   (handle-pause-goal deps session-id nil))
+  ([deps session-id expected-channel]
+   (with-goal-session
+     deps
+     session-id
+     expected-channel
+     (fn [sid]
+       (try
+         (let [goal* (goal/pause-goal! sid)
+               control (pause-goal-task! goal*)]
+           (json-response* deps 200
+                           (cond-> {:session_id (str sid)
+                                    :goal (persistent-goal->body deps goal*)}
+                             control (assoc :task_control
+                                            (goal-task-control->body deps control)))))
+         (catch clojure.lang.ExceptionInfo e
+           (goal-ex-response deps e)))))))
+
+(defn handle-resume-goal
+  ([deps session-id]
+   (handle-resume-goal deps session-id nil))
+  ([deps session-id expected-channel]
+   (with-goal-session
+     deps
+     session-id
+     expected-channel
+     (fn [sid]
+       (try
+         (let [goal* (goal/resume-goal! sid)
+               control (resume-goal-task! goal*)]
+           (json-response* deps 200
+                           (cond-> {:session_id (str sid)
+                                    :goal (persistent-goal->body deps goal*)}
+                             control (assoc :task_control
+                                            (goal-task-control->body deps control)))))
+         (catch clojure.lang.ExceptionInfo e
+           (goal-ex-response deps e)))))))
+
+(defn handle-clear-goal
+  ([deps session-id]
+   (handle-clear-goal deps session-id nil))
+  ([deps session-id expected-channel]
+   (with-goal-session
+     deps
+     session-id
+     expected-channel
+     (fn [sid]
+       (if (session-busy?* deps sid)
+         (json-response* deps 409 {:error "session is busy"})
+         (do
+           (goal/clear-goal! sid)
+           (json-response* deps 200
+                           {:session_id (str sid)
+                            :goal nil})))))))
 
 (defn handle-get-approval
   ([deps session-id]

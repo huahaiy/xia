@@ -8,6 +8,7 @@
   xia.crypto-test
   xia.db-security-test
   xia.email-test
+  xia.goal-test
   xia.identity-test
   xia.llm-smoke-test
   xia.local-doc-smoke-test

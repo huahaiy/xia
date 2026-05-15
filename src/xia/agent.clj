@@ -18,6 +18,7 @@
             [xia.audit :as audit]
             [xia.context :as context]
             [xia.db :as db]
+            [xia.goal :as goal]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
@@ -1150,15 +1151,19 @@
   (task-runtime/runtime-autonomy-state session-id task-id))
 
 (defn- ensure-runtime-task!
-  [session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
-  (task-runtime/ensure-runtime-task! (task-runtime-deps)
-                                     session-id
-                                     channel
-                                     user-message
-                                     autonomy-state
-                                     task-id
-                                     runtime-op
-                                     interrupting-turn-id))
+  [session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id
+   & {:keys [turn-input]}]
+  (apply task-runtime/ensure-runtime-task!
+         (task-runtime-deps)
+         session-id
+         channel
+         user-message
+         autonomy-state
+         task-id
+         runtime-op
+         interrupting-turn-id
+         (cond-> []
+           turn-input (conj :turn-input turn-input))))
 
 (defn- record-task-message-item!
   [task-turn-id item-type role text & {:keys [message-id llm-call-id data status]}]
@@ -2149,6 +2154,11 @@
                        autonomy-state
                        (autonomous/reconcile-invalid-goal-complete autonomy-state))}))
 
+(defn- record-persistent-goal-judge!
+  [session-id task-id attrs]
+  (when (goal/current-goal session-id)
+    (goal/judge-after-turn! session-id (assoc attrs :task-id task-id))))
+
 (defn- persist-assistant-message!
   [session-id text execution-context response local-doc-ids artifact-ids]
   (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
@@ -2481,17 +2491,32 @@
                 (validate-user-message! user-message)
                 (throw-if-cancelled! session-id)
                 (wm/ensure-wm! session-id)
-                (let [initial-autonomy-state (autonomous/prepare-turn-state
+                (let [active-goal* (goal/active-goal session-id)
+                      task-goal-id (when task-id
+                                     (some-> task-id
+                                             db/get-task
+                                             :meta
+                                             :persistent-goal
+                                             :id))
+                      persistent-goal (when (and active-goal*
+                                                 (or (nil? task-id)
+                                                     (= (:id active-goal*) task-goal-id)))
+                                        active-goal*)
+                      autonomy-user-message (goal/autonomy-input persistent-goal user-message)
+                      wm-user-message (goal/working-memory-input persistent-goal user-message)
+                      initial-autonomy-state (autonomous/prepare-turn-state
                                               (task-runtime/runtime-autonomy-state session-id task-id)
-                                              user-message)
+                                              autonomy-user-message)
                       {:keys [task-id task-turn-id]} (task-runtime/ensure-runtime-task! (task-runtime-deps)
                                                                                          session-id
                                                                                          channel
-                                                                                         user-message
+                                                                                         autonomy-user-message
                                                                                          initial-autonomy-state
                                                                                          task-id
                                                                                          runtime-op
-                                                                                         interrupting-turn-id)
+                                                                                         interrupting-turn-id
+                                                                                         :turn-input user-message)
+                      _ (goal/attach-task! session-id task-id)
                       task-run (register-task-run! session-id task-id task-turn-id)
                       _ (reset! runtime-task {:task-id task-id
                                               :task-turn-id task-turn-id
@@ -2529,6 +2554,7 @@
                                                      :task-turn-id task-turn-id
                                                      :channel channel
                                                      :user-message user-message
+                                                     :persistent-goal-id (:id persistent-goal)
                                                      :resource-session-id resource-session-id
                                                      :assistant-provider assistant-provider
                                                      :assistant-provider-id assistant-provider-id})
@@ -2537,7 +2563,7 @@
                       max-iterations* (long (autonomous/max-iterations))
                       transient-messages* (vec (filter map? transient-messages))
                       initial-wm-message (or working-memory-message
-                                             user-message)
+                                             wm-user-message)
                       initial-wm-query-fingerprint (wm-query-signature initial-wm-message)
                       turn-budget-state (or *turn-llm-budget-state*
                                             (atom (task-policy/new-turn-llm-budget session-id
@@ -2720,6 +2746,15 @@
                                                   {:state :resumable
                                                    :summary (truncate-summary final-text 500)
                                                    :autonomy-state updated-autonomy-state})
+                              (record-persistent-goal-judge!
+                               session-id
+                               task-id
+                               {:task-state :resumable
+                                :control control
+                                :autonomy-state updated-autonomy-state
+                                :guardrail :budget
+                                :budget-status budget-status
+                                :summary (truncate-summary final-text 500)})
                               (when-not (str/blank? text)
                                 (launch-fact-utility-review-without-budget! session-id
                                                                             fact-eids*
@@ -2775,6 +2810,13 @@
                                                    :autonomy-state (when-not (clear-autonomy-state-on-terminal? parsed)
                                                                      updated-autonomy-state)
                                                    :finished-at (java.util.Date.)})
+                              (record-persistent-goal-judge!
+                               session-id
+                               task-id
+                               {:task-state :completed
+                                :control control
+                                :autonomy-state updated-autonomy-state
+                                :summary (truncate-summary text 500)})
                               (when (clear-autonomy-state-on-terminal? parsed)
                                 (wm/clear-autonomy-state! session-id)
                                 (wm/snapshot! session-id))
@@ -2809,6 +2851,14 @@
                                                   {:state :resumable
                                                    :summary (truncate-summary final-text 500)
                                                    :autonomy-state updated-autonomy-state})
+                              (record-persistent-goal-judge!
+                               session-id
+                               task-id
+                               {:task-state :resumable
+                                :control control
+                                :autonomy-state updated-autonomy-state
+                                :guardrail :iteration-limit
+                                :summary (truncate-summary final-text 500)})
                               (launch-fact-utility-review-without-budget! session-id
                                                                           fact-eids*
                                                                           user-message
@@ -2907,7 +2957,15 @@
                                          :stop-reason (:stop-reason outcome)
                                          :summary (:summary outcome)
                                          :autonomy-state (wm/autonomy-state session-id)
-                                         :finished-at (java.util.Date.)}))
+                                         :finished-at (java.util.Date.)})
+                    (record-persistent-goal-judge!
+                     session-id
+                     task-id
+                     {:task-state (:task-state outcome)
+                      :control nil
+                      :autonomy-state (wm/autonomy-state session-id)
+                      :guardrail (:stop-reason outcome)
+                      :summary (:summary outcome)}))
                   (request-session-cancel! session-id "request interrupted")
                   (if (stop-worker! session-id)
                     (let [cancel-ex (request-cancelled-ex session-id
@@ -2944,7 +3002,15 @@
                                                :stop-reason (:stop-reason outcome)
                                                :summary (:summary outcome)
                                                :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)}))
+                                               :finished-at (java.util.Date.)})
+                          (record-persistent-goal-judge!
+                           session-id
+                           task-id
+                           {:task-state (:task-state outcome)
+                            :control nil
+                            :autonomy-state (wm/autonomy-state session-id)
+                            :guardrail (:stop-reason outcome)
+                            :summary (:summary outcome)}))
                         (save-schedule-checkpoint! request-context
                                                    {:phase :cancelled
                                                     :summary (or (:summary (task-cancellation-outcome (:reason data)))
@@ -2972,7 +3038,15 @@
                                                :summary (.getMessage e)
                                                :error (.getMessage e)
                                                :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)}))
+                                               :finished-at (java.util.Date.)})
+                          (record-persistent-goal-judge!
+                           session-id
+                           task-id
+                           {:task-state :failed
+                            :control nil
+                            :autonomy-state (wm/autonomy-state session-id)
+                            :guardrail :stalled
+                            :summary (.getMessage e)}))
                         (save-schedule-checkpoint! request-context
                                                    {:phase :stalled
                                                     :summary (.getMessage e)
@@ -2998,7 +3072,15 @@
                                                :summary (.getMessage e)
                                                :error (.getMessage e)
                                                :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)}))
+                                               :finished-at (java.util.Date.)})
+                          (record-persistent-goal-judge!
+                           session-id
+                           task-id
+                           {:task-state :resumable
+                            :control nil
+                            :autonomy-state (wm/autonomy-state session-id)
+                            :guardrail :restart-loop
+                            :summary (.getMessage e)}))
                         (save-schedule-checkpoint! request-context
                                                    {:phase :paused
                                                     :summary (.getMessage e)
@@ -3024,7 +3106,15 @@
                                                :summary (.getMessage e)
                                                :error (.getMessage e)
                                                :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)}))
+                                               :finished-at (java.util.Date.)})
+                          (record-persistent-goal-judge!
+                           session-id
+                           task-id
+                           {:task-state :failed
+                            :control nil
+                            :autonomy-state (wm/autonomy-state session-id)
+                            :guardrail :failed
+                            :summary (.getMessage e)}))
                         (save-schedule-checkpoint! request-context
                                                    {:phase :error
                                                     :summary (.getMessage e)
@@ -3050,7 +3140,15 @@
                                              :stop-reason (:stop-reason outcome)
                                              :summary (:summary outcome)
                                              :autonomy-state (wm/autonomy-state session-id)
-                                             :finished-at (java.util.Date.)}))
+                                             :finished-at (java.util.Date.)})
+                        (record-persistent-goal-judge!
+                         session-id
+                         task-id
+                         {:task-state (:task-state outcome)
+                          :control nil
+                          :autonomy-state (wm/autonomy-state session-id)
+                          :guardrail (:stop-reason outcome)
+                          :summary (:summary outcome)}))
                       (save-schedule-checkpoint! request-context
                                                  {:phase :cancelled
                                                   :summary (:summary (task-cancellation-outcome (:reason (ex-data cancel-ex))))
@@ -3075,7 +3173,15 @@
                                              :summary (.getMessage e)
                                              :error (.getMessage e)
                                              :autonomy-state (wm/autonomy-state session-id)
-                                             :finished-at (java.util.Date.)}))
+                                             :finished-at (java.util.Date.)})
+                        (record-persistent-goal-judge!
+                         session-id
+                         task-id
+                         {:task-state :failed
+                          :control nil
+                          :autonomy-state (wm/autonomy-state session-id)
+                          :guardrail :failed
+                          :summary (.getMessage e)}))
                       (save-schedule-checkpoint! request-context
                                                  {:phase :error
                                                   :summary (.getMessage e)

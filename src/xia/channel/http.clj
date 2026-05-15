@@ -1886,6 +1886,46 @@
   ([session-id expected-channel]
    (http-session/handle-get-current-task (session-handler-deps) session-id expected-channel)))
 
+(defn- handle-get-goal
+  ([session-id]
+   (handle-get-goal session-id nil))
+  ([session-id expected-channel]
+   (http-session/handle-get-goal (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-set-goal
+  ([session-id req]
+   (handle-set-goal session-id req nil))
+  ([session-id req expected-channel]
+   (http-session/handle-set-goal (session-handler-deps) session-id req expected-channel)))
+
+(defn- handle-pause-goal
+  ([session-id]
+   (handle-pause-goal session-id nil))
+  ([session-id expected-channel]
+   (http-session/handle-pause-goal (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-resume-goal
+  ([session-id]
+   (handle-resume-goal session-id nil))
+  ([session-id expected-channel]
+   (http-session/handle-resume-goal (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-clear-goal
+  ([session-id]
+   (handle-clear-goal session-id nil))
+  ([session-id expected-channel]
+   (http-session/handle-clear-goal (session-handler-deps) session-id expected-channel)))
+
+(defn- handle-local-goal
+  [session-id handler]
+  (if-not (session-id-str session-id)
+    (handler session-id nil)
+    (if (local-ui-session-allowed? session-id)
+      (handler session-id
+               (when (= :http (session-channel session-id))
+                 :http))
+      (json-response 404 {:error "session not found"}))))
+
 (defn- handle-get-approval
   ([session-id]
    (handle-get-approval session-id nil))
@@ -2145,6 +2185,11 @@
           session-match      (re-matches #"/sessions/([0-9a-fA-F-]+)/messages" uri)
           session-audit-match (re-matches #"/sessions/([0-9a-fA-F-]+)/audit" uri)
           session-task-match (re-matches #"/sessions/([0-9a-fA-F-]+)/task" uri)
+          session-goal-match (re-matches #"/sessions/([0-9a-fA-F-]+)/goal" uri)
+          session-goal-status-match (re-matches #"/sessions/([0-9a-fA-F-]+)/goal/status" uri)
+          session-goal-pause-match (re-matches #"/sessions/([0-9a-fA-F-]+)/goal/pause" uri)
+          session-goal-resume-match (re-matches #"/sessions/([0-9a-fA-F-]+)/goal/resume" uri)
+          session-goal-clear-match (re-matches #"/sessions/([0-9a-fA-F-]+)/goal/clear" uri)
           status-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/status" uri)
           prompt-match       (re-matches #"/sessions/([0-9a-fA-F-]+)/prompt" uri)
           approval-match     (re-matches #"/sessions/([0-9a-fA-F-]+)/approval" uri)
@@ -2152,6 +2197,11 @@
           command-session-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/messages" uri)
           command-session-audit-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/audit" uri)
           command-session-task-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/task" uri)
+          command-session-goal-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/goal" uri)
+          command-session-goal-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/goal/status" uri)
+          command-session-goal-pause-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/goal/pause" uri)
+          command-session-goal-resume-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/goal/resume" uri)
+          command-session-goal-clear-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/goal/clear" uri)
           command-status-match (re-matches #"/command/sessions/([0-9a-fA-F-]+)/status" uri)
           command-runtime-status-match (= uri "/command/runtime/status")
           command-runtime-drain-match (= uri "/command/runtime/drain")
@@ -2290,6 +2340,38 @@
                                 (fn [_req]
                                   (handle-get-current-task (second command-session-task-match) :command)))
 
+        (and (= method :get) command-session-goal-status-match)
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-get-goal (second command-session-goal-status-match) :command)))
+
+        (and (= method :get) command-session-goal-match)
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-get-goal (second command-session-goal-match) :command)))
+
+        (and (= method :post) command-session-goal-match)
+        (command-route-response req
+                                #(handle-set-goal (second command-session-goal-match) % :command))
+
+        (and (= method :post) command-session-goal-pause-match)
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-pause-goal (second command-session-goal-pause-match) :command)))
+
+        (and (= method :post) command-session-goal-resume-match)
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-resume-goal (second command-session-goal-resume-match) :command)))
+
+        (or (and (= method :post) command-session-goal-clear-match)
+            (and (= method :delete) command-session-goal-match))
+        (command-route-response req
+                                (fn [_req]
+                                  (handle-clear-goal (second (or command-session-goal-clear-match
+                                                                  command-session-goal-match))
+                                                     :command)))
+
         (and (= method :get) command-prompt-match)
         (command-route-response req
                                 (fn [_req]
@@ -2324,6 +2406,39 @@
 
         (and (= method :get) session-task-match)
         (protected-route-response req #(handle-get-current-task (second session-task-match) :http))
+
+        (and (= method :get) session-goal-status-match)
+        (protected-route-response req
+                                  #(handle-local-goal (second session-goal-status-match)
+                                                      handle-get-goal))
+
+        (and (= method :get) session-goal-match)
+        (protected-route-response req
+                                  #(handle-local-goal (second session-goal-match)
+                                                      handle-get-goal))
+
+        (and (= method :post) session-goal-match)
+        (protected-route-response req
+                                  #(handle-local-goal (second session-goal-match)
+                                                      (fn [sid expected-channel]
+                                                        (handle-set-goal sid req expected-channel))))
+
+        (and (= method :post) session-goal-pause-match)
+        (protected-route-response req
+                                  #(handle-local-goal (second session-goal-pause-match)
+                                                      handle-pause-goal))
+
+        (and (= method :post) session-goal-resume-match)
+        (protected-route-response req
+                                  #(handle-local-goal (second session-goal-resume-match)
+                                                      handle-resume-goal))
+
+        (or (and (= method :post) session-goal-clear-match)
+            (and (= method :delete) session-goal-match))
+        (protected-route-response req
+                                  #(handle-local-goal (second (or session-goal-clear-match
+                                                                  session-goal-match))
+                                                      handle-clear-goal))
 
         (and (= method :get) prompt-match)
         (protected-route-response req #(handle-get-prompt (second prompt-match) :http))

@@ -649,7 +649,8 @@
     (persist-task-llm-budget! task-id task-budget-state)))
 
 (defn ensure-runtime-task!
-  [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id]
+  [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id
+   & {:keys [turn-input]}]
   (let [operation        (resolve-task-operation task-id runtime-op)
         title            (task-title deps user-message)
         existing-task    (some-> task-id db/get-task)
@@ -681,7 +682,7 @@
     (let [task-turn-id (db/start-task-turn! resolved-task-id
                                             {:operation operation
                                              :state :running
-                                             :input user-message
+                                             :input (or turn-input user-message)
                                              :summary title
                                              :interrupting-turn-id interrupting-turn-id})]
       (when new-task?
@@ -1163,6 +1164,13 @@
          :session-id session-id}
 
         (contains? #{:cancelled :failed} (:state task))
+        {:status :not-resumable
+         :task-id task-id
+         :session-id session-id
+         :error "task is not resumable"}
+
+        (not (contains? #{:paused :resumable :waiting_input :waiting_approval}
+                        (:state task)))
         {:status :not-resumable
          :task-id task-id
          :session-id session-id

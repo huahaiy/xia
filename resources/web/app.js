@@ -10,6 +10,8 @@ const state = {
     loading: false,
     error: ''
   },
+  persistentGoal: null,
+  persistentGoalSaving: false,
   liveEventAfter: 0,
   liveEventReceivedAt: 0,
   messages: [],
@@ -145,6 +147,13 @@ const currentTaskPanelEl = document.getElementById('current-task-panel');
 const taskBoardNoteEl = document.getElementById('task-board-note');
 const taskBoardPanelEl = document.getElementById('task-board-panel');
 const refreshTaskBoardEl = document.getElementById('refresh-task-board');
+const persistentGoalNoteEl = document.getElementById('persistent-goal-note');
+const persistentGoalInputEl = document.getElementById('persistent-goal-input');
+const persistentGoalStatusEl = document.getElementById('persistent-goal-status');
+const persistentGoalPauseEl = document.getElementById('persistent-goal-pause');
+const persistentGoalResumeEl = document.getElementById('persistent-goal-resume');
+const persistentGoalClearEl = document.getElementById('persistent-goal-clear');
+const persistentGoalSetEl = document.getElementById('persistent-goal-set');
 const inputPanelEl = document.getElementById('input-panel');
 const inputLabelEl = document.getElementById('input-label');
 const inputValueEl = document.getElementById('input-value');
@@ -877,6 +886,127 @@ function createTaskMetaItem(label, value) {
   return wrap;
 }
 
+function persistentGoalStatusText(goal) {
+  const status = firstPresentText(goal && goal.status, 'none');
+  if (!goal || !firstPresentText(goal.text)) return 'No persistent goal.';
+  const parts = [titleizeToken(status)];
+  const maxTurns = Number(goal.max_turns || 0);
+  const turnCount = Number(goal.turn_count || 0);
+  if (maxTurns > 0) parts.push(turnCount + '/' + maxTurns + ' turns');
+  if (goal.last_guardrail) parts.push('Guardrail: ' + titleizeToken(goal.last_guardrail));
+  if (goal.next_step) parts.push('Next: ' + goal.next_step);
+  if (goal.last_judge_reason) parts.push(goal.last_judge_reason);
+  return parts.join(' · ');
+}
+
+function renderPersistentGoal() {
+  if (!persistentGoalNoteEl) return;
+  const goal = asObject(state.persistentGoal);
+  const hasGoal = !!firstPresentText(goal.text);
+  const status = firstPresentText(goal.status).toLowerCase();
+  const turnCount = Number(goal.turn_count || 0);
+  const maxTurns = Number(goal.max_turns || 0);
+  const turnGuardReached = maxTurns > 0 && turnCount >= maxTurns;
+  const saving = !!state.persistentGoalSaving;
+  persistentGoalNoteEl.textContent = persistentGoalStatusText(hasGoal ? goal : null);
+  if (persistentGoalInputEl && document.activeElement !== persistentGoalInputEl) {
+    persistentGoalInputEl.value = hasGoal ? firstPresentText(goal.text) : persistentGoalInputEl.value;
+  }
+  if (persistentGoalSetEl) persistentGoalSetEl.disabled = saving;
+  if (persistentGoalStatusEl) persistentGoalStatusEl.disabled = saving || !state.sessionId;
+  if (persistentGoalPauseEl) {
+    persistentGoalPauseEl.disabled = saving || !hasGoal || status !== 'active';
+  }
+  if (persistentGoalResumeEl) {
+    persistentGoalResumeEl.disabled = saving || !hasGoal || status === 'active'
+      || status === 'completed' || status === 'cleared' || turnGuardReached;
+  }
+  if (persistentGoalClearEl) persistentGoalClearEl.disabled = saving || !hasGoal;
+}
+
+async function loadPersistentGoal(options) {
+  if (!state.sessionId) {
+    state.persistentGoal = null;
+    renderPersistentGoal();
+    return null;
+  }
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/goal/status');
+    state.persistentGoal = data.goal || null;
+    renderPersistentGoal();
+    return state.persistentGoal;
+  } catch (err) {
+    if (!options || !options.quiet) {
+      setStatus(err.message || 'Failed to load persistent goal');
+    }
+    return null;
+  }
+}
+
+async function setPersistentGoal() {
+  if (!persistentGoalInputEl || state.persistentGoalSaving) return;
+  const text = persistentGoalInputEl.value.trim();
+  if (!text) {
+    setStatus('Enter a persistent goal');
+    persistentGoalInputEl.focus();
+    return;
+  }
+  state.persistentGoalSaving = true;
+  renderPersistentGoal();
+  try {
+    await ensureSession();
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId) + '/goal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: text })
+    });
+    state.persistentGoal = data.goal || null;
+    setStatus('Persistent goal set');
+  } catch (err) {
+    setStatus(err.message || 'Failed to set persistent goal');
+  } finally {
+    state.persistentGoalSaving = false;
+    renderPersistentGoal();
+  }
+}
+
+async function submitPersistentGoalAction(action) {
+  if (state.persistentGoalSaving) return;
+  if (action === 'status') {
+    await loadPersistentGoal();
+    return;
+  }
+  if (!state.sessionId) {
+    setStatus('No active session');
+    return;
+  }
+  state.persistentGoalSaving = true;
+  renderPersistentGoal();
+  try {
+    const data = await fetchJson('/sessions/' + encodeURIComponent(state.sessionId)
+      + '/goal/' + encodeURIComponent(action), {
+      method: 'POST'
+    });
+    state.persistentGoal = data.goal || null;
+    if (data.task_control && data.task_control.task) {
+      applyTaskSnapshot(data.task_control.task, { markSending: action === 'resume' });
+    } else if (data.task_control && data.task_control.status === 'running') {
+      state.sending = true;
+      if (!state.sendStartedAt) state.sendStartedAt = Date.now();
+      pollCurrentTask().catch(() => {});
+    } else if (data.task_control && (action === 'pause' || action === 'clear')) {
+      pollCurrentTask().catch(() => {});
+    }
+    setStatus('Persistent goal ' + (action === 'clear' ? 'cleared' : action + 'd'));
+    if (action === 'clear' && persistentGoalInputEl) persistentGoalInputEl.value = '';
+  } catch (err) {
+    setStatus(err.message || ('Failed to ' + action + ' persistent goal'));
+  } finally {
+    state.persistentGoalSaving = false;
+    renderPersistentGoal();
+  }
+}
+
 function createTaskActivityItem(entry) {
   const item = document.createElement('div');
   item.className = 'task-list-item';
@@ -1392,6 +1522,8 @@ function resetCurrentSession(statusText) {
   state.sessionId = '';
   state.currentTaskId = '';
   state.currentTask = null;
+  state.persistentGoal = null;
+  state.persistentGoalSaving = false;
   state.liveEventAfter = 0;
   state.liveEventReceivedAt = 0;
   state.messages = [];
@@ -1423,6 +1555,8 @@ function resetCurrentSession(statusText) {
   renderInputRequest();
   renderApproval();
   renderMessages();
+  if (persistentGoalInputEl) persistentGoalInputEl.value = '';
+  renderPersistentGoal();
   syncLocalDocPanel('No local document selected.');
   syncArtifactPanel('No artifact selected.');
   syncScratchEditor('No note selected.');
@@ -8239,6 +8373,10 @@ async function pollStatus() {
     }
     state.liveStatus = data.status || null;
     setCurrentTaskId(data.task_id || '');
+    if (Object.prototype.hasOwnProperty.call(data, 'goal')) {
+      state.persistentGoal = data.goal || null;
+      renderPersistentGoal();
+    }
     if (!state.pendingInput
         && state.sessionId
         && state.liveStatus
@@ -8290,6 +8428,10 @@ async function pollCurrentTask() {
     } else {
       state.currentTask = null;
       setCurrentTaskId(data.task_id || '');
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'goal')) {
+      state.persistentGoal = data.goal || null;
+      renderPersistentGoal();
     }
     return task;
   } catch (_err) {
@@ -8473,6 +8615,10 @@ async function sendMessage(text, options) {
     } else if (data.task_id) {
       setCurrentTaskId(data.task_id);
     }
+    if (Object.prototype.hasOwnProperty.call(data, 'goal')) {
+      state.persistentGoal = data.goal || null;
+      renderPersistentGoal();
+    }
     const assistantMessage = normalizeMessage(data.message || {
       role: 'assistant',
       content: data.content || '',
@@ -8597,6 +8743,21 @@ artifactDownloadEl.addEventListener('click', () => downloadArtifact());
 artifactDeleteEl.addEventListener('click', () => deleteArtifact());
 if (refreshTaskBoardEl) {
   refreshTaskBoardEl.addEventListener('click', () => loadTaskBoard());
+}
+if (persistentGoalSetEl) {
+  persistentGoalSetEl.addEventListener('click', () => setPersistentGoal());
+}
+if (persistentGoalStatusEl) {
+  persistentGoalStatusEl.addEventListener('click', () => submitPersistentGoalAction('status'));
+}
+if (persistentGoalPauseEl) {
+  persistentGoalPauseEl.addEventListener('click', () => submitPersistentGoalAction('pause'));
+}
+if (persistentGoalResumeEl) {
+  persistentGoalResumeEl.addEventListener('click', () => submitPersistentGoalAction('resume'));
+}
+if (persistentGoalClearEl) {
+  persistentGoalClearEl.addEventListener('click', () => submitPersistentGoalAction('clear'));
 }
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
@@ -8875,6 +9036,7 @@ persistSession();
 renderInputRequest();
 renderApproval();
 renderMessages();
+renderPersistentGoal();
 renderCurrentTaskPanel();
 renderTaskBoard();
 syncLocalDocPanel('No local document selected.');
@@ -8911,6 +9073,7 @@ Promise.all([
   loadAdminConfig(),
   loadHistorySessions(),
   loadHistorySchedules(),
+  loadPersistentGoal({ quiet: true }),
   loadTaskBoard(),
   loadLlmCalls()
 ]).catch(() => {
