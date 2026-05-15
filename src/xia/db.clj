@@ -1841,6 +1841,16 @@
   [call-id]
   (db-session/get-llm-call (session-deps) call-id))
 
+(defn log-limit-usage!
+  "Write a sanitized LLM usage accounting entry for limits and budget policy."
+  [entry]
+  (db-session/log-limit-usage! (session-deps) entry))
+
+(defn limit-usage-totals
+  "Return aggregate sanitized LLM usage totals for a limits scope."
+  [scope selector]
+  (db-session/limit-usage-totals (session-deps) scope selector))
+
 (defn log-audit-event!
   [entry]
   (db-session/log-audit-event! (session-deps) entry))

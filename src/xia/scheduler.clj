@@ -16,6 +16,7 @@
             [xia.db :as db]
             [xia.agent :as agent]
             [xia.hippocampus :as hippo]
+            [xia.limits :as limits]
             [xia.llm :as llm]
             [xia.oauth :as oauth]
             [xia.plugin :as plugin]
@@ -298,7 +299,7 @@
                                                 :session-id session-id
                                                 :started-at started)
         audit-log (atom [])
-        budget-state (atom (task-policy/new-schedule-run-llm-budget id))
+        budget-state (atom (limits/new-schedule-run-budget id))
         prompt* (schedule/augment-prompt-with-recovery-context id prompt)
         execution-context (schedule-tool-context id trusted? audit-log)]
     (try
@@ -324,11 +325,10 @@
                                 :started-at started))
       (let [result (binding [llm/*request-budget-guard*
                              (fn [_request]
-                               (task-policy/throw-if-schedule-run-llm-budget-exhausted!
-                                budget-state))
+                               (limits/throw-if-exhausted! budget-state))
                              llm/*request-observer*
                              (fn [request]
-                               (task-policy/record-schedule-run-llm-request!
+                               (limits/record-schedule-run-request!
                                 budget-state
                                 request))]
                      (agent/process-message session-id
@@ -357,8 +357,7 @@
                                :result (str result)})
         (schedule/record-task-success! id result))
       (catch Exception e
-        (let [schedule-budget? (= :schedule-run-budget-exhausted
-                                  (:type (ex-data e)))]
+        (let [schedule-budget? (limits/exhausted-exception? e)]
           (plugin/run-hooks! :schedule-run
                              (assoc execution-context
                                     :session-id session-id

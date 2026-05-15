@@ -4,7 +4,7 @@
             [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
-            [xia.task-policy :as task-policy]))
+            [xia.limits :as limits]))
 
 (def ^:private detail-output-limit 5)
 (def ^:private detail-tool-limit 8)
@@ -403,21 +403,21 @@
 (defn- budget-summary
   [budget]
   (str (:llm-call-count budget 0)
-       " calls, "
-       (:total-tokens budget 0)
-       " tokens, "
-       (task-policy/format-duration-ms (:llm-total-duration-ms budget 0))
-       " runtime"))
+      " calls, "
+      (:total-tokens budget 0)
+      " tokens, "
+      (limits/format-duration-ms (:llm-total-duration-ms budget 0))
+      " runtime"))
 
 (defn- budget-body
   [task]
   (when-let [persisted (get-in task [:meta :llm-budget])]
-    (let [budget-state (atom (task-policy/restore-task-llm-budget
+    (let [budget-state (atom (limits/restore-task-budget
                               (:id task)
                               (:channel task)
                               (or (:started-at task) (:created-at task))
                               persisted))
-          status       (task-policy/task-llm-budget-status budget-state)]
+          status       (limits/budget-status budget-state)]
       (cond-> {:summary (budget-summary @budget-state)
                :llm_call_count (:llm-call-count @budget-state)
                :total_tokens (:total-tokens @budget-state)
@@ -436,7 +436,7 @@
 
         status
         (assoc :status {:kind (keyword->str (:kind status))
-                        :summary (task-policy/task-llm-budget-summary status)})))))
+                        :summary (limits/budget-summary status)})))))
 
 (defn task-inspection
   ([opts task autonomy-state]

@@ -5,10 +5,10 @@
             [xia.autonomous :as autonomous]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.limits :as limits]
             [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.task-event :as task-event]
-            [xia.task-policy :as task-policy]
             [xia.runtime-state :as runtime-state]
             [xia.working-memory :as wm]))
 
@@ -634,27 +634,27 @@
   [session-id task-id]
   (runtime-autonomy-state session-id task-id {:persist? false}))
 
-(defn task-llm-budget-state
+(defn task-limit-state
   [task-id]
   (when-let [task (some-> task-id db/get-task)]
-    (atom (task-policy/restore-task-llm-budget
+    (atom (limits/restore-task-budget
            (:id task)
            (:channel task)
            (or (:started-at task) (:created-at task))
            (get-in task [:meta :llm-budget])))))
 
-(defn persist-task-llm-budget!
+(defn persist-task-limit!
   [task-id task-budget-state]
   (when (and task-id task-budget-state)
     (merge-task-meta! task-id
                       (fn [meta]
                         (assoc meta :llm-budget @task-budget-state)))))
 
-(defn record-task-llm-request!
+(defn record-task-limit-request!
   [task-id task-budget-state request]
   (when task-budget-state
-    (task-policy/record-task-llm-request! task-budget-state request)
-    (persist-task-llm-budget! task-id task-budget-state)))
+    (limits/record-task-request! task-budget-state request)
+    (persist-task-limit! task-id task-budget-state)))
 
 (defn ensure-runtime-task!
   [deps session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id

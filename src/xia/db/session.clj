@@ -949,6 +949,85 @@
        :related-messages  (llm-call-related-messages deps call-id)
        :created-at        (:llm.log/created-at e)})))
 
+(defn log-limit-usage!
+  [deps entry]
+  (let [record (merge {:limit.usage/id         (or (:id entry) (random-uuid))
+                       :limit.usage/created-at (or (:created-at entry) (java.util.Date.))
+                       :limit.usage/scope      (or (:scope entry) :llm-call)}
+                      (when-let [v (:kind entry)] {:limit.usage/kind v})
+                      (when-let [v (:session-id entry)] {:limit.usage/session-id v})
+                      (when-let [v (:task-id entry)] {:limit.usage/task-id v})
+                      (when-let [v (:schedule-id entry)] {:limit.usage/schedule-id v})
+                      (when-let [v (:goal-id entry)] {:limit.usage/goal-id v})
+                      (when-let [v (:provider-id entry)] {:limit.usage/provider-id v})
+                      (when-let [v (:model entry)] {:limit.usage/model v})
+                      (when-let [v (:workload entry)] {:limit.usage/workload v})
+                      (when-let [v (:llm-call-id entry)] {:limit.usage/llm-call-id v})
+                      (when-let [v (:status entry)] {:limit.usage/status v})
+                      (when-let [v (:error entry)] {:limit.usage/error v})
+                      (when-let [v (:duration-ms entry)] {:limit.usage/duration-ms v})
+                      (when-let [v (:prompt-tokens entry)] {:limit.usage/prompt-tokens v})
+                      (when-let [v (:completion-tokens entry)] {:limit.usage/completion-tokens v})
+                      (when-let [v (:total-tokens entry)] {:limit.usage/total-tokens v})
+                      (when-let [v (:cost-micros entry)] {:limit.usage/cost-micros v})
+                      (when (contains? entry :cost-estimated?)
+                        {:limit.usage/cost-estimated? (boolean (:cost-estimated? entry))}))]
+    (transact!* deps [record])
+    (:limit.usage/id record)))
+
+(defn- limit-usage-eids
+  [deps scope selector]
+  (case scope
+    :org
+    (q* deps '[:find ?e :where [?e :limit.usage/id _]])
+
+    :session
+    (when-let [session-id (:session-id selector)]
+      (q* deps '[:find ?e :in $ ?sid
+                 :where
+                 [?e :limit.usage/id _]
+                 [?e :limit.usage/session-id ?sid]]
+          session-id))
+
+    :task
+    (when-let [task-id (:task-id selector)]
+      (q* deps '[:find ?e :in $ ?tid
+                 :where
+                 [?e :limit.usage/id _]
+                 [?e :limit.usage/task-id ?tid]]
+          task-id))
+
+    :schedule
+    (when-let [schedule-id (:schedule-id selector)]
+      (q* deps '[:find ?e :in $ ?sid
+                 :where
+                 [?e :limit.usage/id _]
+                 [?e :limit.usage/schedule-id ?sid]]
+          schedule-id))
+
+    []))
+
+(defn limit-usage-totals
+  [deps scope selector]
+  (let [eids (limit-usage-eids deps scope selector)]
+    (reduce (fn [totals [eid]]
+              (let [e (raw-entity* deps eid)]
+                (-> totals
+                    (update :llm-call-count inc)
+                    (update :prompt-tokens + (long (:limit.usage/prompt-tokens e 0)))
+                    (update :completion-tokens + (long (:limit.usage/completion-tokens e 0)))
+                    (update :total-tokens + (long (:limit.usage/total-tokens e 0)))
+                    (update :llm-total-duration-ms + (long (:limit.usage/duration-ms e 0)))
+                    (update :cost-micros + (long (:limit.usage/cost-micros e 0))))))
+            {:scope scope
+             :llm-call-count 0
+             :prompt-tokens 0
+             :completion-tokens 0
+             :total-tokens 0
+             :llm-total-duration-ms 0
+             :cost-micros 0}
+            eids)))
+
 (defn log-audit-event!
   [deps entry]
   (transact!* deps

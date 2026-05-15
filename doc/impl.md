@@ -142,6 +142,32 @@ Model-based summaries are off by default. The default experience remains fully
 local and deterministic, and the admin UI exposes the summary backend and token
 budget settings when users want to opt in.
 
+## LLM Limits Layer
+
+LLM budget accounting lives in `xia.limits`, separate from task/tool policy.
+The layer creates per-turn, per-task, and per-schedule-run budget state, records
+provider usage after each request, normalizes prompt/completion/total token
+counts, writes a sanitized persistent usage ledger, and raises a common
+`:limit-exhausted` exception with the exhausted scope attached.
+
+This keeps model selection and spend policy from leaking into the task runtime.
+The current implementation enforces call, token, wall-clock, LLM-duration, and
+ledger-backed policy ceilings. Org, session, and schedule ceilings can be set
+with `:limits/<scope>-max-llm-calls`, `:limits/<scope>-max-total-tokens`, and
+`:limits/<scope>-max-cost-micros`, where `<scope>` is `org`, `session`, or
+`schedule`. Optional cost estimation uses `:limits/model-prices`, an EDN map of
+`[:provider-id "model"]` to `{:input-usd-per-1m n :output-usd-per-1m n}`.
+
+Each ceiling supports `:limits/<scope>-warn-ratio`,
+`:limits/<scope>-near-action`, and `:limits/<scope>-action`. Actions are
+`:warn`, `:deny`, `:require-approval`, `:pause-schedule`, `:prefer-local`, and
+`:downgrade-model`. Routing actions use `:limits/prefer-local-provider-id` or
+`:limits/downgrade-provider-id` when the user has not explicitly selected a
+provider.
+
+Future model-routing improvements should extend this namespace instead of
+adding new budget logic to `xia.task-policy`.
+
 ## Web, Browser, And Service Automation
 
 Xia can interact with the live web through secure, sandboxed tools.

@@ -98,6 +98,10 @@ What to expect:
 
 - You still provide your own LLM provider credentials, and you can use multiple
   LLMs at the same time and assign different LLM to different workloads.
+- Xia treats LLM usage limits as a first-class layer, so turns, tasks, and
+  scheduled runs can share budget accounting instead of relying on per-prompt
+  model choices. The limits layer keeps a sanitized usage ledger for policy
+  ceilings and cost accounting.
 - Xia stores its state in its
   [database](https://github.com/datalevin/datalevin), so conversations, memory,
   settings, and saved connections travel together.

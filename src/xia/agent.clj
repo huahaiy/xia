@@ -19,6 +19,7 @@
             [xia.context :as context]
             [xia.db :as db]
             [xia.goal :as goal]
+            [xia.limits :as limits]
             [xia.llm :as llm]
             [xia.plugin :as plugin]
             [xia.prompt :as prompt]
@@ -31,7 +32,7 @@
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
-(def ^:dynamic *turn-llm-budget-state* nil)
+(def ^:dynamic *turn-limit-state* nil)
 
 (declare clear-runtime!)
 
@@ -305,7 +306,7 @@
               (assoc :reason reason))
             cause)))
 
-(defn- compose-request-budget-guard
+(defn- compose-request-limit-guard
   [outer-guard inner-guard]
   (cond
     (and outer-guard inner-guard)
@@ -317,7 +318,7 @@
     inner-guard inner-guard
     :else nil))
 
-(defn- compose-request-observer
+(defn- compose-request-limit-observer
   [outer-observer inner-observer]
   (cond
     (and outer-observer inner-observer)
@@ -862,9 +863,19 @@
 
 (defn- llm-budget-summary
   [budget-status]
-  (case (:scope budget-status)
-    :task (task-policy/task-llm-budget-summary budget-status)
-    (task-policy/turn-llm-budget-summary budget-status)))
+  (limits/budget-summary budget-status))
+
+(defn- llm-budget-title
+  [budget-status]
+  (str (case (:scope budget-status)
+         :task "Task"
+         :turn "Turn"
+         :session "Session"
+         :schedule "Schedule"
+         :schedule-run "Schedule run"
+         :org "Organization"
+         "Usage")
+       " limit exhausted: "))
 
 (defn- llm-budget-note
   [budget-status parsed autonomy-state & {:keys [before-tools?]}]
@@ -878,6 +889,7 @@
          (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
            (str " Suggested next step: " next-step)))
 
+    :turn
     (str "Note: I stopped this turn after reaching the "
          (llm-budget-summary budget-status)
          "."
@@ -885,7 +897,57 @@
            " I did not execute the next requested tool step.")
          (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
            (str " Suggested next step: " next-step))
-         " Reply to continue from the current agenda.")))
+         " Reply to continue from the current agenda.")
+
+    (str "Note: I stopped this turn after reaching the "
+         (llm-budget-summary budget-status)
+         "."
+         (when before-tools?
+           " I did not execute the next requested tool step.")
+         (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
+           (str " Suggested next step: " next-step)))))
+
+(defn- handle-limit-policy-decision!
+  [execution-context decision]
+  (when decision
+    (prompt/policy-decision! (limits/policy-decision-event decision))
+    (case (:action decision)
+      :warn
+      nil
+
+      :prefer-local
+      nil
+
+      :downgrade-model
+      nil
+
+      :require-approval
+      (let [approved? (and (prompt/approval-available?)
+                           (prompt/approve!
+                            {:tool-id :xia.limits/policy
+                             :tool-name "LLM usage limit"
+                             :description (str "Continue after reaching the "
+                                               (llm-budget-summary decision)
+                                               ".")
+                             :policy :limits
+                             :reason (llm-budget-summary decision)
+                             :arguments (select-keys decision
+                                                     [:scope :state :kind :action
+                                                      :used :limit])}))]
+        (when-not approved?
+          (throw (limits/policy-decision-ex
+                  (assoc decision :approval-denied? true)))))
+
+      :pause-schedule
+      (do
+        (when-let [schedule-id (:schedule-id execution-context)]
+          (schedule/pause-schedule! schedule-id))
+        (throw (limits/policy-decision-ex decision)))
+
+      :deny
+      (throw (limits/policy-decision-ex decision))
+
+      nil)))
 
 (defn- autonomy-status-fields
   [autonomy-state iteration max-iterations]
@@ -994,7 +1056,7 @@
 
 (defn- launch-fact-utility-review-without-budget!
   [session-id fact-eids user-message assistant-response & {:keys [explicit-fact-eids]}]
-  (binding [*turn-llm-budget-state* nil
+  (binding [*turn-limit-state* nil
             llm/*request-budget-guard* nil
             llm/*request-observer* nil]
     (if (seq explicit-fact-eids)
@@ -2308,8 +2370,8 @@
                                                                parsed-response)
               assistant-content (or (:assistant-text parsed-response)
                                     (response-content response))
-              budget-status (or (task-policy/task-llm-budget-status (:task-budget-state execution-context))
-                                (task-policy/turn-llm-budget-status turn-budget-state))
+              budget-status (or (limits/budget-status (:task-budget-state execution-context))
+                                (limits/budget-status turn-budget-state))
               _ (when (zero? round)
                   (emit-intent-event! emit-event!
                                       execution-context
@@ -2550,12 +2612,23 @@
                                                                 :data (cond-> {}
                                                                         (seq local-doc-ids) (assoc :local-doc-ids (vec local-doc-ids))
                                                                         (seq artifact-ids) (assoc :artifact-ids (vec artifact-ids))))
+                      pre-provider-limit-context (merge tool-context
+                                                        request-context
+                                                        {:session-id session-id
+                                                         :task-id task-id
+                                                         :task-turn-id task-turn-id
+                                                         :channel channel
+                                                         :persistent-goal-id (:id persistent-goal)
+                                                         :resource-session-id resource-session-id})
+                      limit-routing-decision (limits/routing-decision pre-provider-limit-context)
+                      provider-selection-opts (-> (cond-> {:workload :assistant}
+                                                    provider-id
+                                                    (assoc :provider-id provider-id))
+                                                  (limits/apply-routing-decision
+                                                   limit-routing-decision))
                       {assistant-provider :provider
                        assistant-provider-id :provider-id}
-                      (llm/resolve-provider-selection
-                       (cond-> {:workload :assistant}
-                         provider-id
-                         (assoc :provider-id provider-id)))
+                      (llm/resolve-provider-selection provider-selection-opts)
                       base-execution-context (merge tool-context
                                                     request-context
                                                     {:session-id session-id
@@ -2566,7 +2639,8 @@
                                                      :persistent-goal-id (:id persistent-goal)
                                                      :resource-session-id resource-session-id
                                                      :assistant-provider assistant-provider
-                                                     :assistant-provider-id assistant-provider-id})
+                                                     :assistant-provider-id assistant-provider-id
+                                                     :limit-routing-decision limit-routing-decision})
                       max-tool-rounds* (long (or max-tool-rounds
                                                  (configured-max-tool-rounds)))
                       max-iterations* (long (autonomous/max-iterations))
@@ -2574,30 +2648,37 @@
                       initial-wm-message (or working-memory-message
                                              wm-user-message)
                       initial-wm-query-fingerprint (wm-query-signature initial-wm-message)
-                      turn-budget-state (or *turn-llm-budget-state*
-                                            (atom (task-policy/new-turn-llm-budget session-id
-                                                                                   channel)))
-                      task-budget-state (task-runtime/task-llm-budget-state task-id)
+                      turn-budget-state (or *turn-limit-state*
+                                            (atom (limits/new-turn-budget session-id
+                                                                          channel)))
+                      task-budget-state (task-runtime/task-limit-state task-id)
                       outer-budget-guard llm/*request-budget-guard*
                       outer-request-observer llm/*request-observer*]
                   (wm/set-autonomy-state! session-id initial-autonomy-state)
-                  (binding [*turn-llm-budget-state* turn-budget-state
-                            llm/*request-budget-guard* (compose-request-budget-guard
+                  (binding [*turn-limit-state* turn-budget-state
+                            llm/*request-budget-guard* (compose-request-limit-guard
                                                         outer-budget-guard
                                                         (fn [_request]
-                                                          (task-policy/throw-if-turn-llm-budget-exhausted!
+                                                          (handle-limit-policy-decision!
+                                                           base-execution-context
+                                                           (limits/policy-decision
+                                                            base-execution-context))
+                                                          (limits/throw-if-exhausted!
                                                            turn-budget-state)
-                                                          (task-policy/throw-if-task-llm-budget-exhausted!
+                                                          (limits/throw-if-exhausted!
                                                            task-budget-state)))
-                            llm/*request-observer* (compose-request-observer
+                            llm/*request-observer* (compose-request-limit-observer
                                                     outer-request-observer
                                                     (fn [request]
-                                                      (task-policy/record-turn-llm-request!
+                                                      (limits/record-turn-request!
                                                        turn-budget-state
                                                        request)
-                                                      (task-runtime/record-task-llm-request!
+                                                      (task-runtime/record-task-limit-request!
                                                        task-id
                                                        task-budget-state
+                                                       request)
+                                                      (limits/log-usage!
+                                                       base-execution-context
                                                        request)))]
                     (loop [iteration 1
                            fact-eids []
@@ -2657,9 +2738,7 @@
                                                                 system-prompt-cache-entry
                                                                 turn-budget-state)
                                 (catch clojure.lang.ExceptionInfo e
-                                  (if (contains? #{:turn-budget-exhausted
-                                                   :task-budget-exhausted}
-                                                 (:type (ex-data e)))
+                                  (if (limits/exhausted-exception? e)
                                     {:budget-exhausted? true
                                      :budget-status (select-keys (ex-data e)
                                                                  [:scope :kind :task-id :session-id :channel
@@ -2730,9 +2809,7 @@
                               (task-runtime/record-task-item! task-turn-id
                                                               {:type :system-note
                                                                :status :limit
-                                                               :summary (str (if (= :task (:scope budget-status))
-                                                                               "Task budget exhausted: "
-                                                                               "Turn budget exhausted: ")
+                                                               :summary (str (llm-budget-title budget-status)
                                                                              (llm-budget-summary budget-status))
                                                                :data {:kind "budget-exhausted"
                                                                       :budget-scope (some-> (:scope budget-status) name)
@@ -2779,9 +2856,7 @@
                                                   (llm-budget-summary budget-status)
                                                   "."))
                                 :session-id session-id
-                                :status (if (= :task (:scope budget-status))
-                                          :task-budget
-                                          :turn-budget)
+                                :status :limit-exhausted
                                 :budget-scope (:scope budget-status)
                                 :budget-kind (:kind budget-status)
                                 :llm-call-count (:llm-call-count budget-status)
