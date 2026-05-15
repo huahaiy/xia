@@ -19,6 +19,7 @@
             [xia.oauth :as oauth]
             [xia.oauth-template :as oauth-template]
             [xia.paths :as paths]
+            [xia.plugin :as plugin]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.schedule :as schedule]
             [xia.service :as service-proxy]
@@ -222,6 +223,22 @@
                       "schedule")
         used-ids  (map :id (schedule/list-schedules))]
     (next-available-id base used-ids)))
+
+(defn- plugin->admin-body
+  [deps plugin]
+  (let [manifest (:plugin/manifest plugin)]
+    {:id           (some-> (:plugin/id plugin) name)
+     :name         (:plugin/name plugin)
+     :description  (:plugin/description plugin)
+     :version      (:plugin/version plugin)
+     :enabled      (boolean (:plugin/enabled? plugin))
+     :capabilities (mapv str (sort-by str (:plugin/capabilities plugin)))
+     :hooks        (mapv (fn [{:keys [id event]}]
+                           {:id (some-> id name)
+                            :event (some-> event name)})
+                         (:hooks manifest))
+     :installed_at (instant->str* deps (:plugin/installed-at plugin))
+     :updated_at   (instant->str* deps (:plugin/updated-at plugin))}))
 
 (defn- parse-skill-tags
   [value]
@@ -1180,6 +1197,9 @@
                        sort-by-name)
        :tools     (->> (db/list-tools)
                        (into [] (map tool->admin-body))
+                       sort-by-name)
+       :plugins   (->> (db/list-plugins)
+                       (into [] (map #(plugin->admin-body deps %)))
                        sort-by-name)
        :skills    (->> (db/list-skills)
                        (into [] (map #(skill->body deps %)))
@@ -2295,6 +2315,40 @@
                                      :url    (get-in report [:source :url])
                                      :name   (get-in report [:source :name])}}
            :skill  (skill->body deps skill)})))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))))
+
+(defn handle-save-plugin
+  [deps req]
+  (try
+    (let [data     (or (read-body* deps req) {})
+          manifest (or (get data "manifest")
+                       (get data :manifest)
+                       data)
+          saved    (plugin/install-plugin! manifest)]
+      (json-response* deps 200
+                      {:status "saved"
+                       :plugin (plugin->admin-body deps saved)
+                       :plugins (->> (db/list-plugins)
+                                     (into [] (map #(plugin->admin-body deps %)))
+                                     sort-by-name)}))
+    (catch clojure.lang.ExceptionInfo e
+      (exception-response* deps e))))
+
+(defn handle-enable-plugin
+  [deps plugin-id enabled?]
+  (try
+    (let [plugin-id* (parse-keyword-id plugin-id "plugin_id")
+          existing   (db/get-plugin plugin-id*)]
+      (if existing
+        (let [saved (plugin/enable-plugin! plugin-id* enabled?)]
+        (json-response* deps 200
+                        {:status (if enabled? "enabled" "disabled")
+                         :plugin (plugin->admin-body deps saved)
+                         :plugins (->> (db/list-plugins)
+                                       (into [] (map #(plugin->admin-body deps %)))
+                                       sort-by-name)}))
+        (json-response* deps 404 {:error "plugin not found"})))
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 

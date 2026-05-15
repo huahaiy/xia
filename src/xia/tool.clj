@@ -17,6 +17,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.pipeline :as pipeline]
+            [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]
             [xia.task-policy :as task-policy]
@@ -756,32 +757,52 @@
                       preflight-decision)
                     _ (prompt/policy-decision! execution-decision)]
                 (if allowed?
-                  (do
-                    (prompt/status! {:state    :running
-                                     :phase    :tool
-                                     :message  (str "Running tool " tool-name)
-                                     :tool-id  tool-id
-                                     :tool-name tool-name})
-                    (try
-                      (let [result (normalize-tool-result tool-id
-                                                         (sci-env/call-fn handler arguments))]
+                  (let [hook-context (assoc handler-context
+                                            :arguments arguments)
+                        pre-results  (plugin/run-hooks! :pre-tool hook-context)
+                        blocked      (plugin/blocked-by-pre-tool-hook pre-results)]
+                    (if blocked
+                      (do
                         (audit-entry! context tool-id tool arguments
-                                      {:status          "success"
-                                       :approval-policy (name policy)
-                                       :approval-mode   (name mode)})
-                        (prompt/status! {:state    :running
-                                         :phase    :tool
-                                         :message  (str "Finished tool " tool-name)
-                                         :tool-id  tool-id
-                                         :tool-name tool-name})
-                        result)
-                      (catch Exception e
-                        (audit-entry! context tool-id tool arguments
-                                      {:status          "error"
+                                      {:status          "blocked"
                                        :approval-policy (name policy)
                                        :approval-mode   (name mode)
-                                       :error           (.getMessage e)})
-                        (throw e))))
+                                       :error           (:reason blocked)})
+                        (approval-error tool-id (:reason blocked)))
+                      (do
+                        (prompt/status! {:state    :running
+                                         :phase    :tool
+                                         :message  (str "Running tool " tool-name)
+                                         :tool-id  tool-id
+                                         :tool-name tool-name})
+                        (try
+                          (let [result (normalize-tool-result tool-id
+                                                              (sci-env/call-fn handler arguments))]
+                            (plugin/run-hooks! :post-tool
+                                               (assoc hook-context
+                                                      :status :success
+                                                      :result result))
+                            (audit-entry! context tool-id tool arguments
+                                          {:status          "success"
+                                           :approval-policy (name policy)
+                                           :approval-mode   (name mode)})
+                            (prompt/status! {:state    :running
+                                             :phase    :tool
+                                             :message  (str "Finished tool " tool-name)
+                                             :tool-id  tool-id
+                                             :tool-name tool-name})
+                            result)
+                          (catch Exception e
+                            (plugin/run-hooks! :post-tool
+                                               (assoc hook-context
+                                                      :status :error
+                                                      :error (.getMessage e)))
+                            (audit-entry! context tool-id tool arguments
+                                          {:status          "error"
+                                           :approval-policy (name policy)
+                                           :approval-mode   (name mode)
+                                           :error           (.getMessage e)})
+                            (throw e))))))
                   (do
                     (audit-entry! context tool-id tool arguments
                                   {:status          "blocked"

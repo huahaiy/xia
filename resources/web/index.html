@@ -454,6 +454,7 @@
               <button class="settings-nav-item advanced-only" data-section="database-backups">Database Backups</button>
               <button class="settings-nav-item advanced-only" data-section="episode-retention">Episode Retention</button>
               <button class="settings-nav-item advanced-only" data-section="knowledge-decay">Knowledge Decay</button>
+              <button class="settings-nav-item advanced-only" data-section="plugins">Plugins</button>
               <button class="settings-nav-item advanced-only" data-section="tools">Tools</button>
             </nav>
             <div class="settings-content">
@@ -1348,6 +1349,21 @@
                   <pre class="history-code capability-import-result" id="openclaw-import-result" hidden></pre>
                 </div>
               </div>
+            </div>
+            </div>
+
+            <div class="admin-card advanced-only" data-settings-section="plugins">
+              <div class="panel-header">
+                <div>
+                <h3 class="panel-title" title="Installed sandboxed plugins.">Plugins</h3>
+                <p class="panel-note">Enable or disable SCI-only lifecycle hooks installed from plugin manifests.</p>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label class="field-label" id="plugin-list-label">Installed Plugins</label>
+                  <div class="capability-list" id="plugin-list" role="list" aria-labelledby="plugin-list-label"></div>
+                </div>
               </div>
             </div>
 

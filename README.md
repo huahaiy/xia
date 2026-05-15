@@ -135,6 +135,10 @@ What the local web UI is for:
 - manage scheduled tasks and other local assistant settings
 - expose an allowlisted MCP-compatible tool facade and durable coordination
   board tools for other trusted local agents through the command channel
+- run restricted tool pipelines that collapse repetitive retrieval workflows
+  into one final structured result
+- enable or disable sandboxed plugins whose EDN manifests declare explicit
+  lifecycle-hook capabilities
 
 The server binds to `127.0.0.1` by default. Use `--bind 0.0.0.0` only when you
 intentionally want to expose it beyond the local machine.
@@ -160,6 +164,10 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 
 - secrets are encrypted at rest in the database
 - tools run inside a restricted sandbox
+- repetitive retrieval pipelines can call only whitelisted Xia tools and return
+  only the final structured output
+- plugin hook handlers run in restricted SCI and must declare explicit
+  `:hook/...` capabilities before they can observe lifecycle events
 - tools do not have ambient access to your host file system
 - authenticated API calls go through a capability proxy instead of exposing raw
   credentials

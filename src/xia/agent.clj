@@ -20,6 +20,7 @@
             [xia.db :as db]
             [xia.goal :as goal]
             [xia.llm :as llm]
+            [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-state :as runtime-state]
@@ -2284,6 +2285,14 @@
                                                (progress-reporter delta)
                                                (throw-if-cancelled! session-id)))
               _ (throw-if-cancelled! session-id)
+              _ (plugin/run-hooks! :post-llm
+                                   (assoc execution-context
+                                          :round round
+                                          :response-content (response-content response)
+                                          :response-provenance (response-provenance response)
+                                          :tool-calls (if (map? response)
+                                                        (vec (or (get response "tool_calls") []))
+                                                        [])))
               tool-calls (if (map? response)
                            (vec (or (get response "tool_calls") []))
                            [])

@@ -1802,6 +1802,23 @@
   (db-catalog/enable-tool! (catalog-deps) tool-id enabled?))
 
 ;; ---------------------------------------------------------------------------
+;; Plugins
+;; ---------------------------------------------------------------------------
+
+(defn save-plugin!
+  [plugin]
+  (db-catalog/save-plugin! (catalog-deps) plugin))
+
+(defn get-plugin [plugin-id]
+  (db-catalog/get-plugin (catalog-deps) plugin-id))
+
+(defn list-plugins []
+  (db-catalog/list-plugins (catalog-deps)))
+
+(defn enable-plugin! [plugin-id enabled?]
+  (db-catalog/enable-plugin! (catalog-deps) plugin-id enabled?))
+
+;; ---------------------------------------------------------------------------
 ;; LLM Call Log
 ;; ---------------------------------------------------------------------------
 

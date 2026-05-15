@@ -64,6 +64,7 @@
 (def ^:private default-tool-pipeline-timeout-ms 120000)
 (def ^:private default-tool-pipeline-max-calls 8)
 (def ^:private default-tool-pipeline-max-code-chars 12000)
+(def ^:private default-plugin-hook-timeout-ms 5000)
 (def ^:private default-local-doc-ocr-timeout-ms 120000)
 (def ^:private default-local-doc-ocr-max-tokens 2048)
 (def ^:private default-browser-playwright-timeout-ms 15000)
@@ -453,6 +454,11 @@
   []
   (cfg/positive-long :tool/pipeline-max-code-chars
                      default-tool-pipeline-max-code-chars))
+
+(defn plugin-hook-timeout-ms
+  []
+  (cfg/positive-long :plugin/hook-timeout-ms
+                     default-plugin-hook-timeout-ms))
 
 (defn local-doc-ocr-timeout-ms
   []

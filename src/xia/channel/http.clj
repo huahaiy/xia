@@ -2246,6 +2246,8 @@
           admin-schedule-match (re-matches #"/admin/schedules/([^/]+)" uri)
           admin-schedule-pause-match (re-matches #"/admin/schedules/([^/]+)/pause" uri)
           admin-schedule-resume-match (re-matches #"/admin/schedules/([^/]+)/resume" uri)
+          admin-plugin-enable-match (re-matches #"/admin/plugins/([^/]+)/enable" uri)
+          admin-plugin-disable-match (re-matches #"/admin/plugins/([^/]+)/disable" uri)
           admin-skill-update-check-match (re-matches #"/admin/skills/([^/]+)/update-check" uri)
           admin-skill-match  (re-matches #"/admin/skills/([^/]+)" uri)
           llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
@@ -2697,6 +2699,21 @@
 
         (and (= method :post) (= uri "/admin/skills/curate"))
         (protected-route-response req #(http-admin/handle-curate-skills (admin-handler-deps) req))
+
+        (and (= method :post) (= uri "/admin/plugins"))
+        (protected-route-response req #(http-admin/handle-save-plugin (admin-handler-deps) req))
+
+        (and (= method :post) admin-plugin-enable-match)
+        (protected-route-response req #(http-admin/handle-enable-plugin
+                                         (admin-handler-deps)
+                                         (second admin-plugin-enable-match)
+                                         true))
+
+        (and (= method :post) admin-plugin-disable-match)
+        (protected-route-response req #(http-admin/handle-enable-plugin
+                                         (admin-handler-deps)
+                                         (second admin-plugin-disable-match)
+                                         false))
 
         (and (= method :post) admin-skill-update-check-match)
         (protected-route-response req #(http-admin/handle-check-skill-update

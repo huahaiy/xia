@@ -18,6 +18,7 @@
             [xia.hippocampus :as hippo]
             [xia.llm :as llm]
             [xia.oauth :as oauth]
+            [xia.plugin :as plugin]
             [xia.runtime-state :as runtime-state]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
@@ -227,8 +228,19 @@
       :tool-id tool-id
       :task-id task-id})
     (try
+      (plugin/run-hooks! :schedule-run
+                         (assoc context
+                                :phase :start
+                                :schedule-type :tool
+                                :started-at started))
       (let [result (tool/execute-tool tool-id (or tool-args {}) context)]
         (close-schedule-tool-turn! task-id turn-id tool-id result)
+        (plugin/run-hooks! :schedule-run
+                           (assoc context
+                                  :phase :finish
+                                  :schedule-type :tool
+                                  :status (if (:error result) :error :success)
+                                  :result result))
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
@@ -244,6 +256,12 @@
                                              (str result)))))
       (catch Exception e
         (close-schedule-tool-turn! task-id turn-id tool-id {:error (.getMessage e)})
+        (plugin/run-hooks! :schedule-run
+                           (assoc context
+                                  :phase :finish
+                                  :schedule-type :tool
+                                  :status :error
+                                  :error (.getMessage e)))
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
@@ -297,6 +315,13 @@
         :resumed? (boolean resumed-session-id)
         :session-id session-id
         :task-id task-id})
+      (plugin/run-hooks! :schedule-run
+                         (assoc execution-context
+                                :session-id session-id
+                                :task-id task-id
+                                :phase :start
+                                :schedule-type :prompt
+                                :started-at started))
       (let [result (binding [llm/*request-budget-guard*
                              (fn [_request]
                                (task-policy/throw-if-schedule-run-llm-budget-exhausted!
@@ -314,6 +339,14 @@
                                                           :resume
                                                           :start)
                                             :tool-context execution-context))]
+        (plugin/run-hooks! :schedule-run
+                           (assoc execution-context
+                                  :session-id session-id
+                                  :task-id task-id
+                                  :phase :finish
+                                  :schedule-type :prompt
+                                  :status :success
+                                  :result result))
         (schedule/record-run! id
                               {:started-at started
                                :finished-at (java.util.Date.)
@@ -326,6 +359,16 @@
       (catch Exception e
         (let [schedule-budget? (= :schedule-run-budget-exhausted
                                   (:type (ex-data e)))]
+          (plugin/run-hooks! :schedule-run
+                             (assoc execution-context
+                                    :session-id session-id
+                                    :task-id task-id
+                                    :phase :finish
+                                    :schedule-type :prompt
+                                    :status (if schedule-budget?
+                                              :budget-exhausted
+                                              :error)
+                                    :error (.getMessage e)))
           (schedule/record-run! id
                                 {:started-at started
                                  :finished-at (java.util.Date.)

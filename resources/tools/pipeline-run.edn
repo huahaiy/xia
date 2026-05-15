@@ -1,0 +1,17 @@
+;; Run a restricted SCI pipeline over a whitelisted subset of Xia tools.
+;; Import with: /import-tool resources/tools/pipeline-run.edn
+
+{:id             :pipeline-run
+ :name           "pipeline-run"
+ :description    "Run a short restricted SCI/Clojure pipeline that can call only whitelisted Xia read/retrieval tools, then return only the pipeline's final structured value. Use this for repetitive retrieval workflows where intermediate tool outputs would waste model tokens. The code can use `input`, `allowed-tools`, and `(call-tool :tool-id {\"arg\" value})`. Allowed tools: artifact-list, artifact-read, artifact-search, board-list, local-doc-read, local-doc-search, recent-work, web-extract, web-fetch, web-search, workspace-list, workspace-read."
+ :tags           #{:pipeline :automation :retrieval}
+ :parameters     {"type"       "object"
+                  "properties" {"code"      {"type"        "string"
+                                             "description" "SCI/Clojure code to run. It may call `(call-tool :web-search {\"query\" \"...\"})` and must return an EDN/JSON-compatible final value."}
+                                "input"     {"type"        "object"
+                                             "description" "Optional structured input available to the pipeline as `input`."}
+                                "max_calls" {"type"        "integer"
+                                             "description" "Optional per-run tool call limit. It cannot exceed Xia's configured pipeline limit."}}
+                  "required"   ["code"]}
+ :handler        "(fn [args]
+                    (xia.pipeline/run! args))"}

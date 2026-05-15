@@ -5,6 +5,7 @@
             [xia.autonomous :as autonomous]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.task-event :as task-event]
             [xia.task-policy :as task-policy]
@@ -537,6 +538,13 @@
 (defn- emit-task-state-event!
   [task-id]
   (when-let [task (some-> task-id db/get-task)]
+    (plugin/run-hooks! :task-state-change
+                       {:session-id (:session-id task)
+                        :channel (:channel task)
+                        :task-id (:id task)
+                        :task-state (:state task)
+                        :task-title (:title task)
+                        :task-summary (:summary task)})
     (some-> (task-event/task-state-event task)
             emit-runtime-event!)))
 

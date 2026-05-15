@@ -58,6 +58,7 @@ const state = {
     messagingChannels: null,
     schedules: [],
     tools: [],
+    plugins: [],
     skills: [],
     managedInstances: []
   },
@@ -401,6 +402,7 @@ const messagingImessagePollIntervalEl = document.getElementById('messaging-imess
 const messagingChannelsStatusEl = document.getElementById('messaging-channels-status');
 const saveMessagingChannelsEl = document.getElementById('save-messaging-channels');
 const toolListEl = document.getElementById('tool-list');
+const pluginListEl = document.getElementById('plugin-list');
 const skillListEl = document.getElementById('skill-list');
 const skillIdEl = document.getElementById('skill-id');
 const skillNameEl = document.getElementById('skill-name');
@@ -5031,6 +5033,60 @@ function renderToolList() {
   );
 }
 
+function pluginMeta(plugin) {
+  return [
+    plugin.id,
+    (plugin.capabilities || []).join(', '),
+    (plugin.hooks || []).map((hook) => hook.event).filter(Boolean).join(', '),
+    plugin.description || ''
+  ].filter(Boolean).join(' • ');
+}
+
+function renderPluginList() {
+  pluginListEl.replaceChildren();
+  const plugins = state.admin.plugins || [];
+  if (!plugins.length) {
+    const empty = document.createElement('div');
+    empty.className = 'admin-list-empty';
+    empty.textContent = 'No plugins installed.';
+    pluginListEl.appendChild(empty);
+    return;
+  }
+  plugins.forEach((plugin) => {
+    const card = document.createElement('div');
+    card.className = 'capability-item';
+    const title = document.createElement('div');
+    title.className = 'capability-title';
+    const name = document.createElement('span');
+    name.textContent = firstNonEmpty(plugin.name, plugin.id);
+    const badge = document.createElement('span');
+    badge.className = 'badge' + (plugin.enabled ? '' : ' off');
+    badge.textContent = plugin.enabled ? 'Enabled' : 'Disabled';
+    title.appendChild(name);
+    title.appendChild(badge);
+    const meta = document.createElement('div');
+    meta.className = 'capability-meta';
+    meta.textContent = pluginMeta(plugin);
+    const actions = document.createElement('div');
+    actions.className = 'capability-actions';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = plugin.enabled ? 'secondary' : 'primary';
+    toggle.textContent = plugin.enabled ? 'Disable' : 'Enable';
+    toggle.addEventListener('click', () => {
+      togglePlugin(plugin).catch((err) => {
+        console.error(err);
+        setStatus(err.message || 'Failed to update plugin');
+      });
+    });
+    actions.appendChild(toggle);
+    card.appendChild(title);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    pluginListEl.appendChild(card);
+  });
+}
+
 function renderSkillList() {
   renderSelectableList(
     skillListEl,
@@ -5051,6 +5107,7 @@ function renderSkillList() {
 
 function renderCapabilities() {
   renderToolList();
+  renderPluginList();
   renderSkillList();
   renderMessagingChannelSettings();
   renderOpenClawImport();
@@ -6116,6 +6173,7 @@ async function loadAdminConfigImpl() {
     state.admin.messagingChannels = data.messaging_channels || null;
     state.admin.schedules = Array.isArray(data.schedules) ? data.schedules : [];
     state.admin.tools = Array.isArray(data.tools) ? data.tools : [];
+    state.admin.plugins = Array.isArray(data.plugins) ? data.plugins : [];
     state.admin.skills = Array.isArray(data.skills) ? data.skills : [];
     state.admin.managedInstances = Array.isArray(data.managed_instances) ? data.managed_instances : [];
     state.contextStatus = defaultConversationContextStatus();
@@ -6199,6 +6257,17 @@ async function loadAdminConfigImpl() {
   } catch (err) {
     console.error(err);
   }
+}
+
+async function togglePlugin(plugin) {
+  if (!plugin || !plugin.id) return;
+  const action = plugin.enabled ? 'disable' : 'enable';
+  const data = await fetchJson('/admin/plugins/' + encodeURIComponent(plugin.id) + '/' + action, {
+    method: 'POST'
+  });
+  state.admin.plugins = Array.isArray(data.plugins) ? data.plugins : state.admin.plugins;
+  renderPluginList();
+  setStatus('Plugin ' + (plugin.enabled ? 'disabled' : 'enabled'));
 }
 
 async function saveMessagingChannels() {

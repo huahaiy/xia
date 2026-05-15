@@ -990,3 +990,66 @@
 (defn enable-tool!
   [deps tool-id enabled?]
   (transact!* deps [{:tool/id tool-id :tool/enabled? enabled?}]))
+
+;; ---------------------------------------------------------------------------
+;; Plugins
+;; ---------------------------------------------------------------------------
+
+(declare get-plugin)
+
+(defn save-plugin!
+  [deps {:keys [id name description version enabled? capabilities manifest installed-at updated-at]}]
+  (let [existing (when id (get-plugin deps id))
+        now      (java.util.Date.)
+        old-caps (set (:plugin/capabilities existing))
+        new-caps (set (or capabilities
+                          (:plugin/capabilities existing)
+                          #{}))
+        retract-caps (for [cap old-caps
+                           :when (not (contains? new-caps cap))]
+                       [:db/retract (:db/id existing) :plugin/capabilities cap])]
+    (transact!*
+     deps
+     (into (vec retract-caps)
+           [{:plugin/id           id
+             :plugin/name         (or name
+                                      (:plugin/name existing)
+                                      (clojure.core/name id))
+             :plugin/description  (or description
+                                      (:plugin/description existing)
+                                      "")
+             :plugin/version      (or version
+                                      (:plugin/version existing)
+                                      "")
+             :plugin/enabled?     (if (some? enabled?)
+                                    enabled?
+                                    (if (contains? existing :plugin/enabled?)
+                                      (:plugin/enabled? existing)
+                                      true))
+             :plugin/capabilities new-caps
+             :plugin/manifest     (or manifest
+                                      (:plugin/manifest existing)
+                                      {})
+             :plugin/installed-at (or installed-at
+                                      (:plugin/installed-at existing)
+                                      now)
+             :plugin/updated-at   (or updated-at now)}])))
+  (get-plugin deps id))
+
+(defn get-plugin
+  [deps plugin-id]
+  (let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :plugin/id ?id]] plugin-id))]
+    (when eid
+      (raw-entity* deps eid))))
+
+(defn list-plugins
+  [deps]
+  (let [eids (q* deps '[:find ?e :where [?e :plugin/id _]])]
+    (mapv #(raw-entity* deps (first %)) eids)))
+
+(defn enable-plugin!
+  [deps plugin-id enabled?]
+  (transact!* deps [{:plugin/id plugin-id
+                     :plugin/enabled? (boolean enabled?)
+                     :plugin/updated-at (java.util.Date.)}])
+  (get-plugin deps plugin-id))

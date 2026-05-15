@@ -201,6 +201,81 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 | `xia.skill`          | Skill search, section extraction, patching, curation   |
 | `xia.db`             | `get-config`, `set-config!`, `q` (all secret-filtered) |
 | `xia.service`        | `request`, `list-services` (capability proxy)          |
+| `xia.pipeline`       | Restricted pipeline runner for whitelisted tool calls  |
+
+### Restricted Tool Pipelines
+
+`pipeline-run` is a bundled tool for repetitive retrieval workflows where
+intermediate tool results would waste model context. The tool evaluates a short
+SCI/Clojure pipeline and returns only the pipeline's final structured value to
+the model.
+
+Pipeline code receives:
+
+- `input`: optional structured input supplied with the tool call.
+- `allowed-tools`: the current pipeline whitelist as strings.
+- `call-tool`: a function shaped as `(call-tool :tool-id {"arg" value})`.
+
+The pipeline runner is intentionally narrower than normal tool execution:
+
+- **Whitelist only:** pipelines can call only read-oriented tools such as
+  `web-search`, `web-fetch`, `web-extract`, `local-doc-search`,
+  `local-doc-read`, `artifact-list`, `artifact-search`, `artifact-read`,
+  `workspace-list`, `workspace-read`, `board-list`, and `recent-work`.
+- **No recursive pipeline calls:** `pipeline-run` is not in the whitelist.
+- **No intermediate transcript:** subtool results stay inside the pipeline; the
+  model receives only the final structured return value.
+- **Normal tool policy still applies:** allowed subtool calls route through
+  Xia's standard tool execution path, including channel checks, approval policy,
+  audit logging, and result normalization.
+- **Extra sandbox limits:** pipeline SCI denies dynamic eval, namespace loading,
+  file I/O, futures, and namespace introspection, and validates that the final
+  value is structured data.
+
+Runtime limits are configurable through Xia config:
+
+| Key                              | Default |
+|----------------------------------|---------|
+| `:tool/pipeline-timeout-ms`      | 120000  |
+| `:tool/pipeline-max-calls`       | 8       |
+| `:tool/pipeline-max-code-chars`  | 12000   |
+
+Example:
+
+```clojure
+(let [r (call-tool :web-search {"query" (:query input) "max_results" 5})]
+  {:titles (mapv #(get % "title") (get r "results"))})
+```
+
+### Sandboxed Plugins And Hooks
+
+Plugins are installed from EDN manifest maps and stored in the DB. A plugin must
+declare every lifecycle capability it wants before any hook can run:
+
+```clojure
+{:id :tool-auditor
+ :name "Tool Auditor"
+ :enabled? true
+ :capabilities #{:hook/pre-tool :hook/post-tool}
+ :hooks [{:id :observe-tool
+          :event :post-tool
+          :handler "(fn [event] {:tool (:tool-id event) :status (:status event)})"}]}
+```
+
+Supported hook events are `:pre-tool`, `:post-tool`, `:post-llm`,
+`:task-state-change`, and `:schedule-run`.
+
+Hook handlers run only through a restricted SCI context. They receive an `event`
+map and may return structured data for audit summaries, but they do not get
+direct Xia namespace access, file I/O, dynamic eval, futures, namespace loading,
+or namespace introspection. Hook failures are isolated, logged, and audited
+without stopping the main runtime, except that `:pre-tool` hooks may deliberately
+block a tool by returning `{:allow? false :reason "..."}`.
+
+Hook execution is bounded by `:plugin/hook-timeout-ms`, which defaults to 5000.
+The admin UI exposes installed plugins with enable/disable controls, and every
+hook invocation writes a `:plugin-hook` audit event when session audit context is
+available.
 
 ### Credential Protection (`xia.secret`)
 
