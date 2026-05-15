@@ -255,7 +255,7 @@ declare every lifecycle capability it wants before any hook can run:
 ```clojure
 {:id :tool-auditor
  :name "Tool Auditor"
- :enabled? true
+ :enabled? false
  :capabilities #{:hook/pre-tool :hook/post-tool}
  :hooks [{:id :observe-tool
           :event :post-tool
@@ -263,7 +263,9 @@ declare every lifecycle capability it wants before any hook can run:
 ```
 
 Supported hook events are `:pre-tool`, `:post-tool`, `:post-llm`,
-`:task-state-change`, and `:schedule-run`.
+`:task-state-change`, and `:schedule-run`. New plugin installs default to
+disabled when `:enabled?` is omitted, so importing a manifest and enabling it are
+separate review steps.
 
 Hook handlers run only through a restricted SCI context. They receive an `event`
 map and may return structured data for audit summaries, but they do not get
@@ -273,9 +275,10 @@ without stopping the main runtime, except that `:pre-tool` hooks may deliberatel
 block a tool by returning `{:allow? false :reason "..."}`.
 
 Hook execution is bounded by `:plugin/hook-timeout-ms`, which defaults to 5000.
-The admin UI exposes installed plugins with enable/disable controls, and every
-hook invocation writes a `:plugin-hook` audit event when session audit context is
-available.
+Hook manifests are also capped by `:plugin/hook-max-code-chars`,
+`:plugin/max-hooks`, and `:plugin/max-active-workers`. The admin UI exposes
+installed plugins with enable/disable controls, and every hook invocation writes
+a `:plugin-hook` audit event when session audit context is available.
 
 ### Credential Protection (`xia.secret`)
 

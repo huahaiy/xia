@@ -40,6 +40,7 @@
                          (when (= (:tool-id event) :blocked-tool)
                            {:allow? false
                             :reason \"blocked by test plugin\"}))"}]})
+  (plugin/enable-plugin! :tool-guard true)
   (let [session-id (db/create-session! :terminal)
         result     (tool/execute-tool :blocked-tool
                                       {}
@@ -63,7 +64,6 @@
     :hooks [{:id :block-tool
              :event :pre-tool
              :handler "(fn [_] {:allow? false :reason \"should not run\"})"}]})
-  (plugin/enable-plugin! :disabled-guard false)
   (is (= {"status" "ok"}
          (tool/execute-tool :blocked-tool {} {:channel :terminal}))))
 
@@ -75,6 +75,7 @@
     :hooks [{:id :try-io
              :event :post-llm
              :handler "(fn [_] (slurp \"/etc/passwd\"))"}]})
+  (plugin/enable-plugin! :sandbox-check true)
   (let [results (plugin/run-hooks! :post-llm {:session-id (db/create-session! :terminal)
                                               :channel :terminal})]
     (is (= :error (:status (first results))))
@@ -93,6 +94,7 @@
                          {:tool (:tool-id event)
                           :status (:status event)
                           :result-status (get (:result event) \"status\")})"}]})
+  (plugin/enable-plugin! :post-tool-observer true)
   (let [session-id (db/create-session! :terminal)
         result     (tool/execute-tool :safe-tool
                                       {}
@@ -105,3 +107,29 @@
                     (= "post-tool" (get-in % [:data "hook-event"]))
                     (= "success" (get-in % [:data "status"])))
               audit))))
+
+(deftest installed-plugin-defaults-to-disabled
+  (let [saved (plugin/install-plugin!
+               {:id :default-disabled
+                :name "Default disabled"
+                :capabilities #{:hook/post-llm}
+                :hooks [{:id :observe
+                         :event :post-llm
+                         :handler "(fn [_] {:ran true})"}]})]
+    (is (false? (:plugin/enabled? saved)))
+    (is (empty? (plugin/run-hooks! :post-llm {:channel :terminal})))))
+
+(deftest hook-timeout-stops-tight-loops
+  (plugin/install-plugin!
+   {:id :looping-hook
+    :name "Looping hook"
+    :capabilities #{:hook/post-llm}
+    :hooks [{:id :loop
+             :event :post-llm
+             :handler "(fn [_] (while true nil))"}]})
+  (plugin/enable-plugin! :looping-hook true)
+  (with-redefs [xia.task-policy/plugin-hook-timeout-ms (constantly 10)]
+    (let [results (plugin/run-hooks! :post-llm {:session-id (db/create-session! :terminal)
+                                                :channel :terminal})]
+      (is (= :error (:status (first results))))
+      (is (re-find #"timed out" (:error (first results)))))))

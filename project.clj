@@ -17,7 +17,7 @@
                                org.bouncycastle/bcprov-jdk18on
                                org.bouncycastle/bcpkix-jdk18on
                                org.apache.xmlgraphics/fop]]
-                 [com.microsoft.playwright/playwright "1.52.0"]
+                 [com.microsoft.playwright/playwright "1.59.0"]
                  [http-kit/http-kit "2.8.1"]
                  [ring/ring-core "1.12.2"]
                  [com.taoensso/timbre "6.5.0"]

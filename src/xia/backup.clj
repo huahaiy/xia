@@ -176,14 +176,17 @@
   [^File source ^File target]
   (doseq [^File file (file-seq source)]
     (let [relative (.relativize (.toPath source) (.toPath file))
-          ^Path target-path (.resolve (.toPath target) relative)]
+          ^Path target-path (.resolve (.toPath target) relative)
+          ^Path source-path (.toPath file)]
+      (when (Files/isSymbolicLink source-path)
+        (throw (ex-info "Refusing to back up a symbolic link."
+                        {:source (.getAbsolutePath file)})))
       (if (.isDirectory file)
         (Files/createDirectories target-path (make-array FileAttribute 0))
         (do
           (when-let [^Path parent (.getParent target-path)]
             (Files/createDirectories parent (make-array FileAttribute 0)))
-          (let [^Path source-path (.toPath file)
-                ^"[Ljava.nio.file.CopyOption;" copy-options
+          (let [^"[Ljava.nio.file.CopyOption;" copy-options
                 (into-array java.nio.file.CopyOption
                             [StandardCopyOption/REPLACE_EXISTING])]
             (Files/copy source-path target-path copy-options)))))))

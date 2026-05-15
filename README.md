@@ -166,8 +166,9 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 - tools run inside a restricted sandbox
 - repetitive retrieval pipelines can call only whitelisted Xia tools and return
   only the final structured output
-- plugin hook handlers run in restricted SCI and must declare explicit
-  `:hook/...` capabilities before they can observe lifecycle events
+- plugin hook handlers run in restricted SCI, install disabled by default, and
+  must declare explicit `:hook/...` capabilities before they can observe
+  lifecycle events
 - tools do not have ambient access to your host file system
 - authenticated API calls go through a capability proxy instead of exposing raw
   credentials
