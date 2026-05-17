@@ -176,6 +176,9 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 - every tool invocation passes through a central permission gate before handler
   code runs; terminal, HTTP, Slack, Telegram, and iMessage approvals route
   through channel adapters rather than per-tool UI code
+- terminal, web, command/WebSocket, and messaging channels enter the core
+  runtime through a shared bridge for prompts, approvals, status, interrupts,
+  and task/session controls
 - repetitive retrieval pipelines can call only whitelisted Xia tools and return
   only the final structured output
 - plugin hook handlers run in restricted SCI, install disabled by default, and

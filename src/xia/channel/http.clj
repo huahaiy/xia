@@ -7,6 +7,7 @@
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
             [xia.board :as board]
+            [xia.bridge :as bridge]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
@@ -21,7 +22,6 @@
             [xia.rate-limit :as rate-limit]
             [xia.runtime-health :as runtime-health]
             [xia.runtime-state :as runtime-state]
-            [xia.agent :as agent]
             [xia.prompt :as prompt]
             [xia.snapshot :as snapshot]
             [xia.util :as util]
@@ -472,7 +472,7 @@
 (defn- handle-websocket-receive-failure!
   [ch session-id ^Throwable e]
   (try
-    (agent/cancel-session! session-id "websocket request failed")
+    (bridge/cancel-session! session-id "websocket request failed")
     (catch Exception cancel-error
       (log/warn cancel-error
                 "Failed to cancel WebSocket session after receive error"
@@ -520,9 +520,9 @@
     #(http/as-channel req
        {:on-open
         (fn [ch]
-          (let [sid (db/create-session! :websocket)]
+          (let [{:keys [session-id]} (bridge/create-session! :websocket)
+                sid session-id]
             (swap! (ws-sessions-atom) assoc ch sid)
-            (wm/ensure-wm! sid)
             (log/info "WebSocket connected, session:" sid)
             (send-websocket-json! ch {:type "connected" :session-id (str sid)})))
 
@@ -541,7 +541,7 @@
                 (when-not (= ::invalid-message data)
                   (try
                     (let [text     (get data "message" (get data "content" msg))
-                          response (agent/process-message sid text :channel :websocket)]
+                          response (bridge/send-message! sid text :channel :websocket)]
                       (clear-websocket-receive-failure! sid)
                       (send-websocket-json! ch {:type    "message"
                                                 :role    "assistant"
@@ -2813,17 +2813,17 @@
                      {:bind-host bind-host
                       :port port})))
    (configure-web-dev! web-dev?)
-   (prompt/register-channel-adapter! :http
+   (bridge/register-channel-adapter! :http
                                      {:prompt http-prompt-handler
                                       :approval http-approval-handler
                                       :status http-status-handler
                                       :runtime-event http-runtime-event-handler})
-   (prompt/register-channel-adapter! :command
+   (bridge/register-channel-adapter! :command
                                      {:prompt http-prompt-handler
                                       :approval http-approval-handler
                                       :status http-status-handler
                                       :runtime-event http-runtime-event-handler})
-   (prompt/register-channel-adapter! :websocket
+   (bridge/register-channel-adapter! :websocket
                                      {:approval http-approval-handler
                                       :status http-status-handler
                                       :runtime-event http-runtime-event-handler})
@@ -2851,9 +2851,9 @@
         (catch InterruptedException _
           (.shutdownNow exec)))
       (reset! (rest-session-finalizer-executor-atom) nil))
-    (prompt/clear-channel-adapter! :http)
-    (prompt/clear-channel-adapter! :command)
-    (prompt/clear-channel-adapter! :websocket)
+    (bridge/clear-channel-adapter! :http)
+    (bridge/clear-channel-adapter! :command)
+    (bridge/clear-channel-adapter! :websocket)
     (reset! (websocket-receive-failures-atom) {})
     (reset! (session-statuses-atom) {})
     (reset! (task-runtime-events-atom) {})

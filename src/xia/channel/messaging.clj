@@ -4,10 +4,10 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.agent :as agent]
             [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.audit :as audit]
+            [xia.bridge :as bridge]
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http-client]
@@ -264,7 +264,7 @@
         response (:response interaction)
         kind (:kind interaction)]
     (loop []
-      (when (agent/session-cancelled? session-id)
+      (when (bridge/session-cancelled? session-id)
         (throw (interaction-cancelled-ex session-id channel)))
       (let [result (deref response interaction-poll-ms ::pending)]
         (cond
@@ -781,53 +781,28 @@
 (defn- handle-pending-interaction-reply!
   [session-id channel user-message]
   (let [{:keys [status interaction]}
-        (prompt/submit-freeform-interaction-reply! {:session-id session-id
-                                                    :channel channel}
-                                                   user-message)]
+        (bridge/submit-freeform-reply! {:session-id session-id
+                                        :channel channel}
+                                       user-message)]
     (case status
       :missing nil
       :delivered true
       :invalid (do
                  (send-session-message! channel
                                         session-id
-                                        (prompt/interaction-retry-text interaction))
+                                        (bridge/interaction-retry-text interaction))
                  true)
       nil)))
 
 (defn- handle-control-intent!
   [session-id channel user-message]
-  (when-let [intent (prompt/parse-control-intent user-message)]
-    (let [task   (db/current-session-task session-id)
-          result (if task
-                   (prompt/apply-task-control-intent!
-                    {:pause-task! agent/pause-task!
-                     :resume-task! agent/resume-task!
-                     :stop-task! agent/stop-task!
-                     :interrupt-task! agent/interrupt-task!
-                     :steer-task! agent/steer-task!
-                     :fork-task! agent/fork-task!}
-                    (some-> task :id)
-                    intent
-                    :context {:session-id session-id
-                              :channel channel})
-                   (if (= :interrupt intent)
-                     (prompt/apply-session-control-intent!
-                      {:cancel-session! agent/cancel-session!}
-                      session-id
-                      :interrupt
-                      :reason "session cancel requested"
-                      :context {:session-id session-id
-                                :channel channel})
-                     {:status :missing}))
-          text   (if task
-                   (prompt/control-result-text intent result)
-                   (if (= :interrupt intent)
-                     (prompt/session-control-result-text :interrupt result)
-                     (prompt/control-result-text intent result)))]
-      (send-session-message! channel
-                             session-id
-                             text)
-      true)))
+  (when-let [{:keys [text]} (bridge/apply-control-message! session-id
+                                                           channel
+                                                           user-message)]
+    (send-session-message! channel
+                           session-id
+                           text)
+    true))
 
 (defn- handle-status-intent!
   [session-id channel user-message]
@@ -903,10 +878,10 @@
                                           external-message-id
                                           external-sender)
           (try
-            (agent/process-message session-id
-                                   user-message
-                                   :channel channel
-                                   :persist-message? false)
+            (bridge/send-message! session-id
+                                  user-message
+                                  :channel channel
+                                  :persist-message? false)
             (catch Exception e
               (log/error e "Messaging channel processing failed"
                          {:channel channel
@@ -1100,7 +1075,7 @@
   []
   (try
     (doseq [channel [:slack :telegram :imessage]]
-      (prompt/clear-channel-adapter! channel))
+      (bridge/clear-channel-adapter! channel))
     (catch clojure.lang.ExceptionInfo e
       (when-not (= :xia/prompt-runtime (:component (ex-data e)))
         (throw e))))
@@ -1138,7 +1113,7 @@
   []
   (clear-runtime!)
   (doseq [channel [:slack :telegram :imessage]]
-    (prompt/register-channel-adapter! channel
+    (bridge/register-channel-adapter! channel
                                       {:prompt messaging-prompt
                                        :approval messaging-approval
                                        :runtime-event messaging-runtime-event}))

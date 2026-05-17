@@ -3,12 +3,11 @@
   (:require [charred.api :as json]
             [org.httpkit.server :as http]
             [taoensso.timbre :as log]
-            [xia.agent :as agent]
             [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
+            [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.goal :as goal]
-            [xia.prompt :as prompt]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.task-event :as task-event]
@@ -697,11 +696,11 @@
 (defn- process-chat!
   [deps {:keys [session-id channel message local-doc-ids artifact-ids]}]
   (try
-    (let [response (agent/process-message session-id
-                                          message
-                                          :channel channel
-                                          :local-doc-ids local-doc-ids
-                                          :artifact-ids artifact-ids)
+    (let [response (bridge/send-message! session-id
+                                         message
+                                         :channel channel
+                                         :local-doc-ids local-doc-ids
+                                         :artifact-ids artifact-ids)
           assistant-message (db/latest-session-message session-id #{:assistant})
           task              (db/current-session-task session-id)
           persistent-goal   (goal/current-goal session-id)
@@ -875,16 +874,22 @@
     (when-let [task (db/get-task task-id)]
       (when (contains? #{:running :waiting_input :waiting_approval :resumable :paused}
                        (:state task))
-        (agent/pause-task! task-id)))))
+        (bridge/control-task! task-id
+                              :pause
+                              :context {:session-id (:session-id task)
+                                        :channel :http})))))
 
 (defn- resume-goal-task!
   [goal]
   (when-let [task-id (goal-task-id goal)]
     (when-let [task (db/get-task task-id)]
       (when-not (contains? #{:cancelled :failed} (:state task))
-        (agent/resume-task! task-id
-                            :message (str "Continue working on persistent goal: "
-                                          (:text goal)))))))
+        (bridge/control-task! task-id
+                              :resume
+                              :message (str "Continue working on persistent goal: "
+                                            (:text goal))
+                              :context {:session-id (:session-id task)
+                                        :channel :http})))))
 
 (defn handle-get-goal
   ([deps session-id]
@@ -999,7 +1004,7 @@
      :else
      (do
        (touch-rest-session!* deps session-id)
-       (if-let [approval (prompt/pending-interaction {:session-id session-id
+       (if-let [approval (bridge/pending-interaction {:session-id session-id
                                                       :kind :approval})]
          (json-response* deps 200 {:pending true
                                    :approval (approval->body* deps approval)})
@@ -1024,7 +1029,7 @@
      :else
      (do
        (touch-rest-session!* deps session-id)
-       (if-let [interaction (prompt/pending-interaction {:session-id session-id
+       (if-let [interaction (bridge/pending-interaction {:session-id session-id
                                                          :kind :prompt})]
          (json-response* deps 200 {:pending true
                                    :prompt (prompt->body* deps interaction)})
@@ -1051,10 +1056,10 @@
 
            :else
            (let [{:keys [status]}
-                 (prompt/deliver-validated-interaction! {:session-id session-id
-                                                         :kind :prompt}
-                                                        prompt-id
-                                                        (str (or value "")))]
+                 (bridge/submit-interaction! {:session-id session-id
+                                              :kind :prompt}
+                                             prompt-id
+                                             (str (or value "")))]
              (case status
                :missing (json-response* deps 404 {:error "no pending prompt"})
                :stale (json-response* deps 409 {:error "stale prompt id"})
@@ -1086,10 +1091,10 @@
 
            :else
            (let [{:keys [status]}
-                 (prompt/deliver-validated-interaction! {:session-id session-id
-                                                         :kind :approval}
-                                                        approval-id
-                                                        decision*)]
+                 (bridge/submit-interaction! {:session-id session-id
+                                              :kind :approval}
+                                             approval-id
+                                             decision*)]
              (case status
                :missing (json-response* deps 404 {:error "no pending approval"})
                :stale (json-response* deps 409 {:error "stale approval id"})
@@ -1104,7 +1109,7 @@
           task (db/get-task uuid)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (if-let [interaction (prompt/resolve-pending-interaction {:task-id uuid
+        (if-let [interaction (bridge/resolve-pending-interaction {:task-id uuid
                                                                   :session-id (:session-id task)
                                                                   :kind :prompt})]
           (json-response* deps 200 {:pending true
@@ -1133,11 +1138,11 @@
 
             :else
             (let [{:keys [status]}
-                  (prompt/deliver-validated-interaction! {:task-id uuid
-                                                          :session-id (:session-id task)
-                                                          :kind :prompt}
-                                                         prompt-id
-                                                         (str (or value "")))]
+                  (bridge/submit-interaction! {:task-id uuid
+                                               :session-id (:session-id task)
+                                               :kind :prompt}
+                                              prompt-id
+                                              (str (or value "")))]
               (case status
                 :missing (json-response* deps 404 {:error "no pending prompt"})
                 :stale (json-response* deps 409 {:error "stale prompt id"})
@@ -1152,7 +1157,7 @@
           task (db/get-task uuid)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (if-let [interaction (prompt/resolve-pending-interaction {:task-id uuid
+        (if-let [interaction (bridge/resolve-pending-interaction {:task-id uuid
                                                                   :session-id (:session-id task)
                                                                   :kind :approval})]
           (json-response* deps 200 {:pending true
@@ -1184,11 +1189,11 @@
 
             :else
             (let [{:keys [status]}
-                  (prompt/deliver-validated-interaction! {:task-id uuid
-                                                          :session-id (:session-id task)
-                                                          :kind :approval}
-                                                         approval-id
-                                                         decision*)]
+                  (bridge/submit-interaction! {:task-id uuid
+                                               :session-id (:session-id task)
+                                               :kind :approval}
+                                              approval-id
+                                              decision*)]
               (case status
                 :missing (json-response* deps 404 {:error "no pending approval"})
                 :stale (json-response* deps 409 {:error "stale approval id"})
@@ -1227,19 +1232,16 @@
 
      :else
      (let [sid    (parse-session-id* deps session-id)
-           result (prompt/apply-session-control-intent!
-                   {:busy? (fn [session-id]
-                             (session-busy?* deps session-id))
-                    :cancel-session! (fn [session-id reason]
-                                       (agent/cancel-session! session-id reason))
-                    :finalize-session! (fn [session-id]
-                                         (finalize-rest-session!* deps session-id :explicit))}
-                   sid
-                   :close
-                   :reason "session close requested"
-                   :context {:session-id sid
-                             :channel (or expected-channel :http)})
-           {:keys [response-kind status status-key message]} (prompt/session-control-result-view :close result)]
+           result (bridge/control-session! sid
+                                           :close
+                                           :reason "session close requested"
+                                           :context {:session-id sid
+                                                     :channel (or expected-channel :http)}
+                                           :busy? (fn [session-id]
+                                                    (session-busy?* deps session-id))
+                                           :finalize-session! (fn [session-id]
+                                                               (finalize-rest-session!* deps session-id :explicit)))
+           {:keys [response-kind status status-key message]} (bridge/session-control-result-view :close result)]
        (case response-kind
          :accepted
          (json-response* deps 202 {:session_id sid
@@ -1412,7 +1414,7 @@
 
 (defn- task-control-response
   [deps intent result]
-  (let [{:keys [status response-kind status-key message]} (prompt/control-result-view intent result)]
+  (let [{:keys [status response-kind status-key message]} (bridge/control-result-view intent result)]
     (case response-kind
       :missing
       (json-response* deps 404 {:error "task not found"})
@@ -1454,14 +1456,6 @@
 
       (json-response* deps 500 {:error "unknown task control result"}))))
 
-(def ^:private task-control-handlers
-  {:pause-task! agent/pause-task!
-   :resume-task! agent/resume-task!
-   :stop-task! agent/stop-task!
-   :interrupt-task! agent/interrupt-task!
-   :steer-task! agent/steer-task!
-   :fork-task! agent/fork-task!})
-
 (defn- handle-task-control-intent
   [deps task-id intent & {:keys [message]}]
   (try
@@ -1469,12 +1463,11 @@
           task (db/get-task uuid)]
       (task-control-response deps
                              intent
-                             (prompt/apply-task-control-intent! task-control-handlers
-                                                                uuid
-                                                                intent
-                                                                :message message
-                                                                :context {:session-id (:session-id task)
-                                                                          :channel :http})))
+                             (bridge/control-task! uuid
+                                                   intent
+                                                   :message message
+                                                   :context {:session-id (:session-id task)
+                                                             :channel :http})))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 

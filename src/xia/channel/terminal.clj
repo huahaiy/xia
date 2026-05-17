@@ -2,8 +2,8 @@
   "Terminal channel — interactive REPL for talking to Xia."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.bridge :as bridge]
             [xia.db :as db]
-            [xia.agent :as agent]
             [xia.skill :as skill]
             [xia.skill.openclaw :as openclaw-skill]
             [xia.tool :as tool]
@@ -103,13 +103,11 @@
 (defn start!
   "Start the terminal REPL loop."
   []
-  (prompt/register-channel-adapter! :terminal
+  (bridge/register-channel-adapter! :terminal
                                     {:prompt terminal-prompt
                                      :approval terminal-approval
                                      :runtime-event terminal-runtime-event})
-  (let [session-id (db/create-session! :terminal)]
-    ;; Initialize working memory with warm start
-    (wm/ensure-wm! session-id)
+  (let [{:keys [session-id]} (bridge/create-session! :terminal)]
     (println)
     (println (str "Xia ready. Type your message (or /quit to exit, /help for commands)"))
     (println)
@@ -285,7 +283,7 @@
 
             :else
             (do (try
-                  (agent/process-message session-id trimmed :channel :terminal)
+                  (bridge/send-message! session-id trimmed :channel :terminal)
                   (catch Exception e
                     (log/error e "Error processing message")
                     (println (str "  error: " (.getMessage e)))

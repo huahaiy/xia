@@ -200,6 +200,21 @@ org policy. Org policy is read from `:constraints/org-policy` as an EDN map.
 Agent turns attach the resolved envelope to the execution context so model
 routing, tools, and inspections can use one consistent operating envelope.
 
+## Bridge And Session Runner
+
+User-facing channels enter the autonomous runtime through `xia.bridge`.
+Terminal, HTTP/WebSocket, command, Slack, Telegram, and iMessage surfaces should
+use this facade for session creation, user-message dispatch, pending
+prompt/approval replies, task controls, session controls, and channel adapter
+registration.
+
+The bridge is intentionally thin today: it preserves the existing
+`xia.agent/process-message` runner and `xia.prompt` interaction bus while
+removing direct channel dependencies on agent internals. This gives future IDE
+or support-system bridges one stable contract for status, prompts, approvals,
+interrupts, and runtime events instead of each channel inventing its own control
+path.
+
 ## Web, Browser, And Service Automation
 
 Xia can interact with the live web through secure, sandboxed tools.
