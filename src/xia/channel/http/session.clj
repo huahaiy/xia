@@ -300,7 +300,7 @@
      :latest_status (some-> (:status latest-run) name)
      :latest_error  (truncate-text* deps (:error latest-run) 160)}))
 
-(declare user-profile->body history-user-profile->body stack->body)
+(declare user-profile->body history-user-profile->body workspace->body history-workspace->body stack->body)
 
 (defn- history-session->body
   ([deps session]
@@ -313,7 +313,8 @@
                                  vec)]
                {:message-count (count messages)
                 :last-message  (last messages)}))
-         user-profile (:user-profile session)]
+         user-profile (:user-profile session)
+         workspace    (:workspace session)]
      {:id              (some-> (:id session) str)
       :channel         (some-> (:channel session) name)
       :created_at      (instant->str* deps (:created-at session))
@@ -321,7 +322,8 @@
       :message_count   (long (or message-count 0))
       :last_message_at (instant->str* deps (:created-at last-message))
       :preview         (truncate-text* deps (:content last-message) 160)
-      :user_profile    (history-user-profile->body deps user-profile)})))
+      :user_profile    (history-user-profile->body deps user-profile)
+      :workspace       (history-workspace->body deps workspace)})))
 
 (defn- task-item->body
   [deps item]
@@ -415,6 +417,22 @@
       (:name user-profile) (assoc :name (:name user-profile))
       (:summary user-profile) (assoc :summary (:summary user-profile)))))
 
+(defn- workspace->body
+  [deps workspace]
+  (when workspace
+    (cond-> {:id         (:id workspace)
+             :created_at (instant->str* deps (:created-at workspace))
+             :updated_at (instant->str* deps (:updated-at workspace))}
+      (:name workspace) (assoc :name (:name workspace))
+      (:preferences workspace) (assoc :preferences (:preferences workspace))
+      (:constraints workspace) (assoc :constraints (:constraints workspace)))))
+
+(defn- history-workspace->body
+  [deps workspace]
+  (when workspace
+    (cond-> {:id (:id workspace)}
+      (:name workspace) (assoc :name (:name workspace)))))
+
 (defn- history-contract->body
   [contract]
   (when (map? contract)
@@ -470,6 +488,7 @@
          recovery-brief  (task-runtime/task-recovery-brief task)
          persistent-goal (get-in task [:meta :persistent-goal])
          contract        (:contract task)
+         constraints     (:constraints task)
          inspection      (task-inspection/task-inspection
                           {:instant->str #(instant->str* deps %)
                            :truncate-text #(truncate-text* deps %1 %2)}
@@ -493,6 +512,7 @@
        (:title task) (assoc :title (:title task))
        (:summary task) (assoc :summary (:summary task))
        contract (assoc :contract contract)
+       constraints (assoc :constraints constraints)
        (:stop-reason task) (assoc :stop_reason (name (:stop-reason task)))
        (:error task) (assoc :error (:error task))
        recovery (assoc :recovery recovery)
@@ -551,6 +571,7 @@
          resume-hint (task-runtime/task-resume-hint task)
          recovery-brief (task-runtime/task-recovery-brief task)
          contract    (history-contract->body (:contract task))
+         constraints (:constraints task)
          inspection  (task-inspection/task-inspection
                       {:instant->str #(instant->str* deps %)
                        :truncate-text #(truncate-text* deps %1 %2)}
@@ -576,6 +597,7 @@
        (:title task) (assoc :title (:title task))
        (:summary task) (assoc :summary (:summary task))
        contract (assoc :contract contract)
+       constraints (assoc :constraints constraints)
        recovery (assoc :recovery recovery)
        boundary (assoc :boundary_summary boundary)
        checkpoint (assoc :checkpoint checkpoint)

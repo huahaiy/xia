@@ -168,6 +168,38 @@ provider.
 Future model-routing improvements should extend this namespace instead of
 adding new budget logic to `xia.task-policy`.
 
+## Task Boundaries And Operating Envelopes
+
+Pause, completion, and terminal task boundaries are finalized into
+`:task/boundary` instead of being buried in `:task/meta`. The finalizer writes
+qualified keys for the next continuation point:
+
+- `:boundary/summary`
+- `:boundary/resume-hint`
+- `:boundary/next-step`
+- `:boundary/stack-tip`
+- `:boundary/open-questions`
+- `:boundary/schedule-run-hint`
+
+The task runtime still exposes compatibility aliases through
+`task-boundary-summary` for existing UI callers, but durable storage uses the
+qualified boundary document.
+
+Context policy is resolved by `xia.constraints/operating-envelope`. It combines
+durable workspace/project constraints and preferences, explicit
+`:task/constraints`, user profile preferences, and low-precedence session
+scratch/recap context. The merge order is:
+
+```clojure
+org policy > project constraints > task constraints > user preferences > session scratch/context
+```
+
+The resolver applies that order by merging lowest-to-highest precedence:
+session context, user preferences, task constraints, project constraints, then
+org policy. Org policy is read from `:constraints/org-policy` as an EDN map.
+Agent turns attach the resolved envelope to the execution context so model
+routing, tools, and inspections can use one consistent operating envelope.
+
 ## Web, Browser, And Service Automation
 
 Xia can interact with the live web through secure, sandboxed tools.
@@ -228,6 +260,19 @@ Tool handlers are strings of Clojure code executed inside [SCI](https://github.c
 | `xia.db`             | `get-config`, `set-config!`, `q` (all secret-filtered) |
 | `xia.service`        | `request`, `list-services` (capability proxy)          |
 | `xia.pipeline`       | Restricted pipeline runner for whitelisted tool calls  |
+
+### Tool Permission Gate
+
+Every normal tool invocation goes through `xia.permission/authorize-tool!`
+before the handler or plugin hooks run. The permission layer owns channel
+compatibility checks, vision-model gating, branch-worker restrictions, approval
+policy, autonomous bypass rules, and session-scoped approval grants.
+
+Approval prompts are still transported through `xia.prompt` channel adapters, so
+terminal, HTTP, Slack, Telegram, and iMessage share the same permission decision
+path. Bridge integrations can also provide a per-invocation
+`:permission/approval-callback`; Xia records the same approval request,
+approval decision, and policy-decision audit events for that callback path.
 
 ### Restricted Tool Pipelines
 

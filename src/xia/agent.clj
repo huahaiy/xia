@@ -17,6 +17,7 @@
             [xia.autonomous :as autonomous]
             [xia.audit :as audit]
             [xia.context :as context]
+            [xia.constraints :as constraints]
             [xia.db :as db]
             [xia.goal :as goal]
             [xia.limits :as limits]
@@ -2612,6 +2613,9 @@
                                                                 :data (cond-> {}
                                                                         (seq local-doc-ids) (assoc :local-doc-ids (vec local-doc-ids))
                                                                         (seq artifact-ids) (assoc :artifact-ids (vec artifact-ids))))
+                      operating-envelope (constraints/operating-envelope
+                                           {:session-id session-id
+                                            :task-id task-id})
                       pre-provider-limit-context (merge tool-context
                                                         request-context
                                                         {:session-id session-id
@@ -2619,7 +2623,8 @@
                                                          :task-turn-id task-turn-id
                                                          :channel channel
                                                          :persistent-goal-id (:id persistent-goal)
-                                                         :resource-session-id resource-session-id})
+                                                         :resource-session-id resource-session-id
+                                                         :operating-envelope operating-envelope})
                       limit-routing-decision (limits/routing-decision pre-provider-limit-context)
                       provider-selection-opts (-> (cond-> {:workload :assistant}
                                                     provider-id
@@ -2640,6 +2645,7 @@
                                                      :resource-session-id resource-session-id
                                                      :assistant-provider assistant-provider
                                                      :assistant-provider-id assistant-provider-id
+                                                     :operating-envelope operating-envelope
                                                      :limit-routing-decision limit-routing-decision})
                       max-tool-rounds* (long (or max-tool-rounds
                                                  (configured-max-tool-rounds)))

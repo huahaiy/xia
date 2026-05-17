@@ -1,6 +1,7 @@
 (ns xia.db.session
   "Session, message, WM snapshot, LLM log, and audit persistence helpers."
   (:require [charred.api :as json]
+            [clojure.string :as str]
             [datalevin.core :as d])
   (:import [java.util UUID]))
 
@@ -66,6 +67,13 @@
                        :where [?e :user.profile/key ?pkey]]
                 profile-key))))
 
+(defn- workspace-eid
+  [deps workspace-id]
+  (when workspace-id
+    (ffirst (q* deps '[:find ?e :in $ ?wid
+                       :where [?e :workspace/id ?wid]]
+                (str workspace-id)))))
+
 (defn- user-profile-id-for-session
   [deps session-eid*]
   (when session-eid*
@@ -73,6 +81,15 @@
                        :where
                        [?session :session/user-profile ?profile]
                        [?profile :user.profile/id ?pid]]
+                session-eid*))))
+
+(defn- workspace-id-for-session
+  [deps session-eid*]
+  (when session-eid*
+    (ffirst (q* deps '[:find ?wid :in $ ?session
+                       :where
+                       [?session :session/workspace ?workspace]
+                       [?workspace :workspace/id ?wid]]
                 session-eid*))))
 
 (defn- read-user-profile*
@@ -87,6 +104,19 @@
        :created-at  (or (:user.profile/created-at entity-map)
                         (entity-created-at* deps entity-map))
        :updated-at  (or (:user.profile/updated-at entity-map)
+                        (entity-updated-at* deps entity-map))})))
+
+(defn- read-workspace*
+  [deps workspace-eid*]
+  (when workspace-eid*
+    (let [entity-map (decrypt-entity* deps (raw-entity* deps workspace-eid*))]
+      {:id          (:workspace/id entity-map)
+       :name        (empty->nil (:workspace/name entity-map))
+       :preferences (:workspace/preferences entity-map)
+       :constraints (:workspace/constraints entity-map)
+       :created-at  (or (:workspace/created-at entity-map)
+                        (entity-created-at* deps entity-map))
+       :updated-at  (or (:workspace/updated-at entity-map)
                         (entity-updated-at* deps entity-map))})))
 
 (defn save-wm-snapshot!
@@ -328,16 +358,50 @@
   (when-let [profile-eid (user-profile-eid-by-key deps profile-key)]
     (read-user-profile* deps profile-eid)))
 
+(defn ensure-workspace!
+  [deps {:keys [id name preferences constraints]}]
+  (let [workspace-id  (or (some-> id str str/trim not-empty)
+                          "default")
+        workspace-eid* (workspace-eid deps workspace-id)
+        timestamp     (java.util.Date.)]
+    (if workspace-eid*
+      (do
+        (transact!*
+          deps
+          [(cond-> {:db/id workspace-eid*
+                    :workspace/updated-at timestamp}
+             (some? name) (assoc :workspace/name name)
+             (some? preferences) (assoc :workspace/preferences preferences)
+             (some? constraints) (assoc :workspace/constraints constraints))])
+        workspace-id)
+      (do
+        (transact!*
+          deps
+          [(cond-> {:workspace/id workspace-id
+                    :workspace/created-at timestamp
+                    :workspace/updated-at timestamp}
+             (some? name) (assoc :workspace/name name)
+             (some? preferences) (assoc :workspace/preferences preferences)
+             (some? constraints) (assoc :workspace/constraints constraints))])
+        workspace-id))))
+
+(defn get-workspace
+  [deps workspace-id]
+  (when-let [workspace-eid* (workspace-eid deps workspace-id)]
+    (read-workspace* deps workspace-eid*)))
+
 (defn create-session!
   [deps channel & [opts]]
-  (let [{:keys [parent-session-id worker? label active? external-key external-meta user-profile-id]
+  (let [{:keys [parent-session-id worker? label active? external-key external-meta user-profile-id workspace-id]
          :or   {worker? false
                 active? true}} opts
         id (random-uuid)
         user-profile-eid* (when user-profile-id
                             (or (user-profile-eid deps user-profile-id)
                                 (throw (ex-info "Cannot create session: user profile not found"
-                                                {:user-profile-id user-profile-id}))))]
+                                                {:user-profile-id user-profile-id}))))
+        workspace-eid* (when workspace-id
+                         (workspace-eid deps (ensure-workspace! deps {:id workspace-id})))]
     (transact!*
       deps
       [(cond-> {:session/id      id
@@ -345,6 +409,7 @@
                 :session/worker? worker?
                 :session/active? active?}
          user-profile-eid* (assoc :session/user-profile user-profile-eid*)
+         workspace-eid* (assoc :session/workspace workspace-eid*)
          parent-session-id (assoc :session/parent-id parent-session-id)
          (some? label) (assoc :session/label label)
          (some? external-key) (assoc :session/external-key external-key)
@@ -363,6 +428,8 @@
        :external-meta (:session/external-meta entity-map)
        :user-profile  (when-let [profile-id (user-profile-id-for-session deps eid)]
                         (get-user-profile deps profile-id))
+       :workspace     (when-let [workspace-id (workspace-id-for-session deps eid)]
+                        (get-workspace deps workspace-id))
        :active?       (boolean (:session/active? entity-map))
        :worker?       (boolean (:session/worker? entity-map))
        :parent-id     (:session/parent-id entity-map)
@@ -386,6 +453,12 @@
     (when-let [profile-id (user-profile-id-for-session deps eid)]
       (get-user-profile deps profile-id))))
 
+(defn session-workspace
+  [deps session-id]
+  (when-let [eid (session-eid deps session-id)]
+    (when-let [workspace-id (workspace-id-for-session deps eid)]
+      (get-workspace deps workspace-id))))
+
 (defn save-session-user-profile!
   [deps session-id profile-id]
   (when-let [eid (session-eid deps session-id)]
@@ -408,6 +481,25 @@
                  profile-eid* (assoc :session/user-profile profile-eid*))]))
       true)))
 
+(defn save-session-workspace!
+  [deps session-id workspace-id]
+  (when-let [eid (session-eid deps session-id)]
+    (let [current-workspace-id (workspace-id-for-session deps eid)
+          workspace-eid*       (when workspace-id
+                                 (workspace-eid deps (ensure-workspace! deps {:id workspace-id})))
+          retracts             (cond-> []
+                                 (and current-workspace-id
+                                      (not= current-workspace-id (some-> workspace-id str)))
+                                 (conj [:db/retract eid
+                                        :session/workspace
+                                        (workspace-eid deps current-workspace-id)]))]
+      (transact!*
+        deps
+        (into retracts
+              [(cond-> {:db/id eid}
+                 workspace-eid* (assoc :session/workspace workspace-eid*))]))
+      true)))
+
 (defn list-sessions
   [deps & [opts]]
   (let [{:keys [include-workers?] :or {include-workers? false}} opts]
@@ -423,6 +515,8 @@
                    :external-meta (:session/external-meta entity-map)
                    :user-profile (when-let [profile-id (user-profile-id-for-session deps eid)]
                                    (get-user-profile deps profile-id))
+                   :workspace (when-let [workspace-id (workspace-id-for-session deps eid)]
+                                (get-workspace deps workspace-id))
                    :created-at (entity-created-at* deps entity-map)
                    :active?    (boolean (:session/active? entity-map))
                    :worker?    (boolean (:session/worker? entity-map))

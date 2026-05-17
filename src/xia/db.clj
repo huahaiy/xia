@@ -1442,6 +1442,14 @@
   [profile-key]
   (db-session/find-user-profile-by-key (session-deps) profile-key))
 
+(defn ensure-workspace!
+  [workspace]
+  (db-session/ensure-workspace! (session-deps) workspace))
+
+(defn get-workspace
+  [workspace-id]
+  (db-session/get-workspace (session-deps) workspace-id))
+
 (defn create-session!
   ([channel]
    (create-session! channel nil))
@@ -1467,6 +1475,14 @@
 (defn save-session-user-profile!
   [session-id profile-id]
   (db-session/save-session-user-profile! (session-deps) session-id profile-id))
+
+(defn session-workspace
+  [session-id]
+  (db-session/session-workspace (session-deps) session-id))
+
+(defn save-session-workspace!
+  [session-id workspace-id]
+  (db-session/save-session-workspace! (session-deps) session-id workspace-id))
 
 (defn list-sessions
   "List all sessions with basic metadata, newest first."

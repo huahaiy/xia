@@ -146,7 +146,7 @@
    sessions linked to the task over time. Historical and attached sessions are
    retained separately in `:session-links`."
   [deps {:keys [id session-id session-role parent-id channel type state title summary contract
-                stop-reason error meta autonomy-state current-turn-id started-at finished-at]}]
+                constraints boundary stop-reason error meta autonomy-state current-turn-id started-at finished-at]}]
   (let [task-id      (or id (random-uuid))
         created-at   (now)
         session-eid* (when session-id
@@ -166,6 +166,8 @@
         channel (assoc :task/channel channel)
         (some? summary) (assoc :task/summary summary)
         (some? contract) (assoc :task/contract contract)
+        (some? constraints) (assoc :task/constraints constraints)
+        (some? boundary) (assoc :task/boundary boundary)
         stop-reason (assoc :task/stop-reason stop-reason)
         (some? error) (assoc :task/error error)
         (some? meta) (assoc :task/meta meta)
@@ -181,8 +183,8 @@
 
    When `:session-id` is supplied, it rebinds the task's current execution
    session. Prior sessions remain attached through task-session links."
-  [deps task-id {:keys [session-id session-role parent-id channel type state title summary contract stop-reason error
-                        meta autonomy-state current-turn-id started-at finished-at]
+  [deps task-id {:keys [session-id session-role parent-id channel type state title summary contract constraints boundary
+                        stop-reason error meta autonomy-state current-turn-id started-at finished-at]
                  :as attrs}]
   (when-let [eid (task-eid deps task-id)]
     (let [entity-map    (raw-entity* deps eid)
@@ -215,6 +217,14 @@
                             (nil? contract)
                             (contains? entity-map :task/contract))
                        (conj [:db/retract eid :task/contract (:task/contract entity-map)])
+                       (and (contains? attrs :constraints)
+                            (nil? constraints)
+                            (contains? entity-map :task/constraints))
+                       (conj [:db/retract eid :task/constraints (:task/constraints entity-map)])
+                       (and (contains? attrs :boundary)
+                            (nil? boundary)
+                            (contains? entity-map :task/boundary))
+                       (conj [:db/retract eid :task/boundary (:task/boundary entity-map)])
                        (and (contains? attrs :meta)
                             (nil? meta)
                             (contains? entity-map :task/meta))
@@ -244,6 +254,8 @@
                 (some? title) (assoc :task/title title)
                 (some? summary) (assoc :task/summary summary)
                 (some? contract) (assoc :task/contract contract)
+                (some? constraints) (assoc :task/constraints constraints)
+                (some? boundary) (assoc :task/boundary boundary)
                 stop-reason (assoc :task/stop-reason stop-reason)
                 (some? error) (assoc :task/error error)
                 (some? meta) (assoc :task/meta meta)
@@ -268,6 +280,8 @@
        :title          (empty->nil (:task/title entity-map))
        :summary        (empty->nil (:task/summary entity-map))
        :contract       (:task/contract entity-map)
+       :constraints    (:task/constraints entity-map)
+       :boundary       (:task/boundary entity-map)
        :stop-reason    (:task/stop-reason entity-map)
        :error          (empty->nil (:task/error entity-map))
        :meta           (:task/meta entity-map)

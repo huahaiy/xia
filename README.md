@@ -102,6 +102,9 @@ What to expect:
   scheduled runs can share budget accounting instead of relying on per-prompt
   model choices. The limits layer keeps a sanitized usage ledger for policy
   ceilings and cost accounting.
+- Xia resolves a turn-level operating envelope from org policy, workspace
+  constraints, task constraints, user preferences, and session scratch context,
+  so preferences and guardrails live outside prompt prose.
 - Xia stores its state in its
   [database](https://github.com/datalevin/datalevin), so conversations, memory,
   settings, and saved connections travel together.
@@ -132,6 +135,8 @@ What the local web UI is for:
 - use scratch pads for copied notes and working context
 - download Xia produced artifacts
 - view the current task and board-backed task lanes
+- resume paused or scheduled work from explicit task boundary summaries and
+  next-step hints
 - configure LLM providers, OAuth accounts, services, saved site logins, local
   document summarization settings, and so on
 - author, import, update-check, and curate safe prompt-only skills from local
@@ -168,6 +173,9 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 
 - secrets are encrypted at rest in the database
 - tools run inside a restricted sandbox
+- every tool invocation passes through a central permission gate before handler
+  code runs; terminal, HTTP, Slack, Telegram, and iMessage approvals route
+  through channel adapters rather than per-tool UI code
 - repetitive retrieval pipelines can call only whitelisted Xia tools and return
   only the final structured output
 - plugin hook handlers run in restricted SCI, install disabled by default, and

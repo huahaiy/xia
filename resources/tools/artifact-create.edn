@@ -30,15 +30,15 @@
                                 {"required" ["data"]}
                                 {"required" ["bytes_base64"]}]}
  :handler        "(fn [args]
-                    (let [artifact (xia.artifact/create-artifact!
-                                     {:name    (get args \"name\")
-                                      :title   (get args \"title\")
-                                      :kind    (get args \"kind\")
-                                      :media-type (get args \"media_type\")
-                                      :content (get args \"content\")
-                                      :rows    (get args \"rows\")
-                                      :data    (get args \"data\")
-                                      :bytes-base64 (get args \"bytes_base64\")
-                                      :meta    (get args \"meta\")
-                                      :source  :agent})]
+                    (let [spec (cond-> {:name    (get args \"name\")
+                                        :title   (get args \"title\")
+                                        :kind    (get args \"kind\")
+                                        :media-type (get args \"media_type\")
+                                        :meta    (get args \"meta\")
+                                        :source  :agent}
+                                 (contains? args \"content\") (assoc :content (get args \"content\"))
+                                 (contains? args \"rows\") (assoc :rows (get args \"rows\"))
+                                 (contains? args \"data\") (assoc :data (get args \"data\"))
+                                 (contains? args \"bytes_base64\") (assoc :bytes-base64 (get args \"bytes_base64\")))
+                          artifact (xia.artifact/create-artifact! spec)]
                       (dissoc artifact :text :sha256 :meta)))"}

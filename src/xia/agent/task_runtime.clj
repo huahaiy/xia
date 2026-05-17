@@ -256,6 +256,75 @@
           str/trim
           not-empty))
 
+(defn- boundary-text
+  [value]
+  (cond
+    (keyword? value) (name value)
+    (some? value)    (some-> value str str/trim not-empty)
+    :else            nil))
+
+(defn- boundary-stack-tip
+  [checkpoint]
+  (let [stack (seq (:stack checkpoint))
+        frame (or (last stack) (first stack))]
+    (when (map? frame)
+      (boundary-text (or (:next-step frame)
+                         (:current-focus frame)
+                         (:title frame)
+                         (:summary frame)
+                         (:kind frame))))))
+
+(defn- normalize-open-question
+  [value]
+  (cond
+    (string? value)
+    (boundary-text value)
+
+    (map? value)
+    (boundary-text (or (:question value)
+                       (:prompt value)
+                       (:item value)
+                       (:title value)
+                       (:summary value)))
+
+    :else
+    nil))
+
+(defn- boundary-open-questions
+  [checkpoint]
+  (let [stack-questions (mapcat #(or (:open-questions %) (:questions %) [])
+                                (filter map? (:stack checkpoint)))]
+    (->> (concat (:open-questions checkpoint)
+                 (:questions checkpoint)
+                 stack-questions)
+         (keep normalize-open-question)
+         distinct
+         vec)))
+
+(defn- default-boundary-next-step
+  [boundary next-step focus]
+  (or next-step
+      focus
+      (case boundary
+        :completion "No next step; task is complete."
+        :terminal "Review the terminal state before starting related work."
+        "Await user direction.")))
+
+(defn- default-resume-hint
+  [task boundary resume-hint next-step]
+  (or resume-hint
+      (case boundary
+        :completion "No resume is needed; the task is complete."
+        :terminal "This task is terminal; start related follow-up work as a new task."
+        (str "On " (resume-target-label task) ", continue with: " next-step))))
+
+(defn- boundary-schedule-run-hint
+  [task next-step resume-hint]
+  (if (= :schedule (:type task))
+    (or resume-hint
+        (str "On the next scheduled run, continue with: " next-step))
+    "No scheduled run is associated with this task."))
+
 (defn- computed-resume-hint
   [task]
   (let [state       (or (:state task)
@@ -322,23 +391,65 @@
                        (:summary checkpoint)
                        focus
                        (:title task))
-        resume-hint (computed-resume-hint task)]
+        next-step*  (default-boundary-next-step boundary next-step focus)
+        stack-tip   (or (boundary-stack-tip checkpoint)
+                        focus
+                        next-step*)
+        resume-hint (default-resume-hint task boundary (computed-resume-hint task) next-step*)
+        open-questions (boundary-open-questions checkpoint)
+        schedule-run-hint (boundary-schedule-run-hint task next-step* resume-hint)]
     (when boundary
-      (cond-> {:at       (or (:finished-at task) (java.util.Date.))
-               :boundary boundary
-               :state    state
-               :summary  summary}
-        (:stop-reason task) (assoc :stop-reason (:stop-reason task))
-        next-step (assoc :next-step next-step)
-        focus (assoc :current-focus focus)
-        checkpoint (assoc :checkpoint-summary (checkpoint-summary checkpoint))
-        resume-hint (assoc :resume-hint resume-hint)))))
+      (cond-> #:boundary{:at             (or (:finished-at task) (java.util.Date.))
+                         :kind           boundary
+                         :state          state
+                         :summary        summary
+                         :resume-hint    resume-hint
+                         :next-step      next-step*
+                         :stack-tip      stack-tip
+                         :open-questions open-questions}
+        (:stop-reason task) (assoc :boundary/stop-reason (:stop-reason task))
+        focus (assoc :boundary/current-focus focus)
+        checkpoint (assoc :boundary/checkpoint-summary (checkpoint-summary checkpoint))
+        schedule-run-hint (assoc :boundary/schedule-run-hint schedule-run-hint)))))
+
+(def ^:private boundary-aliases
+  {:boundary/at :at
+   :boundary/kind :boundary
+   :boundary/state :state
+   :boundary/summary :summary
+   :boundary/resume-hint :resume-hint
+   :boundary/next-step :next-step
+   :boundary/stack-tip :stack-tip
+   :boundary/open-questions :open-questions
+   :boundary/schedule-run-hint :schedule-run-hint
+   :boundary/stop-reason :stop-reason
+   :boundary/current-focus :current-focus
+   :boundary/checkpoint-summary :checkpoint-summary})
+
+(defn- normalize-boundary-doc
+  [doc]
+  (when (map? doc)
+    (reduce (fn [acc [qualified-key alias-key]]
+              (if (and (contains? acc qualified-key)
+                       (not (contains? acc alias-key)))
+                (assoc acc alias-key (get acc qualified-key))
+                acc))
+            doc
+            boundary-aliases)))
+
+(defn- sanitize-boundary-doc
+  [doc]
+  (when-let [doc* (sanitize-doc-value doc)]
+    (assoc doc*
+           :boundary/open-questions
+           (vec (or (:boundary/open-questions doc) [])))))
 
 (defn task-boundary-summary
   [task-or-id]
   (let [task (if (map? task-or-id) task-or-id (some-> task-or-id db/get-task))]
-    (or (get-in task [:meta :boundary])
-        (some-> task boundary-doc* sanitize-doc-value))))
+    (or (some-> (:boundary task) normalize-boundary-doc)
+        (some-> (get-in task [:meta :boundary]) normalize-boundary-doc)
+        (some-> task boundary-doc* sanitize-boundary-doc normalize-boundary-doc))))
 
 (defn task-resume-hint
   [task-or-id]
@@ -351,9 +462,7 @@
   (when task-id
     (when-let [task (db/get-task task-id)]
       (when-let [boundary (boundary-doc* task)]
-        (merge-task-meta! task-id
-                          (fn [meta]
-                            (assoc (or meta {}) :boundary (sanitize-doc-value boundary))))))))
+        (db/update-task! task-id {:boundary (sanitize-boundary-doc boundary)})))))
 
 (defn- set-task-runtime-status!
   [task-id status]

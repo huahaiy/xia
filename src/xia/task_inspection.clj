@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
+            [xia.constraints :as constraints]
             [xia.db :as db]
             [xia.limits :as limits]))
 
@@ -438,6 +439,40 @@
         (assoc :status {:kind (keyword->str (:kind status))
                         :summary (limits/budget-summary status)})))))
 
+(defn- truncate-envelope-value
+  [opts value]
+  (cond
+    (string? value)
+    (truncate-text* opts value 480)
+
+    (map? value)
+    (into (empty value)
+          (keep (fn [[k v]]
+                  (when-let [v* (truncate-envelope-value opts v)]
+                    [k v*])))
+          value)
+
+    (vector? value)
+    (mapv #(truncate-envelope-value opts %) value)
+
+    (sequential? value)
+    (mapv #(truncate-envelope-value opts %) value)
+
+    :else
+    value))
+
+(defn- operating-envelope-body
+  [opts task]
+  (let [envelope (constraints/operating-envelope {:session-id (:session-id task)
+                                                  :task-id (:id task)})
+        sources* (:sources envelope)]
+    {:precedence (mapv name (:precedence envelope))
+     :resolved   (reduce (fn [acc key-name]
+                            (update acc key-name #(some-> % str)))
+                          (:resolved sources*)
+                          [:session-id :task-id :user-profile-id])
+     :effective  (truncate-envelope-value opts (:effective envelope))}))
+
 (defn task-inspection
   ([opts task autonomy-state]
    (task-inspection opts task autonomy-state false))
@@ -461,12 +496,14 @@
          status-updates        (recent-status-updates opts items status-limit)
          checkpoints           (recent-checkpoints opts items checkpoint-limit)
          activity              (recent-activity opts items activity-limit)
+         operating-envelope    (operating-envelope-body opts task)
          base                  {:current_tip current-tip
                                 :stack_summary (stack-summary opts autonomy-state compact?)
                                 :last_checkpoint (checkpoint-body opts task)
                                 :current_state (current-state-body opts task runtime current-tip checkpoint)
                                 :attention (attention-body opts task runtime items budget)
                                 :budget budget
+                                :operating_envelope operating-envelope
                                 :counts (counts-body turns items)}]
      (if compact?
        (cond-> base
