@@ -168,6 +168,45 @@ provider.
 Future model-routing improvements should extend this namespace instead of
 adding new budget logic to `xia.task-policy`.
 
+## Runtime Overlay Contract
+
+Managed Xia runtimes load an optional EDN overlay through `xia.runtime-overlay`.
+The v1 wire shape is closed and uses `:overlay/schema-version 1`; unknown
+top-level keys are rejected at load time. Required keys are `:snapshot/id`,
+`:tenant/id`, `:runtime/id`, `:generated-at`, `:config-overrides`,
+`:bounded-config`, `:tx-data`, and `:forced-keys`.
+
+`:config-overrides` contains literal replace values. `:bounded-config` contains
+cap-style policy bounds that are exposed through the same config readers with
+merge mode `:cap`. Secret material in overlay entities or secret config keys is
+referenced as `{:secret/file "/run/..."}` and resolved in memory only.
+
+Remote browser authentication follows the same managed-secret rule: the overlay
+sets `:browser/remote-token-file`, and the remote backend reads the bearer token
+from that file at request time. Xia no longer relies on inline
+`:browser/remote-auth-token` for the SaaS runtime contract.
+
+## Managed Tenant Proxy Auth
+
+Local Xia UI auth and managed SaaS tenant auth are separate. Local routes still
+use the `xia-local-session` cookie and local-origin checks. The `/local-session`
+bootstrap endpoint remains local-only and must not be used by tenant-origin
+browsers.
+
+Managed tenant traffic is admitted only when Hai has already authenticated the
+Better Auth session, authorized tenant membership, and `gang` forwards a signed
+proxy proof to Xia over the private route. The overlay enables this mode with
+`:http/managed-proxy-enabled? true`, points Xia at a shared HMAC secret through
+`:http/managed-proxy-secret-file`, and may bind the public tenant origin with
+`:http/managed-tenant-origin`.
+
+The signed request headers are `X-Xia-Proxy-Mode: tenant`,
+`X-Xia-Tenant-Id`, `X-Xia-Runtime-Id`, `X-Xia-User-Id`,
+`X-Xia-Request-Id`, `X-Xia-Proxy-Timestamp`, and
+`X-Xia-Proxy-Signature`. Xia verifies tenant/runtime against the active runtime
+overlay, checks timestamp skew, rejects replayed request ids, and validates the
+HMAC. `/command/*` routes keep their separate command-channel auth contract.
+
 ## Task Boundaries And Operating Envelopes
 
 Pause, completion, and terminal task boundaries are finalized into

@@ -7,32 +7,43 @@
 
 (use-fixtures :each th/with-test-db)
 
-(deftest numeric-config-readers-apply-overlay-cap-and-floor
+(defn- overlay
+  [m]
+  (merge {:overlay/schema-version 1
+          :snapshot/id "snapshot-test"
+          :tenant/id "tenant-test"
+          :runtime/id "runtime-test"
+          :generated-at "2026-04-04T10:15:00Z"
+          :config-overrides {}
+          :bounded-config {}
+          :tx-data []
+          :forced-keys #{}}
+         m))
+
+(deftest numeric-config-readers-apply-bounded-config-cap
   (db/set-config! :agent/max-turn-llm-calls 25)
-  (db/set-config! :memory/knowledge-decay-min-confidence 0.2)
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "snapshot-config-rules"
-     :config-overrides {:agent/max-turn-llm-calls {:merge :cap :value 10}
-                        :memory/knowledge-decay-min-confidence {:merge :floor :value 0.4}}})
+    (overlay
+     {:snapshot/id "snapshot-config-rules"
+      :bounded-config {:agent/max-turn-llm-calls 10}}))
   (is (= 10 (cfg/positive-long :agent/max-turn-llm-calls 99)))
-  (is (= 0.4 (cfg/bounded-double :memory/knowledge-decay-min-confidence 0.1))))
+  (is (= 10 (get-in (cfg/positive-long-resolution :agent/max-turn-llm-calls 99)
+                    [:raw :overlay]))))
 
 (deftest numeric-config-rules-apply-against-defaults-when-tenant-value-is-absent
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "snapshot-config-default-rules"
-     :config-overrides {:agent/max-task-llm-calls {:merge :cap :value 8}
-                        :agent/supervisor-semantic-loop-threshold {:merge :floor :value 0.85}}})
+    (overlay
+     {:snapshot/id "snapshot-config-default-rules"
+      :bounded-config {:agent/max-task-llm-calls 8}}))
   (is (= 8 (cfg/positive-long :agent/max-task-llm-calls 20)))
-  (is (= 0.85 (cfg/positive-double :agent/supervisor-semantic-loop-threshold 0.5))))
+  (is (= :runtime-overlay
+         (:source (cfg/positive-long-resolution :agent/max-task-llm-calls 20)))))
 
 (deftest nonreplace-rules-are-rejected-by-string-readers
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "snapshot-config-string-rule"
-     :config-overrides {:browser/remote-base-url {:merge :cap
-                                                  :value "https://browser.example"}}})
+    (overlay
+     {:snapshot/id "snapshot-config-string-rule"
+      :bounded-config {:browser/remote-base-url "https://browser.example"}}))
   (is (thrown-with-msg?
         clojure.lang.ExceptionInfo
         #"not supported"
@@ -40,9 +51,9 @@
 
 (deftest keyword-readers-accept-literal-keyword-overlay-values
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "snapshot-config-keyword-rule"
-     :config-overrides {:browser/backend-default :remote}})
+    (overlay
+     {:snapshot/id "snapshot-config-keyword-rule"
+      :config-overrides {:browser/backend-default :remote}}))
   (is (= :remote
          (cfg/keyword-option :browser/backend-default
                              :auto

@@ -7,17 +7,30 @@
    runtime overlay > tenant DB > code defaults"
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.set :as set]
             [clojure.string :as str]
             [xia.db-schema :as db-schema]
             [xia.sensitive :as sensitive]
-            [taoensso.timbre :as log]))
+            [taoensso.timbre :as log])
+  (:import [java.time Instant]))
 
-(def ^:private current-overlay-version 1)
+(def ^:private current-overlay-schema-version 1)
 (def ^:private current-db-schema-version db-schema/current-version)
 (def ^:private current-db-schema (db-schema/current-schema))
 
-(def ^:private supported-config-merge-modes
-  #{:replace :cap :floor})
+(def ^:private required-top-level-keys
+  #{:overlay/schema-version
+    :snapshot/id
+    :tenant/id
+    :runtime/id
+    :generated-at
+    :config-overrides
+    :bounded-config
+    :tx-data
+    :forced-keys})
+
+(def ^:private allowed-top-level-keys
+  required-top-level-keys)
 
 (def ^:private overlay-kinds
   {:provider      {:identity :llm.provider/id
@@ -34,9 +47,9 @@
 
 (declare clear!)
 
-(defn- input-overlay-version
+(defn- input-overlay-schema-version
   [overlay]
-  (or (:overlay/version overlay) 0))
+  (:overlay/schema-version overlay))
 
 (defn- nonblank-string?
   [value]
@@ -58,19 +71,31 @@
   (and (map? value)
        (contains? value :merge)))
 
-(defn- normalize-config-entry
+(defn- normalize-config-override-entry
   [value]
-  (if (config-rule? value)
-    {:merge (:merge value)
-     :value  (:value value)}
-    {:merge :replace
-     :value  value}))
+  {:merge :replace
+   :value value})
+
+(defn- normalize-bounded-config-entry
+  [value]
+  {:merge :cap
+   :value value})
+
+(def ^:private supported-secret-ref-keys
+  #{:secret/file})
+
+(def ^:private unsupported-secret-ref-keys
+  #{:secret/ref
+    :secret-env
+    :secret-file})
+
+(def ^:private known-secret-ref-keys
+  (set/union supported-secret-ref-keys unsupported-secret-ref-keys))
 
 (defn- secret-ref?
   [value]
   (and (map? value)
-       (or (contains? value :secret-env)
-           (contains? value :secret-file))))
+       (boolean (some #(contains? value %) known-secret-ref-keys))))
 
 (defn- nonblank-secret-ref
   [value key]
@@ -90,27 +115,35 @@
 
 (defn- resolve-secret-ref
   [value context]
-  (let [env-name  (nonblank-secret-ref value :secret-env)
-        file-path (nonblank-secret-ref value :secret-file)]
+  (let [present-ref-keys (set/intersection (set (keys value))
+                                           known-secret-ref-keys)
+        file-path        (nonblank-secret-ref value :secret/file)]
     (cond
-      (and env-name file-path)
+      (not= 1 (count present-ref-keys))
       (throw (ex-info "Runtime overlay secret ref must use exactly one source."
                       (assoc context :secret-ref value)))
 
-      env-name
-      (or (some-> (read-env-secret env-name) trim-trailing-newline)
-          (throw (ex-info "Runtime overlay secret env is not set."
-                          (assoc context :secret-env env-name))))
+      (not= (set (keys value)) present-ref-keys)
+      (throw (ex-info "Runtime overlay secret ref contains unsupported fields."
+                      (assoc context
+                             :secret-ref value
+                             :supported-secret-ref-keys (sort supported-secret-ref-keys))))
+
+      (not (contains? supported-secret-ref-keys (first present-ref-keys)))
+      (throw (ex-info "Runtime overlay secret refs currently support only :secret/file."
+                      (assoc context
+                             :secret-ref value
+                             :supported-secret-ref-keys (sort supported-secret-ref-keys))))
 
       file-path
       (let [file (io/file file-path)]
         (when-not (.exists file)
           (throw (ex-info "Runtime overlay secret file does not exist."
-                          (assoc context :secret-file file-path))))
+                          (assoc context :secret/file file-path))))
         (some-> (read-file-secret file-path) trim-trailing-newline))
 
       :else
-      (throw (ex-info "Runtime overlay secret ref requires :secret-env or :secret-file."
+      (throw (ex-info "Runtime overlay secret ref requires :secret/file."
                       (assoc context :secret-ref value))))))
 
 (defn- entity-kind-entry
@@ -147,93 +180,78 @@
                        :allowed-namespaces (sort attr-namespaces)
                        :entry entry})))))
 
-(defn- migrate-v0->v1
-  [overlay]
-  (assoc overlay :overlay/version current-overlay-version))
-
-(def ^:private overlay-migrations
-  {0 migrate-v0->v1})
-
-(defn- migrate-overlay
-  [overlay]
-  (loop [overlay* overlay
-         version  (input-overlay-version overlay)]
-    (cond
-      (= version current-overlay-version)
-      overlay*
-
-      (> version current-overlay-version)
-      (throw (ex-info "Unsupported runtime overlay version."
-                      {:supported-version current-overlay-version
-                       :overlay-version version}))
-
-      :else
-      (if-let [step (get overlay-migrations version)]
-        (let [next-overlay (step overlay*)
-              next-version (input-overlay-version next-overlay)]
-          (when (<= next-version version)
-            (throw (ex-info "Runtime overlay migration did not advance the version."
-                            {:from-version version
-                             :to-version next-version})))
-          (recur next-overlay next-version))
-        (throw (ex-info "Unsupported runtime overlay version."
-                        {:supported-version current-overlay-version
-                         :overlay-version version}))))))
-
 (defn- validate-overlay!
   [overlay]
   (when-not (map? overlay)
     (throw (ex-info "Runtime overlay must be an EDN map."
                     {:overlay overlay})))
-  (when-not (= current-overlay-version (:overlay/version overlay))
-    (throw (ex-info "Unsupported runtime overlay version."
-                    {:supported-version current-overlay-version
-                     :overlay-version (:overlay/version overlay)})))
+  (let [unknown-keys (set/difference (set (keys overlay))
+                                     allowed-top-level-keys)
+        missing-keys (set/difference required-top-level-keys
+                                     (set (keys overlay)))]
+    (when (seq unknown-keys)
+      (throw (ex-info "Runtime overlay contains unknown top-level keys."
+                      {:unknown-keys (sort unknown-keys)
+                       :allowed-keys (sort allowed-top-level-keys)})))
+    (when (seq missing-keys)
+      (throw (ex-info "Runtime overlay is missing required top-level keys."
+                      {:missing-keys (sort missing-keys)}))))
+  (when-not (= current-overlay-schema-version (:overlay/schema-version overlay))
+    (throw (ex-info "Unsupported runtime overlay schema version."
+                    {:supported-schema-version current-overlay-schema-version
+                     :overlay/schema-version (:overlay/schema-version overlay)})))
   (when-not (nonblank-string? (:snapshot/id overlay))
     (throw (ex-info "Runtime overlay requires a non-empty :snapshot/id."
                     {:snapshot/id (:snapshot/id overlay)})))
-  (when (contains? overlay :overlay/requires-db-schema-version)
-    (let [required-version (:overlay/requires-db-schema-version overlay)]
-      (when-not (valid-db-schema-version required-version)
-        (throw (ex-info "Runtime overlay :overlay/requires-db-schema-version must be a positive integer."
-                        {:value required-version})))
-      (when-not (= (long required-version) current-db-schema-version)
-        (throw (ex-info "Runtime overlay requires a different Xia DB schema version."
-                        {:required-db-schema-version (long required-version)
-                         :current-db-schema-version current-db-schema-version})))))
-  (when-not (or (nil? (:config-overrides overlay))
-                (map? (:config-overrides overlay)))
+  (when-not (nonblank-string? (:tenant/id overlay))
+    (throw (ex-info "Runtime overlay requires a non-empty :tenant/id."
+                    {:tenant/id (:tenant/id overlay)})))
+  (when-not (nonblank-string? (:runtime/id overlay))
+    (throw (ex-info "Runtime overlay requires a non-empty :runtime/id."
+                    {:runtime/id (:runtime/id overlay)})))
+  (try
+    (Instant/parse (:generated-at overlay))
+    (catch Exception _
+      (throw (ex-info "Runtime overlay :generated-at must be an ISO-8601 UTC timestamp string."
+                      {:generated-at (:generated-at overlay)}))))
+  (when-not (map? (:config-overrides overlay))
     (throw (ex-info "Runtime overlay :config-overrides must be a map."
                     {:value (:config-overrides overlay)})))
   (when-not (every? keyword? (keys (:config-overrides overlay)))
     (throw (ex-info "Runtime overlay :config-overrides keys must be keywords."
                     {:keys (keys (:config-overrides overlay))})))
-  (doseq [[config-key entry] (:config-overrides overlay)]
-    (let [{:keys [merge value]} (normalize-config-entry entry)]
-      (when-not (contains? supported-config-merge-modes merge)
-        (throw (ex-info "Runtime overlay config override uses an unsupported merge mode."
-                        {:config-key config-key
-                         :merge merge
-                         :supported-modes (sort supported-config-merge-modes)})))
-      (when (and (config-rule? entry)
-                 (not (contains? entry :value)))
-        (throw (ex-info "Runtime overlay config override rules require a :value."
-                        {:config-key config-key
-                         :value entry})))
+  (when-not (map? (:bounded-config overlay))
+    (throw (ex-info "Runtime overlay :bounded-config must be a map."
+                    {:value (:bounded-config overlay)})))
+  (when-not (every? keyword? (keys (:bounded-config overlay)))
+    (throw (ex-info "Runtime overlay :bounded-config keys must be keywords."
+                    {:keys (keys (:bounded-config overlay))})))
+  (let [overlap (set/intersection (set (keys (:config-overrides overlay)))
+                                  (set (keys (:bounded-config overlay))))]
+    (when (seq overlap)
+      (throw (ex-info "Runtime overlay keys cannot appear in both :config-overrides and :bounded-config."
+                      {:config-keys (sort overlap)}))))
+  (doseq [[config-key value] (:config-overrides overlay)]
+    (when (config-rule? value)
+      (throw (ex-info "Runtime overlay :config-overrides values must be literal override values."
+                      {:config-key config-key
+                       :value value})))
       (when (secret-ref? value)
         (when-not (sensitive/secret-config-key? config-key)
           (throw (ex-info "Runtime overlay secret refs are only allowed for secret config keys."
                           {:config-key config-key})))
-        (resolve-secret-ref value {:config-key config-key}))))
-  (when-not (or (nil? (:forced-keys overlay))
-                (set? (:forced-keys overlay)))
+      (resolve-secret-ref value {:config-key config-key})))
+  (doseq [[config-key value] (:bounded-config overlay)]
+    (when (secret-ref? value)
+      (throw (ex-info "Runtime overlay :bounded-config cannot contain secret refs."
+                      {:config-key config-key}))))
+  (when-not (set? (:forced-keys overlay))
     (throw (ex-info "Runtime overlay :forced-keys must be a set of keywords."
                     {:value (:forced-keys overlay)})))
   (when-not (every? keyword? (:forced-keys overlay))
     (throw (ex-info "Runtime overlay :forced-keys entries must be keywords."
                     {:forced-keys (:forced-keys overlay)})))
-  (when-not (or (nil? (:tx-data overlay))
-                (vector? (:tx-data overlay)))
+  (when-not (vector? (:tx-data overlay))
     (throw (ex-info "Runtime overlay :tx-data must be a vector of entity maps."
                     {:value (:tx-data overlay)})))
   (doseq [entity (:tx-data overlay)]
@@ -258,7 +276,7 @@
   overlay)
 
 (defn- normalize-overlay
-  [overlay source-version]
+  [overlay source-schema-version]
   (let [provider-default-ids (->> (:tx-data overlay)
                                   (keep (fn [entity]
                                           (when (and (contains? entity :llm.provider/default?)
@@ -280,30 +298,37 @@
                              (if (some #{entity-id} ids*)
                                ids*
                                (conj (vec ids*) entity-id))))))))
-      {:overlay/version current-overlay-version
-       :source-overlay/version source-version
-       :overlay/requires-db-schema-version
-       (or (:overlay/requires-db-schema-version overlay)
-           current-db-schema-version)
-       :snapshot/id (:snapshot/id overlay)
-       :config-overrides (into {}
-                               (map (fn [[config-key value]]
-                                     [config-key (normalize-config-entry value)]))
-                               (or (:config-overrides overlay) {}))
-       :forced-keys (or (:forced-keys overlay) #{})
-       :tx-data (or (:tx-data overlay) [])
-       :provider-default-id (first provider-default-ids)}
+      (let [literal-overrides (into {}
+                                    (map (fn [[config-key value]]
+                                           [config-key (normalize-config-override-entry value)]))
+                                    (:config-overrides overlay))
+            bounded-overrides (into {}
+                                    (map (fn [[config-key value]]
+                                           [config-key (normalize-bounded-config-entry value)]))
+                                    (:bounded-config overlay))]
+        {:overlay/schema-version current-overlay-schema-version
+         :source-overlay/schema-version source-schema-version
+         :tenant/id (:tenant/id overlay)
+         :runtime/id (:runtime/id overlay)
+         :generated-at (:generated-at overlay)
+         :overlay/requires-db-schema-version current-db-schema-version
+         :snapshot/id (:snapshot/id overlay)
+         :literal-config-overrides literal-overrides
+         :bounded-config bounded-overrides
+         :config-overrides (merge literal-overrides bounded-overrides)
+         :forced-keys (:forced-keys overlay)
+         :tx-data (:tx-data overlay)
+         :provider-default-id (first provider-default-ids)})
       (:tx-data overlay))))
 
 (defn- activate-overlay!
   [overlay source-path]
   (locking activation-lock
     (let [previous       @overlay-atom
-          source-version (input-overlay-version overlay)
+          source-schema-version (input-overlay-schema-version overlay)
           normalized     (-> overlay
-                             migrate-overlay
                              validate-overlay!
-                             (normalize-overlay source-version))
+                             (normalize-overlay source-schema-version))
           overlay-state  (assoc normalized
                            :overlay/source-path (some-> source-path str str/trim not-empty)
                            :overlay/loaded-at-ms (System/currentTimeMillis)
@@ -376,7 +401,11 @@
 
 (defn overlay-version
   []
-  (:overlay/version @overlay-atom))
+  (:overlay/schema-version @overlay-atom))
+
+(defn overlay-schema-version
+  []
+  (:overlay/schema-version @overlay-atom))
 
 (defn source-path
   []
@@ -478,8 +507,11 @@
   (let [overlay @overlay-atom]
     {:active               (boolean overlay)
      :snapshot_id          (:snapshot/id overlay)
-     :overlay_version      (:overlay/version overlay)
-     :source_overlay_version (:source-overlay/version overlay)
+     :tenant_id            (:tenant/id overlay)
+     :runtime_id           (:runtime/id overlay)
+     :generated_at         (:generated-at overlay)
+     :overlay_schema_version (:overlay/schema-version overlay)
+     :source_overlay_schema_version (:source-overlay/schema-version overlay)
      :required_db_schema_version (:overlay/requires-db-schema-version overlay)
      :current_db_schema_version current-db-schema-version
      :source_path          (:overlay/source-path overlay)
@@ -487,7 +519,11 @@
      :reloadable           (boolean (:overlay/source-path overlay))
      :reload_count         (:overlay/reload-count overlay)
      :provider_default_id  (some-> (:provider-default-id overlay) name)
-     :config_override_keys (->> (keys (:config-overrides overlay))
+     :config_override_keys (->> (keys (:literal-config-overrides overlay))
+                                (map key->overlay-name)
+                                sort
+                                vec)
+     :bounded_config_keys  (->> (keys (:bounded-config overlay))
                                 (map key->overlay-name)
                                 sort
                                 vec)

@@ -2,6 +2,7 @@
  [xia.agent-test
   xia.autonomous-smoke-test
   xia.board-test
+  xia.browser-remote-test
   xia.calendar-test
   xia.config-test
   xia.core-test
@@ -27,5 +28,6 @@
   xia.summarizer-test
   xia.system-test
   xia.tool-smoke-test
+  xia.channel.http-test
   xia.channel.http-admin-test]
 }

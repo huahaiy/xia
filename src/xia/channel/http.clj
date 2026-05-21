@@ -21,6 +21,7 @@
             [xia.checkpoint :as checkpoint]
             [xia.rate-limit :as rate-limit]
             [xia.runtime-health :as runtime-health]
+            [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.prompt :as prompt]
             [xia.snapshot :as snapshot]
@@ -49,6 +50,9 @@
 (def ^:private local-session-cookie-name "xia-local-session")
 (def ^:private command-channel-token-config-key :secret/command-channel-token)
 (def ^:private command-channel-next-token-config-key :secret/command-channel-token-next)
+(def ^:private managed-proxy-enabled-config-key :http/managed-proxy-enabled?)
+(def ^:private managed-proxy-secret-file-config-key :http/managed-proxy-secret-file)
+(def ^:private managed-tenant-origin-config-key :http/managed-tenant-origin)
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private max-live-task-runtime-events 200)
@@ -59,6 +63,9 @@
 (def ^:private command-signature-max-skew-ms (* 5 60 1000))
 (def ^:private command-auth-nonce-cleanup-interval-ms (* 60 1000))
 (def ^:private command-auth-nonce-max-length 200)
+(def ^:private managed-proxy-signature-max-skew-ms (* 5 60 1000))
+(def ^:private managed-proxy-nonce-cleanup-interval-ms (* 60 1000))
+(def ^:private managed-proxy-request-id-max-length 200)
 (def ^:private rest-session-channels #{:http :command})
 (def ^:private local-ui-session-channels #{:http :websocket})
 (def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
@@ -96,6 +103,8 @@
    :ingress-rate-limit-cleanup          (AtomicLong. 0)
    :command-auth-nonces                 (ConcurrentHashMap.)
    :command-auth-nonce-cleanup          (AtomicLong. 0)
+   :managed-proxy-nonces                (ConcurrentHashMap.)
+   :managed-proxy-nonce-cleanup         (AtomicLong. 0)
    :rest-session-finalizer-executor-atom (atom nil)
    :rest-session-finalizers-atom        (atom {})
    :session-finalize-locks              (vec (repeatedly session-finalize-lock-count #(Object.)))})
@@ -161,6 +170,14 @@
 (defn- ^AtomicLong command-auth-nonce-cleanup
   []
   (:command-auth-nonce-cleanup (current-runtime)))
+
+(defn- ^ConcurrentHashMap managed-proxy-nonces
+  []
+  (:managed-proxy-nonces (current-runtime)))
+
+(defn- ^AtomicLong managed-proxy-nonce-cleanup
+  []
+  (:managed-proxy-nonce-cleanup (current-runtime)))
 
 (defn- maybe-command-shutdown-handler-atom
   []
@@ -723,6 +740,36 @@
        distinct
        vec))
 
+(defn- managed-proxy-enabled?
+  []
+  (cfg/boolean-option managed-proxy-enabled-config-key false))
+
+(defn- trim-trailing-newline
+  [value]
+  (some-> value (str/replace #"(?:\r?\n)\z" "")))
+
+(defn- managed-proxy-secret
+  []
+  (when (managed-proxy-enabled?)
+    (let [path (some-> (cfg/string-option managed-proxy-secret-file-config-key nil)
+                       str/trim
+                       not-empty)]
+      (when path
+        (try
+          (some-> (slurp path) trim-trailing-newline not-empty)
+          (catch java.io.FileNotFoundException _
+            (throw (ex-info "Managed proxy secret file does not exist."
+                            {:config-key managed-proxy-secret-file-config-key
+                             :path path}))))))))
+
+(defn- normalize-base-url
+  [value]
+  (some-> value str str/trim not-empty (str/replace #"/+$" "")))
+
+(defn- managed-tenant-origin
+  []
+  (normalize-base-url (cfg/string-option managed-tenant-origin-config-key nil)))
+
 (defn- local-command-client?
   [req]
   (let [remote-addr (some-> (:remote-addr req) str str/trim not-empty)]
@@ -914,6 +961,13 @@
   (when runtime
     (.clear ^ConcurrentHashMap (:command-auth-nonces runtime))
     (.set ^AtomicLong (:command-auth-nonce-cleanup runtime) 0))
+  nil)
+
+(defn- reset-runtime-managed-proxy-auth!
+  [runtime]
+  (when runtime
+    (.clear ^ConcurrentHashMap (:managed-proxy-nonces runtime))
+    (.set ^AtomicLong (:managed-proxy-nonce-cleanup runtime) 0))
   nil)
 
 (defn- utf8-download-media-type
@@ -1113,6 +1167,145 @@
     :else
     nil))
 
+(defn- managed-proxy-signature-attempt?
+  [req]
+  (or (some? (request-header req "x-xia-proxy-mode"))
+      (some? (request-header req "x-xia-tenant-id"))
+      (some? (request-header req "x-xia-runtime-id"))
+      (some? (request-header req "x-xia-user-id"))
+      (some? (request-header req "x-xia-request-id"))
+      (some? (request-header req "x-xia-proxy-timestamp"))
+      (some? (request-header req "x-xia-proxy-signature"))))
+
+(defn- runtime-overlay-tenant-id
+  []
+  (some-> (runtime-overlay/current-overlay) :tenant/id str str/trim not-empty))
+
+(defn- runtime-overlay-runtime-id
+  []
+  (some-> (runtime-overlay/current-overlay) :runtime/id str str/trim not-empty))
+
+(defn- managed-proxy-origin-valid?
+  [req]
+  (if-let [expected (managed-tenant-origin)]
+    (= expected (normalize-base-url (request-base-url req)))
+    true))
+
+(defn- managed-proxy-signature-value
+  [value]
+  (let [text (some-> value str str/trim not-empty)]
+    (cond
+      (and text (str/starts-with? text "v1:"))
+      (let [parts (str/split text #":")]
+        (case (count parts)
+          2 (second parts)
+          3 (nth parts 2)
+          nil))
+
+      :else
+      nil)))
+
+(defn- managed-proxy-signing-payload
+  [req timestamp request-id tenant-id runtime-id user-id]
+  (str (str/upper-case (name (:request-method req)))
+       "\n"
+       (:uri req)
+       "\n"
+       (or (:query-string req) "")
+       "\n"
+       timestamp
+       "\n"
+       request-id
+       "\n"
+       tenant-id
+       "\n"
+       runtime-id
+       "\n"
+       user-id))
+
+(defn- prune-managed-proxy-nonces!
+  [now]
+  (let [now* (long now)
+        ^AtomicLong cleanup (managed-proxy-nonce-cleanup)]
+    (loop []
+      (let [last-cleanup (.get cleanup)]
+        (cond
+          (< (- now* last-cleanup) managed-proxy-nonce-cleanup-interval-ms)
+          nil
+
+          (not (.compareAndSet cleanup last-cleanup now*))
+          (recur)
+
+          :else
+          (let [cutoff (- now* managed-proxy-signature-max-skew-ms)]
+            (doseq [entry (iterator-seq (.iterator (.entrySet (managed-proxy-nonces))))]
+              (let [request-id (.getKey entry)
+                    timestamp (long (.getValue entry))]
+                (when (< timestamp cutoff)
+                  (.remove (managed-proxy-nonces) request-id timestamp))))))))))
+
+(defn- reserve-managed-proxy-request-id!
+  [request-id timestamp now]
+  (prune-managed-proxy-nonces! now)
+  (nil? (.putIfAbsent (managed-proxy-nonces) request-id (long timestamp))))
+
+(defn- authenticated-managed-proxy-req
+  [req]
+  (let [secret         (managed-proxy-secret)
+        overlay-tenant (runtime-overlay-tenant-id)
+        overlay-runtime (runtime-overlay-runtime-id)
+        mode           (some-> (request-header req "x-xia-proxy-mode") str str/trim not-empty)
+        tenant-id      (some-> (request-header req "x-xia-tenant-id") str str/trim not-empty)
+        runtime-id     (some-> (request-header req "x-xia-runtime-id") str str/trim not-empty)
+        user-id        (some-> (request-header req "x-xia-user-id") str str/trim not-empty)
+        request-id     (some-> (request-header req "x-xia-request-id") str str/trim not-empty)
+        timestamp-text (some-> (request-header req "x-xia-proxy-timestamp") str str/trim not-empty)
+        signature      (managed-proxy-signature-value
+                        (request-header req "x-xia-proxy-signature"))
+        timestamp      (parse-command-timestamp-ms timestamp-text)
+        now            (System/currentTimeMillis)]
+    (when (and (managed-proxy-enabled?)
+               secret
+               overlay-tenant
+               overlay-runtime
+               (= "tenant" mode)
+               (= overlay-tenant tenant-id)
+               (= overlay-runtime runtime-id)
+               user-id
+               request-id
+               timestamp-text
+               timestamp
+               signature
+               (managed-proxy-origin-valid? req)
+               (<= (count request-id) managed-proxy-request-id-max-length)
+               (<= (Math/abs (- (long now) (long timestamp)))
+                   managed-proxy-signature-max-skew-ms))
+      (let [expected (hmac-sha256-base64url
+                      secret
+                      (managed-proxy-signing-payload req
+                                                     timestamp-text
+                                                     request-id
+                                                     tenant-id
+                                                     runtime-id
+                                                     user-id))]
+        (when (and (constant-time-string= expected signature)
+                   (reserve-managed-proxy-request-id! request-id timestamp now))
+          (assoc req
+                 :xia/managed-proxy {:tenant-id tenant-id
+                                     :runtime-id runtime-id
+                                     :user-id user-id
+                                     :request-id request-id}))))))
+
+(defn- valid-local-ui-request?
+  [req]
+  (and (trusted-local-origin? req)
+       (valid-session-secret? req)))
+
+(defn- valid-managed-proxy-request?
+  [req]
+  (and (managed-proxy-signature-attempt? req)
+       (boolean (authenticated-managed-proxy-req req))))
+
 (defn register-command-shutdown-handler!
   [handler]
   (when-not (maybe-current-runtime)
@@ -1284,18 +1477,19 @@
   [req allowed-fn]
   (if-let [response (check-ingress-rate-limit req :http)]
     response
-    (cond
-      (not (trusted-local-origin? req))
-      (forbidden-response)
+    (let [authorized? (or (valid-local-ui-request? req)
+                          (valid-managed-proxy-request? req))]
+      (cond
+        authorized?
+        (if (runtime-available?)
+          (allowed-fn)
+          (runtime-unavailable-response))
 
-      (not (valid-session-secret? req))
-      (unauthorized-response)
+        (not (trusted-local-origin? req))
+        (forbidden-response)
 
-      (not (runtime-available?))
-      (runtime-unavailable-response)
-
-      :else
-      (allowed-fn))))
+        :else
+        (unauthorized-response)))))
 
 (defn- command-route-response
   [req allowed-fn]
@@ -2859,6 +3053,7 @@
     (reset! (task-runtime-events-atom) {})
     (reset-runtime-ingress-rate-limits! (current-runtime))
     (reset-runtime-command-auth! (current-runtime))
+    (reset-runtime-managed-proxy-auth! (current-runtime))
     (clear-command-shutdown-handler!)
     (configure-web-dev! false)
     (reset! (server-atom) nil)
@@ -2896,6 +3091,7 @@
     (reset! (:command-shutdown-handler-atom runtime) nil)
     (reset-runtime-ingress-rate-limits! runtime)
     (reset-runtime-command-auth! runtime)
+    (reset-runtime-managed-proxy-auth! runtime)
     (reset! (:rest-session-finalizer-executor-atom runtime) nil)
     (reset! (:rest-session-finalizers-atom runtime) {})
     (reset! installed-runtime-atom nil))

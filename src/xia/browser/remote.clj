@@ -30,8 +30,8 @@
    (cfg/boolean-option-resolution :browser/remote-enabled? false)
    :base-url
    (cfg/string-option-resolution :browser/remote-base-url nil)
-   :auth-token
-   (cfg/string-option-resolution :browser/remote-auth-token nil)
+   :token-file
+   (cfg/string-option-resolution :browser/remote-token-file nil)
    :timeout-ms
    (cfg/positive-long-resolution :browser/remote-timeout-ms
                                  default-request-timeout-ms)})
@@ -47,7 +47,16 @@
 
 (defn- auth-token
   []
-  (cfg/string-option :browser/remote-auth-token nil))
+  (when-let [path (some-> (cfg/string-option :browser/remote-token-file nil)
+                          str/trim
+                          not-empty)]
+    (try
+      (some-> (slurp path)
+              (str/replace #"(?:\r?\n)\z" ""))
+      (catch java.io.FileNotFoundException _
+        (throw (ex-info "Remote browser token file does not exist."
+                        {:config-key :browser/remote-token-file
+                         :path path}))))))
 
 (defn- request-timeout-ms
   []

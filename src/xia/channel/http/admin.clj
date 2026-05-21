@@ -731,7 +731,7 @@
      :sources                    {:configured_default_backend (some-> (get-in resolutions [:backend-default :source]) name)
                                   :remote_enabled (some-> (get-in resolutions [:remote :enabled :source]) name)
                                   :remote_base_url (some-> (get-in resolutions [:remote :base-url :source]) name)
-                                  :remote_auth_token (some-> (get-in resolutions [:remote :auth-token :source]) name)
+                                  :remote_token_file (some-> (get-in resolutions [:remote :token-file :source]) name)
                                   :remote_timeout_ms (some-> (get-in resolutions [:remote :timeout-ms :source]) name)
                                   :playwright_enabled (some-> (get-in resolutions [:playwright :enabled :source]) name)
                                   :playwright_headless (some-> (get-in resolutions [:playwright :headless :source]) name)
@@ -743,7 +743,7 @@
                                                                 admin-config-value)
                                   :remote {:enabled (config-resolution->admin-body (get-in resolutions [:remote :enabled]))
                                            :base_url (config-resolution->admin-body (get-in resolutions [:remote :base-url]))
-                                           :auth_token (secret-resolution->admin-body (get-in resolutions [:remote :auth-token]))
+                                           :token_file (secret-resolution->admin-body (get-in resolutions [:remote :token-file]))
                                            :timeout_ms (config-resolution->admin-body (get-in resolutions [:remote :timeout-ms]))}
                                   :playwright {:enabled (config-resolution->admin-body (get-in resolutions [:playwright :enabled]))
                                                :headless (config-resolution->admin-body (get-in resolutions [:playwright :headless]))

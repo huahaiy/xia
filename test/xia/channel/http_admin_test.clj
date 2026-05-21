@@ -25,6 +25,19 @@
     (spit (io/file path) (pr-str payload))
     path))
 
+(defn- overlay
+  [m]
+  (merge {:overlay/schema-version 1
+          :snapshot/id "overlay-test"
+          :tenant/id "tenant-test"
+          :runtime/id "runtime-test"
+          :generated-at "2026-04-04T10:15:00Z"
+          :config-overrides {}
+          :bounded-config {}
+          :tx-data []
+          :forced-keys #{}}
+         m))
+
 (defn- admin-deps
   ([] (admin-deps nil))
   ([body]
@@ -51,22 +64,22 @@
   (instance-supervisor/configure! {:enabled? true
                                    :command "/opt/xia/bin/xia"})
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "overlay-debug-v1"
-     :config-overrides {:browser/backend-default :remote
-                        :browser/remote-enabled? true
-                        :context/recent-history-message-limit 55
-                        :web/search-backend "searxng"}
-     :forced-keys #{:browser/backend-default}
-     :tx-data [{:llm.provider/id :platform-openai
-                :llm.provider/name "OpenAI (Platform)"
-                :llm.provider/default? true}
-               {:service/id :platform-search
-                :service/name "Platform Search"}
-               {:oauth.account/id :platform-oauth
-                :oauth.account/name "Platform OAuth"}
-               {:site-cred/id :platform-site
-                :site-cred/name "Platform Site"}]})
+    (overlay
+     {:snapshot/id "overlay-debug-v1"
+      :config-overrides {:browser/backend-default :remote
+                         :browser/remote-enabled? true
+                         :context/recent-history-message-limit 55
+                         :web/search-backend "searxng"}
+      :forced-keys #{:browser/backend-default}
+      :tx-data [{:llm.provider/id :platform-openai
+                 :llm.provider/name "OpenAI (Platform)"
+                 :llm.provider/default? true}
+                {:service/id :platform-search
+                 :service/name "Platform Search"}
+                {:oauth.account/id :platform-oauth
+                 :oauth.account/name "Platform OAuth"}
+                {:site-cred/id :platform-site
+                 :site-cred/name "Platform Site"}]}))
   (try
     (db/set-config! :context/history-budget 777)
     (db/set-config! :web/search-brave-api-key "tenant-brave-key")
@@ -138,8 +151,10 @@
              (get db-schema "migration_history")))
       (is (= true (get overlay "active")))
       (is (= "overlay-debug-v1" (get overlay "snapshot_id")))
-      (is (= 1 (get overlay "overlay_version")))
-      (is (= 1 (get overlay "source_overlay_version")))
+      (is (= 1 (get overlay "overlay_schema_version")))
+      (is (= 1 (get overlay "source_overlay_schema_version")))
+      (is (= "tenant-test" (get overlay "tenant_id")))
+      (is (= "runtime-test" (get overlay "runtime_id")))
       (is (= "platform-openai" (get overlay "provider_default_id")))
       (is (= #{"browser/backend-default"
                "browser/remote-enabled?"
@@ -258,9 +273,9 @@
 
 (deftest admin-config-shows-redacted-messaging-config-resolution
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "overlay-messaging-v1"
-     :config-overrides {:messaging/imessage-enabled? true}})
+    (overlay
+     {:snapshot/id "overlay-messaging-v1"
+      :config-overrides {:messaging/imessage-enabled? true}}))
   (try
     (db/set-config! :messaging/slack-enabled? "true")
     (db/set-config! :secret/messaging-slack-bot-token "slack-secret-token")
@@ -286,10 +301,9 @@
 
 (deftest admin-config-shows-effective-tenant-winner-under-overlay-cap
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "overlay-cap-debug-v1"
-     :config-overrides {:context/history-budget {:merge :cap
-                                                 :value 6000}}})
+    (overlay
+     {:snapshot/id "overlay-cap-debug-v1"
+      :bounded-config {:context/history-budget 6000}}))
   (try
     (db/set-config! :context/history-budget 5000)
     (let [response     (#'http-admin/handle-admin-config (admin-deps) {})
@@ -307,10 +321,10 @@
 
 (deftest admin-save-provider-rejects-overlay-managed-provider
   (runtime-overlay/activate!
-    {:overlay/version 1
-     :snapshot/id "overlay-locked-provider"
-     :tx-data [{:llm.provider/id :platform-openai
-                :llm.provider/name "OpenAI (Platform)"}]})
+    (overlay
+     {:snapshot/id "overlay-locked-provider"
+      :tx-data [{:llm.provider/id :platform-openai
+                 :llm.provider/name "OpenAI (Platform)"}]}))
   (try
     (let [response (#'http-admin/handle-save-provider
                      (admin-deps {"id" "platform-openai"
@@ -357,15 +371,15 @@
 
 (deftest admin-runtime-overlay-reload-updates-current-file
   (let [overlay-file (temp-overlay-file
-                       {:overlay/version 1
-                        :snapshot/id "overlay-reload-v1"
-                        :config-overrides {:browser/backend-default :playwright}})]
+                       (overlay
+                        {:snapshot/id "overlay-reload-v1"
+                         :config-overrides {:browser/backend-default :playwright}}))]
     (try
       (runtime-overlay/load-file! overlay-file)
       (spit (io/file overlay-file)
-            (pr-str {:overlay/version 1
-                     :snapshot/id "overlay-reload-v2"
-                     :config-overrides {:browser/backend-default :remote}}))
+            (pr-str (overlay
+                     {:snapshot/id "overlay-reload-v2"
+                      :config-overrides {:browser/backend-default :remote}})))
       (let [response (#'http-admin/handle-reload-runtime-overlay (admin-deps) {})
             body     (response-json response)
             overlay  (get body "runtime_overlay")]
@@ -380,18 +394,19 @@
 
 (deftest admin-runtime-overlay-reload-preserves-current-overlay-on-invalid-update
   (let [overlay-file (temp-overlay-file
-                       {:overlay/version 1
-                        :snapshot/id "overlay-stable-v1"
-                        :config-overrides {:browser/backend-default :remote}})]
+                       (overlay
+                        {:snapshot/id "overlay-stable-v1"
+                         :config-overrides {:browser/backend-default :remote}}))]
     (try
       (runtime-overlay/load-file! overlay-file)
       (spit (io/file overlay-file)
-            (pr-str {:overlay/version 99
-                     :snapshot/id "overlay-invalid"}))
+            (pr-str (overlay
+                     {:overlay/schema-version 99
+                      :snapshot/id "overlay-invalid"})))
       (let [response (#'http-admin/handle-reload-runtime-overlay (admin-deps) {})
             body     (response-json response)]
         (is (= 400 (:status response)))
-        (is (= "Unsupported runtime overlay version." (get body "error")))
+        (is (= "Unsupported runtime overlay schema version." (get body "error")))
         (is (= "overlay-stable-v1" (runtime-overlay/snapshot-id)))
         (is (= "remote" (runtime-overlay/config-db-value :browser/backend-default))))
       (finally
