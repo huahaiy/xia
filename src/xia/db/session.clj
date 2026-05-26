@@ -1091,6 +1091,14 @@
                  [?e :limit.usage/task-id ?tid]]
           task-id))
 
+    :goal
+    (when-let [goal-id (:goal-id selector)]
+      (q* deps '[:find ?e :in $ ?gid
+                 :where
+                 [?e :limit.usage/id _]
+                 [?e :limit.usage/goal-id ?gid]]
+          goal-id))
+
     :schedule
     (when-let [schedule-id (:schedule-id selector)]
       (q* deps '[:find ?e :in $ ?sid

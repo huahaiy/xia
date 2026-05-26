@@ -92,6 +92,16 @@
     (catch Exception _
       nil)))
 
+(defn- map-value
+  [m k]
+  (when (map? m)
+    (let [n (name k)
+          underscored (str/replace n "-" "_")]
+      (or (get m k)
+          (get m n)
+          (get m underscored)
+          (get m (keyword underscored))))))
+
 (defn- optional-ratio
   [config-key]
   (cfg/custom-option config-key nil parse-ratio))
@@ -498,7 +508,7 @@
         nil))))
 
 (def ^:private policy-scope-order
-  [:org :session :schedule])
+  [:org :goal :session :schedule])
 
 (defn- policy-scope-selector
   [context scope]
@@ -506,11 +516,13 @@
     :org {}
     :session (when-let [session-id (:session-id context)]
                {:session-id session-id})
+    :goal (when-let [goal-id (:persistent-goal-id context)]
+            {:goal-id goal-id})
     :schedule (when-let [schedule-id (:schedule-id context)]
                 {:schedule-id schedule-id})
     nil))
 
-(defn- policy-ceilings
+(defn- configured-policy-ceilings
   [scope]
   (let [prefix (name scope)
         max-llm-calls (optional-positive-long
@@ -542,6 +554,44 @@
              :near-action near-action
              :action action))))
 
+(defn- budget-policy-ceilings
+  [budget]
+  (let [max-llm-calls (parse-positive-long (map-value budget :max-llm-calls))
+        max-total-tokens (parse-positive-long (map-value budget :max-total-tokens))
+        max-cost-micros (parse-positive-long (map-value budget :max-cost-micros))
+        warn-ratio (or (parse-ratio (map-value budget :warn-ratio)) 0.9)
+        near-action (or (parse-policy-action (map-value budget :near-action)) :warn)
+        action (or (parse-policy-action (map-value budget :action)) :deny)]
+    (not-empty
+     (cond-> {}
+       max-llm-calls
+       (assoc :max-llm-calls max-llm-calls)
+
+       max-total-tokens
+       (assoc :max-total-tokens max-total-tokens)
+
+       max-cost-micros
+       (assoc :max-cost-micros max-cost-micros)
+
+       (or max-llm-calls max-total-tokens max-cost-micros)
+       (assoc :warn-ratio warn-ratio
+              :near-action near-action
+              :action action)))))
+
+(defn- goal-contract-policy-ceilings
+  [context]
+  (or (budget-policy-ceilings
+       (get-in context [:operating-envelope :effective :goal :budget]))
+      (budget-policy-ceilings
+       (get-in context [:operating-envelope :effective :limits :goal]))))
+
+(defn- policy-ceilings
+  [context scope]
+  (if (= scope :goal)
+    (or (goal-contract-policy-ceilings context)
+        (configured-policy-ceilings scope))
+    (configured-policy-ceilings scope)))
+
 (defn- threshold-reached?
   [used limit ratio]
   (and limit
@@ -553,6 +603,7 @@
   (let [usage (usage-totals-for scope selector)
         status (merge usage
                       ceilings
+                      selector
                       {:scope scope
                        :policy? true
                        :state state
@@ -607,7 +658,7 @@
   [context states]
   (some (fn [scope]
           (when-let [selector (policy-scope-selector context scope)]
-            (let [ceilings (policy-ceilings scope)]
+            (let [ceilings (policy-ceilings context scope)]
               (when (seq ceilings)
                 (some (fn [state]
                         (let [status (case state
@@ -669,6 +720,7 @@
     :org "organization"
     :session "session"
     :schedule "schedule"
+    :goal "goal"
     :schedule-run "scheduled run"
     :task "task"
     :turn "turn"
@@ -768,7 +820,8 @@
          (select-keys decision
                       [:scope :state :kind :action :used :limit :llm-call-count
                        :total-tokens :cost-micros :max-llm-calls
-                       :max-total-tokens :max-cost-micros :target-provider-id])))
+                       :max-total-tokens :max-cost-micros :target-provider-id
+                       :goal-id])))
 
 (defn exhausted-exception?
   [e]

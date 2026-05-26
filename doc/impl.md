@@ -224,20 +224,29 @@ The task runtime still exposes compatibility aliases through
 `task-boundary-summary` for existing UI callers, but durable storage uses the
 qualified boundary document.
 
+Goal, task, and session memory are separate scopes. A user-facing persistent
+goal is the contract: intent, success criteria, constraints, preferences,
+budget, and resume policy. Xia-authored tasks are execution units under that
+contract: they own stack/checkpoint/runtime state and `:task/constraints`, but
+they do not override the goal contract. Sessions own transient scratch, recaps,
+pending prompts, and recent turn context.
+
 Context policy is resolved by `xia.constraints/operating-envelope`. It combines
-durable workspace/project constraints and preferences, explicit
-`:task/constraints`, user profile preferences, and low-precedence session
-scratch/recap context. The merge order is:
+the current goal contract, explicit `:task/constraints`, user profile
+preferences, and low-precedence session scratch/recap context. The merge order
+is:
 
 ```clojure
-org policy > project constraints > task constraints > user preferences > session scratch/context
+org policy > goal contract > task constraints > user preferences > session scratch/context
 ```
 
 The resolver applies that order by merging lowest-to-highest precedence:
-session context, user preferences, task constraints, project constraints, then
-org policy. Org policy is read from `:constraints/org-policy` as an EDN map.
-Agent turns attach the resolved envelope to the execution context so model
-routing, tools, and inspections can use one consistent operating envelope.
+session context, user preferences, task constraints, goal contract, then org
+policy. Org policy is read from `:constraints/org-policy` as an EDN map. Goal
+budgets are exposed through the envelope and enforced against the LLM usage
+ledger when a persistent goal id is present. Agent turns attach the resolved
+envelope to the execution context so model routing, tools, and inspections can
+use one consistent operating envelope.
 
 ## Bridge And Session Runner
 

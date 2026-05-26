@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [xia.constraints :as constraints]
             [xia.db :as db]
+            [xia.goal :as goal]
             [xia.scratch :as scratch]
             [xia.test-helpers :as th]))
 
@@ -13,17 +14,8 @@
                      :preferences {:model {:tier :user
                                             :style :concise}
                                    :user-only true}})
-        _          (db/ensure-workspace!
-                    {:id "repo"
-                     :name "Repo"
-                     :preferences {:model {:tier :workspace-preference}
-                                   :workspace-preference true}
-                     :constraints {:model {:tier :project}
-                                   :limits {:llm-calls 20}
-                                   :project-only true}})
         session-id (db/create-session! :terminal
-                                       {:user-profile-id profile-id
-                                        :workspace-id "repo"})
+                                       {:user-profile-id profile-id})
         task-id    (db/create-task! {:session-id session-id
                                      :channel :terminal
                                      :type :interactive
@@ -32,6 +24,13 @@
                                      :constraints {:model {:tier :task}
                                                    :limits {:llm-calls 10}
                                                    :task-only true}})
+        goal*      (goal/set-goal! session-id
+                                   "Finish investigation"
+                                   :success-criteria ["Root cause identified"]
+                                   :constraints {:model {:tier :goal}
+                                                 :limits {:llm-calls 20}
+                                                 :goal-only true}
+                                   :budget {:max-llm-calls 3})
         _          (db/save-session-history-recap! session-id "Earlier turn context" 3)
         _          (scratch/create-pad! {:session-id session-id
                                          :title "Scratch note"
@@ -44,17 +43,22 @@
     (is (= [:session-context
             :user-preferences
             :task-constraints
-            :project-constraints
+            :goal-contract
             :org-policy]
            (:precedence envelope)))
-    (is (= "repo" (get-in envelope [:sources :resolved :workspace-id])))
+    (is (= (:id goal*) (get-in envelope [:sources :resolved :goal-id])))
     (is (= :org (get-in envelope [:effective :model :tier])))
     (is (= :concise (get-in envelope [:effective :model :style])))
     (is (= 20 (get-in envelope [:effective :limits :llm-calls])))
     (is (true? (get-in envelope [:effective :user-only])))
     (is (true? (get-in envelope [:effective :task-only])))
-    (is (true? (get-in envelope [:effective :project-only])))
+    (is (true? (get-in envelope [:effective :goal-only])))
     (is (true? (get-in envelope [:effective :org-only])))
+    (is (= "Finish investigation"
+           (get-in envelope [:effective :goal :intent])))
+    (is (= ["Root cause identified"]
+           (get-in envelope [:effective :goal :success-criteria])))
+    (is (= 3 (get-in envelope [:effective :goal :budget :max-llm-calls])))
     (is (= "Earlier turn context"
            (get-in envelope [:sources :session-context :session :history-recap :content])))
     (is (= ["Scratch note"]

@@ -449,27 +449,39 @@
 (defn- persistent-goal->body
   [deps goal]
   (when goal
-    (cond-> {:id (:id goal)
-             :text (:text goal)
-             :status (some-> (:status goal) name)
-             :source (some-> (:source goal) name)
-             :turn_count (long (or (:turn-count goal) 0))
-             :max_turns (:max-turns goal)}
-      (:last-task-id goal) (assoc :last_task_id (str (:last-task-id goal)))
-      (:last-task-state goal) (assoc :last_task_state (some-> (:last-task-state goal) name))
-      (:last-judge-status goal) (assoc :last_judge_status (some-> (:last-judge-status goal) name))
-      (:last-judge-reason goal) (assoc :last_judge_reason (:last-judge-reason goal))
-      (:last-guardrail goal) (assoc :last_guardrail (some-> (:last-guardrail goal) name))
-      (:last-summary goal) (assoc :last_summary (:last-summary goal))
-      (:next-step goal) (assoc :next_step (:next-step goal))
-      (:last-budget-status goal) (assoc :last_budget_status (:last-budget-status goal))
-      (:created-at goal) (assoc :created_at (instant->str* deps (:created-at goal)))
-      (:updated-at goal) (assoc :updated_at (instant->str* deps (:updated-at goal)))
-      (:last-used-at goal) (assoc :last_used_at (instant->str* deps (:last-used-at goal)))
-      (:last-judged-at goal) (assoc :last_judged_at (instant->str* deps (:last-judged-at goal)))
-      (:paused-at goal) (assoc :paused_at (instant->str* deps (:paused-at goal)))
-      (:resumed-at goal) (assoc :resumed_at (instant->str* deps (:resumed-at goal)))
-      (:completed-at goal) (assoc :completed_at (instant->str* deps (:completed-at goal))))))
+    (let [contract (goal/goal-contract goal)]
+      (cond-> {:id (:id goal)
+               :text (:text goal)
+               :status (some-> (:status goal) name)
+               :source (some-> (:source goal) name)
+               :turn_count (long (or (:turn-count goal) 0))
+               :max_turns (:max-turns goal)}
+        contract (assoc :contract {:intent (:goal/intent contract)
+                                   :success_criteria (:goal/success-criteria contract)
+                                   :constraints (:goal/constraints contract)
+                                   :preferences (:goal/preferences contract)
+                                   :budget (:goal/budget contract)
+                                   :resume_policy (:goal/resume-policy contract)})
+        (:goal/success-criteria contract) (assoc :success_criteria (:goal/success-criteria contract))
+        (:goal/constraints contract) (assoc :constraints (:goal/constraints contract))
+        (:goal/preferences contract) (assoc :preferences (:goal/preferences contract))
+        (:goal/budget contract) (assoc :budget (:goal/budget contract))
+        (:goal/resume-policy contract) (assoc :resume_policy (:goal/resume-policy contract))
+        (:last-task-id goal) (assoc :last_task_id (str (:last-task-id goal)))
+        (:last-task-state goal) (assoc :last_task_state (some-> (:last-task-state goal) name))
+        (:last-judge-status goal) (assoc :last_judge_status (some-> (:last-judge-status goal) name))
+        (:last-judge-reason goal) (assoc :last_judge_reason (:last-judge-reason goal))
+        (:last-guardrail goal) (assoc :last_guardrail (some-> (:last-guardrail goal) name))
+        (:last-summary goal) (assoc :last_summary (:last-summary goal))
+        (:next-step goal) (assoc :next_step (:next-step goal))
+        (:last-budget-status goal) (assoc :last_budget_status (:last-budget-status goal))
+        (:created-at goal) (assoc :created_at (instant->str* deps (:created-at goal)))
+        (:updated-at goal) (assoc :updated_at (instant->str* deps (:updated-at goal)))
+        (:last-used-at goal) (assoc :last_used_at (instant->str* deps (:last-used-at goal)))
+        (:last-judged-at goal) (assoc :last_judged_at (instant->str* deps (:last-judged-at goal)))
+        (:paused-at goal) (assoc :paused_at (instant->str* deps (:paused-at goal)))
+        (:resumed-at goal) (assoc :resumed_at (instant->str* deps (:resumed-at goal)))
+        (:completed-at goal) (assoc :completed_at (instant->str* deps (:completed-at goal)))))))
 
 (defn- task->body
   ([deps task]
@@ -921,7 +933,21 @@
                           (get data "text"))
                  max-turns (or (get data "max_turns")
                                (get data "max-turns"))
-                 goal* (goal/set-goal! sid text :max-turns max-turns)]
+                 success-criteria (or (get data "success_criteria")
+                                      (get data "success-criteria"))
+                 constraints (get data "constraints")
+                 preferences (get data "preferences")
+                 budget (get data "budget")
+                 resume-policy (or (get data "resume_policy")
+                                   (get data "resume-policy"))
+                 goal* (goal/set-goal! sid
+                                        text
+                                        :max-turns max-turns
+                                        :success-criteria success-criteria
+                                        :constraints constraints
+                                        :preferences preferences
+                                        :budget budget
+                                        :resume-policy resume-policy)]
              (json-response* deps 200
                              {:session_id (str sid)
                               :goal (persistent-goal->body deps goal*)})))

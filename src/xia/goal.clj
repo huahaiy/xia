@@ -37,6 +37,19 @@
     :else
     value))
 
+(defn- deep-merge
+  [& maps]
+  (letfn [(merge-entry [left right]
+            (if (and (map? left) (map? right))
+              (merge-with merge-entry left right)
+              right))]
+    (reduce (fn [acc value]
+              (if (map? value)
+                (merge-entry acc value)
+                acc))
+            {}
+            maps)))
+
 (defn- session-meta
   [session-id]
   (or (db/session-external-meta session-id) {}))
@@ -56,6 +69,7 @@
   (when goal
     (select-keys goal
                  [:id :text :status :source :turn-count :max-turns
+                  :contract
                   :last-judge-status :last-judge-reason :last-used-at
                   :last-task-id :last-task-state :last-summary :next-step
                   :last-guardrail :last-budget-status :created-at :updated-at
@@ -96,6 +110,44 @@
   [goal]
   (= :active (:status goal)))
 
+(defn goal-contract
+  "Return the explicit user-authored goal contract, with legacy goals normalized."
+  [goal]
+  (when goal
+    (compact
+     (assoc (or (:contract goal) {})
+            :goal/intent (or (get-in goal [:contract :goal/intent])
+                             (:text goal))))))
+
+(defn operating-envelope-source
+  "Return the goal-level source used by xia.constraints.
+
+   Goal preferences and constraints are merged into the envelope root so they
+   can participate in the same precedence rules as task constraints and user
+   preferences. Goal metadata stays under :goal for inspection."
+  [goal]
+  (when goal
+    (let [contract (goal-contract goal)]
+      (compact
+       (deep-merge
+        (:goal/preferences contract)
+        (:goal/constraints contract)
+        {:goal (cond-> {:id (:id goal)
+                        :intent (:goal/intent contract)
+                        :status (:status goal)
+                        :turn-count (long (or (:turn-count goal) 0))
+                        :max-turns (:max-turns goal)}
+                 (:goal/success-criteria contract)
+                 (assoc :success-criteria (:goal/success-criteria contract))
+
+                 (:goal/budget contract)
+                 (assoc :budget (:goal/budget contract))
+
+                 (:goal/resume-policy contract)
+                 (assoc :resume-policy (:goal/resume-policy contract)))}
+        (when-let [budget (:goal/budget contract)]
+          {:limits {:goal budget}}))))))
+
 (defn- save-goal!
   [session-id goal]
   (let [meta* (assoc (session-meta session-id) meta-key (compact goal))]
@@ -119,8 +171,62 @@
                       (catch Exception _ nil))
     :else nil))
 
+(defn- nonblank-string
+  [value]
+  (some-> value str str/trim not-empty))
+
+(defn- invalid-goal!
+  [message data]
+  (throw (ex-info message
+                  (merge {:type :goal/invalid
+                          :status 400
+                          :error message}
+                         data))))
+
+(defn- normalized-map-field
+  [field value]
+  (cond
+    (nil? value)
+    nil
+
+    (map? value)
+    (compact value)
+
+    :else
+    (invalid-goal! (str "Persistent goal " (name field) " must be a map")
+                   {:field field})))
+
+(defn- normalized-success-criteria
+  [value]
+  (cond
+    (nil? value)
+    nil
+
+    (string? value)
+    (some-> value nonblank-string vector)
+
+    (sequential? value)
+    (let [items (into [] (keep nonblank-string) value)]
+      (when (seq items)
+        items))
+
+    :else
+    (invalid-goal! "Persistent goal success criteria must be a string or list"
+                   {:field :success-criteria})))
+
+(defn- build-contract
+  [intent {:keys [success-criteria constraints preferences budget resume-policy]}]
+  (compact
+   #:goal{:intent intent
+          :success-criteria (normalized-success-criteria success-criteria)
+          :constraints (normalized-map-field :constraints constraints)
+          :preferences (normalized-map-field :preferences preferences)
+          :budget (normalized-map-field :budget budget)
+          :resume-policy (normalized-map-field :resume-policy resume-policy)}))
+
 (defn set-goal!
-  [session-id text & {:keys [max-turns source]}]
+  [session-id text & {:keys [max-turns source success-criteria constraints preferences
+                             budget resume-policy]}]
   (let [text* (some-> text str str/trim not-empty)]
     (when-not text*
       (throw (ex-info "Persistent goal text is required"
@@ -128,8 +234,15 @@
                        :status 400
                        :error "goal text is required"})))
     (let [at (now)
+          contract (build-contract text*
+                                   {:success-criteria success-criteria
+                                    :constraints constraints
+                                    :preferences preferences
+                                    :budget budget
+                                    :resume-policy resume-policy})
           goal {:id (str (random-uuid))
                 :text text*
+                :contract contract
                 :status :active
                 :source (or source :user)
                 :turn-count 0
@@ -200,9 +313,13 @@
   [goal user-message]
   (let [message* (some-> user-message str str/trim not-empty)]
     (if (active? goal)
-      (str "Persistent goal: " (:text goal)
+      (let [contract (goal-contract goal)]
+        (str "Persistent goal: " (:text goal)
+             (when-let [criteria (seq (:goal/success-criteria contract))]
+               (str "\nSuccess criteria:\n"
+                    (str/join "\n" (map #(str "- " %) criteria))))
            (when message*
-             (str "\n\nCurrent user turn: " message*)))
+             (str "\n\nCurrent user turn: " message*))))
       user-message)))
 
 (defn attach-task!

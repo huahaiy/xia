@@ -92,6 +92,22 @@
     (is (= 1 (:llm-call-count
               (db/limit-usage-totals :schedule {:schedule-id :nightly}))))))
 
+(deftest goal-policy-budget-uses-goal-ledger-and-contract-budget
+  (limits/log-usage! {:persistent-goal-id "goal-1"}
+                     {:kind :chat-message
+                      :usage {"prompt_tokens" 10
+                              "completion_tokens" 5}
+                      :duration-ms 20})
+  (is (= 1 (:llm-call-count
+            (db/limit-usage-totals :goal {:goal-id "goal-1"}))))
+  (let [status (limits/policy-status
+                {:persistent-goal-id "goal-1"
+                 :operating-envelope {:effective {:goal {:budget {:max-llm-calls 1}}}}})]
+    (is (= :goal (:scope status)))
+    (is (= "goal-1" (:goal-id status)))
+    (is (= :llm-calls (:kind status)))
+    (is (= 1 (:limit status)))))
+
 (deftest policy-ceilings-use-persistent-ledger-totals
   (let [session-id #uuid "00000000-0000-0000-0000-000000000006"]
     (db/set-config! :limits/session-max-llm-calls 1)

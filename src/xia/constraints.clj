@@ -4,7 +4,7 @@
             [clojure.string :as str]
             [xia.config :as cfg]
             [xia.db :as db]
-            [xia.paths :as paths]
+            [xia.goal :as goal]
             [xia.scratch :as scratch]))
 
 (def precedence
@@ -12,7 +12,7 @@
   [:session-context
    :user-preferences
    :task-constraints
-   :project-constraints
+   :goal-contract
    :org-policy])
 
 (defn- parse-edn-map
@@ -60,14 +60,6 @@
     task-or-id       (db/get-task task-or-id)
     :else            nil))
 
-(defn- workspace*
-  [session-id workspace-id]
-  (or (when workspace-id
-        (db/get-workspace workspace-id))
-      (when session-id
-        (db/session-workspace session-id))
-      (db/get-workspace paths/default-workspace-id)))
-
 (defn- scratch-context
   [session-id]
   (when session-id
@@ -94,28 +86,28 @@
 
 (defn sources
   "Return each policy/context source used to resolve a turn envelope."
-  [{:keys [session-id task-id task workspace-id]}]
+  [{:keys [session-id task-id task goal]}]
   (let [task*       (task* (or task task-id))
         session-id* (or session-id (:session-id task*))
-        workspace   (workspace* session-id* workspace-id)
         profile     (when session-id*
                       (db/session-user-profile session-id*))
-        project*    (deep-merge (:preferences workspace)
-                                (:constraints workspace))]
+        goal*       (or goal
+                        (when session-id*
+                          (goal/current-goal session-id*)))]
     {:session-context   (or (session-context session-id*) {})
      :user-preferences  (or (:preferences profile) {})
      :task-constraints  (or (:constraints task*) {})
-     :project-constraints project*
+     :goal-contract     (or (goal/operating-envelope-source goal*) {})
      :org-policy        (org-policy)
-     :resolved          (cond-> {:session-id session-id*
-                                 :workspace-id (:id workspace)}
+     :resolved          (cond-> {:session-id session-id*}
                           (:id task*) (assoc :task-id (:id task*))
+                          (:id goal*) (assoc :goal-id (:id goal*))
                           (:id profile) (assoc :user-profile-id (:id profile)))}))
 
 (defn operating-envelope
   "Resolve the effective operating envelope for a session/task turn.
 
-   Precedence is org policy > project constraints > task constraints >
+   Precedence is org policy > goal contract > task constraints >
    user preferences > session scratch/context. The `:precedence` vector is
    listed lowest-to-highest to match the merge implementation."
   [opts]
@@ -125,7 +117,7 @@
                               [:session-context
                                :user-preferences
                                :task-constraints
-                               :project-constraints
+                               :goal-contract
                                :org-policy]))]
     {:precedence precedence
      :sources    sources*
@@ -139,9 +131,9 @@
         effective (:effective envelope)]
     (str/trim
      (str "Operating envelope"
-          (when (:workspace-id resolved)
-            (str " for workspace " (:workspace-id resolved)))
           (when (:task-id resolved)
-            (str ", task " (:task-id resolved)))
+            (str " for task " (:task-id resolved)))
+          (when (:goal-id resolved)
+            (str ", goal " (:goal-id resolved)))
           ": "
           (pr-str effective)))))

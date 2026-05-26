@@ -35,6 +35,37 @@
     (goal/clear-goal! session-id)
     (is (nil? (goal/current-goal session-id)))))
 
+(deftest persistent-goal-has-explicit-contract
+  (let [session-id (db/create-session! :http)
+        goal*      (goal/set-goal! session-id
+                                   "Ship the report"
+                                   :success-criteria ["Draft approved" "Published"]
+                                   :constraints {:model {:tier :goal}
+                                                 :tools {:network false}}
+                                   :preferences {:style :brief}
+                                   :budget {:max-llm-calls 4}
+                                   :resume-policy {:mode :auto})
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :http
+                                     :type :interactive
+                                     :state :running
+                                     :title "Report"})]
+    (is (= "Ship the report" (get-in goal* [:contract :goal/intent])))
+    (is (= ["Draft approved" "Published"]
+           (get-in goal* [:contract :goal/success-criteria])))
+    (is (= :goal (get-in (goal/operating-envelope-source goal*)
+                         [:model :tier])))
+    (is (= :brief (get-in (goal/operating-envelope-source goal*)
+                          [:style])))
+    (is (= 4 (get-in (goal/operating-envelope-source goal*)
+                     [:goal :budget :max-llm-calls])))
+    (is (re-find #"Draft approved"
+                 (goal/working-memory-input goal* "continue")))
+    (goal/attach-task! session-id task-id)
+    (is (= ["Draft approved" "Published"]
+           (get-in (db/get-task task-id)
+                   [:meta :persistent-goal :contract :goal/success-criteria])))))
+
 (deftest setting-a-new-persistent-goal-resets-session-autonomy
   (let [session-id (db/create-session! :http)]
     (wm/ensure-wm! session-id)
