@@ -11,18 +11,18 @@
             [xia.agent.branch :as agent-branch]
             [xia.agent.fact-review :as fact-review]
             [xia.agent.loop-guard :as loop-guard]
+            [xia.agent.recorder :as recorder]
             [xia.agent.run-state :as run-state]
             [xia.agent.supervisor :as supervisor]
             [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
+            [xia.agent.turn-completion :as turn-completion]
+            [xia.agent.turn-observation :as turn-observation]
             [xia.agent.turn-outcome :as turn-outcome]
+            [xia.agent.turn-setup :as turn-setup]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
-            [xia.audit :as audit]
             [xia.context :as context]
-            [xia.constraints :as constraints]
-            [xia.db :as db]
-            [xia.goal :as goal]
             [xia.limits :as limits]
             [xia.llm :as llm]
             [xia.plugin :as plugin]
@@ -69,6 +69,7 @@
          cancel-futures!
          request-session-cancel!
          live-run-entry-for-session
+         report-autonomy-status!
          current-time-ms)
 
 ;; build-messages is now in xia.context
@@ -455,57 +456,9 @@
   []
   (long (System/currentTimeMillis)))
 
-(defn- turn-budget-next-step
-  [parsed autonomy-state]
-  (or (some-> parsed :control :next-step str str/trim not-empty)
-      (some-> parsed :intent :plan-step str str/trim not-empty)
-      (some-> autonomy-state autonomous/current-frame :next-step str str/trim not-empty)))
-
 (defn- llm-budget-summary
   [budget-status]
   (limits/budget-summary budget-status))
-
-(defn- llm-budget-title
-  [budget-status]
-  (str (case (:scope budget-status)
-         :task "Task"
-         :turn "Turn"
-         :session "Session"
-         :schedule "Schedule"
-         :schedule-run "Schedule run"
-         :org "Organization"
-         "Usage")
-       " limit exhausted: "))
-
-(defn- llm-budget-note
-  [budget-status parsed autonomy-state & {:keys [before-tools?]}]
-  (case (:scope budget-status)
-    :task
-    (str "Note: I paused this task after reaching the "
-         (llm-budget-summary budget-status)
-         "."
-         (when before-tools?
-           " I did not execute the next requested tool step.")
-         (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
-           (str " Suggested next step: " next-step)))
-
-    :turn
-    (str "Note: I stopped this turn after reaching the "
-         (llm-budget-summary budget-status)
-         "."
-         (when before-tools?
-           " I did not execute the next requested tool step.")
-         (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
-           (str " Suggested next step: " next-step))
-         " Reply to continue from the current agenda.")
-
-    (str "Note: I stopped this turn after reaching the "
-         (llm-budget-summary budget-status)
-         "."
-         (when before-tools?
-           " I did not execute the next requested tool step.")
-         (when-let [next-step (turn-budget-next-step parsed autonomy-state)]
-           (str " Suggested next step: " next-step)))))
 
 (defn- handle-limit-policy-decision!
   [execution-context decision]
@@ -681,10 +634,6 @@
    :trace-context trace-context
    :validate-tool-round-call-count! validate-tool-round-call-count!})
 
-(defn- tool-result-audit-data
-  [tool-result]
-  (agent-tools/tool-result-audit-data tool-result))
-
 (defn- truncate-summary
   [value max-len]
   (agent-tools/truncate-summary value max-len))
@@ -803,61 +752,25 @@
      :stack (:stack autonomy-state)
      :incoming-message incoming-message})])
 
-(defn- autonomous-iteration-summary
-  [{:keys [assistant-text control]}]
-  (or (:summary control)
-      (some-> assistant-text str not-empty)
-      "Completed an autonomous iteration."))
-
-(defn- runtime-autonomy-state
-  [session-id task-id]
-  (task-runtime/runtime-autonomy-state session-id task-id))
-
-(defn- ensure-runtime-task!
-  [session-id channel user-message autonomy-state task-id runtime-op interrupting-turn-id
-   & {:keys [turn-input]}]
-  (apply task-runtime/ensure-runtime-task!
-         (task-runtime-deps)
-         session-id
-         channel
-         user-message
-         autonomy-state
-         task-id
-         runtime-op
-         interrupting-turn-id
-         (cond-> []
-           turn-input (conj :turn-input turn-input))))
-
-(defn- record-task-message-item!
-  [task-turn-id item-type role text & {:keys [message-id llm-call-id data status]}]
-  (task-runtime/record-task-message-item! (task-runtime-deps)
-                                          task-turn-id
-                                          item-type
-                                          role
-                                          text
-                                          :message-id message-id
-                                          :llm-call-id llm-call-id
-                                          :data data
-                                          :status status))
-
-(defn- record-task-tool-call-items!
-  [task-turn-id assistant-message-id llm-call-id tool-calls]
-  (task-runtime/record-task-tool-call-items! task-turn-id
-                                             assistant-message-id
-                                             llm-call-id
-                                             tool-calls))
-
-(defn- sync-runtime-task!
-  [task-id attrs]
-  (task-runtime/sync-runtime-task! task-id attrs))
-
-(defn- sync-runtime-task-turn!
-  [task-turn-id attrs]
-  (task-runtime/sync-runtime-task-turn! task-turn-id attrs))
-
 (defn- task-runtime-callbacks
   [runtime-task]
   (task-runtime/task-runtime-callbacks (task-runtime-deps) runtime-task))
+
+(defn- turn-setup-deps
+  []
+  {:register-task-run! register-task-run!})
+
+(defn- turn-completion-deps
+  []
+  {:autonomy-status-fields autonomy-status-fields
+   :launch-fact-utility-review-without-budget! launch-fact-utility-review-without-budget!
+   :report-autonomy-status! report-autonomy-status!
+   :save-schedule-checkpoint! save-schedule-checkpoint!})
+
+(defn- turn-observation-deps
+  []
+  {:report-autonomy-status! report-autonomy-status!
+   :save-schedule-checkpoint! save-schedule-checkpoint!})
 
 (defn- status-agenda
   [agenda]
@@ -1063,30 +976,6 @@
    system-prompt-cache-entry
    turn-budget-state))
 
-(defn- iteration-signature
-  [autonomy-state control tool-activity]
-  (loop-guard/iteration-signature autonomy-state control tool-activity))
-
-(defn- update-iteration-loop-state
-  [loop-state next-signature]
-  (loop-guard/update-iteration-loop-state loop-state next-signature))
-
-(defn- throw-if-identical-iteration-loop!
-  [session-id channel iteration max-iterations loop-state autonomy-state control]
-  (loop-guard/throw-if-identical-iteration-loop! session-id
-                                                 channel
-                                                 iteration
-                                                 max-iterations
-                                                 loop-state
-                                                 autonomy-state
-                                                 control))
-
-(defn- merge-fact-eids
-  [left right]
-  (->> (concat (or left []) (or right []))
-       distinct
-       vec))
-
 (defn- explicit-fact-ref->eid
   [used-fact-refs]
   (into {}
@@ -1105,116 +994,17 @@
          distinct
          vec)))
 
-(defn- final-assistant-text
-  [parsed response]
-  (or (some-> (:assistant-text parsed) str not-empty)
-      (some-> parsed :control :summary str not-empty)
-      (some-> response response-content str not-empty)
-      ""))
-
-(defn- append-assistant-note
-  [text note]
-  (let [text* (some-> text str str/trim)
-        note* (some-> note str str/trim)]
-    (cond
-      (str/blank? note*) (or text* "")
-      (str/blank? text*) note*
-      :else (str text* "\n\n" note*))))
-
-(defn- iteration-limit-note
-  [max-iterations control]
-  (str "Note: I stopped after reaching the autonomous iteration limit for this turn ("
-       max-iterations
-       ")."
-       (when-let [next-step (some-> (:next-step control) str str/trim not-empty)]
-         (str " Suggested next step: " next-step))
-       " Reply to continue from the current agenda."))
-
-(defn- clear-autonomy-state-on-terminal?
-  [parsed]
-  (let [control (:control parsed)]
-    (and (= :parsed (:control-status parsed))
-         (= :clear (:stack-action control)))))
-
-(defn- validate-goal-complete
-  [control autonomy-state]
-  (let [claimed? (true? (:goal-complete? control))
-        valid? (or (not claimed?)
-                   (autonomous/structurally-complete? autonomy-state))]
-    {:goal-complete-valid? valid?
-     :control (if valid?
-                control
-                (assoc control :goal-complete? false))
-     :autonomy-state (if valid?
-                       autonomy-state
-                       (autonomous/reconcile-invalid-goal-complete autonomy-state))}))
-
-(defn- record-persistent-goal-judge!
-  [session-id task-id attrs]
-  (when (goal/current-goal session-id)
-    (goal/judge-after-turn! session-id (assoc attrs :task-id task-id))))
-
-(defn- persist-assistant-message!
-  [session-id text execution-context response local-doc-ids artifact-ids]
-  (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
-        assistant-message-id
-        (db/add-message! session-id :assistant text
-                         :llm-call-id llm-call-id
-                         :provider-id provider-id
-                         :model model
-                         :workload workload
-                         :local-doc-ids local-doc-ids
-                         :artifact-ids artifact-ids)]
-    (task-runtime/record-task-message-item! (task-runtime-deps)
-                                            (:task-turn-id execution-context)
-                                            :assistant-message
-                                            :assistant
-                                            text
-                                            :message-id assistant-message-id
-                                            :llm-call-id llm-call-id
-                                            :data (cond-> {:provider-id provider-id
-                                                           :model model
-                                                           :workload workload}
-                                                    (seq local-doc-ids) (assoc :local-doc-ids (vec local-doc-ids))
-                                                    (seq artifact-ids) (assoc :artifact-ids (vec artifact-ids))))
-    (audit/log! execution-context
-                {:actor :assistant
-                 :type :llm-response
-                 :message-id assistant-message-id
-                 :llm-call-id llm-call-id
-                 :data {:provider-id (some-> provider-id name)
-                        :model model
-                        :workload (some-> workload name)
-                        :tool-calls []}})))
-
-(defn- persist-tool-result-message!
-  [session-id execution-context llm-call-id provider-id model workload tool-result]
-  (let [tool-name (:tool_name tool-result)
-        tool-call-id (:tool_call_id tool-result)
-        tool-message-id (db/add-message! session-id :tool
-                                         nil
-                                         :tool-result (:result tool-result)
-                                         :tool-id tool-name
-                                         :tool-call-id tool-call-id
-                                         :tool-name tool-name
-                                         :llm-call-id llm-call-id
-                                         :provider-id provider-id
-                                         :model model
-                                         :workload workload)]
-    (task-runtime/record-task-tool-result-item! (task-runtime-deps)
-                                                (:task-turn-id execution-context)
-                                                tool-message-id
-                                                llm-call-id
-                                                tool-result)
-    (audit/log! execution-context
-                {:actor :assistant
-                 :type :tool-result
-                 :message-id tool-message-id
-                 :llm-call-id llm-call-id
-                 :tool-id tool-name
-                 :tool-call-id tool-call-id
-                 :data (tool-result-audit-data tool-result)})
-    tool-message-id))
+(defn- record-tool-round!
+  [session-id execution-context provenance assistant-content tool-calls tool-results
+   local-doc-ids artifact-ids]
+  (recorder/record-tool-round! session-id
+                               execution-context
+                               provenance
+                               assistant-content
+                               tool-calls
+                               tool-results
+                               local-doc-ids
+                               artifact-ids))
 
 (defn- run-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
@@ -1339,7 +1129,8 @@
                                   {:type :tool-round-limit-exceeded
                                    :rounds rounds
                                    :max-tool-rounds max-tool-rounds}))))
-              (let [{:keys [llm-call-id provider-id model workload]} (response-provenance response)
+              (let [provenance (response-provenance response)
+                    {:keys [llm-call-id provider-id model workload]} provenance
                     assistant-msg {:role "assistant"
                                    :content assistant-content
                                    :tool_calls tool-calls}
@@ -1371,48 +1162,14 @@
                                             vec)
                     tool-activity* (conj tool-activity
                                          (tool-round-signature tool-calls tool-results))]
-                (let [assistant-message-id
-                      (db/add-message! session-id :assistant
-                                       assistant-content
-                                       :tool-calls tool-calls
-                                       :llm-call-id llm-call-id
-                                       :provider-id provider-id
-                                       :model model
-                                       :workload workload
-                                       :local-doc-ids local-doc-ids
-                                       :artifact-ids artifact-ids)]
-                  (task-runtime/record-task-message-item! (task-runtime-deps)
-                                                          (:task-turn-id execution-context)
-                                                          :assistant-message
-                                                          :assistant
-                                                          assistant-content
-                                                          :message-id assistant-message-id
-                                                          :llm-call-id llm-call-id
-                                                          :data {:provider-id provider-id
-                                                                 :model model
-                                                                 :workload workload
-                                                                 :tool-calls (tool-call-summary tool-calls)})
-                  (task-runtime/record-task-tool-call-items! (:task-turn-id execution-context)
-                                                             assistant-message-id
-                                                             llm-call-id
-                                                             tool-calls)
-                  (audit/log! execution-context
-                              {:actor :assistant
-                               :type :llm-response
-                               :message-id assistant-message-id
-                               :llm-call-id llm-call-id
-                               :data {:provider-id (some-> provider-id name)
-                                      :model model
-                                      :workload (some-> workload name)
-                                      :tool-calls (tool-call-summary tool-calls)}}))
-                (doseq [tr tool-results]
-                  (persist-tool-result-message! session-id
-                                                execution-context
-                                                llm-call-id
-                                                provider-id
-                                                model
-                                                workload
-                                                tr))
+                (record-tool-round! session-id
+                                    execution-context
+                                    provenance
+                                    assistant-content
+                                    tool-calls
+                                    tool-results
+                                    local-doc-ids
+                                    artifact-ids)
                 (emit-event! {:phase :tool
                               :message (or (truncate-summary assistant-content 240)
                                            (str "Completed tool round with "
@@ -1487,97 +1244,31 @@
           (let [request-context (derive-request-context session-id channel tool-context)
                 runtime-task (atom nil)]
             (binding [prompt/*interaction-context* (merge request-context
-                                                          (task-runtime/task-runtime-callbacks (task-runtime-deps)
-                                                                                               runtime-task))]
+                                                          (task-runtime-callbacks runtime-task))]
               (try
                 (throw-if-cancelled! session-id)
                 (validate-user-message! user-message)
                 (throw-if-cancelled! session-id)
                 (wm/ensure-wm! session-id)
-                (let [active-goal* (goal/active-goal session-id)
-                      task-goal-id (when task-id
-                                     (some-> task-id
-                                             db/get-task
-                                             :meta
-                                             :persistent-goal
-                                             :id))
-                      persistent-goal (when (and active-goal*
-                                                 (or (nil? task-id)
-                                                     (= (:id active-goal*) task-goal-id)))
-                                        active-goal*)
-                      autonomy-user-message (goal/autonomy-input persistent-goal user-message)
-                      wm-user-message (goal/working-memory-input persistent-goal user-message)
-                      initial-autonomy-state (autonomous/prepare-turn-state
-                                              (task-runtime/runtime-autonomy-state session-id task-id)
-                                              autonomy-user-message)
-                      {:keys [task-id task-turn-id]} (task-runtime/ensure-runtime-task! (task-runtime-deps)
-                                                                                         session-id
-                                                                                         channel
-                                                                                         autonomy-user-message
-                                                                                         initial-autonomy-state
-                                                                                         task-id
-                                                                                         runtime-op
-                                                                                         interrupting-turn-id
-                                                                                         :turn-input user-message)
-                      _ (goal/attach-task! session-id task-id)
-                      task-run (register-task-run! session-id task-id task-turn-id)
-                      _ (reset! runtime-task {:task-id task-id
-                                              :task-turn-id task-turn-id
-                                              :task-run-id (:task-run-id task-run)})
-                      user-message-id (when persist-message?
-                                        (db/add-message! session-id :user user-message
-                                                         :local-doc-ids local-doc-ids
-                                                         :artifact-ids artifact-ids))
-                      _ (when user-message-id
-                          (audit/log! request-context
-                                      {:actor :user
-                                       :type :user-message
-                                       :message-id user-message-id
-                                       :data {:local-doc-ids (vec (or local-doc-ids []))
-                                              :artifact-ids (vec (or artifact-ids []))}}))
-                      _ (task-runtime/record-task-message-item! (task-runtime-deps)
-                                                                task-turn-id
-                                                                :user-message
-                                                                :user
-                                                                user-message
-                                                                :message-id user-message-id
-                                                                :data (cond-> {}
-                                                                        (seq local-doc-ids) (assoc :local-doc-ids (vec local-doc-ids))
-                                                                        (seq artifact-ids) (assoc :artifact-ids (vec artifact-ids))))
-                      operating-envelope (constraints/operating-envelope
-                                           {:session-id session-id
-                                            :task-id task-id})
-                      pre-provider-limit-context (merge tool-context
-                                                        request-context
-                                                        {:session-id session-id
-                                                         :task-id task-id
-                                                         :task-turn-id task-turn-id
-                                                         :channel channel
-                                                         :persistent-goal-id (:id persistent-goal)
-                                                         :resource-session-id resource-session-id
-                                                         :operating-envelope operating-envelope})
-                      limit-routing-decision (limits/routing-decision pre-provider-limit-context)
-                      provider-selection-opts (-> (cond-> {:workload :assistant}
-                                                    provider-id
-                                                    (assoc :provider-id provider-id))
-                                                  (limits/apply-routing-decision
-                                                   limit-routing-decision))
-                      {assistant-provider :provider
-                       assistant-provider-id :provider-id}
-                      (llm/resolve-provider-selection provider-selection-opts)
-                      base-execution-context (merge tool-context
-                                                    request-context
-                                                    {:session-id session-id
-                                                     :task-id task-id
-                                                     :task-turn-id task-turn-id
-                                                     :channel channel
-                                                     :user-message user-message
-                                                     :persistent-goal-id (:id persistent-goal)
-                                                     :resource-session-id resource-session-id
-                                                     :assistant-provider assistant-provider
-                                                     :assistant-provider-id assistant-provider-id
-                                                     :operating-envelope operating-envelope
-                                                     :limit-routing-decision limit-routing-decision})
+                (let [{:keys [assistant-provider assistant-provider-id
+                              base-execution-context initial-autonomy-state
+                              task-id task-turn-id wm-user-message]}
+                      (turn-setup/prepare-turn!
+                       (turn-setup-deps)
+                       {:session-id session-id
+                        :channel channel
+                        :user-message user-message
+                        :task-id task-id
+                        :runtime-op runtime-op
+                        :interrupting-turn-id interrupting-turn-id
+                        :request-context request-context
+                        :tool-context tool-context
+                        :provider-id provider-id
+                        :resource-session-id resource-session-id
+                        :persist-message? persist-message?
+                        :local-doc-ids local-doc-ids
+                        :artifact-ids artifact-ids
+                        :runtime-task runtime-task})
                       max-tool-rounds* (long (or max-tool-rounds
                                                  (configured-max-tool-rounds)))
                       max-iterations* (long (autonomous/max-iterations))
@@ -1685,287 +1376,119 @@
                                                                   :max-llm-calls :max-total-tokens
                                                                   :max-wall-clock-ms :max-llm-duration-ms])}
                                     (throw e))))
-                              parsed parsed-response
-                              control (:control parsed)
-                              summary (autonomous-iteration-summary parsed)
-                              fact-eids* (merge-fact-eids fact-eids used-fact-eids)
-                              explicit-fact-eids* (merge-fact-eids explicit-fact-eids
-                                                                   explicit-used-fact-eids)
-                              updated-autonomy-state* (if control
-                                                        (let [next-state (autonomous/apply-control autonomy-state
-                                                                                                   control)]
-                                                          (wm/set-autonomy-state! session-id next-state)
-                                                          (or (wm/autonomy-state session-id)
-                                                              next-state))
-                                                        autonomy-state)
-                              {:keys [goal-complete-valid? control autonomy-state]}
-                              (if control
-                                (validate-goal-complete control updated-autonomy-state*)
-                                {:goal-complete-valid? true
-                                 :control control
-                                 :autonomy-state updated-autonomy-state*})
-                              _ (when (and control (not goal-complete-valid?))
-                                  (wm/set-autonomy-state! session-id autonomy-state))
-                              updated-autonomy-state autonomy-state
-                              updated-tip (autonomous/current-frame updated-autonomy-state)
-                              _ (wm/snapshot! session-id)
-                              text (final-assistant-text parsed response)]
-                          (sync-runtime-task! task-id
-                                              {:state :running
-                                               :summary summary
-                                               :autonomy-state updated-autonomy-state})
-                          (report-autonomy-status! :observing
-                                                   updated-autonomy-state
-                                                   iteration
-                                                   max-iterations*
-                                                   :stack-action (some-> control :stack-action))
-                          (save-schedule-checkpoint!
-                           iteration-context
-                           {:phase :observing
-                            :iteration iteration
-                            :summary summary
-                            :session-id session-id
-                            :control-status (:control-status parsed)
-                            :goal-complete-valid? goal-complete-valid?
-                            :status (some-> control :status)
-                            :next-step (some-> control :next-step)
-                            :progress-status (some-> updated-tip :progress-status)
-                            :agenda (some-> updated-tip :agenda)
-                            :stack (some-> updated-autonomy-state :stack)})
+                              {:keys [parsed control text updated-autonomy-state updated-tip]
+                               fact-eids* :fact-eids
+                               explicit-fact-eids* :explicit-fact-eids}
+                              (turn-observation/observe!
+                               (turn-observation-deps)
+                               {:session-id session-id
+                                :task-id task-id
+                                :iteration iteration
+                                :max-iterations max-iterations*
+                                :iteration-context iteration-context
+                                :autonomy-state autonomy-state
+                                :parsed-response parsed-response
+                                :response response
+                                :fact-eids fact-eids
+                                :used-fact-eids used-fact-eids
+                                :explicit-fact-eids explicit-fact-eids
+                                :explicit-used-fact-eids explicit-used-fact-eids})]
                           (cond
                             (and budget-exhausted?
                                  (or (nil? response)
                                      budget-before-tools?
                                      (= :continue (:status control))))
-                            (let [final-text (append-assistant-note
-                                              text
-                                              (llm-budget-note budget-status
-                                                               parsed
-                                                               updated-autonomy-state
-                                                               :before-tools? budget-before-tools?))]
-                              (task-runtime/record-task-item! task-turn-id
-                                                              {:type :system-note
-                                                               :status :limit
-                                                               :summary (str (llm-budget-title budget-status)
-                                                                             (llm-budget-summary budget-status))
-                                                               :data {:kind "budget-exhausted"
-                                                                      :budget-scope (some-> (:scope budget-status) name)
-                                                                      :budget-kind (some-> (:kind budget-status) name)
-                                                                      :llm-call-count (:llm-call-count budget-status)
-                                                                      :total-tokens (:total-tokens budget-status)
-                                                                      :elapsed-ms (:elapsed-ms budget-status)
-                                                                      :llm-total-duration-ms (:llm-total-duration-ms budget-status)
-                                                                      :before-tools? (boolean budget-before-tools?)}})
-                              (persist-assistant-message! session-id
-                                                          final-text
-                                                          iteration-context
-                                                          response
-                                                          local-doc-ids
-                                                          artifact-ids)
-                              (sync-runtime-task-turn! task-turn-id
-                                                       {:state :completed
-                                                        :summary (truncate-summary final-text 500)})
-                              (sync-runtime-task! task-id
-                                                  {:state :resumable
-                                                   :summary (truncate-summary final-text 500)
-                                                   :autonomy-state updated-autonomy-state})
-                              (record-persistent-goal-judge!
-                               session-id
-                               task-id
-                               {:task-state :resumable
-                                :control control
-                                :autonomy-state updated-autonomy-state
-                                :guardrail :budget
-                                :budget-status budget-status
-                                :summary (truncate-summary final-text 500)})
-                              (when-not (str/blank? text)
-                                (launch-fact-utility-review-without-budget! session-id
-                                                                            fact-eids*
-                                                                            user-message
-                                                                            text
-                                                                            :explicit-fact-eids explicit-fact-eids*))
-                              (save-schedule-checkpoint!
-                               iteration-context
-                               {:phase :complete
-                                :iteration iteration
-                                :summary (or (truncate-summary final-text 500)
-                                             (str "Stopped after reaching the "
-                                                  (llm-budget-summary budget-status)
-                                                  "."))
-                                :session-id session-id
-                                :status :limit-exhausted
-                                :budget-scope (:scope budget-status)
-                                :budget-kind (:kind budget-status)
-                                :llm-call-count (:llm-call-count budget-status)
-                                :total-tokens (:total-tokens budget-status)
-                                :elapsed-ms (:elapsed-ms budget-status)
-                                :llm-total-duration-ms (:llm-total-duration-ms budget-status)
-                                :next-step (turn-budget-next-step parsed updated-autonomy-state)
-                                :progress-status (some-> updated-tip :progress-status)
-                                :agenda (some-> updated-tip :agenda)
-                                :stack (some-> updated-autonomy-state :stack)})
-                              (prompt/status! (merge {:state :completed
-                                                      :phase :complete
-                                                      :message (str "Paused after reaching the "
-                                                                    (llm-budget-summary budget-status))}
-                                                     (autonomy-status-fields updated-autonomy-state
-                                                                             iteration
-                                                                             max-iterations*)))
-                              final-text)
+                            (turn-completion/budget-pause!
+                             (turn-completion-deps)
+                             {:session-id session-id
+                              :task-id task-id
+                              :task-turn-id task-turn-id
+                              :user-message user-message
+                              :local-doc-ids local-doc-ids
+                              :artifact-ids artifact-ids
+                              :iteration iteration
+                              :max-iterations max-iterations*
+                              :iteration-context iteration-context
+                              :response response
+                              :parsed parsed
+                              :control control
+                              :text text
+                              :fact-eids fact-eids*
+                              :explicit-fact-eids explicit-fact-eids*
+                              :updated-autonomy-state updated-autonomy-state
+                              :updated-tip updated-tip
+                              :budget-status budget-status
+                              :budget-before-tools? budget-before-tools?})
 
                             (or (nil? control)
                                 (= :complete (:status control)))
-                            (do
-                              (persist-assistant-message! session-id
-                                                          text
-                                                          iteration-context
-                                                          response
-                                                          local-doc-ids
-                                                          artifact-ids)
-                              (sync-runtime-task-turn! task-turn-id
-                                                       {:state :completed
-                                                        :summary (truncate-summary text 500)})
-                              (sync-runtime-task! task-id
-                                                  {:state :completed
-                                                   :summary (truncate-summary text 500)
-                                                   :autonomy-state (when-not (clear-autonomy-state-on-terminal? parsed)
-                                                                     updated-autonomy-state)
-                                                   :finished-at (java.util.Date.)})
-                              (record-persistent-goal-judge!
-                               session-id
-                               task-id
-                               {:task-state :completed
-                                :control control
-                                :autonomy-state updated-autonomy-state
-                                :summary (truncate-summary text 500)})
-                              (when (clear-autonomy-state-on-terminal? parsed)
-                                (wm/clear-autonomy-state! session-id)
-                                (wm/snapshot! session-id))
-                              (launch-fact-utility-review-without-budget! session-id
-                                                                          fact-eids*
-                                                                          user-message
-                                                                          text
-                                                                          :explicit-fact-eids explicit-fact-eids*)
-                              (prompt/status! {:state :completed
-                                               :phase :complete
-                                               :message "Ready"})
-                              text)
+                            (turn-completion/complete!
+                             (turn-completion-deps)
+                             {:session-id session-id
+                              :task-id task-id
+                              :task-turn-id task-turn-id
+                              :user-message user-message
+                              :local-doc-ids local-doc-ids
+                              :artifact-ids artifact-ids
+                              :iteration-context iteration-context
+                              :response response
+                              :parsed parsed
+                              :control control
+                              :text text
+                              :fact-eids fact-eids*
+                              :explicit-fact-eids explicit-fact-eids*
+                              :updated-autonomy-state updated-autonomy-state})
 
                             (>= iteration max-iterations*)
-                            (let [final-text (append-assistant-note text
-                                                                    (iteration-limit-note max-iterations*
-                                                                                          control))]
-                              (prompt/policy-decision!
-                               (task-policy/autonomy-iteration-limit-policy
-                                iteration
-                                max-iterations*))
-                              (persist-assistant-message! session-id
-                                                          final-text
-                                                          iteration-context
-                                                          response
-                                                          local-doc-ids
-                                                          artifact-ids)
-                              (sync-runtime-task-turn! task-turn-id
-                                                       {:state :completed
-                                                        :summary (truncate-summary final-text 500)})
-                              (sync-runtime-task! task-id
-                                                  {:state :resumable
-                                                   :summary (truncate-summary final-text 500)
-                                                   :autonomy-state updated-autonomy-state})
-                              (record-persistent-goal-judge!
-                               session-id
-                               task-id
-                               {:task-state :resumable
-                                :control control
-                                :autonomy-state updated-autonomy-state
-                                :guardrail :iteration-limit
-                                :summary (truncate-summary final-text 500)})
-                              (launch-fact-utility-review-without-budget! session-id
-                                                                          fact-eids*
-                                                                          user-message
-                                                                          text
-                                                                          :explicit-fact-eids explicit-fact-eids*)
-                              (save-schedule-checkpoint!
-                               iteration-context
-                               {:phase :complete
-                                :iteration iteration
-                                :summary (or (truncate-summary final-text 500)
-                                             "Stopped after reaching the autonomous iteration limit for this turn.")
-                                :session-id session-id
-                                :status :iteration-limit
-                                :next-step (:next-step control)
-                                :progress-status (some-> updated-tip :progress-status)
-                                :agenda (some-> updated-tip :agenda)
-                                :stack (some-> updated-autonomy-state :stack)})
-                              (prompt/status! (merge {:state :completed
-                                                      :phase :complete
-                                                      :message (str "Paused after reaching iteration limit ("
-                                                                    max-iterations*
-                                                                    ")")}
-                                                     (autonomy-status-fields updated-autonomy-state
-                                                                             iteration
-                                                                             max-iterations*)))
-                              final-text)
+                            (turn-completion/iteration-limit!
+                             (turn-completion-deps)
+                             {:session-id session-id
+                              :task-id task-id
+                              :task-turn-id task-turn-id
+                              :user-message user-message
+                              :local-doc-ids local-doc-ids
+                              :artifact-ids artifact-ids
+                              :iteration iteration
+                              :max-iterations max-iterations*
+                              :iteration-context iteration-context
+                              :response response
+                              :control control
+                              :text text
+                              :fact-eids fact-eids*
+                              :explicit-fact-eids explicit-fact-eids*
+                              :updated-autonomy-state updated-autonomy-state
+                              :updated-tip updated-tip})
 
                             :else
-                            (let [next-loop-state (update-iteration-loop-state
-                                                   loop-state
-                                                   (iteration-signature updated-autonomy-state
-                                                                        control
-                                                                        tool-activity))
-                                  next-wm-message (or working-memory-message
-                                                      (autonomous/retrieval-message updated-autonomy-state))
-                                  next-wm-query-fingerprint (wm-query-signature next-wm-message)
-                                  next-refresh-working-memory?
-                                  (or refresh-needed?
-                                      (and next-wm-query-fingerprint
-                                           (not= wm-query-fingerprint
-                                                 next-wm-query-fingerprint)))]
-                              (persist-assistant-message! session-id
-                                                          text
-                                                          iteration-context
-                                                          response
-                                                          nil
-                                                          nil)
-                              (when-not (str/blank? text)
-                                (prompt/assistant-message! {:text text
-                                                            :iteration iteration
-                                                            :max-iterations max-iterations*
-                                                            :status :continue
-                                                            :progress-status (some-> updated-tip :progress-status)
-                                                            :agenda (some-> updated-tip :agenda)
-                                                            :stack (some-> updated-autonomy-state :stack)}))
-                              (throw-if-identical-iteration-loop! session-id
-                                                                  channel
-                                                                  iteration
-                                                                  max-iterations*
-                                                                  next-loop-state
-                                                                  updated-autonomy-state
-                                                                  control)
-                              (report-autonomy-status! :updating
-                                                       updated-autonomy-state
-                                                       iteration
-                                                       max-iterations*
-                                                       :stack-action (:stack-action control))
-                              (save-schedule-checkpoint!
-                               iteration-context
-                               {:phase :updating
-                                :iteration iteration
-                                :summary (or (:next-step control)
-                                             "Updating the autonomous plan for the next iteration.")
-                                :session-id session-id
-                                :status :continue
-                                :progress-status (some-> updated-tip :progress-status)
-                                :agenda (some-> updated-tip :agenda)
-                                :stack (some-> updated-autonomy-state :stack)})
-                              (recur (inc iteration)
+                            (let [{:keys [iteration loop-state refresh-working-memory?
+                                          system-prompt-cache-entry wm-message
+                                          wm-query-fingerprint]}
+                                  (turn-completion/continue!
+                                   (turn-completion-deps)
+                                   {:session-id session-id
+                                    :channel channel
+                                    :iteration iteration
+                                    :max-iterations max-iterations*
+                                    :iteration-context iteration-context
+                                    :response response
+                                    :control control
+                                    :text text
+                                    :tool-activity tool-activity
+                                    :loop-state loop-state
+                                    :refresh-needed? refresh-needed?
+                                    :working-memory-message working-memory-message
+                                    :wm-query-fingerprint wm-query-fingerprint
+                                    :system-prompt-cache-entry system-prompt-cache-entry
+                                    :updated-autonomy-state updated-autonomy-state
+                                    :updated-tip updated-tip})]
+                              (recur iteration
                                      fact-eids*
                                      explicit-fact-eids*
-                                     next-loop-state
-                                     next-refresh-working-memory?
+                                     loop-state
+                                     refresh-working-memory?
                                      system-prompt-cache-entry
-                                     next-wm-message
-                                     next-wm-query-fingerprint))))))))
+                                     wm-message
+                                     wm-query-fingerprint))))))))
                 (catch InterruptedException e
                   (turn-outcome/record-cancellation! session-id
                                                      @runtime-task
