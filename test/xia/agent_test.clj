@@ -1,12 +1,12 @@
 (ns xia.agent-test
   (:require [clojure.test :refer :all]
-            [xia.agent :as agent]))
+            [xia.agent.iteration :as iteration]))
 
 (deftest first-tool-call-response-without-intent-gets-synthesized-intent
   (let [tool-calls [{"id" "call-1"
                      "function" {"name" "email-list"
                                  "arguments" "{\"query\":\"from:michelle\"}"}}]
-        parsed (#'agent/ensure-tool-call-intent
+        parsed (#'iteration/ensure-tool-call-intent
                 nil
                 {:user-message "Find the Michelle Zhou email"}
                 0
@@ -25,7 +25,7 @@
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
        #"malformed ACTION_INTENT_JSON"
-       (#'agent/validate-tool-round-protocol!
+       (#'iteration/validate-tool-round-protocol!
         nil
         {:channel :http
          :iteration 1}

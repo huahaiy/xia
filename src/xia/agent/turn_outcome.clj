@@ -139,3 +139,147 @@
   (prompt/status! {:state :error
                    :phase :error
                    :message (str "Request failed: " message)}))
+
+(defn- supervisor-restart-grace-ms
+  [deps]
+  (let [value (:supervisor-restart-grace-ms deps)]
+    (if (fn? value)
+      (value)
+      value)))
+
+(defn- record-failed-outcome!
+  [session-id runtime-task message]
+  (record-task-outcome!
+   session-id
+   runtime-task
+   {:turn-state :failed
+    :task-state :failed
+    :stop-reason :error
+    :summary message
+    :error message
+    :guardrail :failed}))
+
+(defn- record-request-cancelled!
+  [deps {:keys [session-id request-context runtime-task]} reason message]
+  (let [outcome (record-cancellation! session-id
+                                      runtime-task
+                                      reason
+                                      message)]
+    (record-cancellation-status!
+     (:save-schedule-checkpoint! deps)
+     request-context
+     session-id
+     outcome)
+    outcome))
+
+(defn handle-interrupted!
+  [deps {:keys [session-id channel request-context runtime-task]} e]
+  (record-cancellation! session-id
+                        runtime-task
+                        "request interrupted"
+                        (some-> e .getMessage))
+  ((:request-session-cancel! deps) session-id "request interrupted")
+  (if ((:stop-worker! deps) session-id)
+    (let [cancel-ex ((:request-cancelled-ex deps)
+                     session-id
+                     ((:cancellation-reason deps) session-id)
+                     e)]
+      (record-cancellation-status!
+       (:save-schedule-checkpoint! deps)
+       request-context
+       session-id
+       (cancellation-outcome (:reason (ex-data cancel-ex))))
+      (throw cancel-ex))
+    (throw (ex-info "Agent supervisor could not stop the worker after request cancellation"
+                    {:type :agent-stop-timeout
+                     :session-id session-id
+                     :channel channel
+                     :grace-ms (supervisor-restart-grace-ms deps)}
+                    e))))
+
+(defn handle-ex-info!
+  [deps {:keys [session-id request-context runtime-task] :as context} e]
+  (let [data (ex-data e)
+        message (.getMessage e)]
+    (cond
+      (= :request-cancelled (:type data))
+      (do
+        (record-request-cancelled! deps
+                                   context
+                                   (:reason data)
+                                   message)
+        (throw e))
+
+      (contains? #{:agent-stalled :autonomous-loop-stalled :agent-stop-timeout} (:type data))
+      (do
+        (record-task-outcome!
+         session-id
+         runtime-task
+         {:turn-state :failed
+          :task-state :failed
+          :stop-reason :stalled
+          :summary message
+          :error message
+          :guardrail :stalled})
+        (record-stalled-status!
+         (:save-schedule-checkpoint! deps)
+         request-context
+         session-id
+         data
+         message)
+        (throw e))
+
+      (= :task-restart-loop (:type data))
+      (do
+        (record-task-outcome!
+         session-id
+         runtime-task
+         {:turn-state :completed
+          :task-state :resumable
+          :stop-reason :restart-loop
+          :summary message
+          :error message
+          :guardrail :restart-loop})
+        (record-restart-loop-status!
+         (:save-schedule-checkpoint! deps)
+         request-context
+         session-id
+         data
+         message)
+        (throw e))
+
+      :else
+      (do
+        (record-failed-outcome! session-id runtime-task message)
+        (record-error-status!
+         (:save-schedule-checkpoint! deps)
+         request-context
+         session-id
+         message)
+        (throw e)))))
+
+(defn handle-exception!
+  [deps {:keys [session-id request-context runtime-task] :as context} e]
+  (if ((:session-cancelled? deps) session-id)
+    (let [cancel-ex ((:request-cancelled-ex deps)
+                     session-id
+                     ((:cancellation-reason deps) session-id)
+                     e)]
+      (record-request-cancelled! deps
+                                 context
+                                 (:reason (ex-data cancel-ex))
+                                 (.getMessage cancel-ex))
+      (throw cancel-ex))
+    (do
+      (record-failed-outcome! session-id runtime-task (.getMessage e))
+      (record-error-status!
+       (:save-schedule-checkpoint! deps)
+       request-context
+       session-id
+       (.getMessage e))
+      (throw e))))
+
+(defn clear-runtime-task-run!
+  [deps session-id runtime-task]
+  (when-let [{:keys [task-id task-turn-id task-run-id]} runtime-task]
+    ((:clear-task-run! deps) session-id task-id task-turn-id task-run-id)))
