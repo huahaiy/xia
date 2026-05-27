@@ -13,8 +13,8 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.backup :as backup]
+            [xia.bridge :as bridge]
             [xia.db :as db]
-            [xia.agent :as agent]
             [xia.hippocampus :as hippo]
             [xia.limits :as limits]
             [xia.llm :as llm]
@@ -23,8 +23,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
-            [xia.task-policy :as task-policy]
-            [xia.working-memory :as wm])
+            [xia.task-policy :as task-policy])
   (:import [java.util.concurrent ExecutorService Executors ScheduledExecutorService ThreadFactory TimeUnit RejectedExecutionException ThreadPoolExecutor]))
 
 ;; ---------------------------------------------------------------------------
@@ -274,18 +273,10 @@
 
 (defn- finalize-prompt-schedule-session!
   [session-id]
-  (try
-    (let [topics (:topics (wm/get-wm session-id))]
-      (wm/clear-autonomy-state! session-id)
-      (wm/snapshot! session-id)
-      (hippo/record-conversation! session-id :scheduler :topics topics))
-    (catch Exception e
-      (log/error e "Failed to finalize scheduler session" session-id))
-    (finally
-      (try
-        (wm/clear-wm! session-id)
-        (catch Exception e
-          (log/error e "Failed to clear scheduler working memory" session-id))))))
+  (bridge/finalize-session! session-id
+                            :reason :schedule-finish
+                            :default-channel :scheduler
+                            :mark-inactive? false))
 
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
@@ -293,7 +284,7 @@
   (let [started (or started-at (java.util.Date.))
         resumed-session-id (schedule/resumable-session-id id)
         session-id (or resumed-session-id
-                       (db/create-session! :scheduler))
+                       (:session-id (bridge/create-session! :scheduler)))
         existing-task-id (schedule/schedule-task-id id)
         task-id (schedule/ensure-schedule-task! sched
                                                 :session-id session-id
@@ -305,8 +296,8 @@
     (try
       (schedule/bind-task! id task-id)
       (when resumed-session-id
-        (db/set-session-active! session-id true))
-      (wm/ensure-wm! session-id)
+        (bridge/resume-session! session-id
+                                :expected-channel :scheduler))
       (schedule/save-task-checkpoint!
        id
        {:phase :planning
@@ -331,14 +322,14 @@
                                (limits/record-schedule-run-request!
                                 budget-state
                                 request))]
-                     (agent/process-message session-id
-                                            prompt*
-                                            :channel :scheduler
-                                            :task-id task-id
-                                            :runtime-op (if (= task-id existing-task-id)
-                                                          :resume
-                                                          :start)
-                                            :tool-context execution-context))]
+                     (bridge/send-message! session-id
+                                           prompt*
+                                           :channel :scheduler
+                                           :task-id task-id
+                                           :runtime-op (if (= task-id existing-task-id)
+                                                         :resume
+                                                         :start)
+                                           :tool-context execution-context))]
         (plugin/run-hooks! :schedule-run
                            (assoc execution-context
                                   :session-id session-id

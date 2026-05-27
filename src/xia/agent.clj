@@ -8,11 +8,14 @@
    Tools  = executable functions the LLM can call via function-calling."
   (:require [taoensso.timbre :as log]
             [clojure.string :as str]
-            [datalevin.embedding :as emb]
             [xia.agent.branch :as agent-branch]
             [xia.agent.fact-review :as fact-review]
+            [xia.agent.loop-guard :as loop-guard]
+            [xia.agent.run-state :as run-state]
+            [xia.agent.supervisor :as supervisor]
             [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
+            [xia.agent.turn-outcome :as turn-outcome]
             [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.audit :as audit]
@@ -39,11 +42,7 @@
 
 (defn- make-runtime
   []
-  {:active-session-turns-atom (atom #{})
-   :session-turn-reservations-atom (atom {})
-   :active-session-runs-atom  (atom {})
-   :active-task-runs-atom     (atom {})
-   :idle-monitor              (Object.)})
+  (run-state/make-runtime))
 
 (defn- maybe-current-runtime
   []
@@ -54,26 +53,6 @@
   (or (maybe-current-runtime)
       (throw (ex-info "Agent runtime is not installed"
                       {:component :xia/agent-runtime}))))
-
-(defn- active-session-turns-atom
-  []
-  (:active-session-turns-atom (current-runtime)))
-
-(defn- active-session-runs-atom
-  []
-  (:active-session-runs-atom (current-runtime)))
-
-(defn- session-turn-reservations-atom
-  []
-  (:session-turn-reservations-atom (current-runtime)))
-
-(defn- active-task-runs-atom
-  []
-  (:active-task-runs-atom (current-runtime)))
-
-(defn- idle-monitor
-  []
-  (:idle-monitor (current-runtime)))
 
 (def ^:private trace-context-keys
   [:request-id
@@ -96,80 +75,17 @@
 
 (defn- reserve-next-session-turn!
   [session-id metadata]
-  (when session-id
-    (let [token (Object.)]
-      (locking (idle-monitor)
-        (let [reservations* (session-turn-reservations-atom)]
-          (when-not (contains? @reservations* session-id)
-            (swap! reservations* assoc session-id (assoc metadata :token token))
-            (.notifyAll ^Object (idle-monitor))
-            token))))))
+  (run-state/reserve-next-session-turn! (current-runtime) session-id metadata))
 
 (defn- clear-session-turn-reservation!
   [session-id token]
-  (when (and session-id token)
-    (locking (idle-monitor)
-      (swap! (session-turn-reservations-atom)
-             (fn [reservations]
-               (if (= token (get-in reservations [session-id :token]))
-                 (dissoc reservations session-id)
-                 reservations)))
-      (.notifyAll ^Object (idle-monitor))))
-  nil)
-
-(defn- try-acquire-session-turn!
-  ([session-id]
-   (try-acquire-session-turn! session-id nil))
-  ([session-id reservation-token]
-   (locking (idle-monitor)
-     (let [active-session-turns* (active-session-turns-atom)
-           reservations* (session-turn-reservations-atom)
-           active @active-session-turns*
-           reservation (get @reservations* session-id)]
-       (cond
-         (contains? active session-id)
-         false
-
-         reservation
-         (if (= reservation-token (:token reservation))
-           (do
-             (swap! reservations* dissoc session-id)
-             (swap! active-session-turns* conj session-id)
-             true)
-           false)
-
-         reservation-token
-         false
-
-         :else
-         (do
-           (swap! active-session-turns* conj session-id)
-           true))))))
-
-(defn- release-session-turn!
-  [session-id]
-  (when session-id
-    (locking (idle-monitor)
-      (swap! (active-session-turns-atom) disj session-id)
-      (.notifyAll ^Object (idle-monitor))))
-  nil)
+  (run-state/clear-session-turn-reservation! (current-runtime) session-id token))
 
 (defn- with-session-turn-lock
   ([session-id f]
    (with-session-turn-lock session-id nil f))
   ([session-id reservation-token f]
-   (if session-id
-     (if (try-acquire-session-turn! session-id reservation-token)
-       (try
-         (f)
-         (finally
-           (release-session-turn! session-id)))
-       (throw (ex-info "Session is already processing another request"
-                       {:type :session-busy
-                        :status 409
-                        :error "session is busy"
-                        :session-id session-id})))
-     (f))))
+   (run-state/with-session-turn-lock (current-runtime) session-id reservation-token f)))
 
 (defn- max-user-message-chars
   []
@@ -218,10 +134,6 @@
 (defn- llm-status-update-interval-ms
   []
   (task-policy/llm-status-update-interval-ms))
-
-(defn- supervisor-tick-ms
-  []
-  (task-policy/supervisor-tick-ms))
 
 (defn- task-control-wait-ms
   []
@@ -331,38 +243,6 @@
     inner-observer inner-observer
     :else nil))
 
-(defn- task-cancellation-outcome
-  [reason]
-  (case reason
-    "task pause requested"
-    {:turn-state :paused
-     :task-state :paused
-     :stop-reason :paused
-     :summary "Task paused by user"}
-
-    "task interrupt requested"
-    {:turn-state :cancelled
-     :task-state :paused
-     :stop-reason :interrupted
-     :summary "Task interrupted by user"}
-
-    "task steer requested"
-    {:turn-state :cancelled
-     :task-state :paused
-     :stop-reason :interrupted
-     :summary "Task interrupted by new instruction"}
-
-    "task stop requested"
-    {:turn-state :cancelled
-     :task-state :cancelled
-     :stop-reason :stopped
-     :summary "Task stopped by user"}
-
-    {:turn-state :cancelled
-     :task-state :cancelled
-     :stop-reason :cancelled
-     :summary "Request cancelled"}))
-
 (defn cancel-session!
   "Request cancellation of the currently running agent turn for a session.
    Returns true when an active run was found and signalled."
@@ -378,17 +258,12 @@
   ([]
    (cancel-all-sessions! "runtime stopping"))
   ([reason]
-   (let [session-ids (keys @(active-session-runs-atom))]
-     (doseq [session-id session-ids]
-       (cancel-session! session-id reason))
-     (count session-ids))))
+   (run-state/cancel-all-sessions! (current-runtime) reason cancel-session!)))
 
 (defn runtime-activity
   "Return coarse agent runtime activity counts for control-plane inspection."
   []
-  {:active-session-turn-count (count @(active-session-turns-atom))
-   :active-session-run-count  (count @(active-session-runs-atom))
-   :active-task-run-count     (count @(active-task-runs-atom))})
+  (run-state/runtime-activity (current-runtime)))
 
 (defn install-runtime!
   ([] (install-runtime! (make-runtime)))
@@ -404,12 +279,7 @@
   []
   (fact-review/reset-runtime!)
   (when-let [runtime (maybe-current-runtime)]
-    (reset! (:active-session-turns-atom runtime) #{})
-    (reset! (:session-turn-reservations-atom runtime) {})
-    (reset! (:active-session-runs-atom runtime) {})
-    (reset! (:active-task-runs-atom runtime) {})
-    (locking (:idle-monitor runtime)
-      (.notifyAll ^Object (:idle-monitor runtime)))
+    (run-state/clear-runtime-state! runtime)
     (reset! installed-runtime-atom nil))
   nil)
 
@@ -438,354 +308,83 @@
 
 (defn- with-session-run
   [session-id f]
-  (if session-id
-    (let [run-id (Object.)]
-      (swap! (active-session-runs-atom) assoc session-id
-             {:run-id run-id
-              :supervisor-thread (Thread/currentThread)
-              :task-id nil
-              :child-session-ids #{}
-              :cancelled? false
-              :cancel-reason nil})
-      (locking (idle-monitor)
-        (.notifyAll ^Object (idle-monitor)))
-      (try
-        (f)
-        (finally
-          (swap! (active-session-runs-atom)
-                 (fn [runs]
-                   (if (= run-id (get-in runs [session-id :run-id]))
-                     (dissoc runs session-id)
-                     runs)))
-          (locking (idle-monitor)
-            (.notifyAll ^Object (idle-monitor))))))
-    (f)))
+  (run-state/with-session-run (current-runtime) session-id f))
 
 (defn- session-run-entry
   [session-id]
-  (when session-id
-    (get @(active-session-runs-atom) session-id)))
+  (run-state/session-run-entry (current-runtime) session-id))
 
 (defn- task-run-entry
   [task-id]
-  (when task-id
-    (get @(active-task-runs-atom) task-id)))
-
-(defn- session-bound-task-id
-  [session-id]
-  (some-> (session-run-entry session-id) :task-id))
+  (run-state/task-run-entry (current-runtime) task-id))
 
 (defn- live-run-entry-for-session
   [session-id]
-  (or (some-> session-id session-bound-task-id task-run-entry)
-      (session-run-entry session-id)))
-
-(defn- wait-for-idle!
-  [entry-fn id timeout-ms]
-  (let [timeout-ms* (long (max 0 (long timeout-ms)))
-        deadline (+ (current-time-ms) timeout-ms*)
-        monitor (idle-monitor)]
-    (locking monitor
-      (loop []
-        (cond
-          (nil? (entry-fn id))
-          true
-
-          (>= (current-time-ms) deadline)
-          false
-
-          :else
-          (let [remaining-ms (max 1 (- deadline (current-time-ms)))]
-            (.wait ^Object monitor (long remaining-ms))
-            (recur)))))))
+  (run-state/live-run-entry-for-session (current-runtime) session-id))
 
 (defn- wait-for-session-idle!
   [session-id timeout-ms]
-  (wait-for-idle! session-run-entry session-id timeout-ms))
+  (run-state/wait-for-session-idle! (current-runtime) session-id timeout-ms))
 
 (defn- wait-for-task-idle!
   [task-id timeout-ms]
-  (wait-for-idle! task-run-entry task-id timeout-ms))
-
-(defn- update-session-run-entry!
-  [session-id f]
-  (when session-id
-    (swap! (active-session-runs-atom)
-           (fn [runs]
-             (if-let [entry (get runs session-id)]
-               (assoc runs session-id (f entry))
-               runs)))))
-
-(defn- update-task-run-entry!
-  [task-id f]
-  (when task-id
-    (swap! (active-task-runs-atom)
-           (fn [runs]
-             (if-let [entry (get runs task-id)]
-               (assoc runs task-id (f entry))
-               runs)))))
+  (run-state/wait-for-task-idle! (current-runtime) task-id timeout-ms))
 
 (defn- register-task-run!
   [session-id task-id task-turn-id]
-  (when (and session-id task-id task-turn-id)
-    (when-let [entry (session-run-entry session-id)]
-      (let [session-run-id (:run-id entry)
-            task-run-id (Object.)
-            task-entry {:task-id task-id
-                        :task-turn-id task-turn-id
-                        :session-id session-id
-                        :task-run-id task-run-id
-                        :session-run-id session-run-id
-                        :supervisor-thread (:supervisor-thread entry)
-                        :child-session-ids (:child-session-ids entry)
-                        :cancelled? (:cancelled? entry)
-                        :cancel-reason (:cancel-reason entry)}]
-        (swap! (active-task-runs-atom) assoc task-id task-entry)
-        (update-session-run-entry! session-id
-                                   (fn [run]
-                                     (if (= session-run-id (:run-id run))
-                                       (assoc run
-                                              :task-id task-id
-                                              :child-session-ids #{})
-                                        run)))
-        (locking (idle-monitor)
-          (.notifyAll ^Object (idle-monitor)))
-        task-entry))))
+  (run-state/register-task-run! (current-runtime) session-id task-id task-turn-id))
 
 (defn- clear-task-run!
   [session-id task-id task-turn-id task-run-id]
-  (when task-id
-    (let [expected-task-run-id (or task-run-id
-                                   (some-> (task-run-entry task-id) :task-run-id))]
-      (swap! (active-task-runs-atom)
-             (fn [runs]
-               (if-let [entry (get runs task-id)]
-                 (if (and (or (nil? expected-task-run-id)
-                              (= expected-task-run-id (:task-run-id entry)))
-                          (or (nil? session-id)
-                              (= session-id (:session-id entry)))
-                          (or (nil? task-turn-id)
-                              (= task-turn-id (:task-turn-id entry))))
-                   (dissoc runs task-id)
-                   runs)
-                 runs)))
-      (when session-id
-        (update-session-run-entry! session-id
-                                   (fn [entry]
-                                     (if (= task-id (:task-id entry))
-                                       (assoc entry
-                                              :task-id nil)
-                                       entry))))
-      (locking (idle-monitor)
-        (.notifyAll ^Object (idle-monitor))))))
+  (run-state/clear-task-run! (current-runtime) session-id task-id task-turn-id task-run-id))
 
 (defn- register-child-session!
   [parent-session-id child-session-id]
-  (when (and parent-session-id
-             child-session-id
-             (not= parent-session-id child-session-id))
-    (if-let [task-id (session-bound-task-id parent-session-id)]
-      (update-task-run-entry! task-id
-                              #(update % :child-session-ids (fnil conj #{}) child-session-id))
-      (update-session-run-entry! parent-session-id
-                                 #(update % :child-session-ids (fnil conj #{}) child-session-id)))))
+  (run-state/register-child-session! (current-runtime) parent-session-id child-session-id))
 
 (defn- unregister-child-session!
   [parent-session-id child-session-id]
-  (when (and parent-session-id
-             child-session-id
-             (not= parent-session-id child-session-id))
-    (if-let [task-id (session-bound-task-id parent-session-id)]
-      (update-task-run-entry! task-id
-                              #(update % :child-session-ids disj child-session-id))
-      (update-session-run-entry! parent-session-id
-                                 #(update % :child-session-ids disj child-session-id)))))
+  (run-state/unregister-child-session! (current-runtime) parent-session-id child-session-id))
 
 (defn- begin-worker-run!
   [session-id worker-token]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            #(assoc % :worker-token worker-token
-                                    :worker-thread nil
-                                    :worker-future nil
-                                    :parallel-tool-futures []))
-    (update-session-run-entry! session-id
-                               #(assoc % :worker-token worker-token
-                                       :worker-thread nil
-                                       :worker-future nil
-                                       :parallel-tool-futures []))))
+  (run-state/begin-worker-run! (current-runtime) session-id worker-token))
 
 (defn- register-worker-thread!
   [session-id worker-token]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            (fn [entry]
-                              (if (= worker-token (:worker-token entry))
-                                (assoc entry :worker-thread (Thread/currentThread))
-                                entry)))
-    (update-session-run-entry! session-id
-                               (fn [entry]
-                                 (if (= worker-token (:worker-token entry))
-                                   (assoc entry :worker-thread (Thread/currentThread))
-                                   entry)))))
-
-(defn- clear-worker-thread!
-  [session-id worker-token]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            (fn [entry]
-                              (if (= worker-token (:worker-token entry))
-                                (assoc entry :worker-thread nil)
-                                entry)))
-    (update-session-run-entry! session-id
-                               (fn [entry]
-                                 (if (= worker-token (:worker-token entry))
-                                   (assoc entry :worker-thread nil)
-                                   entry)))))
+  (run-state/register-worker-thread! (current-runtime) session-id worker-token))
 
 (defn- register-worker-future!
   [session-id worker-token worker]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            (fn [entry]
-                              (if (= worker-token (:worker-token entry))
-                                (assoc entry :worker-future worker)
-                                entry)))
-    (update-session-run-entry! session-id
-                               (fn [entry]
-                                 (if (= worker-token (:worker-token entry))
-                                   (assoc entry :worker-future worker)
-                                   entry)))))
+  (run-state/register-worker-future! (current-runtime) session-id worker-token worker))
 
 (defn- clear-worker-run!
   [session-id worker-token]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            (fn [entry]
-                              (if (= worker-token (:worker-token entry))
-                                (assoc entry
-                                       :worker-token nil
-                                       :worker-thread nil
-                                       :worker-future nil
-                                       :parallel-tool-futures [])
-                                entry)))
-    (update-session-run-entry! session-id
-                               (fn [entry]
-                                 (if (= worker-token (:worker-token entry))
-                                   (assoc entry
-                                          :worker-token nil
-                                          :worker-thread nil
-                                          :worker-future nil
-                                          :parallel-tool-futures [])
-                                   entry)))))
+  (run-state/clear-worker-run! (current-runtime) session-id worker-token))
 
 (defn- register-parallel-tool-futures!
   [session-id worker-token futures]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            (fn [entry]
-                              (if (= worker-token (:worker-token entry))
-                                (update entry
-                                        :parallel-tool-futures
-                                        (fn [existing]
-                                          (->> (concat (or existing []) futures)
-                                               distinct
-                                               vec)))
-                                entry)))
-    (update-session-run-entry! session-id
-                               (fn [entry]
-                                 (if (= worker-token (:worker-token entry))
-                                   (update entry
-                                           :parallel-tool-futures
-                                           (fn [existing]
-                                             (->> (concat (or existing []) futures)
-                                                  distinct
-                                                  vec)))
-                                   entry)))))
+  (run-state/register-parallel-tool-futures! (current-runtime) session-id worker-token futures))
 
 (defn- clear-parallel-tool-futures!
   [session-id worker-token futures]
-  (if-let [task-id (session-bound-task-id session-id)]
-    (update-task-run-entry! task-id
-                            (fn [entry]
-                              (if (= worker-token (:worker-token entry))
-                                (update entry
-                                        :parallel-tool-futures
-                                        (fn [existing]
-                                          (let [to-clear (set futures)]
-                                            (->> (or existing [])
-                                                 (remove to-clear)
-                                                 vec))))
-                                entry)))
-    (update-session-run-entry! session-id
-                               (fn [entry]
-                                 (if (= worker-token (:worker-token entry))
-                                   (update entry
-                                           :parallel-tool-futures
-                                           (fn [existing]
-                                             (let [to-clear (set futures)]
-                                               (->> (or existing [])
-                                                    (remove to-clear)
-                                                    vec))))
-                                   entry)))))
+  (run-state/clear-parallel-tool-futures! (current-runtime) session-id worker-token futures))
 
 (defn- interrupt-worker-thread!
   [session-id]
-  (when-let [^Thread worker-thread (:worker-thread (live-run-entry-for-session session-id))]
-    (when (not= (Thread/currentThread) worker-thread)
-      (.interrupt worker-thread))
-    true))
+  (run-state/interrupt-worker-thread! (current-runtime) session-id))
 
 (defn- request-session-cancel!
   [session-id reason & {:keys [interrupt-supervisor?]
                         :or {interrupt-supervisor? false}}]
-  (let [session-entry* (atom nil)
-        task-entry*    (atom nil)]
-    (when session-id
-      (swap! (active-session-runs-atom)
-             (fn [runs]
-               (if-let [entry (get runs session-id)]
-                 (let [updated (assoc entry
-                                      :cancelled? true
-                                      :cancel-reason (or (:cancel-reason entry)
-                                                         reason))]
-                   (reset! session-entry* updated)
-                   (assoc runs session-id updated))
-                 runs)))
-      (when-let [task-id (:task-id @session-entry*)]
-        (swap! (active-task-runs-atom)
-               (fn [runs]
-                 (if-let [entry (get runs task-id)]
-                   (let [updated (assoc entry
-                                        :cancelled? true
-                                        :cancel-reason (or (:cancel-reason entry)
-                                                           reason))]
-                     (reset! task-entry* updated)
-                     (assoc runs task-id updated))
-                   runs))))
-      (when-let [entry (or @task-entry* @session-entry*)]
-        (when (and interrupt-supervisor?
-                   (not= (Thread/currentThread) ^Thread (:supervisor-thread entry)))
-          (.interrupt ^Thread (:supervisor-thread entry)))
-        (when (and (:worker-thread entry)
-                   (not= (Thread/currentThread) ^Thread (:worker-thread entry)))
-          (.interrupt ^Thread (:worker-thread entry)))
-        (when-let [parallel-tool-futures (seq (:parallel-tool-futures entry))]
-          (cancel-futures! parallel-tool-futures))
-        (when-let [^Future worker-future (:worker-future entry)]
-          (future-cancel worker-future))
-        (doseq [child-session-id (or (:child-session-ids @task-entry*)
-                                     (:child-session-ids @session-entry*))]
-          (when (not= child-session-id session-id)
-            (request-session-cancel! child-session-id
+  (run-state/request-session-cancel! (current-runtime)
+                                     session-id
                                      reason
-                                     :interrupt-supervisor? true)))
-        true))))
+                                     :interrupt-supervisor? interrupt-supervisor?))
 
 (defn- cancel-futures!
   [futures]
-  (doseq [f futures]
-    (future-cancel f)))
+  (run-state/cancel-futures! futures))
 
 (def ^:private future-timeout-sentinel ::future-timeout)
 
@@ -1283,298 +882,9 @@
        vec
        not-empty))
 
-(def ^:private loop-signature-stopwords
-  #{"a" "an" "and" "are" "for" "from" "into" "its" "more" "now" "of" "on" "or"
-    "remaining" "remains" "step" "steps" "still" "the" "to" "with" "work" "working"})
-
-(def ^:private loop-signature-token-aliases
-  {"again" "retry"
-   "attempt" "retry"
-   "attempting" "retry"
-   "attempts" "retry"
-   "check" "inspect"
-   "checked" "inspect"
-   "checking" "inspect"
-   "compose" "draft"
-   "composed" "draft"
-   "composing" "draft"
-   "drafted" "draft"
-   "drafting" "draft"
-   "examine" "inspect"
-   "examined" "inspect"
-   "examining" "inspect"
-   "fetch" "search"
-   "fetched" "search"
-   "fetching" "search"
-   "find" "search"
-   "finding" "search"
-   "found" "search"
-   "inspect" "inspect"
-   "inspected" "inspect"
-   "inspecting" "inspect"
-   "look" "inspect"
-   "looked" "inspect"
-   "looking" "inspect"
-   "lookup" "search"
-   "open" "inspect"
-   "opened" "inspect"
-   "opening" "inspect"
-   "post" "send"
-   "posted" "send"
-   "posting" "send"
-   "query" "search"
-   "queried" "search"
-   "querying" "search"
-   "read" "inspect"
-   "reading" "inspect"
-   "reads" "inspect"
-   "repeat" "retry"
-   "repeated" "retry"
-   "repeating" "retry"
-   "reply" "send"
-   "replied" "send"
-   "replying" "send"
-   "respond" "send"
-   "responded" "send"
-   "responding" "send"
-   "review" "inspect"
-   "reviewed" "inspect"
-   "reviewing" "inspect"
-   "scan" "inspect"
-   "scanned" "inspect"
-   "scanning" "inspect"
-   "search" "search"
-   "searched" "search"
-   "searching" "search"
-   "send" "send"
-   "sending" "send"
-   "sent" "send"
-   "submit" "send"
-   "submitted" "send"
-   "submitting" "send"
-   "view" "inspect"
-   "viewed" "inspect"
-   "viewing" "inspect"
-   "write" "draft"
-   "writing" "draft"
-   "written" "draft"})
-
-(def ^:private progress-status-scores
-  {:not-started 0
-   :pending 0
-   :paused 0
-   :resumable 0
-   :diverged 0
-   :blocked 0
-   :in-progress 1
-   :complete 5})
-
-(defn- loop-text-signature
-  [text]
-  (some->> text
-           str
-           str/lower-case
-           (re-seq #"[a-z0-9]+")
-           (map #(get loop-signature-token-aliases % %))
-           (remove #(or (< (count ^String %) 3)
-                        (contains? loop-signature-stopwords %)))
-           distinct
-           sort
-           vec
-           not-empty))
-
-(defn- loop-agenda-signature
-  [agenda]
-  (->> agenda
-       (keep (fn [{:keys [item status]}]
-               (when (or item status)
-                 {:item-terms (loop-text-signature item)
-                  :status status})))
-       vec
-       not-empty))
-
-(defn- loop-stack-signature
-  [stack]
-  (->> stack
-       (keep (fn [{:keys [title progress-status]}]
-               (when (or title progress-status)
-                 {:title-terms (loop-text-signature title)
-                  :progress-status progress-status})))
-       vec
-       not-empty))
-
-(defn- semantic-loop-fallback-signature
-  [autonomy-state control]
-  (let [tip (autonomous/current-frame autonomy-state)]
-    {:root-goal-terms (loop-text-signature (autonomous/root-goal autonomy-state))
-     :title-terms (loop-text-signature (:title tip))
-     :next-step-terms (loop-text-signature (:next-step control))
-     :agenda (loop-agenda-signature (:agenda tip))
-     :stack (loop-stack-signature (:stack autonomy-state))}))
-
-(defn- semantic-loop-text
-  [autonomy-state control]
-  (let [tip (autonomous/current-frame autonomy-state)
-        goal (some-> (autonomous/root-goal autonomy-state) str not-empty)
-        focus (some-> (:title tip) str not-empty)
-        next-step (some-> (:next-step control) str not-empty)
-        stack (->> (:stack autonomy-state)
-                   (keep (fn [{:keys [title progress-status]}]
-                           (when title
-                             (str "- "
-                                  "[" (some-> progress-status name) "] "
-                                  title)))))
-        agenda (->> (:agenda tip)
-                    (keep (fn [{:keys [item status]}]
-                            (when item
-                              (str "- "
-                                   "[" (some-> status name) "] "
-                                   item)))))]
-    (some->> [(when goal
-                (str "Goal: " goal))
-              (when focus
-                (str "Focus: " focus))
-              (when next-step
-                (str "Next step: " next-step))
-              (when (seq agenda)
-                (str "Agenda:\n" (str/join "\n" agenda)))
-              (when (seq stack)
-                (str "Stack:\n" (str/join "\n" stack)))]
-             (remove str/blank?)
-             seq
-             (str/join "\n"))))
-
-(defn- cosine-similarity
-  [left right]
-  (when (and (sequential? left)
-             (sequential? right)
-             (= (count left) (count right))
-             (pos? (count left)))
-    (let [[dot norm-left norm-right]
-          (reduce (fn [[dot* norm-left* norm-right*] [left-value right-value]]
-                    (let [left* (double left-value)
-                          right* (double right-value)]
-                      [(+ dot* (* left* right*))
-                       (+ norm-left* (* left* left*))
-                       (+ norm-right* (* right* right*))]))
-                  [0.0 0.0 0.0]
-                  (map vector left right))]
-      (when (and (pos? norm-left) (pos? norm-right))
-        (/ dot
-           (* (Math/sqrt norm-left)
-              (Math/sqrt norm-right)))))))
-
-(defn- embed-loop-text
-  [embedding-cache text]
-  (let [text* (some-> text str str/trim not-empty)]
-    (cond
-      (nil? text*)
-      [embedding-cache nil]
-
-      (contains? embedding-cache text*)
-      [embedding-cache (get embedding-cache text*)]
-
-      :else
-      (let [embedding (try
-                        (when-let [provider (db/current-embedding-provider)]
-                          (some-> (emb/embedding provider [text*] nil)
-                                  first
-                                  vec))
-                        (catch Throwable t
-                          (log/debug t "Failed to embed autonomy loop state")
-                          nil))]
-        [(assoc embedding-cache text* embedding) embedding]))))
-
-(defn- semantic-loop-equivalent?
-  [embedding-cache previous-signature next-signature]
-  (let [previous-fallback (:semantic-fallback previous-signature)
-        next-fallback (:semantic-fallback next-signature)]
-    (if (and previous-fallback
-             next-fallback
-             (= previous-fallback next-fallback))
-      {:embedding-cache embedding-cache
-       :same-semantic? true
-       :semantic-similarity 1.0
-       :semantic-match-source :fallback}
-      (let [[embedding-cache* previous-embedding]
-            (embed-loop-text embedding-cache (:semantic-text previous-signature))
-            [embedding-cache** next-embedding]
-            (embed-loop-text embedding-cache* (:semantic-text next-signature))
-            similarity (cosine-similarity previous-embedding next-embedding)]
-        {:embedding-cache embedding-cache**
-         :same-semantic? (boolean (and similarity
-                                       (>= similarity
-                                           (task-policy/supervisor-semantic-loop-threshold))))
-         :semantic-similarity similarity
-         :semantic-match-source (when similarity :embedding)}))))
-
 (defn- wm-query-signature
   [message]
-  (loop-text-signature message))
-
-(defn- iteration-progress-marker
-  [autonomy-state control]
-  (let [tip (autonomous/current-frame autonomy-state)
-        stack (vec (:stack autonomy-state))
-        agenda (vec (:agenda tip))
-        stack-statuses (frequencies (keep :progress-status stack))
-        agenda-statuses (frequencies (keep :status agenda))]
-    {:goal-complete? (true? (:goal-complete? control))
-     :stack-depth (count stack)
-     :stack-complete (long (get stack-statuses :complete 0))
-     :tip-status (:progress-status tip)
-     :agenda-total (count agenda)
-     :agenda-complete (long (+ (get agenda-statuses :completed 0)
-                               (get agenda-statuses :skipped 0)))
-     :agenda-active (long (get agenda-statuses :in-progress 0))
-     :agenda-statuses agenda-statuses
-     :stack-statuses stack-statuses}))
-
-(defn- iteration-progress-score
-  [{:keys [goal-complete? stack-complete tip-status agenda-complete agenda-active]}]
-  (+ (if goal-complete? 1000 0)
-     (* 100 (long (or stack-complete 0)))
-     (* 10 (long (or agenda-complete 0)))
-     (* 2 (long (or agenda-active 0)))
-     (long (get progress-status-scores tip-status 0))))
-
-(defn- iteration-tool-marker
-  [tool-activity]
-  (let [results (->> tool-activity
-                     (mapcat :results)
-                     vec)
-        statuses (frequencies (keep :status results))
-        failure-count (long (get statuses "error" 0))
-        success-count (long (get statuses "success" 0))
-        total-count (+ failure-count success-count)
-        error-terms (->> results
-                         (keep (fn [{:keys [error summary status]}]
-                                 (when (= status "error")
-                                   (or (loop-text-signature error)
-                                       (loop-text-signature summary)))))
-                         vec
-                         not-empty)]
-    {:round-count (count tool-activity)
-     :total-count total-count
-     :failure-count failure-count
-     :success-count success-count
-     :only-failures? (and (pos? total-count)
-                          (zero? success-count))
-     :error-signature error-terms}))
-
-(defn- repeated-tool-failure-loop?
-  [previous-signature next-signature]
-  (let [previous-tool-marker (:tool-marker previous-signature)
-        next-tool-marker (:tool-marker next-signature)]
-    (and (:only-failures? previous-tool-marker)
-         (:only-failures? next-tool-marker))))
-
-(defn- iteration-stall-key
-  [signature]
-  (select-keys signature
-               [:progress-status
-                :stack-action
-                :progress-marker]))
+  (loop-guard/wm-query-signature message))
 
 (defn- report-autonomy-status!
   [phase autonomy-state iteration max-iterations & {:keys [stack-action]}]
@@ -1674,156 +984,29 @@
                                                 tool-calls))
     parsed-response))
 
-(defn- emit-worker-event!
-  [worker-state event]
-  (let [now-ms (current-time-ms)]
-    (swap! worker-state
-           (fn [state]
-             (let [phase (:phase event)
-                   previous-phase (:phase state)
-                   phase-start-ms (if (= phase previous-phase)
-                                    (:phase-start-ms state now-ms)
-                                    now-ms)
-                   seq-no (inc (long (:seq state 0)))
-                   event* (merge {:message nil
-                                  :partial-content nil
-                                  :round nil
-                                  :tool-count nil
-                                  :tool-id nil
-                                  :tool-name nil
-                                  :tool-risk? nil
-                                  :tool-risk-mode nil
-                                  :tool-risk-reason nil
-                                  :parallel nil
-                                  :checkpoint nil}
-                                 event
-                                 {:seq seq-no
-                                  :phase phase
-                                  :phase-start-ms phase-start-ms
-                                  :last-event-ms now-ms
-                                  :updated-at-ms now-ms})]
-               (-> state
-                   (merge (dissoc event* :events))
-                   (assoc :phase phase
-                          :phase-start-ms phase-start-ms
-                          :last-event-ms now-ms
-                          :updated-at-ms now-ms
-                          :seq seq-no
-                          :tool-risk? (or (:tool-risk? state)
-                                          (true? (:tool-risk? event*)))
-                          :tool-risk-mode (or (:tool-risk-mode state)
-                                              (:tool-risk-mode event*))
-                          :tool-risk-reason (or (:tool-risk-reason state)
-                                                (:tool-risk-reason event*)))
-                   (update :events (fnil conj []) event*)))))))
-
-(defn- worker-timeout-ms
-  [phase]
-  (task-policy/supervisor-worker-timeout-ms phase))
-
-(defn- worker-stalled?
-  [{:keys [phase last-event-ms]}]
-  (when (and phase last-event-ms)
-    (> (- (current-time-ms) (long last-event-ms))
-       (long (worker-timeout-ms phase)))))
-
-(defn- worker-stall-ex
-  [session-id channel iteration max-iterations autonomy-state worker-state]
-  (let [tip (autonomous/current-frame autonomy-state)]
-    (ex-info (str "Agent supervisor stopped a stalled worker during "
-                  (some-> (:phase worker-state) name)
-                  " phase")
-             {:type :agent-stalled
-              :session-id session-id
-              :channel channel
-              :phase (:phase worker-state)
-              :iteration iteration
-              :max-iterations max-iterations
-              :current-focus (:title tip)
-              :progress-status (:progress-status tip)
-              :timeout-ms (worker-timeout-ms (:phase worker-state))
-              :last-event-ms (:last-event-ms worker-state)
-              :tool-id (:tool-id worker-state)
-              :tool-name (:tool-name worker-state)
-              :round (:round worker-state)})))
-
-(defn- worker-stop-timeout-ex
-  [session-id channel iteration max-iterations autonomy-state worker-state]
-  (let [tip (autonomous/current-frame autonomy-state)]
-    (ex-info (str "Agent supervisor could not stop a stalled worker during "
-                  (some-> (:phase worker-state) name)
-                  " phase")
-             {:type :agent-stop-timeout
-              :session-id session-id
-              :channel channel
-              :phase (:phase worker-state)
-              :iteration iteration
-              :max-iterations max-iterations
-              :current-focus (:title tip)
-              :progress-status (:progress-status tip)
-              :grace-ms (task-policy/supervisor-restart-grace-ms)
-              :tool-id (:tool-id worker-state)
-              :tool-name (:tool-name worker-state)
-              :round (:round worker-state)})))
+(defn- supervisor-deps
+  []
+  {:begin-worker-run! begin-worker-run!
+   :cancel-futures! cancel-futures!
+   :cancellation-reason cancellation-reason
+   :clear-worker-run! clear-worker-run!
+   :interrupt-worker-thread! interrupt-worker-thread!
+   :live-run-entry-for-session live-run-entry-for-session
+   :register-worker-future! register-worker-future!
+   :register-worker-thread! register-worker-thread!
+   :report-supervisor-status! report-supervisor-status!
+   :request-cancelled-ex request-cancelled-ex
+   :request-session-cancel! request-session-cancel!
+   :run-agent-iteration run-agent-iteration
+   :save-schedule-checkpoint! save-schedule-checkpoint!
+   :session-cancelled? session-cancelled?
+   :truncate-summary truncate-summary})
 
 (defn- stop-worker!
   ([session-id]
    (stop-worker! session-id nil))
   ([session-id worker]
-   (let [worker* (or worker
-                     (:worker-future (live-run-entry-for-session session-id)))
-         parallel-tool-futures (some-> (live-run-entry-for-session session-id)
-                                       :parallel-tool-futures
-                                       seq)
-         interrupted? (volatile! (Thread/interrupted))]
-     (try
-       (interrupt-worker-thread! session-id)
-       (when parallel-tool-futures
-         (cancel-futures! parallel-tool-futures))
-       (when worker*
-         (future-cancel worker*))
-       (if (nil? worker*)
-         true
-         (let [deadline-ms (+ (current-time-ms)
-                              (long (task-policy/supervisor-restart-grace-ms)))]
-           (loop []
-             (cond
-               (future-done? worker*)
-               true
-
-               (>= (current-time-ms) deadline-ms)
-               false
-
-               :else
-               (do
-                 (try
-                   (Thread/sleep 10)
-                   (catch InterruptedException _
-                     (vreset! interrupted? true)))
-                 (recur))))))
-       (finally
-         (when @interrupted?
-           (.interrupt (Thread/currentThread))))))))
-
-(defn- worker-cancel-stop-timeout-ex
-  [session-id channel iteration max-iterations autonomy-state worker-state]
-  (let [tip (autonomous/current-frame autonomy-state)]
-    (ex-info (str "Agent supervisor could not stop the worker after request cancellation during "
-                  (some-> (:phase worker-state) name)
-                  " phase")
-             {:type :agent-stop-timeout
-              :session-id session-id
-              :channel channel
-              :phase (:phase worker-state)
-              :iteration iteration
-              :max-iterations max-iterations
-              :current-focus (:title tip)
-              :progress-status (:progress-status tip)
-              :grace-ms (task-policy/supervisor-restart-grace-ms)
-              :cancel-reason (cancellation-reason session-id)
-              :tool-id (:tool-id worker-state)
-              :tool-name (:tool-name worker-state)
-              :round (:round worker-state)})))
+   (supervisor/stop-worker! (supervisor-deps) session-id worker)))
 
 (defn- autonomous-protocol-ex
   [session-id execution-context round parsed-response message]
@@ -1854,301 +1037,49 @@
             parsed-response
             "Tool-calling response must not include AUTONOMOUS_STATUS_JSON"))))
 
-(defn- worker-failure-summary
-  [t]
-  (let [type (some-> t ex-data :type)
-        message (or (.getMessage ^Throwable t)
-                    (some-> type name)
-                    "worker failure")]
-    (truncate-summary message 240)))
-
-(defn- wait-for-worker!
-  [execution-context session-id channel iteration max-iterations autonomy-state worker-state worker]
-  (let [handled-seq (volatile! 0)
-        handle-events! (fn [snapshot]
-                         (doseq [event (filter #(> (long (:seq % 0))
-                                                   (long @handled-seq))
-                                               (:events snapshot))]
-                           (vreset! handled-seq (long (:seq event 0)))
-                           (report-supervisor-status! (:phase event)
-                                                      (:message event)
-                                                      autonomy-state
-                                                      iteration
-                                                      max-iterations
-                                                      :worker-phase (:phase event)
-                                                      :round (:round event)
-                                                      :partial-content (:partial-content event)
-                                                      :tool-count (:tool-count event)
-                                                      :tool-id (:tool-id event)
-                                                      :tool-name (:tool-name event)
-                                                      :parallel (:parallel event)
-                                                      :intent-focus (:intent-focus event)
-                                                      :intent-agenda-item (:intent-agenda-item event)
-                                                      :intent-plan-step (:intent-plan-step event)
-                                                      :intent-why (:intent-why event)
-                                                      :intent-tool-name (:intent-tool-name event)
-                                                      :intent-tool-args-summary (:intent-tool-args-summary event))
-                           (when-let [checkpoint (:checkpoint event)]
-                             (save-schedule-checkpoint! execution-context checkpoint))))
-        cancel-run! (fn [snapshot]
-                      (report-supervisor-status! :cancelling
-                                                 "Stopping current work"
-                                                 autonomy-state
-                                                 iteration
-                                                 max-iterations
-                                                 :worker-phase (:phase snapshot)
-                                                 :round (:round snapshot)
-                                                 :tool-count (:tool-count snapshot)
-                                                 :tool-id (:tool-id snapshot)
-                                                 :tool-name (:tool-name snapshot)
-                                                 :parallel (:parallel snapshot)
-                                                 :cancel-reason (cancellation-reason session-id))
-                      (throw (if (stop-worker! session-id worker)
-                               (request-cancelled-ex session-id
-                                                     (cancellation-reason session-id))
-                               (worker-cancel-stop-timeout-ex session-id
-                                                              channel
-                                                              iteration
-                                                              max-iterations
-                                                              autonomy-state
-                                                              snapshot))))]
-    (loop []
-      (let [snapshot @worker-state]
-        (handle-events! snapshot)
-        (cond
-          (session-cancelled? session-id)
-          (cancel-run! snapshot)
-
-          (future-done? worker)
-          (do
-            (handle-events! @worker-state)
-            (try
-              @worker
-              (catch java.util.concurrent.ExecutionException e
-                (throw (or (.getCause e) e)))))
-
-          (worker-stalled? snapshot)
-          (do
-            (throw (if (stop-worker! session-id worker)
-                     (worker-stall-ex session-id
-                                      channel
-                                      iteration
-                                      max-iterations
-                                      autonomy-state
-                                      snapshot)
-                     (worker-stop-timeout-ex session-id
-                                             channel
-                                             iteration
-                                             max-iterations
-                                             autonomy-state
-                                             snapshot))))
-
-          :else
-          (do
-            (try
-              (Thread/sleep (long (supervisor-tick-ms)))
-              (catch InterruptedException _
-                (request-session-cancel! session-id
-                                         (or (cancellation-reason session-id)
-                                             "request interrupted"))
-                (cancel-run! snapshot)))
-            (recur)))))))
-
 (defn- run-supervised-agent-iteration
   [session-id channel resource-session-id local-doc-ids artifact-ids
    execution-context assistant-provider assistant-provider-id transient-messages
    working-memory-message update-working-memory? refresh-working-memory?
    max-tool-rounds autonomy-state max-iterations system-prompt-cache-entry
    turn-budget-state]
-  (loop [attempt 0]
-    (let [worker-token (Object.)
-          worker-state (atom {:phase nil
-                              :seq 0
-                              :last-event-ms (current-time-ms)
-                              :events []})
-          _ (begin-worker-run! session-id worker-token)
-          worker (future
-                   (register-worker-thread! session-id worker-token)
-                   (try
-                     (run-agent-iteration session-id
-                                          channel
-                                          resource-session-id
-                                          local-doc-ids
-                                          artifact-ids
-                                          (assoc execution-context
-                                                 :worker-token worker-token)
-                                          assistant-provider
-                                          assistant-provider-id
-                                          transient-messages
-                                          working-memory-message
-                                          update-working-memory?
-                                          refresh-working-memory?
-                                          max-tool-rounds
-                                          worker-state
-                                          system-prompt-cache-entry
-                                          turn-budget-state)
-                     (finally
-                       (clear-worker-run! session-id worker-token))))]
-      (register-worker-future! session-id worker-token worker)
-      (let [result (try
-                     {:ok (wait-for-worker! execution-context
-                                            session-id
-                                            channel
-                                            (:iteration execution-context)
-                                            max-iterations
-                                            autonomy-state
-                                            worker-state
-                                            worker)}
-                     (catch Throwable t
-                       {:error t}))]
-        (if-let [t (:error result)]
-          (let [worker-snapshot @worker-state
-                task-id (:task-id execution-context)
-                restart-window-ms (task-policy/task-restart-loop-window-ms)
-                recent-restart-count (if task-id
-                                       (task-runtime/recent-task-restart-count task-id
-                                                                               restart-window-ms)
-                                       0)
-                restart-decision (task-policy/restart-policy-decision
-                                  t
-                                  worker-snapshot
-                                  attempt
-                                  :session-cancelled? (session-cancelled? session-id)
-                                  :recent-restart-count recent-restart-count
-                                  :recent-restart-limit (task-policy/task-restart-loop-limit)
-                                  :restart-window-ms restart-window-ms)
-                max-restarts (:max-restarts restart-decision)
-                attempt* (:attempt restart-decision)
-                _ (prompt/policy-decision! (merge restart-decision
-                                                  {:decision-type :restart-policy
-                                                   :error (worker-failure-summary t)}))]
-            (if (:allowed? restart-decision)
-              (do
-                (report-supervisor-status! :restarting
-                                           (str "Restarting iteration after "
-                                                (worker-failure-summary t)
-                                                " (attempt "
-                                                attempt*
-                                                "/"
-                                                max-restarts
-                                                ")")
-                                           autonomy-state
-                                           (:iteration execution-context)
-                                           max-iterations
-                                           :attempt attempt*
-                                           :max-restarts max-restarts
-                                           :failure-phase (some-> t ex-data :phase)
-                                           :worker-phase (:phase worker-snapshot)
-                                           :round (:round worker-snapshot)
-                                           :tool-id (:tool-id worker-snapshot)
-                                           :tool-name (:tool-name worker-snapshot))
-                (save-schedule-checkpoint! execution-context
-                                           {:phase :restarting
-                                            :iteration (:iteration execution-context)
-                                            :summary (worker-failure-summary t)
-                                            :attempt attempt*
-                                            :session-id session-id
-                                            :failure-phase (some-> t ex-data :phase)})
-                (Thread/sleep (long (:backoff-ms restart-decision)))
-                (recur attempt*))
-              (if (= :restart-loop (:mode restart-decision))
-                (let [summary (str "Task restart loop detected after "
-                                   (:recent-restart-count restart-decision)
-                                   " recent restarts in "
-                                   (quot (long (:restart-window-ms restart-decision)) 1000)
-                                   "s. Investigate before resuming.")]
-                  (when task-id
-                    (task-runtime/record-task-restart-loop! task-id restart-decision summary))
-                  (throw (ex-info summary
-                                  {:type :task-restart-loop
-                                   :task-id task-id
-                                   :session-id session-id
-                                   :channel channel
-                                   :recent-restart-count (:recent-restart-count restart-decision)
-                                   :recent-restart-limit (:recent-restart-limit restart-decision)
-                                   :restart-window-ms (:restart-window-ms restart-decision)
-                                   :failure-phase (:failure-phase restart-decision)
-                                   :worker-phase (:worker-phase restart-decision)}
-                                  t)))
-                (throw t))))
-          (:ok result))))))
+  (supervisor/run-supervised-agent-iteration
+   (supervisor-deps)
+   session-id
+   channel
+   resource-session-id
+   local-doc-ids
+   artifact-ids
+   execution-context
+   assistant-provider
+   assistant-provider-id
+   transient-messages
+   working-memory-message
+   update-working-memory?
+   refresh-working-memory?
+   max-tool-rounds
+   autonomy-state
+   max-iterations
+   system-prompt-cache-entry
+   turn-budget-state))
 
 (defn- iteration-signature
   [autonomy-state control tool-activity]
-  (let [tip (autonomous/current-frame autonomy-state)
-        progress-marker (iteration-progress-marker autonomy-state control)]
-    {:progress-status (:progress-status tip)
-     :stack-action (:stack-action control)
-     :tool-activity tool-activity
-     :tool-marker (iteration-tool-marker tool-activity)
-     :progress-marker progress-marker
-     :semantic-text (semantic-loop-text autonomy-state control)
-     :semantic-fallback (semantic-loop-fallback-signature autonomy-state control)}))
+  (loop-guard/iteration-signature autonomy-state control tool-activity))
 
 (defn- update-iteration-loop-state
-  [{:keys [signature stall-key progress-score count embedding-cache]} next-signature]
-  (let [next-stall-key (iteration-stall-key next-signature)
-        next-progress-score (iteration-progress-score (:progress-marker next-signature))
-        same-stall-state? (= stall-key next-stall-key)
-        progressed? (> next-progress-score
-                       (long (or progress-score Long/MIN_VALUE)))
-        repeated-tool-failure? (and signature
-                                    same-stall-state?
-                                    (not progressed?)
-                                    (repeated-tool-failure-loop? signature
-                                                                 next-signature))
-        {:keys [embedding-cache same-semantic? semantic-similarity semantic-match-source]}
-        (if (and signature
-                 same-stall-state?
-                 (not progressed?))
-          (semantic-loop-equivalent? (or embedding-cache {}) signature next-signature)
-          {:embedding-cache (or embedding-cache {})
-           :same-semantic? false
-           :semantic-similarity nil
-           :semantic-match-source nil})
-        semantic-match-source (cond
-                                (and repeated-tool-failure? same-semantic?)
-                                :tool-failure
-
-                                :else
-                                semantic-match-source)]
-    (if (and same-stall-state? same-semantic? (not progressed?))
-      {:signature next-signature
-       :stall-key next-stall-key
-       :progress-score next-progress-score
-       :embedding-cache embedding-cache
-       :semantic-similarity semantic-similarity
-       :semantic-match-source semantic-match-source
-       :count (inc (long (or count 0)))}
-      {:signature next-signature
-       :stall-key next-stall-key
-       :progress-score next-progress-score
-       :embedding-cache embedding-cache
-       :semantic-similarity semantic-similarity
-       :semantic-match-source semantic-match-source
-       :count 1})))
+  [loop-state next-signature]
+  (loop-guard/update-iteration-loop-state loop-state next-signature))
 
 (defn- throw-if-identical-iteration-loop!
   [session-id channel iteration max-iterations loop-state autonomy-state control]
-  (let [count* (long (or (:count loop-state) 0))
-        limit (long (task-policy/supervisor-max-identical-iterations))]
-    (when (>= count* limit)
-      (let [tip (autonomous/current-frame autonomy-state)]
-        (throw (ex-info (str "Autonomous loop made no progress after "
-                             limit
-                             " identical iterations")
-                        {:type :autonomous-loop-stalled
-                         :session-id session-id
-                         :channel channel
-                         :iteration iteration
-                         :max-iterations max-iterations
-                         :current-focus (:title tip)
-                         :progress-status (:progress-status tip)
-                         :next-step (:next-step control)
-                         :semantic-similarity (:semantic-similarity loop-state)
-                         :semantic-match-source (:semantic-match-source loop-state)
-                         :agenda (:agenda tip)
-                         :stack (:stack autonomy-state)}))))))
+  (loop-guard/throw-if-identical-iteration-loop! session-id
+                                                 channel
+                                                 iteration
+                                                 max-iterations
+                                                 loop-state
+                                                 autonomy-state
+                                                 control))
 
 (defn- merge-fact-eids
   [left right]
@@ -2290,7 +1221,7 @@
    execution-context assistant-provider assistant-provider-id transient-messages
    working-memory-message update-working-memory? refresh-working-memory?
    max-tool-rounds worker-state system-prompt-cache-entry turn-budget-state]
-  (let [emit-event! #(emit-worker-event! worker-state %)
+  (let [emit-event! #(supervisor/emit-worker-event! worker-state %)
         retrieval-session-id (or resource-session-id session-id)]
     (when (or update-working-memory? refresh-working-memory?)
       (emit-event! {:phase :working-memory
@@ -3036,38 +1967,21 @@
                                      next-wm-message
                                      next-wm-query-fingerprint))))))))
                 (catch InterruptedException e
-                  (let [{:keys [task-id task-turn-id]} @runtime-task
-                        outcome (task-cancellation-outcome "request interrupted")]
-                    (sync-runtime-task-turn! task-turn-id
-                                             {:state (:turn-state outcome)
-                                              :summary (:summary outcome)
-                                              :error (some-> e .getMessage)})
-                    (sync-runtime-task! task-id
-                                        {:state (:task-state outcome)
-                                         :stop-reason (:stop-reason outcome)
-                                         :summary (:summary outcome)
-                                         :autonomy-state (wm/autonomy-state session-id)
-                                         :finished-at (java.util.Date.)})
-                    (record-persistent-goal-judge!
-                     session-id
-                     task-id
-                     {:task-state (:task-state outcome)
-                      :control nil
-                      :autonomy-state (wm/autonomy-state session-id)
-                      :guardrail (:stop-reason outcome)
-                      :summary (:summary outcome)}))
+                  (turn-outcome/record-cancellation! session-id
+                                                     @runtime-task
+                                                     "request interrupted"
+                                                     (some-> e .getMessage))
                   (request-session-cancel! session-id "request interrupted")
                   (if (stop-worker! session-id)
                     (let [cancel-ex (request-cancelled-ex session-id
                                                           (cancellation-reason session-id)
                                                           e)]
-                      (save-schedule-checkpoint! request-context
-                                                 {:phase :cancelled
-                                                  :summary "Request cancelled"
-                                                  :session-id session-id})
-                      (prompt/status! {:state :cancelled
-                                       :phase :cancelled
-                                       :message "Request cancelled"})
+                      (turn-outcome/record-cancellation-status!
+                       save-schedule-checkpoint!
+                       request-context
+                       session-id
+                       (turn-outcome/cancellation-outcome
+                        (:reason (ex-data cancel-ex))))
                       (throw cancel-ex))
                     (throw (ex-info "Agent supervisor could not stop the worker after request cancellation"
                                     {:type :agent-stop-timeout
@@ -3080,205 +1994,104 @@
                     (cond
                       (= :request-cancelled (:type data))
                       (do
-                        (let [reason (:reason data)
-                              outcome (task-cancellation-outcome reason)
-                              {:keys [task-id task-turn-id]} @runtime-task]
-                          (sync-runtime-task-turn! task-turn-id
-                                                   {:state (:turn-state outcome)
-                                                    :summary (:summary outcome)
-                                                    :error (.getMessage e)})
-                          (sync-runtime-task! task-id
-                                              {:state (:task-state outcome)
-                                               :stop-reason (:stop-reason outcome)
-                                               :summary (:summary outcome)
-                                               :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)})
-                          (record-persistent-goal-judge!
+                        (let [outcome (turn-outcome/record-cancellation!
+                                       session-id
+                                       @runtime-task
+                                       (:reason data)
+                                       (.getMessage e))]
+                          (turn-outcome/record-cancellation-status!
+                           save-schedule-checkpoint!
+                           request-context
                            session-id
-                           task-id
-                           {:task-state (:task-state outcome)
-                            :control nil
-                            :autonomy-state (wm/autonomy-state session-id)
-                            :guardrail (:stop-reason outcome)
-                            :summary (:summary outcome)}))
-                        (save-schedule-checkpoint! request-context
-                                                   {:phase :cancelled
-                                                    :summary (or (:summary (task-cancellation-outcome (:reason data)))
-                                                                 "Request cancelled")
-                                                    :session-id session-id})
-                        (prompt/status! {:state (if (= :paused (:task-state (task-cancellation-outcome (:reason data))))
-                                                  :paused
-                                                  :cancelled)
-                                         :phase (if (= :paused (:task-state (task-cancellation-outcome (:reason data))))
-                                                  :paused
-                                                  :cancelled)
-                                         :message (:summary (task-cancellation-outcome (:reason data)))})
+                           outcome))
                         (throw e))
 
                       (contains? #{:agent-stalled :autonomous-loop-stalled :agent-stop-timeout} (:type data))
                       (do
-                        (let [{:keys [task-id task-turn-id]} @runtime-task]
-                          (sync-runtime-task-turn! task-turn-id
-                                                   {:state :failed
-                                                    :summary (.getMessage e)
-                                                    :error (.getMessage e)})
-                          (sync-runtime-task! task-id
-                                              {:state :failed
-                                               :stop-reason :stalled
-                                               :summary (.getMessage e)
-                                               :error (.getMessage e)
-                                               :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)})
-                          (record-persistent-goal-judge!
-                           session-id
-                           task-id
-                           {:task-state :failed
-                            :control nil
-                            :autonomy-state (wm/autonomy-state session-id)
-                            :guardrail :stalled
-                            :summary (.getMessage e)}))
-                        (save-schedule-checkpoint! request-context
-                                                   {:phase :stalled
-                                                    :summary (.getMessage e)
-                                                    :session-id session-id
-                                                    :iteration (:iteration data)
-                                                    :current-focus (:current-focus data)
-                                                    :progress-status (:progress-status data)})
-                        (prompt/status! {:state :error
-                                         :phase :stalled
-                                         :message (str "Supervisor stopped the run: " (.getMessage e))})
+                        (turn-outcome/record-task-outcome!
+                         session-id
+                         @runtime-task
+                         {:turn-state :failed
+                          :task-state :failed
+                          :stop-reason :stalled
+                          :summary (.getMessage e)
+                          :error (.getMessage e)
+                          :guardrail :stalled})
+                        (turn-outcome/record-stalled-status!
+                         save-schedule-checkpoint!
+                         request-context
+                         session-id
+                         data
+                         (.getMessage e))
                         (throw e))
 
                       (= :task-restart-loop (:type data))
                       (do
-                        (let [{:keys [task-id task-turn-id]} @runtime-task]
-                          (sync-runtime-task-turn! task-turn-id
-                                                   {:state :completed
-                                                    :summary (.getMessage e)
-                                                    :error (.getMessage e)})
-                          (sync-runtime-task! task-id
-                                              {:state :resumable
-                                               :stop-reason :restart-loop
-                                               :summary (.getMessage e)
-                                               :error (.getMessage e)
-                                               :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)})
-                          (record-persistent-goal-judge!
-                           session-id
-                           task-id
-                           {:task-state :resumable
-                            :control nil
-                            :autonomy-state (wm/autonomy-state session-id)
-                            :guardrail :restart-loop
-                            :summary (.getMessage e)}))
-                        (save-schedule-checkpoint! request-context
-                                                   {:phase :paused
-                                                    :summary (.getMessage e)
-                                                    :session-id session-id
-                                                    :status :restart-loop
-                                                    :failure-phase (:failure-phase data)
-                                                    :worker-phase (:worker-phase data)})
-                        (prompt/status! {:state :paused
-                                         :phase :paused
-                                         :message (.getMessage e)})
+                        (turn-outcome/record-task-outcome!
+                         session-id
+                         @runtime-task
+                         {:turn-state :completed
+                          :task-state :resumable
+                          :stop-reason :restart-loop
+                          :summary (.getMessage e)
+                          :error (.getMessage e)
+                          :guardrail :restart-loop})
+                        (turn-outcome/record-restart-loop-status!
+                         save-schedule-checkpoint!
+                         request-context
+                         session-id
+                         data
+                         (.getMessage e))
                         (throw e))
 
                       :else
                       (do
-                        (let [{:keys [task-id task-turn-id]} @runtime-task]
-                          (sync-runtime-task-turn! task-turn-id
-                                                   {:state :failed
-                                                    :summary (.getMessage e)
-                                                    :error (.getMessage e)})
-                          (sync-runtime-task! task-id
-                                              {:state :failed
-                                               :stop-reason :error
-                                               :summary (.getMessage e)
-                                               :error (.getMessage e)
-                                               :autonomy-state (wm/autonomy-state session-id)
-                                               :finished-at (java.util.Date.)})
-                          (record-persistent-goal-judge!
-                           session-id
-                           task-id
-                           {:task-state :failed
-                            :control nil
-                            :autonomy-state (wm/autonomy-state session-id)
-                            :guardrail :failed
-                            :summary (.getMessage e)}))
-                        (save-schedule-checkpoint! request-context
-                                                   {:phase :error
-                                                    :summary (.getMessage e)
-                                                    :session-id session-id})
-                        (prompt/status! {:state :error
-                                         :phase :error
-                                         :message (str "Request failed: " (.getMessage e))})
+                        (turn-outcome/record-task-outcome!
+                         session-id
+                         @runtime-task
+                         {:turn-state :failed
+                          :task-state :failed
+                          :stop-reason :error
+                          :summary (.getMessage e)
+                          :error (.getMessage e)
+                          :guardrail :failed})
+                        (turn-outcome/record-error-status!
+                         save-schedule-checkpoint!
+                         request-context
+                         session-id
+                         (.getMessage e))
                         (throw e)))))
                 (catch Exception e
                   (if (session-cancelled? session-id)
                     (let [cancel-ex (request-cancelled-ex session-id
                                                           (cancellation-reason session-id)
                                                           e)]
-                      (let [reason (:reason (ex-data cancel-ex))
-                            outcome (task-cancellation-outcome reason)
-                            {:keys [task-id task-turn-id]} @runtime-task]
-                        (sync-runtime-task-turn! task-turn-id
-                                                 {:state (:turn-state outcome)
-                                                  :summary (:summary outcome)
-                                                  :error (.getMessage cancel-ex)})
-                        (sync-runtime-task! task-id
-                                            {:state (:task-state outcome)
-                                             :stop-reason (:stop-reason outcome)
-                                             :summary (:summary outcome)
-                                             :autonomy-state (wm/autonomy-state session-id)
-                                             :finished-at (java.util.Date.)})
-                        (record-persistent-goal-judge!
+                      (let [outcome (turn-outcome/record-cancellation!
+                                     session-id
+                                     @runtime-task
+                                     (:reason (ex-data cancel-ex))
+                                     (.getMessage cancel-ex))]
+                        (turn-outcome/record-cancellation-status!
+                         save-schedule-checkpoint!
+                         request-context
                          session-id
-                         task-id
-                         {:task-state (:task-state outcome)
-                          :control nil
-                          :autonomy-state (wm/autonomy-state session-id)
-                          :guardrail (:stop-reason outcome)
-                          :summary (:summary outcome)}))
-                      (save-schedule-checkpoint! request-context
-                                                 {:phase :cancelled
-                                                  :summary (:summary (task-cancellation-outcome (:reason (ex-data cancel-ex))))
-                                                  :session-id session-id})
-                      (prompt/status! {:state (if (= :paused (:task-state (task-cancellation-outcome (:reason (ex-data cancel-ex)))))
-                                                :paused
-                                                :cancelled)
-                                       :phase (if (= :paused (:task-state (task-cancellation-outcome (:reason (ex-data cancel-ex)))))
-                                                :paused
-                                                :cancelled)
-                                       :message (:summary (task-cancellation-outcome (:reason (ex-data cancel-ex))))})
+                         outcome))
                       (throw cancel-ex))
                     (do
-                      (let [{:keys [task-id task-turn-id]} @runtime-task]
-                        (sync-runtime-task-turn! task-turn-id
-                                                 {:state :failed
-                                                  :summary (.getMessage e)
-                                                  :error (.getMessage e)})
-                        (sync-runtime-task! task-id
-                                            {:state :failed
-                                             :stop-reason :error
-                                             :summary (.getMessage e)
-                                             :error (.getMessage e)
-                                             :autonomy-state (wm/autonomy-state session-id)
-                                             :finished-at (java.util.Date.)})
-                        (record-persistent-goal-judge!
-                         session-id
-                         task-id
-                         {:task-state :failed
-                          :control nil
-                          :autonomy-state (wm/autonomy-state session-id)
-                          :guardrail :failed
-                          :summary (.getMessage e)}))
-                      (save-schedule-checkpoint! request-context
-                                                 {:phase :error
-                                                  :summary (.getMessage e)
-                                                  :session-id session-id})
-                      (prompt/status! {:state :error
-                                       :phase :error
-                                       :message (str "Request failed: " (.getMessage e))})
+                      (turn-outcome/record-task-outcome!
+                       session-id
+                       @runtime-task
+                       {:turn-state :failed
+                        :task-state :failed
+                        :stop-reason :error
+                        :summary (.getMessage e)
+                        :error (.getMessage e)
+                        :guardrail :failed})
+                      (turn-outcome/record-error-status!
+                       save-schedule-checkpoint!
+                       request-context
+                       session-id
+                       (.getMessage e))
                       (throw e))))
                 (finally
                   (when-let [{:keys [task-id task-turn-id task-run-id]} @runtime-task]

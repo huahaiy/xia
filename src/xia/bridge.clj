@@ -7,7 +7,7 @@
   (:require [xia.agent :as agent]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.working-memory :as wm]))
+            [xia.session-lifecycle :as session-life]))
 
 (defn register-channel-adapter!
   "Register the interaction adapter for a user-facing channel.
@@ -27,17 +27,19 @@
 
   Returns a small runner descriptor that channel code can keep or expose."
   ([channel]
-   (let [session-id (db/create-session! channel)]
-     (wm/ensure-wm! session-id)
-     {:session-id session-id
-      :channel channel}))
+   (session-life/create! channel))
   ([channel opts]
-   (let [session-id (if (some? opts)
-                      (db/create-session! channel opts)
-                      (db/create-session! channel))]
-     (wm/ensure-wm! session-id)
-     {:session-id session-id
-      :channel channel})))
+   (session-life/create! channel opts)))
+
+(defn resume-session!
+  "Resume an inactive session and ensure working memory is ready."
+  [session-id & {:as opts}]
+  (apply session-life/resume! session-id (mapcat identity opts)))
+
+(defn finalize-session!
+  "Finalize a session through the shared lifecycle path."
+  [session-id & {:as opts}]
+  (apply session-life/finalize! session-id (mapcat identity opts)))
 
 (defn send-message!
   "Run one user message through Xia for an existing session.
@@ -119,6 +121,11 @@
    :steer-task! agent/steer-task!
    :fork-task! agent/fork-task!})
 
+(defn- default-finalize-session!
+  [session-id]
+  (session-life/finalize! session-id
+                          :clear-state! session-life/clear-session-state!))
+
 (defn control-task!
   "Apply a task control intent through the shared bridge.
 
@@ -139,7 +146,8 @@
   - `:finalize-session!` performs channel-specific finalization for close."
   [session-id intent & {:keys [reason context busy? finalize-session!]}]
   (prompt/apply-session-control-intent!
-   (cond-> {:cancel-session! agent/cancel-session!}
+   (cond-> {:cancel-session! agent/cancel-session!
+            :finalize-session! default-finalize-session!}
      busy? (assoc :busy? busy?)
      finalize-session! (assoc :finalize-session! finalize-session!))
    session-id
@@ -174,11 +182,21 @@
            :scope :session
            :result result
            :text (session-control-result-text :interrupt result)})
-        (let [result {:status :missing}]
-          {:intent intent
-           :scope :task
-           :result result
-           :text (control-result-text intent result)})))))
+        (if (= :close intent)
+          (let [result (control-session! session-id
+                                         :close
+                                         :reason "session close requested"
+                                         :context {:session-id session-id
+                                                   :channel channel})]
+            {:intent intent
+             :scope :session
+             :result result
+             :text (session-control-result-text :close result)})
+          (let [result {:status :missing}]
+            {:intent intent
+             :scope :task
+             :result result
+             :text (control-result-text intent result)}))))))
 
 (defn status!
   "Publish a runtime status update for the current bridge interaction context."

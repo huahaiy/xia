@@ -9,7 +9,6 @@
             [xia.tool :as tool]
             [xia.memory :as memory]
             [xia.identity :as identity]
-            [xia.hippocampus :as hippo]
             [xia.prompt :as prompt]
             [xia.working-memory :as wm]
             [xia.context :as context]))
@@ -119,13 +118,11 @@
           (cond
             (or (= trimmed "/quit") (= trimmed "/exit"))
             (do (println "consolidating memories...")
-                (let [topics (:topics (wm/get-wm session-id))]
-                  (wm/clear-autonomy-state! session-id)
-                  (wm/snapshot! session-id)
-                  (hippo/record-conversation! session-id :terminal
-                                              :topics topics
-                                              :consolidation-mode :sync)
-                  (wm/clear-wm! session-id))
+                (bridge/finalize-session! session-id
+                                          :reason :terminal-exit
+                                          :default-channel :terminal
+                                          :mark-inactive? false
+                                          :consolidation-mode :sync)
                 (println "goodbye.")
                 (System/exit 0))
 

@@ -4,6 +4,7 @@
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.prompt :as prompt]
+            [xia.session-lifecycle :as session-life]
             [xia.test-helpers :refer [with-test-db]]))
 
 (use-fixtures :each with-test-db)
@@ -121,6 +122,25 @@
                (:result result)))
         (is (= "Cancelling the current session." (:text result)))))
     (is (= [[session-id "session cancel requested"]] @calls))))
+
+(deftest bridge-closes-sessions-through-shared-lifecycle
+  (let [{:keys [session-id]} (bridge/create-session! :http)]
+    (is (true? (session-life/active? session-id)))
+    (is (= {:status :closed
+            :session-id session-id}
+           (select-keys (bridge/control-session! session-id
+                                                 :close
+                                                 :reason "session close requested"
+                                                 :context {:session-id session-id
+                                                           :channel :http})
+                        [:status :session-id])))
+    (is (false? (session-life/active? session-id)))
+    (is (= :already-closed
+           (:status (bridge/control-session! session-id
+                                             :close
+                                             :reason "session close requested"
+                                             :context {:session-id session-id
+                                                       :channel :http}))))))
 
 (deftest bridge-reports-missing-task-for-non-interrupt-control
   (let [{:keys [session-id]} (bridge/create-session! :imessage)]

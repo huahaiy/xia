@@ -8,36 +8,28 @@
             [taoensso.timbre :as log]
             [xia.board :as board]
             [xia.bridge :as bridge]
-            [xia.config :as cfg]
             [xia.db :as db]
-            [xia.hippocampus :as hippo]
             [xia.memory :as memory]
-            [xia.mcp :as mcp]
             [xia.channel.http.admin :as http-admin]
+            [xia.channel.http.auth :as http-auth]
+            [xia.channel.http.command :as http-command]
             [xia.channel.http.messaging :as http-messaging]
             [xia.channel.http.session :as http-session]
+            [xia.channel.http.websocket :as http-websocket]
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
-            [xia.checkpoint :as checkpoint]
-            [xia.rate-limit :as rate-limit]
-            [xia.runtime-health :as runtime-health]
-            [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.prompt :as prompt]
-            [xia.snapshot :as snapshot]
-            [xia.util :as util]
-            [xia.wake-projection :as wake-projection]
-            [xia.working-memory :as wm])
+            [xia.session-lifecycle :as session-life]
+            [xia.util :as util])
   (:import [java.io ByteArrayOutputStream InputStream]
     [java.net BindException]
     [java.nio.charset StandardCharsets]
     [java.nio.file Files LinkOption Path Paths]
-    [java.security MessageDigest SecureRandom]
+    [java.security SecureRandom]
     [java.util Base64 Date]
     [java.util.concurrent ConcurrentHashMap Executors ScheduledExecutorService ScheduledFuture TimeUnit]
-    [java.util.concurrent.atomic AtomicLong]
-    [javax.crypto Mac]
-    [javax.crypto.spec SecretKeySpec]))
+    [java.util.concurrent.atomic AtomicLong]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -45,44 +37,17 @@
 
 (defonce ^:private installed-runtime-atom (atom nil))
 
-(def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private approval-timeout-ms (* 5 60 1000))
-(def ^:private local-session-cookie-name "xia-local-session")
-(def ^:private command-channel-token-config-key :secret/command-channel-token)
-(def ^:private command-channel-next-token-config-key :secret/command-channel-token-next)
-(def ^:private managed-proxy-enabled-config-key :http/managed-proxy-enabled?)
-(def ^:private managed-proxy-secret-file-config-key :http/managed-proxy-secret-file)
-(def ^:private managed-tenant-origin-config-key :http/managed-tenant-origin)
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private max-live-task-runtime-events 200)
-(def ^:private websocket-receive-retry-delay-ms 5000)
-(def ^:private session-finalize-lock-count 256)
+(def ^:private session-finalize-lock-count session-life/default-finalize-lock-count)
 (def ^:private http-port-search-limit 100)
-(def ^:private ingress-rate-limit-window-ms 60000)
-(def ^:private command-signature-max-skew-ms (* 5 60 1000))
-(def ^:private command-auth-nonce-cleanup-interval-ms (* 60 1000))
-(def ^:private command-auth-nonce-max-length 200)
-(def ^:private managed-proxy-signature-max-skew-ms (* 5 60 1000))
-(def ^:private managed-proxy-nonce-cleanup-interval-ms (* 60 1000))
-(def ^:private managed-proxy-request-id-max-length 200)
 (def ^:private rest-session-channels #{:http :command})
 (def ^:private local-ui-session-channels #{:http :websocket})
 (def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
 (def ^:private byte-array-class (class (byte-array 0)))
 (declare install-runtime! clear-runtime!)
-
-(defn- default-ingress-rate-limit-per-minute
-  []
-  1200)
-
-(defn- chat-ingress-rate-limit-per-minute
-  []
-  60)
-
-(defn- session-create-ingress-rate-limit-per-minute
-  []
-  120)
 
 (defn- make-runtime
   []
@@ -107,7 +72,7 @@
    :managed-proxy-nonce-cleanup         (AtomicLong. 0)
    :rest-session-finalizer-executor-atom (atom nil)
    :rest-session-finalizers-atom        (atom {})
-   :session-finalize-locks              (vec (repeatedly session-finalize-lock-count #(Object.)))})
+   :session-finalize-locks              (session-life/make-finalize-locks session-finalize-lock-count)})
 
 (defn- maybe-current-runtime
   []
@@ -411,169 +376,6 @@
       (resource-response path content-type))))
 
 ;; ---------------------------------------------------------------------------
-;; WebSocket handler
-;; ---------------------------------------------------------------------------
-
-(declare protected-route-response with-session-finalize-lock touch-rest-session!)
-
-(defn- record-session-finalization-failure!
-  [session-id channel step ^Throwable e]
-  (let [sid-str (str session-id)]
-    (swap! (session-statuses-atom) assoc
-           sid-str
-           {:session-id         sid-str
-            :state              :error
-            :phase              :finalizing
-            :message            (str "Failed to finalize "
-                                     (name channel)
-                                     " session; working memory preserved for retry.")
-            :error              (throwable-message e)
-            :finalization-step  step
-            :updated-at         (java.util.Date.)})
-    (log/error e
-               "Failed to finalize session; preserving working memory for retry"
-               sid-str
-               "channel" (name channel)
-               "step" (name step))))
-
-(defn- clear-websocket-receive-failure!
-  [session-id]
-  (swap! (websocket-receive-failures-atom) dissoc (str session-id)))
-
-(defn- active-websocket-receive-failure
-  [session-id]
-  (let [sid-str  (str session-id)
-        failure  (get @(websocket-receive-failures-atom) sid-str)
-        now-ms   (System/currentTimeMillis)
-        retry-ms (long (or (:retry-not-before-ms failure) 0))]
-    (cond
-      (nil? failure)
-      nil
-
-      (<= retry-ms now-ms)
-      (do
-        (clear-websocket-receive-failure! sid-str)
-        nil)
-
-      :else
-      (assoc failure :retry-after-ms (- retry-ms now-ms)))))
-
-(defn- send-websocket-json!
-  [ch payload]
-  (try
-    (http/send! ch (json/write-json-str payload))
-    (catch Exception e
-      (log/warn e "Failed to send WebSocket response"))))
-
-(defn- send-websocket-error!
-  [ch error-message & {:as extra}]
-  (send-websocket-json! ch
-                        (merge {:type  "error"
-                                :error (or (some-> error-message str/trim not-empty)
-                                           "WebSocket request failed")}
-                               extra)))
-
-(defn- record-websocket-receive-failure!
-  [session-id ^Throwable e]
-  (let [sid-str             (str session-id)
-        retry-not-before-ms (+ (System/currentTimeMillis)
-                               websocket-receive-retry-delay-ms)
-        failure             {:session-id          sid-str
-                             :error               (or (some-> (throwable-message e) str/trim not-empty)
-                                                      "WebSocket request failed")
-                             :failed-at           (java.util.Date.)
-                             :retry-not-before-ms retry-not-before-ms}]
-    (swap! (websocket-receive-failures-atom) assoc sid-str failure)
-    failure))
-
-(defn- handle-websocket-receive-failure!
-  [ch session-id ^Throwable e]
-  (try
-    (bridge/cancel-session! session-id "websocket request failed")
-    (catch Exception cancel-error
-      (log/warn cancel-error
-                "Failed to cancel WebSocket session after receive error"
-                (str session-id))))
-  (let [{:keys [error]} (record-websocket-receive-failure! session-id e)]
-    (log/error e "WebSocket message error; temporarily blocking retries" (str session-id))
-    (send-websocket-error! ch
-                           error
-                           :retry_after_ms websocket-receive-retry-delay-ms)))
-
-(defn- finalize-websocket-session!
-  [ch]
-  (when-let [sid (get @(ws-sessions-atom) ch)]
-    (clear-websocket-receive-failure! sid)
-    (let [topics-or-failure
-          (try
-            (:topics (wm/get-wm sid))
-            (catch Exception e
-              (record-session-finalization-failure! sid :websocket :load-working-memory e)
-              ::finalization-failed))]
-      (when-not (= ::finalization-failed topics-or-failure)
-        (let [finalized?
-              (try
-                (wm/clear-autonomy-state! sid)
-                (wm/snapshot! sid)
-                (hippo/record-conversation! sid :websocket
-                                            :topics topics-or-failure
-                                            :consolidation-mode :sync)
-                true
-                (catch Exception e
-                  (record-session-finalization-failure! sid :websocket :persist-session e)
-                  false))]
-          (when finalized?
-            (swap! (session-statuses-atom) dissoc (str sid))
-            (try
-              (wm/clear-wm! sid)
-              (catch Exception e
-                (log/error e "Failed to clear WebSocket working memory"))))))))
-  (swap! (ws-sessions-atom) dissoc ch)
-  (log/info "WebSocket disconnected"))
-
-(defn- ws-handler [req]
-  (protected-route-response
-    req
-    #(http/as-channel req
-       {:on-open
-        (fn [ch]
-          (let [{:keys [session-id]} (bridge/create-session! :websocket)
-                sid session-id]
-            (swap! (ws-sessions-atom) assoc ch sid)
-            (log/info "WebSocket connected, session:" sid)
-            (send-websocket-json! ch {:type "connected" :session-id (str sid)})))
-
-        :on-receive
-        (fn [ch msg]
-          (if-let [sid (get @(ws-sessions-atom) ch)]
-            (if-let [{:keys [retry-after-ms]} (active-websocket-receive-failure sid)]
-              (send-websocket-error! ch
-                                     "Previous WebSocket request failed; wait before retrying."
-                                     :retry_after_ms retry-after-ms)
-              (let [data (try
-                           (json/read-json msg)
-                           (catch Exception e
-                             (send-websocket-error! ch (throwable-message e))
-                             ::invalid-message))]
-                (when-not (= ::invalid-message data)
-                  (try
-                    (let [text     (get data "message" (get data "content" msg))
-                          response (bridge/send-message! sid text :channel :websocket)]
-                      (clear-websocket-receive-failure! sid)
-                      (send-websocket-json! ch {:type    "message"
-                                                :role    "assistant"
-                                                :content response}))
-                    (catch Throwable t
-                      (handle-websocket-receive-failure! ch sid t)
-                      (when (instance? Error t)
-                        (throw t)))))))
-            (send-websocket-error! ch "Session not found")))
-
-        :on-close
-        (fn [ch _status]
-          (finalize-websocket-session! ch))})))
-
-;; ---------------------------------------------------------------------------
 ;; REST endpoints
 ;; ---------------------------------------------------------------------------
 
@@ -648,13 +450,7 @@
 
 (defn- request-header
   [req header-name]
-  (let [target (str/lower-case header-name)]
-    (or (get-in req [:headers header-name])
-        (get-in req [:headers target])
-        (some (fn [[k v]]
-                (when (= target (str/lower-case (str k)))
-                  v))
-              (:headers req)))))
+  (http-auth/request-header req header-name))
 
 (defn- request-content-type
   [req]
@@ -669,26 +465,9 @@
 
 (declare nonblank-str parse-session-id session-exists? session-id-str)
 
-(defn- first-forwarded
-  [value]
-  (some-> value str (str/split #",") first str/trim nonblank-str))
-
 (defn- request-base-url
   [req]
-  (or (when-let [origin (nonblank-str (request-header req "origin"))]
-        (let [uri (java.net.URI. origin)]
-          (str (.getScheme uri) "://" (.getAuthority uri))))
-      (let [scheme (or (first-forwarded (request-header req "x-forwarded-proto"))
-                       (some-> (:scheme req) name)
-                       "http")
-            host   (or (first-forwarded (request-header req "x-forwarded-host"))
-                       (nonblank-str (request-header req "host")))]
-        (when host
-          (str scheme "://" host)))))
-
-(defn- env-value
-  [k]
-  (System/getenv k))
+  (http-auth/request-base-url req))
 
 (defn- parse-query-string
   [query-string]
@@ -700,275 +479,52 @@
                      (some-> v ^String (java.net.URLDecoder/decode "UTF-8"))]))))
         (str/split (or query-string "") #"&")))
 
-(defn- session-secret []
-  @(local-session-secret-delay))
+(defn- auth-secret-deps
+  []
+  {:local-session-secret-delay local-session-secret-delay})
 
-(defn- session-cookie-value []
-  (str local-session-cookie-name "=" (session-secret)))
+(defn- session-secret []
+  (http-auth/session-secret (auth-secret-deps)))
 
 (defn- session-cookie-header []
-  (str (session-cookie-value) "; Path=/; HttpOnly; SameSite=Strict"))
-
-(defn- bearer-token
-  [value]
-  (when-let [header (some-> value str str/trim not-empty)]
-    (let [[scheme token & extra] (str/split header #"\s+")]
-      (when (and (= "bearer" (some-> scheme str/lower-case))
-                 (seq token)
-                 (empty? extra))
-        token))))
-
-(defn- request-bearer-token
-  [req]
-  (bearer-token (request-header req "authorization")))
-
-(defn- command-channel-token
-  []
-  (or (some-> (env-value "XIA_COMMAND_TOKEN") nonblank-str)
-      (some-> (cfg/string-option command-channel-token-config-key nil) nonblank-str)))
-
-(defn- command-channel-next-token
-  []
-  (or (some-> (env-value "XIA_COMMAND_TOKEN_NEXT") nonblank-str)
-      (some-> (cfg/string-option command-channel-next-token-config-key nil) nonblank-str)))
-
-(defn- command-channel-tokens
-  []
-  (->> [(command-channel-token)
-        (command-channel-next-token)]
-       (keep #(some-> % str str/trim not-empty))
-       distinct
-       vec))
-
-(defn- managed-proxy-enabled?
-  []
-  (cfg/boolean-option managed-proxy-enabled-config-key false))
-
-(defn- trim-trailing-newline
-  [value]
-  (some-> value (str/replace #"(?:\r?\n)\z" "")))
-
-(defn- managed-proxy-secret
-  []
-  (when (managed-proxy-enabled?)
-    (let [path (some-> (cfg/string-option managed-proxy-secret-file-config-key nil)
-                       str/trim
-                       not-empty)]
-      (when path
-        (try
-          (some-> (slurp path) trim-trailing-newline not-empty)
-          (catch java.io.FileNotFoundException _
-            (throw (ex-info "Managed proxy secret file does not exist."
-                            {:config-key managed-proxy-secret-file-config-key
-                             :path path}))))))))
-
-(defn- normalize-base-url
-  [value]
-  (some-> value str str/trim not-empty (str/replace #"/+$" "")))
-
-(defn- managed-tenant-origin
-  []
-  (normalize-base-url (cfg/string-option managed-tenant-origin-config-key nil)))
-
-(defn- local-command-client?
-  [req]
-  (let [remote-addr (some-> (:remote-addr req) str str/trim not-empty)]
-    (or (nil? remote-addr)
-        (contains? local-hosts remote-addr)
-        (= "0:0:0:0:0:0:0:1" remote-addr))))
-
-(defn- constant-time-string=
-  [a b]
-  (and (string? a)
-       (string? b)
-       (MessageDigest/isEqual
-        (.getBytes ^String a StandardCharsets/UTF_8)
-        (.getBytes ^String b StandardCharsets/UTF_8))))
-
-(defn- base64url
-  [^bytes bytes]
-  (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) bytes))
-
-(defn- sha256-base64url
-  [^bytes bytes]
-  (base64url (.digest (doto (MessageDigest/getInstance "SHA-256")
-                        (.update bytes)))))
+  (str http-auth/local-session-cookie-name "=" (session-secret)
+       "; Path=/; HttpOnly; SameSite=Strict"))
 
 (defn- hmac-sha256-base64url
   [secret message]
-  (let [mac (Mac/getInstance "HmacSHA256")]
-    (.init mac (SecretKeySpec.
-                (.getBytes ^String secret StandardCharsets/UTF_8)
-                "HmacSHA256"))
-    (base64url (.doFinal mac (.getBytes ^String message StandardCharsets/UTF_8)))))
+  (http-auth/hmac-sha256-base64url secret message))
 
-(defn- cookie-map
-  [req]
-  (let [cookie-header (request-header req "cookie")]
-    (into {}
-          (keep (fn [part]
-                  (let [[k v] (str/split (str/trim part) #"=" 2)]
-                    (when (and (seq k) (some? v))
-                      [k v]))))
-          (str/split (or cookie-header "") #";"))))
-
-(defn- local-origin?
-  [origin]
-  (try
-    (let [host (.getHost (java.net.URI. origin))]
-      (contains? local-hosts host))
-    (catch Exception _
-      false)))
-
-(defn- valid-session-secret?
-  [req]
-  (= (get (cookie-map req) local-session-cookie-name)
-     (session-secret)))
+(defn- managed-proxy-signing-payload
+  [req timestamp request-id tenant-id runtime-id user-id]
+  (http-auth/managed-proxy-signing-payload req
+                                           timestamp
+                                           request-id
+                                           tenant-id
+                                           runtime-id
+                                           user-id))
 
 (defn- trusted-local-origin?
   "Allow loopback browser origins and direct local clients with no origin
    headers. Origin checks prevent cross-site requests from using the cookie."
   [req]
-  (let [origin  (request-header req "origin")
-        referer (request-header req "referer")]
-    (cond
-      (seq origin)  (local-origin? origin)
-      (seq referer) (local-origin? referer)
-      :else         true)))
+  (http-auth/trusted-local-origin? req))
 
 (defn- json-response [status body]
   {:status  status
    :headers {"Content-Type" "application/json"}
    :body    (json/write-json-str body)})
 
-(defn- ingress-route-class
-  [req]
-  (let [uri    (:uri req)
-        method (:request-method req)]
-    (cond
-      (and (= method :post)
-           (#{
-              "/chat"
-              "/command/chat"} uri))
-      :chat
-
-      (and (= method :post)
-           (#{
-              "/sessions"
-              "/command/sessions"} uri))
-      :session-create
-
-      :else
-      :default)))
-
-(defn- ingress-rate-limit-per-minute
-  [route-class]
-  (case route-class
-    :chat (chat-ingress-rate-limit-per-minute)
-    :session-create (session-create-ingress-rate-limit-per-minute)
-    (default-ingress-rate-limit-per-minute)))
-
-(defn- request-client-id
-  [req]
-  (or (some-> (:remote-addr req) str str/trim not-empty)
-      (some-> (request-header req "x-real-ip") str str/trim not-empty)
-      (first-forwarded (request-header req "x-forwarded-for"))
-      "unknown"))
-
-(defn- ingress-rate-limit-key
-  [req scope route-class]
-  [scope route-class (request-client-id req)])
-
-(defn- new-ingress-rate-limit-state
-  []
-  (atom {:timestamps []
-         :cleaned 0}))
-
-(defn- ingress-rate-limit-state
-  [bucket-key now]
-  (let [^ConcurrentHashMap states (ingress-rate-limits)]
-    (rate-limit/maybe-prune-states! states
-                                    (ingress-rate-limit-cleanup)
-                                    now
-                                    ingress-rate-limit-window-ms)
-    (or (.get states bucket-key)
-        (let [state (new-ingress-rate-limit-state)]
-          (or (.putIfAbsent states bucket-key state)
-              state)))))
-
-(defn- ingress-retry-after-ms
-  [state now]
-  (let [now*   (long now)
-        cutoff (- now* (long ingress-rate-limit-window-ms))
-        oldest (reduce (fn [acc timestamp]
-                         (let [timestamp* (long timestamp)]
-                           (if (> timestamp* cutoff)
-                             (if (or (nil? acc) (< timestamp* acc))
-                               timestamp*
-                               acc)
-                             acc)))
-                       nil
-                       (:timestamps @state))]
-    (-> (if oldest
-          (- (long ingress-rate-limit-window-ms)
-             (- now* oldest))
-          (long ingress-rate-limit-window-ms))
-        (util/long-max 0))))
-
-(defn- ingress-rate-limited-response
-  [scope route-class limit state now]
-  (let [retry-after-ms      (ingress-retry-after-ms state now)
-        retry-after-seconds (long (max 1 (Math/ceil (/ retry-after-ms 1000.0))))]
-    {:status 429
-     :headers {"Content-Type" "application/json"
-               "Retry-After" (str retry-after-seconds)}
-     :body (json/write-json-str
-            {:error "too many requests"
-             :channel (name scope)
-             :route_kind (name route-class)
-             :limit_per_minute (long limit)
-             :retry_after_seconds retry-after-seconds})}))
-
-(defn- check-ingress-rate-limit
-  [req scope]
-  (let [route-class (ingress-route-class req)
-        limit       (ingress-rate-limit-per-minute route-class)
-        now         (System/currentTimeMillis)
-        state       (ingress-rate-limit-state (ingress-rate-limit-key req scope route-class)
-                                              now)]
-    (try
-      (rate-limit/consume-slot! state
-                                now
-                                ingress-rate-limit-window-ms
-                                limit
-                                #(ex-info "too many requests"
-                                          {:type :http/ingress-rate-limit}))
-      nil
-      (catch clojure.lang.ExceptionInfo e
-        (if (= :http/ingress-rate-limit (some-> e ex-data :type))
-          (ingress-rate-limited-response scope route-class limit state now)
-          (throw e))))))
-
 (defn- reset-runtime-ingress-rate-limits!
   [runtime]
-  (when runtime
-    (.clear ^ConcurrentHashMap (:ingress-rate-limits runtime))
-    (.set ^AtomicLong (:ingress-rate-limit-cleanup runtime) 0))
-  nil)
+  (http-auth/reset-runtime-ingress-rate-limits! runtime))
 
 (defn- reset-runtime-command-auth!
   [runtime]
-  (when runtime
-    (.clear ^ConcurrentHashMap (:command-auth-nonces runtime))
-    (.set ^AtomicLong (:command-auth-nonce-cleanup runtime) 0))
-  nil)
+  (http-auth/reset-runtime-command-auth! runtime))
 
 (defn- reset-runtime-managed-proxy-auth!
   [runtime]
-  (when runtime
-    (.clear ^ConcurrentHashMap (:managed-proxy-nonces runtime))
-    (.set ^AtomicLong (:managed-proxy-nonce-cleanup runtime) 0))
-  nil)
+  (http-auth/reset-runtime-managed-proxy-auth! runtime))
 
 (defn- utf8-download-media-type
   [media-type]
@@ -1043,269 +599,6 @@
       (str/replace "\"" "&quot;")
       (str/replace "'" "&#39;")))
 
-(defn- forbidden-response []
-  (json-response 403 {:error "forbidden origin"}))
-
-(defn- unauthorized-response []
-  (json-response 401 {:error "missing or invalid local session secret"}))
-
-(defn- handle-local-session-bootstrap
-  [req]
-  (if-not (trusted-local-origin? req)
-    (forbidden-response)
-    (-> (json-response 200 {:ok true})
-        (assoc-in [:headers "Set-Cookie"] (session-cookie-header)))))
-
-(defn- command-channel-unavailable-response []
-  (json-response 503 {:error "command channel is not configured"}))
-
-(defn- command-unauthorized-response []
-  (json-response 401 {:error "missing or invalid command token"}))
-
-(defn- parse-command-timestamp-ms
-  [value]
-  (when-let [text (some-> value str str/trim not-empty)]
-    (try
-      (let [parsed (Long/parseLong text)]
-        (when (pos? parsed)
-          (if (< parsed 1000000000000)
-            (* parsed 1000)
-            parsed)))
-      (catch NumberFormatException _
-        nil))))
-
-(defn- command-signature-attempt?
-  [req]
-  (or (some? (request-header req "x-xia-command-timestamp"))
-      (some? (request-header req "x-xia-command-nonce"))
-      (some? (request-header req "x-xia-command-signature"))))
-
-(defn- command-request-body-bytes
-  [req]
-  (if (contains? req :body)
-    (let [body (:body req)]
-      (if (nil? body)
-        [(byte-array 0) req]
-        (let [body-bytes (or (read-body-bytes body)
-                             (byte-array 0))]
-          [body-bytes (assoc req :body body-bytes)])))
-    [(byte-array 0) req]))
-
-(defn- command-signing-payload
-  [req timestamp nonce body-bytes]
-  (str (str/upper-case (name (:request-method req)))
-       "\n"
-       (:uri req)
-       "\n"
-       (or (:query-string req) "")
-       "\n"
-       timestamp
-       "\n"
-       nonce
-       "\n"
-       (sha256-base64url body-bytes)))
-
-(defn- prune-command-auth-nonces!
-  [now]
-  (let [now* (long now)
-        ^AtomicLong cleanup (command-auth-nonce-cleanup)]
-    (loop []
-      (let [last-cleanup (.get cleanup)]
-        (cond
-          (< (- now* last-cleanup) command-auth-nonce-cleanup-interval-ms)
-          nil
-
-          (not (.compareAndSet cleanup last-cleanup now*))
-          (recur)
-
-          :else
-          (let [cutoff (- now* command-signature-max-skew-ms)]
-            (doseq [entry (iterator-seq (.iterator (.entrySet (command-auth-nonces))))]
-              (let [nonce (.getKey entry)
-                    timestamp (long (.getValue entry))]
-                (when (< timestamp cutoff)
-                  (.remove (command-auth-nonces) nonce timestamp))))))))))
-
-(defn- reserve-command-auth-nonce!
-  [nonce timestamp now]
-  (prune-command-auth-nonces! now)
-  (nil? (.putIfAbsent (command-auth-nonces) nonce (long timestamp))))
-
-(defn- signed-command-auth
-  [req token]
-  (let [timestamp-text (some-> (request-header req "x-xia-command-timestamp")
-                               str str/trim not-empty)
-        nonce          (some-> (request-header req "x-xia-command-nonce")
-                               str str/trim not-empty)
-        signature      (some-> (request-header req "x-xia-command-signature")
-                               str str/trim not-empty)
-        timestamp      (parse-command-timestamp-ms timestamp-text)
-        now            (System/currentTimeMillis)]
-    (when (and timestamp-text nonce signature)
-      (when (and timestamp
-                 (<= (Math/abs (- (long now) (long timestamp)))
-                     command-signature-max-skew-ms)
-                 (<= (count nonce) command-auth-nonce-max-length))
-        (let [[body-bytes req*] (command-request-body-bytes req)
-              expected          (hmac-sha256-base64url
-                                 token
-                                 (command-signing-payload req timestamp-text nonce body-bytes))]
-          (when (and (constant-time-string= expected signature)
-                     (reserve-command-auth-nonce! nonce timestamp now))
-            req*))))))
-
-(defn- authenticated-command-req
-  [req token]
-  (cond
-    (command-signature-attempt? req)
-    (signed-command-auth req token)
-
-    (and (local-command-client? req)
-         (constant-time-string= (request-bearer-token req) token))
-    req
-
-    :else
-    nil))
-
-(defn- managed-proxy-signature-attempt?
-  [req]
-  (or (some? (request-header req "x-xia-proxy-mode"))
-      (some? (request-header req "x-xia-tenant-id"))
-      (some? (request-header req "x-xia-runtime-id"))
-      (some? (request-header req "x-xia-user-id"))
-      (some? (request-header req "x-xia-request-id"))
-      (some? (request-header req "x-xia-proxy-timestamp"))
-      (some? (request-header req "x-xia-proxy-signature"))))
-
-(defn- runtime-overlay-tenant-id
-  []
-  (some-> (runtime-overlay/current-overlay) :tenant/id str str/trim not-empty))
-
-(defn- runtime-overlay-runtime-id
-  []
-  (some-> (runtime-overlay/current-overlay) :runtime/id str str/trim not-empty))
-
-(defn- managed-proxy-origin-valid?
-  [req]
-  (if-let [expected (managed-tenant-origin)]
-    (= expected (normalize-base-url (request-base-url req)))
-    true))
-
-(defn- managed-proxy-signature-value
-  [value]
-  (let [text (some-> value str str/trim not-empty)]
-    (cond
-      (and text (str/starts-with? text "v1:"))
-      (let [parts (str/split text #":")]
-        (case (count parts)
-          2 (second parts)
-          3 (nth parts 2)
-          nil))
-
-      :else
-      nil)))
-
-(defn- managed-proxy-signing-payload
-  [req timestamp request-id tenant-id runtime-id user-id]
-  (str (str/upper-case (name (:request-method req)))
-       "\n"
-       (:uri req)
-       "\n"
-       (or (:query-string req) "")
-       "\n"
-       timestamp
-       "\n"
-       request-id
-       "\n"
-       tenant-id
-       "\n"
-       runtime-id
-       "\n"
-       user-id))
-
-(defn- prune-managed-proxy-nonces!
-  [now]
-  (let [now* (long now)
-        ^AtomicLong cleanup (managed-proxy-nonce-cleanup)]
-    (loop []
-      (let [last-cleanup (.get cleanup)]
-        (cond
-          (< (- now* last-cleanup) managed-proxy-nonce-cleanup-interval-ms)
-          nil
-
-          (not (.compareAndSet cleanup last-cleanup now*))
-          (recur)
-
-          :else
-          (let [cutoff (- now* managed-proxy-signature-max-skew-ms)]
-            (doseq [entry (iterator-seq (.iterator (.entrySet (managed-proxy-nonces))))]
-              (let [request-id (.getKey entry)
-                    timestamp (long (.getValue entry))]
-                (when (< timestamp cutoff)
-                  (.remove (managed-proxy-nonces) request-id timestamp))))))))))
-
-(defn- reserve-managed-proxy-request-id!
-  [request-id timestamp now]
-  (prune-managed-proxy-nonces! now)
-  (nil? (.putIfAbsent (managed-proxy-nonces) request-id (long timestamp))))
-
-(defn- authenticated-managed-proxy-req
-  [req]
-  (let [secret         (managed-proxy-secret)
-        overlay-tenant (runtime-overlay-tenant-id)
-        overlay-runtime (runtime-overlay-runtime-id)
-        mode           (some-> (request-header req "x-xia-proxy-mode") str str/trim not-empty)
-        tenant-id      (some-> (request-header req "x-xia-tenant-id") str str/trim not-empty)
-        runtime-id     (some-> (request-header req "x-xia-runtime-id") str str/trim not-empty)
-        user-id        (some-> (request-header req "x-xia-user-id") str str/trim not-empty)
-        request-id     (some-> (request-header req "x-xia-request-id") str str/trim not-empty)
-        timestamp-text (some-> (request-header req "x-xia-proxy-timestamp") str str/trim not-empty)
-        signature      (managed-proxy-signature-value
-                        (request-header req "x-xia-proxy-signature"))
-        timestamp      (parse-command-timestamp-ms timestamp-text)
-        now            (System/currentTimeMillis)]
-    (when (and (managed-proxy-enabled?)
-               secret
-               overlay-tenant
-               overlay-runtime
-               (= "tenant" mode)
-               (= overlay-tenant tenant-id)
-               (= overlay-runtime runtime-id)
-               user-id
-               request-id
-               timestamp-text
-               timestamp
-               signature
-               (managed-proxy-origin-valid? req)
-               (<= (count request-id) managed-proxy-request-id-max-length)
-               (<= (Math/abs (- (long now) (long timestamp)))
-                   managed-proxy-signature-max-skew-ms))
-      (let [expected (hmac-sha256-base64url
-                      secret
-                      (managed-proxy-signing-payload req
-                                                     timestamp-text
-                                                     request-id
-                                                     tenant-id
-                                                     runtime-id
-                                                     user-id))]
-        (when (and (constant-time-string= expected signature)
-                   (reserve-managed-proxy-request-id! request-id timestamp now))
-          (assoc req
-                 :xia/managed-proxy {:tenant-id tenant-id
-                                     :runtime-id runtime-id
-                                     :user-id user-id
-                                     :request-id request-id}))))))
-
-(defn- valid-local-ui-request?
-  [req]
-  (and (trusted-local-origin? req)
-       (valid-session-secret? req)))
-
-(defn- valid-managed-proxy-request?
-  [req]
-  (and (managed-proxy-signature-attempt? req)
-       (boolean (authenticated-managed-proxy-req req))))
-
 (defn register-command-shutdown-handler!
   [handler]
   (when-not (maybe-current-runtime)
@@ -1318,133 +611,6 @@
   (when-let [handler-atom (maybe-command-shutdown-handler-atom)]
     (reset! handler-atom nil))
   nil)
-
-(declare runtime-idle-body)
-
-(defn- handle-command-shutdown
-  [_req]
-  (if-let [handler (some-> (maybe-command-shutdown-handler-atom) deref)]
-    (let [{:keys [shutdown-allowed?] :as status} (runtime-health/idle-status)]
-      (if shutdown-allowed?
-        (do
-          (future
-            (try
-              (handler)
-              (catch Throwable e
-                (log/error e "Command shutdown handler failed"))))
-          (json-response 202 {:status "stopping"}))
-        (json-response 409
-                       (assoc (runtime-idle-body)
-                              :error "runtime must be draining and idle before shutdown"))))
-    (json-response 503 {:error "shutdown control unavailable"})))
-
-(defn- runtime-idle-body
-  []
-  (let [{:keys [phase draining? drain-requested-at accepting-new-work? idle? shutdown-allowed? blockers activity]}
-        (runtime-health/idle-status)
-        memory-consolidation (hippo/consolidation-summary)]
-    {:phase (some-> phase name)
-     :draining draining?
-     :drain_requested_at (instant->str drain-requested-at)
-     :accepting_new_work accepting-new-work?
-     :idle idle?
-     :shutdown_allowed shutdown-allowed?
-     :blockers (mapv (fn [{:keys [component kind count reason]}]
-                       {:component (some-> component name)
-                        :kind (some-> kind name)
-                        :count count
-                        :reason reason})
-                     blockers)
-     :activity {"agent" {"active_session_turn_count" (get-in activity [:agent :active-session-turn-count] 0)
-                         "active_session_run_count" (get-in activity [:agent :active-session-run-count] 0)
-                         "active_task_run_count" (get-in activity [:agent :active-task-run-count] 0)}
-                "scheduler" {"running" (boolean (get-in activity [:scheduler :running?]))
-                             "running_schedule_count" (get-in activity [:scheduler :running-schedule-count] 0)
-                             "maintenance_running" (boolean (get-in activity [:scheduler :maintenance-running?]))}
-                "hippocampus" {"accepting" (boolean (get-in activity [:hippocampus :accepting?]))
-                               "pending_background_task_count" (get-in activity [:hippocampus :pending-background-task-count] 0)}
-                "llm" {"accepting" (boolean (get-in activity [:llm :accepting?]))
-                       "pending_log_write_count" (get-in activity [:llm :pending-log-write-count] 0)}}
-     :memory_consolidation memory-consolidation}))
-
-(defn- handle-command-runtime-status
-  [_req]
-  (json-response 200 (runtime-idle-body)))
-
-(defn- handle-command-runtime-drain
-  [_req]
-  (runtime-state/request-drain!)
-  (json-response 200 (runtime-idle-body)))
-
-(defn- handle-command-runtime-undrain
-  [_req]
-  (runtime-state/clear-drain!)
-  (json-response 200 (runtime-idle-body)))
-
-(defn- handle-command-wake-projection
-  [_req]
-  (let [projection (wake-projection/current-snapshot)]
-    (cond-> (json-response 200 projection)
-      (:projection_seq projection)
-      (assoc-in [:headers "ETag"] (str "\"" (:projection_seq projection) "\"")))))
-
-(defn- handle-command-mcp
-  [req]
-  (let [request  (or (read-body req) {})
-        response (mcp/handle-json-rpc
-                  request
-                  {:request-id  (str (random-uuid))
-                   :remote-addr (:remote-addr req)})]
-    (if response
-      (json-response 200 response)
-      (json-response 202 {:ok true}))))
-
-(defn- handle-command-create-checkpoint
-  [req]
-  (let [body         (or (read-body req) {})
-        staging-root (some-> (get body "staging_root")
-                             nonblank-str)
-        checkpoint*  (checkpoint/submit-online-checkpoint!
-                       (cond-> {}
-                         staging-root
-                         (assoc :staging-root staging-root)))]
-    (json-response 202 checkpoint*)))
-
-(defn- handle-command-get-checkpoint
-  [checkpoint-id]
-  (if-let [status (checkpoint/checkpoint-status checkpoint-id)]
-    (json-response 200 status)
-    (json-response 404 {:error "checkpoint not found"})))
-
-(defn- snapshot-command-body
-  [snapshot*]
-  {:snapshot_id (:snapshot/id snapshot*)
-   :label (:snapshot/label snapshot*)
-   :created_at (:snapshot/created-at snapshot*)
-   :path (:snapshot/path snapshot*)
-   :db {:source_path (get-in snapshot* [:db :source-path])
-        :archive (get-in snapshot* [:db :archive])}
-   :workspace {:included (boolean (get-in snapshot* [:workspace :included?]))
-               :source_root (get-in snapshot* [:workspace :source-root])
-               :entry (get-in snapshot* [:workspace :entry])}})
-
-(defn- handle-command-list-snapshots
-  [_req]
-  (json-response 200
-                 {:snapshots (mapv snapshot-command-body
-                                    (snapshot/list-snapshots))}))
-
-(defn- handle-command-create-snapshot
-  [req]
-  (let [body               (or (read-body req) {})
-        label              (some-> (get body "label") nonblank-str)
-        snapshot-root      (some-> (get body "snapshot_root") nonblank-str)
-        include-workspace? (not= false (get body "include_workspace"))
-        snapshot*          (snapshot/create-snapshot!
-                            :label label
-                            :snapshot-root snapshot-root
-                            :include-workspace? include-workspace?)]
-    (json-response 201 (snapshot-command-body snapshot*))))
 
 (defn- runtime-available?
   []
@@ -1473,38 +639,43 @@
                  "last-close" (pr-str last-close)))
     (json-response 503 {:error error})))
 
+(defn- auth-deps
+  []
+  {:command-auth-nonce-cleanup   command-auth-nonce-cleanup
+   :command-auth-nonces          command-auth-nonces
+   :ingress-rate-limit-cleanup   ingress-rate-limit-cleanup
+   :ingress-rate-limits          ingress-rate-limits
+   :json-response                json-response
+   :local-session-secret-delay   local-session-secret-delay
+   :managed-proxy-nonce-cleanup  managed-proxy-nonce-cleanup
+   :managed-proxy-nonces         managed-proxy-nonces
+   :read-body-bytes              read-body-bytes
+   :runtime-available?           runtime-available?
+   :runtime-unavailable-response runtime-unavailable-response})
+
+(defn- handle-local-session-bootstrap
+  [req]
+  (http-auth/handle-local-session-bootstrap (auth-deps) req))
+
 (defn- protected-route-response
   [req allowed-fn]
-  (if-let [response (check-ingress-rate-limit req :http)]
-    response
-    (let [authorized? (or (valid-local-ui-request? req)
-                          (valid-managed-proxy-request? req))]
-      (cond
-        authorized?
-        (if (runtime-available?)
-          (allowed-fn)
-          (runtime-unavailable-response))
-
-        (not (trusted-local-origin? req))
-        (forbidden-response)
-
-        :else
-        (unauthorized-response)))))
+  (http-auth/protected-route-response (auth-deps) req allowed-fn))
 
 (defn- command-route-response
   [req allowed-fn]
-  (if-let [response (check-ingress-rate-limit req :command)]
-    response
-    (cond
-      (not (runtime-available?))
-      (runtime-unavailable-response)
+  (http-auth/command-route-response (auth-deps) req allowed-fn))
 
-      :else
-      (if-let [tokens (seq (command-channel-tokens))]
-        (if-let [req* (some #(authenticated-command-req req %) tokens)]
-          (allowed-fn req*)
-          (command-unauthorized-response))
-        (command-channel-unavailable-response)))))
+(defn- websocket-handler-deps
+  []
+  {:protected-route-response protected-route-response
+   :session-statuses-atom (session-statuses-atom)
+   :throwable-message throwable-message
+   :websocket-receive-failures-atom (websocket-receive-failures-atom)
+   :ws-sessions-atom (ws-sessions-atom)})
+
+(defn- ws-handler
+  [req]
+  (http-websocket/handler (websocket-handler-deps) req))
 
 (defn- approval->body
   [{:keys [approval-id tool-id tool-name description arguments reason policy created-at]}]
@@ -1599,87 +770,45 @@
         (finally
           (prompt/clear-pending-interaction! {:interaction-id (:interaction-id approval*)}))))))
 
+(declare touch-rest-session!)
+
 (defn- parse-session-id
   [session-id]
-  (cond
-    (instance? java.util.UUID session-id)
-    (str session-id)
-
-    :else
-    (try
-      (let [uuid (java.util.UUID/fromString session-id)]
-        (str uuid))
-      (catch IllegalArgumentException _
-        nil))))
+  (session-life/parse-session-id session-id))
 
 (defn- session-exists?
   [session-id]
-  (when-let [sid (parse-session-id session-id)]
-    (boolean
-      (ffirst (db/q '[:find ?e :in $ ?sid
-                      :where
-                      [?e :session/id ?sid]]
-                    (java.util.UUID/fromString sid))))))
+  (session-life/session-exists? session-id))
 
 (defn- session-id-str
   [session-id]
-  (cond
-    (instance? java.util.UUID session-id) (str session-id)
-    :else                                 (parse-session-id session-id)))
+  (session-life/session-id-str session-id))
 
 (defn- session-uuid
   [session-id]
-  (some-> (session-id-str session-id) java.util.UUID/fromString))
-
-(defn- session-eid
-  [session-id]
-  (when-let [sid (session-uuid session-id)]
-    (ffirst (db/q '[:find ?e :in $ ?sid
-                    :where
-                    [?e :session/id ?sid]]
-                  sid))))
+  (session-life/session-uuid session-id))
 
 (defn- session-channel
   [session-id]
-  (when-let [eid (session-eid session-id)]
-    (ffirst (db/q '[:find ?channel :in $ ?e
-                    :where
-                    [?e :session/channel ?channel]]
-                  eid))))
+  (session-life/session-channel session-id))
 
 (defn- session-accessible?
   [session-id expected-channel]
-  (when-let [sid (session-id-str session-id)]
-    (and (session-exists? sid)
-         (or (nil? expected-channel)
-             (= expected-channel (session-channel sid))))))
+  (session-life/session-accessible? session-id expected-channel))
 
 (defn- session-active?
   [session-id]
-  (when-let [eid (session-eid session-id)]
-    (boolean (:session/active? (db/entity eid)))))
-
-(defn- set-session-active!
-  [session-id active?]
-  (when-let [sid (session-uuid session-id)]
-    (db/set-session-active! sid active?)))
+  (session-life/active? session-id))
 
 (defn- maybe-resume-http-session!
   [session-id expected-channel]
   (when (and (= expected-channel :http)
              (session-accessible? session-id expected-channel)
              (not (session-active? session-id)))
-    (when-let [sid (session-uuid session-id)]
-      (with-session-finalize-lock
-        sid
-        (fn []
-          (when (and (session-accessible? sid expected-channel)
-                     (not (session-active? sid)))
-            (set-session-active! sid true)
-            (wm/ensure-wm! sid)
-            (touch-rest-session! sid)
-            (log/info "Resumed HTTP session" (str sid))
-            true))))))
+    (bridge/resume-session! session-id
+                            :expected-channel expected-channel
+                            :locks (session-finalize-locks)
+                            :touch! touch-rest-session!)))
 
 (defn- session-busy?
   [session-id]
@@ -1689,20 +818,6 @@
                  (keyword? state) state
                  (string? state) (keyword state)
                  :else state))))
-
-(defn- session-finalize-lock
-  [session-id]
-  (when-let [sid (session-id-str session-id)]
-    (nth (session-finalize-locks)
-         (mod (bit-and Integer/MAX_VALUE (int (hash sid)))
-              session-finalize-lock-count))))
-
-(defn- with-session-finalize-lock
-  [session-id f]
-  (if-let [lock (session-finalize-lock session-id)]
-    (locking lock
-      (f))
-    (f)))
 
 (defn- rest-session-idle-timeout-ms
   []
@@ -1812,10 +927,9 @@
 
 (defn- clear-rest-session-state!
   [session-id]
-  (let [sid (str session-id)]
-    (clear-session-status! sid)
-    (prompt/clear-pending-interaction! {:session-id sid})
-    (cancel-rest-session-finalizer! sid)))
+  (session-life/clear-session-state! session-id
+                                     :clear-status! clear-session-status!
+                                     :cancel-finalizer! cancel-rest-session-finalizer!))
 
 (defn- terminal-status-state?
   [state]
@@ -1837,65 +951,13 @@
   ([session-id]
    (finalize-rest-session! session-id :explicit))
   ([session-id reason]
-   (when-let [sid (session-uuid session-id)]
-     (with-session-finalize-lock
-       sid
-       (fn []
-         (let [sid-str     (str sid)
-               channel     (or (session-channel sid) :http)
-               was-active? (session-active? sid)]
-           (try
-             (when was-active?
-               (let [topics (:topics (wm/get-wm sid))]
-                 (try
-                   (wm/clear-autonomy-state! sid)
-                   (catch Exception e
-                     (log/error e "Failed to clear session autonomy state during finalization"
-                                sid-str
-                                "channel" (name channel)
-                                "reason" (name reason))))
-                 (try
-                   (wm/snapshot! sid)
-                   (catch Exception e
-                     (log/error e "Failed to snapshot session working memory during finalization"
-                                sid-str
-                                "channel" (name channel)
-                                "reason" (name reason))))
-                (try
-                   (hippo/record-conversation! sid channel
-                                               :topics topics
-                                               :consolidation-mode :sync)
-                   (catch Exception e
-                     (log/warn e "Failed to record session conversation during finalization"
-                               sid-str
-                               "channel" (name channel)
-                               "reason" (name reason))))))
-             (catch Exception e
-               (log/error e "Failed to finalize session"
-                          sid-str
-                          "channel" (name channel)
-                          "reason" (name reason)))
-             (finally
-               (try
-                 (wm/clear-wm! sid)
-                 (catch Exception e
-                   (log/error e "Failed to clear session working memory"
-                              sid-str
-                              "channel" (name channel))))
-               (clear-rest-session-state! sid)
-               (when was-active?
-                 (try
-                   (set-session-active! sid false)
-                   (catch Exception e
-                     (log/error e "Failed to mark session inactive"
-                                sid-str
-                                "channel" (name channel)))))))
-           (when was-active?
-             (log/info "Finalized session"
-                       sid-str
-                       "channel" (name channel)
-                       "reason" (name reason)))
-           was-active?))))))
+   (bridge/finalize-session! session-id
+                             :locks (session-finalize-locks)
+                             :reason reason
+                             :default-channel :http
+                             :clear-state! clear-rest-session-state!
+                             :mark-inactive? true
+                             :consolidation-mode :sync)))
 
 (defn- named-value->str
   [value]
@@ -2041,6 +1103,14 @@
    :read-body          read-body
    :request-base-url   request-base-url
    :truncate-text      truncate-text})
+
+(defn- command-handler-deps
+  []
+  {:command-shutdown-handler #(some-> (maybe-command-shutdown-handler-atom) deref)
+   :instant->str             instant->str
+   :json-response            json-response
+   :nonblank-str             nonblank-str
+   :read-body                read-body})
 
 (defn- handle-create-session
   ([] (handle-create-session :http))
@@ -2489,37 +1559,38 @@
         (http-messaging/handle-telegram-webhook (workspace-handler-deps) req)
 
         (and (= method :post) (= uri "/command/shutdown"))
-        (command-route-response req #(handle-command-shutdown %))
+        (command-route-response req #(http-command/handle-shutdown (command-handler-deps) %))
 
         (and (= method :get) command-runtime-status-match)
-        (command-route-response req #(handle-command-runtime-status %))
+        (command-route-response req #(http-command/handle-runtime-status (command-handler-deps) %))
 
         (and (= method :post) command-runtime-drain-match)
-        (command-route-response req #(handle-command-runtime-drain %))
+        (command-route-response req #(http-command/handle-runtime-drain (command-handler-deps) %))
 
         (and (= method :post) command-runtime-undrain-match)
-        (command-route-response req #(handle-command-runtime-undrain %))
+        (command-route-response req #(http-command/handle-runtime-undrain (command-handler-deps) %))
 
         (and (= method :post) command-mcp-match)
-        (command-route-response req #(handle-command-mcp %))
+        (command-route-response req #(http-command/handle-mcp (command-handler-deps) %))
 
         (and (= method :post) command-managed-checkpoints-match)
-        (command-route-response req #(handle-command-create-checkpoint %))
+        (command-route-response req #(http-command/handle-create-checkpoint (command-handler-deps) %))
 
         (and (= method :get) command-managed-checkpoint-match)
         (command-route-response req
                                 (fn [_req]
-                                  (handle-command-get-checkpoint
+                                  (http-command/handle-get-checkpoint
+                                   (command-handler-deps)
                                    (second command-managed-checkpoint-match))))
 
         (and (= method :get) command-managed-snapshots-match)
-        (command-route-response req #(handle-command-list-snapshots %))
+        (command-route-response req #(http-command/handle-list-snapshots (command-handler-deps) %))
 
         (and (= method :post) command-managed-snapshots-match)
-        (command-route-response req #(handle-command-create-snapshot %))
+        (command-route-response req #(http-command/handle-create-snapshot (command-handler-deps) %))
 
         (and (= method :get) command-wake-projection-match)
-        (command-route-response req #(handle-command-wake-projection %))
+        (command-route-response req #(http-command/handle-wake-projection (command-handler-deps) %))
 
         (and (= method :delete) command-session-close-match)
         (command-route-response req

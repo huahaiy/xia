@@ -11,8 +11,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.task-event :as task-event]
-            [xia.task-inspection :as task-inspection]
-            [xia.working-memory :as wm]))
+            [xia.task-inspection :as task-inspection]))
 
 (def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
 
@@ -658,8 +657,8 @@
   ([deps]
    (handle-create-session deps :http))
   ([deps channel]
-   (let [sid (db/create-session! channel)]
-     (wm/ensure-wm! sid)
+   (let [{:keys [session-id]} (bridge/create-session! channel)
+         sid session-id]
      (touch-rest-session!* deps sid)
      (json-response* deps 200 {:session_id (str sid)}))))
 
@@ -696,8 +695,7 @@
        :else
        (let [sid (if session-id
                    (java.util.UUID/fromString session-id)
-                   (db/create-session! channel))]
-         (wm/ensure-wm! sid)
+                   (:session-id (bridge/create-session! channel)))]
          (cancel-rest-session-finalizer!* deps sid)
          {:session-id    sid
           :channel       channel

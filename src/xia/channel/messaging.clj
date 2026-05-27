@@ -406,12 +406,14 @@
   (let [existing (db/find-session-by-external-key external-key)]
     (if-let [session-id (:id existing)]
       (do
-        (db/set-session-active! session-id true)
+        (bridge/resume-session! session-id
+                                :expected-channel channel)
         (db/save-session-external-meta! session-id external-meta)
         session-id)
-      (db/create-session! channel {:label label
-                                   :external-key external-key
-                                   :external-meta external-meta}))))
+      (:session-id (bridge/create-session! channel
+                                           {:label label
+                                            :external-key external-key
+                                            :external-meta external-meta})))))
 
 (defn- persist-external-user-message!
   [session-id channel user-message external-message-id external-sender]
