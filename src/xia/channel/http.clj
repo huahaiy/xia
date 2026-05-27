@@ -1,33 +1,32 @@
 (ns xia.channel.http
   "HTTP/WebSocket channel — enables remote clients and web UIs."
   (:require [clojure.string :as str]
-            [clojure.java.io :as io]
             [org.httpkit.server :as http]
-            [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.channel.http.admin :as http-admin]
+            [xia.channel.http.assets :as http-assets]
             [xia.channel.http.auth :as http-auth]
             [xia.channel.http.command :as http-command]
             [xia.channel.http.interaction :as http-interaction]
             [xia.channel.http.knowledge :as http-knowledge]
             [xia.channel.http.messaging :as http-messaging]
+            [xia.channel.http.request :as http-request]
+            [xia.channel.http.response :as http-response]
             [xia.channel.http.session :as http-session]
+            [xia.channel.http.status :as http-status]
             [xia.channel.http.task-board :as http-task-board]
+            [xia.channel.http.value :as http-value]
             [xia.channel.http.websocket :as http-websocket]
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
             [xia.runtime-state :as runtime-state]
-            [xia.session-lifecycle :as session-life]
-            [xia.util :as util])
-  (:import [java.io ByteArrayOutputStream InputStream]
-    [java.net BindException]
-    [java.nio.charset StandardCharsets]
-    [java.nio.file Files LinkOption Path Paths]
+            [xia.session-lifecycle :as session-life])
+  (:import [java.net BindException]
     [java.security SecureRandom]
-    [java.util Base64 Date]
+    [java.util Base64]
     [java.util.concurrent ConcurrentHashMap Executors ScheduledExecutorService ScheduledFuture TimeUnit]
     [java.util.concurrent.atomic AtomicLong]))
 
@@ -37,15 +36,12 @@
 
 (defonce ^:private installed-runtime-atom (atom nil))
 
-(def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
-(def ^:private max-live-task-runtime-events 200)
 (def ^:private session-finalize-lock-count session-life/default-finalize-lock-count)
 (def ^:private http-port-search-limit 100)
 (def ^:private rest-session-channels #{:http :command})
 (def ^:private local-ui-session-channels #{:http :websocket})
 (def ^:private busy-session-states #{:running :waiting_input :waiting_approval})
-(def ^:private byte-array-class (class (byte-array 0)))
 (declare install-runtime! clear-runtime!)
 
 (defn- make-runtime
@@ -163,304 +159,25 @@
   []
   (:session-finalize-locks (current-runtime)))
 
-;; ---------------------------------------------------------------------------
-;; Local web UI
-;; ---------------------------------------------------------------------------
-
-(def ^:private read-bundled-resource
-  (memoize
-    (fn [path]
-      (some-> (str "web/" path)
-              io/resource
-              slurp))))
-
-(def ^:private read-bundled-resource-bytes
-  (memoize
-    (fn [path]
-      (when-let [resource (some-> (str "web/" path) io/resource)]
-        (with-open [in (io/input-stream resource)
-                    out (ByteArrayOutputStream.)]
-          (io/copy in out)
-          (.toByteArray out))))))
-
-(def ^:private web-dev-poll-interval-ms 1000)
-
-(def ^:private web-dev-no-cache-headers
-  {"Cache-Control" "no-store, no-cache, must-revalidate, max-age=0"
-   "Pragma" "no-cache"
-   "Expires" "0"})
-
-(defn- web-dev-enabled?
-  []
-  (true? (:enabled? @(web-dev-state-atom))))
-
-(defn- resolve-web-dev-root
-  []
-  (try
-    (when-let [resource (io/resource "web/index.html")]
-      (when (= "file" (.getProtocol resource))
-        (.getParent (Paths/get (.toURI resource)))))
-    (catch Exception _
-      nil)))
-
-(defn- configure-web-dev!
-  [enabled?]
-  (if-not enabled?
-    (reset! (web-dev-state-atom) {:enabled? false
-                                  :root nil})
-    (if-let [root (resolve-web-dev-root)]
-      (do
-        (reset! (web-dev-state-atom) {:enabled? true
-                                      :root root})
-        (log/info "Web dev mode enabled; serving live web assets from" (str root)))
-      (do
-        (reset! (web-dev-state-atom) {:enabled? false
-                                      :root nil})
-        (log/warn "Web dev mode requested, but web resources are not file-backed; falling back to bundled assets")))))
-
-(defn- web-dev-root
-  []
-  (:root @(web-dev-state-atom)))
-
-(defn- web-dev-path
-  ^Path [path]
-  (when-let [^Path root (web-dev-root)]
-    (.normalize (.resolve root ^String path))))
-
-(defn- read-web-dev-resource
-  [path]
-  (when-let [^Path p (web-dev-path path)]
-    (when (Files/isRegularFile p (make-array LinkOption 0))
-      (slurp (.toFile p)))))
-
-(defn- read-web-dev-resource-bytes
-  [path]
-  (when-let [^Path p (web-dev-path path)]
-    (when (Files/isRegularFile p (make-array LinkOption 0))
-      (Files/readAllBytes p))))
-
-(defn- read-resource
-  [path]
-  (if (web-dev-enabled?)
-    (or (read-web-dev-resource path)
-        (read-bundled-resource path))
-    (read-bundled-resource path)))
-
-(defn- read-resource-bytes
-  [path]
-  (if (web-dev-enabled?)
-    (or (read-web-dev-resource-bytes path)
-        (read-bundled-resource-bytes path))
-    (read-bundled-resource-bytes path)))
-
-(defn- with-web-dev-headers
-  [response]
-  (if (web-dev-enabled?)
-    (update response :headers #(merge web-dev-no-cache-headers (or % {})))
-    response))
-
-(defn- web-dev-version
-  []
-  (when-let [^Path root (web-dev-root)]
-    (try
-      (with-open [stream (Files/walk root (make-array java.nio.file.FileVisitOption 0))]
-        (let [{:keys [file-count max-modified total-size]}
-              (reduce (fn [{:keys [file-count max-modified total-size]} ^Path path]
-                        (if (Files/isRegularFile path (make-array LinkOption 0))
-                          {:file-count   (unchecked-inc-int (int file-count))
-                           :max-modified (max (long max-modified)
-                                              (.toMillis (Files/getLastModifiedTime path
-                                                                                    (make-array LinkOption 0))))
-                           :total-size   (+ (long total-size) (Files/size path))}
-                          {:file-count file-count
-                           :max-modified max-modified
-                           :total-size total-size}))
-                      {:file-count 0
-                       :max-modified 0
-                       :total-size 0}
-                      (iterator-seq (.iterator stream)))]
-          (str file-count ":" max-modified ":" total-size)))
-      (catch Exception e
-        (log/debug e "Failed to compute web dev version")
-        nil))))
-
-(defn- inject-web-dev-client
-  [html]
-  (if-not (web-dev-enabled?)
-    html
-    (let [version (or (web-dev-version) "0")
-          script  (str "<script>"
-                       "(function(){"
-                       "var currentVersion=" (pr-str version) ";"
-                       "async function poll(){"
-                       "try{"
-                       "var response=await fetch('/__dev/web-reload',{cache:'no-store'});"
-                       "if(!response.ok){return;}"
-                       "var payload=await response.json();"
-                       "if(payload && payload.version && payload.version!==currentVersion){"
-                       "window.location.reload();"
-                       "return;}"
-                       "if(payload && payload.version){currentVersion=payload.version;}"
-                       "}catch(_err){}"
-                       "}"
-                       "window.setInterval(function(){"
-                       "if(document.visibilityState!=='hidden'){poll();}"
-                       "},"
-                       web-dev-poll-interval-ms
-                       ");"
-                       "})();"
-                       "</script>")]
-      (if (str/includes? html "</body>")
-        (str/replace html "</body>" (str script "</body>"))
-        (str html script)))))
-
-(defn- resource-response [path content-type]
-  (if-let [content (read-resource path)]
-    (with-web-dev-headers
-      {:status  200
-       :headers {"Content-Type" content-type}
-       :body    content})
-    {:status 404 :body "Not Found"}))
-
-(defn- binary-resource-response [path content-type]
-  (if-let [content (read-resource-bytes path)]
-    (with-web-dev-headers
-      {:status  200
-       :headers {"Content-Type" content-type}
-       :body    content})
-    {:status 404 :body "Not Found"}))
-
 (defn- throwable-message
   [^Throwable e]
   (.getMessage e))
 
 (defn- instant->str
   [value]
-  (cond
-    (instance? Date value) (str (.toInstant ^Date value))
-    (instance? java.time.Instant value) (str value)
-    :else nil))
-
-(defn- parse-iso-instant
-  [value field]
-  (when-let [text (some-> value str str/trim not-empty)]
-    (try
-      (Date/from (java.time.Instant/parse text))
-      (catch Exception _
-        (throw (ex-info (str "invalid '" field "' field")
-                        {:field field}))))))
+  (http-value/instant->str value))
 
 (defn- date->millis
   [value]
-  (when (instance? Date value)
-    (.getTime ^Date value)))
-
-(def ^:private web-static-assets
-  {"/style.css"                     {:path "style.css" :content-type "text/css"}
-   "/app.js"                        {:path "app.js" :content-type "text/javascript"}
-   "/favicon.ico"                   {:path "favicon/favicon.ico" :content-type "image/x-icon" :binary? true}
-   "/favicon/favicon.svg"           {:path "favicon/favicon.svg" :content-type "image/svg+xml"}
-   "/favicon/favicon-96x96.png"     {:path "favicon/favicon-96x96.png" :content-type "image/png" :binary? true}
-   "/favicon/apple-touch-icon.png"  {:path "favicon/apple-touch-icon.png" :content-type "image/png" :binary? true}
-   "/favicon/web-app-manifest-192x192.png" {:path "favicon/web-app-manifest-192x192.png" :content-type "image/png" :binary? true}
-   "/favicon/web-app-manifest-512x512.png" {:path "favicon/web-app-manifest-512x512.png" :content-type "image/png" :binary? true}
-   "/favicon/site.webmanifest"      {:path "favicon/site.webmanifest"
-                                     :content-type "application/manifest+json; charset=utf-8"}})
-
-(defn- static-asset-response
-  [uri]
-  (when-let [{:keys [path content-type binary?]} (get web-static-assets uri)]
-    (if binary?
-      (binary-resource-response path content-type)
-      (resource-response path content-type))))
-
-;; ---------------------------------------------------------------------------
-;; REST endpoints
-;; ---------------------------------------------------------------------------
-
-(defn- request-body-too-large-ex
-  []
-  (ex-info "request body too large"
-           {:type :http/request-body-too-large
-            :status 413
-            :error "request body too large"
-            :max_bytes max-request-body-bytes}))
-
-(defn- invalid-json-body-ex
-  [cause]
-  (ex-info "invalid JSON request body"
-           {:type :http/invalid-json-body
-            :status 400
-            :error "invalid JSON request body"}
-           cause))
-
-(declare read-body-bytes)
-
-(defn- read-body-text
-  [body]
-  (when-let [body-bytes (read-body-bytes body)]
-    (String. ^bytes body-bytes StandardCharsets/UTF_8)))
-
-(defn- read-body-bytes
-  [body]
-  (cond
-    (nil? body)
-    nil
-
-    (string? body)
-    (let [body-bytes (.getBytes ^String body StandardCharsets/UTF_8)]
-      (when (> (long (alength body-bytes)) (long max-request-body-bytes))
-        (throw (request-body-too-large-ex)))
-      body-bytes)
-
-    (instance? byte-array-class body)
-    (let [body-bytes ^bytes body]
-      (when (> (long (alength body-bytes)) (long max-request-body-bytes))
-        (throw (request-body-too-large-ex)))
-      body-bytes)
-
-    :else
-    (with-open [^InputStream in (io/input-stream body)
-                out (ByteArrayOutputStream.)]
-      (let [buffer (byte-array 8192)]
-        (loop [total 0]
-          (let [read-count (.read in buffer)]
-            (cond
-              (neg? read-count)
-              (.toByteArray out)
-
-              (> (+ (long total) read-count) (long max-request-body-bytes))
-              (throw (request-body-too-large-ex))
-
-              :else
-              (do
-                (.write out buffer 0 read-count)
-                (recur (+ total read-count))))))))))
-
-(defn- read-body [req]
-  (when-let [body (:body req)]
-    (let [body-text (read-body-text body)]
-      (try
-        (json/read-json body-text)
-        (catch clojure.lang.ExceptionInfo e
-          (throw e))
-        (catch Exception e
-          (throw (invalid-json-body-ex e)))))))
+  (http-value/date->millis value))
 
 (defn- request-header
   [req header-name]
-  (http-auth/request-header req header-name))
-
-(defn- request-content-type
-  [req]
-  (some-> (request-header req "content-type")
-          str
-          str/lower-case))
+  (http-request/request-header req header-name))
 
 (defn- multipart-form-request?
   [req]
-  (some-> (request-content-type req)
-          (str/starts-with? "multipart/form-data")))
+  (http-request/multipart-form-request? req))
 
 (declare nonblank-str parse-session-id session-exists? session-id-str)
 
@@ -470,13 +187,15 @@
 
 (defn- parse-query-string
   [query-string]
-  (into {}
-        (keep (fn [part]
-                (let [[^String k ^String v] (str/split (str part) #"=" 2)]
-                  (when (seq k)
-                    [(java.net.URLDecoder/decode k "UTF-8")
-                     (some-> v ^String (java.net.URLDecoder/decode "UTF-8"))]))))
-        (str/split (or query-string "") #"&")))
+  (http-request/parse-query-string query-string))
+
+(defn- read-body-bytes
+  [body]
+  (http-request/read-body-bytes body))
+
+(defn- read-body
+  [req]
+  (http-request/read-body req))
 
 (defn- auth-secret-deps
   []
@@ -509,9 +228,25 @@
   (http-auth/trusted-local-origin? req))
 
 (defn- json-response [status body]
-  {:status  status
-   :headers {"Content-Type" "application/json"}
-   :body    (json/write-json-str body)})
+  (http-response/json-response status body))
+
+(defn- asset-handler-deps
+  []
+  {:json-response         json-response
+   :session-cookie-header session-cookie-header
+   :web-dev-state-atom    (web-dev-state-atom)})
+
+(defn- configure-web-dev!
+  [enabled?]
+  (http-assets/configure-web-dev! (asset-handler-deps) enabled?))
+
+(defn- static-asset-uri?
+  [uri]
+  (http-assets/static-asset-uri? uri))
+
+(defn- static-asset-response
+  [uri]
+  (http-assets/static-asset-response (asset-handler-deps) uri))
 
 (defn- reset-runtime-ingress-rate-limits!
   [runtime]
@@ -525,31 +260,9 @@
   [runtime]
   (http-auth/reset-runtime-managed-proxy-auth! runtime))
 
-(defn- utf8-download-media-type
-  [media-type]
-  (let [base (some-> media-type str str/trim not-empty)]
-    (cond
-      (nil? base) "application/octet-stream"
-      (re-find #";\s*charset=" base) base
-      (or (str/starts-with? base "text/")
-          (= base "application/json")
-          (= base "application/edn")
-          (= base "application/xml"))
-      (str base "; charset=utf-8")
-      :else
-      base)))
-
-(defn- quoted-filename
-  [filename]
-  (-> (or (some-> filename str str/trim not-empty) "download")
-      (str/replace #"[\\\"\r\n]+" "_")))
-
 (defn- download-response
   [filename media-type body]
-  {:status  200
-   :headers {"Content-Type"        (utf8-download-media-type media-type)
-             "Content-Disposition" (str "attachment; filename=\"" (quoted-filename filename) "\"")}
-   :body    body})
+  (http-response/download-response filename media-type body))
 
 (declare runtime-unavailable-response)
 
@@ -583,20 +296,6 @@
           body    (cond-> {:error (or (:error data) (throwable-message e))}
                     details (assoc :details details))]
       (json-response status body))))
-
-(defn- html-response [body]
-  {:status  200
-   :headers {"Content-Type" "text/html; charset=utf-8"}
-   :body    body})
-
-(defn- escape-html
-  [value]
-  (-> (str (or value ""))
-      (str/replace "&" "&amp;")
-      (str/replace "<" "&lt;")
-      (str/replace ">" "&gt;")
-      (str/replace "\"" "&quot;")
-      (str/replace "'" "&#39;")))
 
 (defn register-command-shutdown-handler!
   [handler]
@@ -765,71 +464,32 @@
 
 (defn- truncate-text
   [value limit]
-  (let [text  (some-> value str str/trim)
-        limit (long limit)]
-    (when (seq text)
-      (if (> (long (count text)) limit)
-        (str (subs text 0 (util/long-max 0 (- limit 1))) "…")
-        text))))
+  (http-value/truncate-text value limit))
+
+(defn- status-handler-deps
+  []
+  {:session-statuses-atom (session-statuses-atom)
+   :task-runtime-events-atom (task-runtime-events-atom)
+   :task-runtime-stream-subscribers-atom (task-runtime-stream-subscribers-atom)})
 
 (defn- clear-session-status!
   [session-id]
-  (when session-id
-    (swap! (session-statuses-atom) dissoc (str session-id))))
-
-(defn- append-task-runtime-event!
-  [event]
-  (when-let [task-id (some-> (:task-id event) str)]
-    (let [received-at (java.util.Date.)]
-      (-> (swap! (task-runtime-events-atom)
-                 (fn [state]
-                   (let [{:keys [next-index events]} (get state task-id)
-                         next-index* (inc (long (or next-index 0)))
-                         event* (assoc event
-                                       :stream-index next-index*
-                                       :received-at received-at)
-                         events* (conj (vec (or events [])) event*)
-                         trimmed (if (> (count events*) max-live-task-runtime-events)
-                                   (subvec events* (- (count events*) max-live-task-runtime-events))
-                                   events*)]
-                     (assoc state task-id {:next-index next-index*
-                                           :events trimmed}))))
-          (get task-id)
-          :events
-          last))))
+  (http-status/clear-session-status! (status-handler-deps) session-id))
 
 (defn- register-task-runtime-stream-subscriber!
   [task-id subscriber-id callback]
-  (when (and task-id subscriber-id callback)
-    (swap! (task-runtime-stream-subscribers-atom)
-           update
-           (str task-id)
-           (fnil assoc {})
-           subscriber-id
-           callback)))
+  (http-status/register-runtime-stream-subscriber!
+   (status-handler-deps)
+   task-id
+   subscriber-id
+   callback))
 
 (defn- unregister-task-runtime-stream-subscriber!
   [task-id subscriber-id]
-  (when (and task-id subscriber-id)
-    (swap! (task-runtime-stream-subscribers-atom)
-           (fn [state]
-             (let [task-key (str task-id)
-                   subscribers (dissoc (get state task-key {}) subscriber-id)]
-               (if (seq subscribers)
-                 (assoc state task-key subscribers)
-                 (dissoc state task-key)))))))
-
-(defn- notify-task-runtime-stream-subscribers!
-  [event]
-  (when-let [task-id (some-> (:task-id event) str)]
-    (doseq [[subscriber-id callback] (get @(task-runtime-stream-subscribers-atom) task-id)]
-      (try
-        (callback event)
-        (catch Exception e
-          (log/warn e "Failed to deliver runtime event to task stream subscriber"
-                    "task" task-id
-                    "subscriber" subscriber-id)
-          (unregister-task-runtime-stream-subscriber! task-id subscriber-id))))))
+  (http-status/unregister-runtime-stream-subscriber!
+   (status-handler-deps)
+   task-id
+   subscriber-id))
 
 (defn- clear-rest-session-state!
   [session-id]
@@ -837,21 +497,13 @@
                                      :clear-status! clear-session-status!
                                      :cancel-finalizer! cancel-rest-session-finalizer!))
 
-(defn- terminal-status-state?
-  [state]
-  (contains? #{:completed :done :error :cancelled} state))
-
 (defn- http-status-handler
-  [{:keys [session-id state] :as status}]
-  (when-let [sid (some-> session-id str)]
-    (if (terminal-status-state? state)
-      (clear-session-status! sid)
-      (swap! (session-statuses-atom) assoc sid (assoc status :updated-at (java.util.Date.))))))
+  [status]
+  (http-status/status-handler (status-handler-deps) status))
 
 (defn- http-runtime-event-handler
   [event]
-  (when-let [event* (append-task-runtime-event! event)]
-    (notify-task-runtime-stream-subscribers! event*)))
+  (http-status/runtime-event-handler (status-handler-deps) event))
 
 (defn- finalize-rest-session!
   ([session-id]
@@ -867,40 +519,15 @@
 
 (defn- nonblank-str
   [value]
-  (let [s (some-> value str str/trim)]
-    (when (seq s)
-      s)))
+  (http-value/nonblank-str value))
 
 (defn- parse-keyword-id
   [value field-name]
-  (let [id-str (nonblank-str value)]
-    (cond
-      (nil? id-str)
-      (throw (ex-info (str "missing '" field-name "' field") {:field field-name}))
-
-      (re-find #"\s" id-str)
-      (throw (ex-info (str "'" field-name "' must not contain whitespace")
-                      {:field field-name
-                       :value value}))
-
-      :else
-      (keyword id-str))))
+  (http-value/parse-keyword-id value field-name))
 
 (defn- parse-optional-positive-long
   [value field-name]
-  (let [text (nonblank-str value)]
-    (when text
-      (try
-        (let [parsed (Long/parseLong text)]
-          (when-not (pos? parsed)
-            (throw (ex-info (str "'" field-name "' must be a positive integer")
-                            {:field field-name
-                             :value value})))
-          parsed)
-        (catch NumberFormatException _
-          (throw (ex-info (str "'" field-name "' must be a positive integer")
-                          {:field field-name
-                           :value value})))))))
+  (http-value/parse-optional-positive-long value field-name))
 
 (defn- workspace-handler-deps
   []
@@ -1238,18 +865,10 @@
   (json-response 200 {:status "ok" :version "0.1.0"}))
 
 (defn- handle-web-dev-reload [_req]
-  (if (web-dev-enabled?)
-    (with-web-dev-headers
-      (json-response 200 {:enabled true
-                          :version (or (web-dev-version) "0")}))
-    (json-response 404 {:error "not found"})))
+  (http-assets/handle-web-dev-reload (asset-handler-deps)))
 
 (defn- handle-home [_req]
-  (if-let [html (read-resource "index.html")]
-    (-> (html-response (inject-web-dev-client html))
-        (assoc-in [:headers "Set-Cookie"] (session-cookie-header))
-        (with-web-dev-headers))
-    {:status 404 :body "Not Found"}))
+  (http-assets/handle-home (asset-handler-deps)))
 
 ;; ---------------------------------------------------------------------------
 ;; Router
@@ -1339,7 +958,7 @@
         (and (= method :get) (= uri "/local-session"))
         (handle-local-session-bootstrap req)
 
-        (and (= method :get) (contains? web-static-assets uri))
+        (and (= method :get) (static-asset-uri? uri))
         (static-asset-response uri)
 
         (and (= method :get) (= uri "/__dev/web-reload"))
