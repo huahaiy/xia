@@ -6,15 +6,16 @@
             [charred.api :as json]
             [ring.middleware.multipart-params :as multipart]
             [taoensso.timbre :as log]
-            [xia.board :as board]
             [xia.bridge :as bridge]
             [xia.db :as db]
-            [xia.memory :as memory]
             [xia.channel.http.admin :as http-admin]
             [xia.channel.http.auth :as http-auth]
             [xia.channel.http.command :as http-command]
+            [xia.channel.http.interaction :as http-interaction]
+            [xia.channel.http.knowledge :as http-knowledge]
             [xia.channel.http.messaging :as http-messaging]
             [xia.channel.http.session :as http-session]
+            [xia.channel.http.task-board :as http-task-board]
             [xia.channel.http.websocket :as http-websocket]
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
@@ -36,7 +37,6 @@
 
 (defonce ^:private installed-runtime-atom (atom nil))
 
-(def ^:private approval-timeout-ms (* 5 60 1000))
 (def ^:private max-request-body-bytes (* 16 1024 1024)) ; 16 MiB
 (def ^:private default-rest-session-idle-timeout-ms (* 30 60 1000))
 (def ^:private max-live-task-runtime-events 200)
@@ -676,101 +676,6 @@
   [req]
   (http-websocket/handler (websocket-handler-deps) req))
 
-(defn- approval->body
-  [{:keys [approval-id tool-id tool-name description arguments reason policy created-at]}]
-  {:approval_id approval-id
-   :tool_id     (name tool-id)
-   :tool_name   tool-name
-   :description description
-   :arguments   arguments
-   :reason      reason
-   :policy      (name policy)
-   :created_at  (instant->str created-at)})
-
-(defn- prompt->body
-  [{:keys [prompt-id label mask? created-at]}]
-  {:prompt_id  prompt-id
-   :label      label
-   :masked     (boolean mask?)
-   :created_at (instant->str created-at)})
-
-(defn- current-session-task-id
-  [session-id]
-  (try
-    (let [sid (java.util.UUID/fromString session-id)]
-      (some-> (db/current-session-task sid) :id))
-    (catch IllegalArgumentException _
-      nil)))
-
-(defn- http-prompt-handler
-  [label & {:keys [mask?] :or {mask? false}}]
-  (let [interaction-context (bridge/interaction-context)
-        sid (some-> (:session-id interaction-context) str)]
-    (when-not sid
-      (throw (ex-info "HTTP prompt requires a session id"
-                      {:label label})))
-    (let [task-id   (or (:task-id interaction-context)
-                        (current-session-task-id sid))
-          prompt-id (str (random-uuid))
-          response  (promise)
-          prompt*   (bridge/register-interaction!
-                     {:interaction-id prompt-id
-                      :kind :prompt
-                      :channel (or (:channel interaction-context) :http)
-                      :session-id sid
-                      :task-id task-id
-                      :prompt-id  prompt-id
-                      :label      label
-                      :mask?      (boolean mask?)
-                      :created-at (java.util.Date.)
-                      :response   response})]
-      (try
-        (let [result (deref response approval-timeout-ms ::timeout)]
-          (if (= result ::timeout)
-                            (throw (ex-info "Timed out waiting for interactive input"
-                                            {:label label
-                                             :session-id sid}))
-                            (str (or result ""))))
-        (finally
-          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id prompt*)}))))))
-
-(defn- http-approval-handler
-  [{:keys [session-id tool-id tool-name description arguments reason policy]}]
-  (let [interaction-context (bridge/interaction-context)
-        sid (some-> session-id str)]
-    (when-not sid
-      (throw (ex-info "HTTP approval requires a session id"
-                      {:tool-id tool-id})))
-    (let [task-id     (or (:task-id interaction-context)
-                          (current-session-task-id sid))
-          approval-id (str (random-uuid))
-          response    (promise)
-          approval*   (bridge/register-interaction!
-                       {:interaction-id approval-id
-                        :kind :approval
-                        :channel (or (:channel interaction-context) :http)
-                        :session-id sid
-                        :task-id task-id
-                        :approval-id approval-id
-                        :tool-id     tool-id
-                        :tool-name   (or tool-name (name tool-id))
-                        :description description
-                        :arguments   arguments
-                        :reason      reason
-                        :policy      policy
-                        :created-at  (java.util.Date.)
-                        :response    response})]
-      (try
-        (let [result (deref response approval-timeout-ms ::timeout)]
-          (case result
-            :allow true
-            :deny  false
-                            (throw (ex-info "Timed out waiting for tool approval"
-                                            {:tool-id tool-id
-                                             :session-id sid}))))
-        (finally
-          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id approval*)}))))))
-
 (declare touch-rest-session!)
 
 (defn- parse-session-id
@@ -960,33 +865,6 @@
                              :mark-inactive? true
                              :consolidation-mode :sync)))
 
-(defn- named-value->str
-  [value]
-  (cond
-    (keyword? value) (name value)
-    (symbol? value)  (name value)
-    (some? value)    (str value)
-    :else            nil))
-
-(defn- knowledge-node->body
-  [node]
-  (let [eid (or (:eid node) (:db/id node))]
-    {:id   (some-> eid str)
-     :eid  eid
-     :name (or (:name node) (:kg.node/name node))
-     :type (named-value->str (or (:type node) (:kg.node/type node)))}))
-
-(defn- knowledge-fact->body
-  [fact]
-  {:id         (some-> (:eid fact) str)
-   :eid        (:eid fact)
-   :node_id    (some-> (:node-eid fact) str)
-   :node_eid   (:node-eid fact)
-   :content    (:content fact)
-   :confidence (:confidence fact)
-   :utility    (:utility fact)
-   :updated_at (instant->str (:updated-at fact))})
-
 (defn- nonblank-str
   [value]
   (let [s (some-> value str str/trim)]
@@ -1024,34 +902,6 @@
                           {:field field-name
                            :value value})))))))
 
-(def ^:private default-knowledge-search-top 12)
-(def ^:private max-knowledge-search-top 25)
-
-(defn- parse-knowledge-search-top
-  [value]
-  (-> (or (parse-optional-positive-long value "top")
-          default-knowledge-search-top)
-      long
-      (util/long-min max-knowledge-search-top)
-      int))
-
-(defn- search-knowledge-nodes
-  [query top]
-  (loop [results (concat (memory/find-node query)
-                         (memory/search-nodes query :top top))
-         acc     []
-         seen    #{}]
-    (if-let [node (first results)]
-      (let [node-eid (:eid node)]
-        (if (or (nil? node-eid)
-                (contains? seen node-eid))
-          (recur (rest results) acc seen)
-          (recur (rest results)
-                 (cond-> acc
-                   (< (count acc) top) (conj node))
-                 (conj seen node-eid))))
-      acc)))
-
 (defn- workspace-handler-deps
   []
   {:download-response            download-response
@@ -1070,9 +920,17 @@
    :throwable-message            throwable-message
    :touch-rest-session!          touch-rest-session!})
 
+(defn- knowledge-handler-deps
+  []
+  {:instant->str                 instant->str
+   :json-response                json-response
+   :nonblank-str                 nonblank-str
+   :parse-optional-positive-long parse-optional-positive-long
+   :parse-query-string           parse-query-string})
+
 (defn- session-handler-deps
   []
-  {:approval->body               approval->body
+  {:approval->body               http-interaction/approval->body
    :cancel-rest-session-finalizer! cancel-rest-session-finalizer!
    :date->millis                 date->millis
    :exception-response           exception-response
@@ -1083,7 +941,7 @@
    :parse-keyword-id             parse-keyword-id
    :parse-query-string           parse-query-string
    :parse-session-id             parse-session-id
-   :prompt->body                 prompt->body
+   :prompt->body                 http-interaction/prompt->body
    :read-body                    read-body
    :register-task-runtime-stream-subscriber! register-task-runtime-stream-subscriber!
    :session-accessible?          session-accessible?
@@ -1112,6 +970,11 @@
    :json-response            json-response
    :nonblank-str             nonblank-str
    :read-body                read-body})
+
+(defn- task-board-handler-deps
+  []
+  {:instant->str  instant->str
+   :json-response json-response})
 
 (defn- handle-create-session
   ([] (handle-create-session :http))
@@ -1241,38 +1104,8 @@
 (defn- handle-history-tasks []
   (http-session/handle-history-tasks (session-handler-deps)))
 
-(defn- board-comment->body
-  [comment]
-  (cond-> {:id   (some-> (:id comment) str)
-           :text (:text comment)}
-    (:author comment) (assoc :author (:author comment))
-    (:at comment) (assoc :at (instant->str (:at comment)))))
-
-(defn- board-card->body
-  [card]
-  (let [status (:status card)]
-    (cond-> {:id          (some-> (:id card) str)
-             :type        (name board/board-task-type)
-             :channel     (name board/board-channel)
-             :state       (some-> status name)
-             :status      (some-> status name)
-             :priority    (some-> (:priority card) name)
-             :title       (:title card)
-             :description (:description card)
-             :comments    (mapv board-comment->body (:comments card))
-             :created_at  (instant->str (:created-at card))
-             :updated_at  (instant->str (:updated-at card))}
-      (:assignee card) (assoc :assignee (:assignee card))
-      (:parent-id card) (assoc :parent_id (str (:parent-id card)))
-      (:claimed-at card) (assoc :claimed_at (instant->str (:claimed-at card)))
-      (:heartbeat-at card) (assoc :heartbeat_at (instant->str (:heartbeat-at card)))
-      (:finished-at card) (assoc :finished_at (instant->str (:finished-at card))))))
-
 (defn- handle-task-board []
-  (json-response 200
-                 {:tasks (mapv board-card->body
-                               (board/list-cards {:include-terminal? true
-                                                  :limit 200}))}))
+  (http-task-board/handle-board (task-board-handler-deps)))
 
 (defn- handle-get-task [task-id]
   (http-session/handle-get-task (session-handler-deps) task-id))
@@ -1393,33 +1226,13 @@
   (http-workspace/handle-download-workspace-item (workspace-handler-deps) item-id req))
 
 (defn- handle-search-knowledge-nodes [req]
-  (let [params (parse-query-string (:query-string req))
-        query  (nonblank-str (get params "query"))
-        top    (parse-knowledge-search-top (get params "top"))]
-    (if-not query
-      (json-response 400 {:error "missing query"})
-      (json-response 200 {:query query
-                          :nodes (mapv knowledge-node->body
-                                       (search-knowledge-nodes query top))}))))
+  (http-knowledge/handle-search-nodes (knowledge-handler-deps) req))
 
 (defn- handle-list-knowledge-node-facts [node-id]
-  (if-let [node-eid (parse-optional-positive-long node-id "node id")]
-    (if-let [node (some-> node-eid memory/get-node not-empty)]
-      (json-response 200
-                     {:node  (knowledge-node->body (assoc node :db/id node-eid))
-                      :facts (mapv (fn [fact]
-                                     (knowledge-fact->body (assoc fact :node-eid node-eid)))
-                                   (memory/node-facts-with-eids node-eid))})
-      (json-response 404 {:error "node not found"}))
-    (json-response 400 {:error "invalid node id"})))
+  (http-knowledge/handle-list-node-facts (knowledge-handler-deps) node-id))
 
 (defn- handle-delete-knowledge-fact [fact-id]
-  (if-let [fact-eid (parse-optional-positive-long fact-id "fact id")]
-    (if-let [forgotten (memory/forget-fact! fact-eid)]
-      (json-response 200 {:status "forgotten"
-                          :fact   (knowledge-fact->body forgotten)})
-      (json-response 404 {:error "fact not found"}))
-    (json-response 400 {:error "invalid fact id"})))
+  (http-knowledge/handle-delete-fact (knowledge-handler-deps) fact-id))
 
 (defn- handle-health [_req]
   (json-response 200 {:status "ok" :version "0.1.0"}))
@@ -2080,17 +1893,17 @@
                       :port port})))
    (configure-web-dev! web-dev?)
    (bridge/register-channel-adapter! :http
-                                     {:prompt http-prompt-handler
-                                      :approval http-approval-handler
+                                     {:prompt http-interaction/prompt-handler
+                                      :approval http-interaction/approval-handler
                                       :status http-status-handler
                                       :runtime-event http-runtime-event-handler})
    (bridge/register-channel-adapter! :command
-                                     {:prompt http-prompt-handler
-                                      :approval http-approval-handler
+                                     {:prompt http-interaction/prompt-handler
+                                      :approval http-interaction/approval-handler
                                       :status http-status-handler
                                       :runtime-event http-runtime-event-handler})
    (bridge/register-channel-adapter! :websocket
-                                     {:approval http-approval-handler
+                                     {:approval http-interaction/approval-handler
                                       :status http-status-handler
                                       :runtime-event http-runtime-event-handler})
    (let [^ScheduledExecutorService finalizer-exec
