@@ -5,12 +5,12 @@
             [xia.autonomous :as autonomous]
             [xia.backup :as backup]
             [xia.browser :as browser]
+            [xia.bridge :as bridge]
             [xia.channel.messaging :as messaging]
             [xia.config :as config]
             [xia.context :as context]
             [xia.db :as db]
             [xia.db-schema :as db-schema]
-            [xia.hippocampus :as hippo]
             [xia.identity :as identity]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.llm :as llm]
@@ -588,8 +588,8 @@
 (defn- knowledge-decay->admin-body
   []
   (let [{:keys [grace-period-ms half-life-ms min-confidence maintenance-step-ms archive-after-bottom-ms]}
-        (hippo/knowledge-decay-settings)
-        resolutions (hippo/knowledge-decay-config-resolutions)]
+        (bridge/knowledge-decay-settings)
+        resolutions (bridge/knowledge-decay-config-resolutions)]
     {:grace_period_days         (long (/ (long grace-period-ms) (long ms-per-day)))
      :half_life_days            (long (/ (long half-life-ms) (long ms-per-day)))
      :min_confidence            min-confidence
@@ -617,7 +617,7 @@
 
 (defn- memory-consolidation->admin-body
   []
-  (hippo/consolidation-summary))
+  (bridge/memory-consolidation-summary))
 
 (defn- conversation-context->admin-body
   []

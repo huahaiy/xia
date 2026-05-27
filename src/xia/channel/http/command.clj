@@ -1,8 +1,8 @@
 (ns xia.channel.http.command
   "Machine command-channel HTTP handlers."
   (:require [taoensso.timbre :as log]
+            [xia.bridge :as bridge]
             [xia.checkpoint :as checkpoint]
-            [xia.hippocampus :as hippo]
             [xia.mcp :as mcp]
             [xia.runtime-health :as runtime-health]
             [xia.runtime-state :as runtime-state]
@@ -29,7 +29,7 @@
   [deps]
   (let [{:keys [phase draining? drain-requested-at accepting-new-work? idle? shutdown-allowed? blockers activity]}
         (runtime-health/idle-status)
-        memory-consolidation (hippo/consolidation-summary)]
+        memory-consolidation (bridge/memory-consolidation-summary)]
     {:phase (some-> phase name)
      :draining draining?
      :drain_requested_at (instant->str* deps drain-requested-at)

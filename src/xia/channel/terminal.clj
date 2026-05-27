@@ -9,7 +9,6 @@
             [xia.tool :as tool]
             [xia.memory :as memory]
             [xia.identity :as identity]
-            [xia.prompt :as prompt]
             [xia.context :as context]))
 
 (defonce ^:private terminal-statuses (atom {}))
@@ -89,7 +88,7 @@
   [{:keys [type data summary]}]
   (case type
     :task.status
-    (terminal-status {:session-id (:session-id prompt/*interaction-context*)
+    (terminal-status {:session-id (:session-id (bridge/interaction-context))
                       :state (runtime-event-keyword (:state data))
                       :phase (runtime-event-keyword (:phase data))
                       :message (or (:message data) summary)

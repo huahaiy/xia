@@ -10,7 +10,6 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http-client]
-            [xia.prompt :as prompt]
             [xia.runtime-state :as runtime-state])
   (:import [java.nio.charset StandardCharsets]
            [java.util Date]
@@ -287,7 +286,7 @@
 
 (defn- messaging-prompt
   [label & {:keys [mask?] :or {mask? false}}]
-  (let [{:keys [channel session-id task-id]} prompt/*interaction-context*]
+  (let [{:keys [channel session-id task-id]} (bridge/interaction-context)]
     (when-not (and session-id (messaging-channel? channel))
       (throw (ex-info "Messaging prompt requires a messaging session"
                       {:channel channel
@@ -302,16 +301,16 @@
                        :mask? (boolean mask?)
                        :created-at (Date.)
                        :response (promise)}]
-      (prompt/register-interaction! interaction)
+      (bridge/register-interaction! interaction)
       (try
         (send-session-message! channel session-id (prompt-request-text interaction))
         (str (await-interaction-result session-id channel interaction))
         (finally
-          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
+          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
 
 (defn- messaging-approval
   [{:keys [tool-id tool-name description arguments reason]}]
-  (let [{:keys [channel session-id task-id]} prompt/*interaction-context*]
+  (let [{:keys [channel session-id task-id]} (bridge/interaction-context)]
     (when-not (and session-id (messaging-channel? channel))
       (throw (ex-info "Messaging approval requires a messaging session"
                       {:channel channel
@@ -329,12 +328,12 @@
                        :reason reason
                        :created-at (Date.)
                        :response (promise)}]
-      (prompt/register-interaction! interaction)
+      (bridge/register-interaction! interaction)
       (try
         (send-session-message! channel session-id (approval-request-text interaction))
         (= :allow (await-interaction-result session-id channel interaction))
         (finally
-          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
+          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
 
 (defn valid-slack-signature?
   [body-bytes timestamp signature]

@@ -55,6 +55,11 @@
   [session-id user-message & {:as opts}]
   (apply agent/process-message session-id user-message (mapcat identity opts)))
 
+(defn interaction-context
+  "Return the current bridge interaction context."
+  []
+  prompt/*interaction-context*)
+
 (defn working-memory-context
   "Return the channel-facing working-memory context for a session."
   [session-id]
@@ -75,6 +80,27 @@
   "Persist a session conversation into long-term memory."
   [session-id channel & {:as opts}]
   (apply hippo/record-conversation! session-id channel (mapcat identity opts)))
+
+(defn memory-consolidation-summary
+  "Return current long-term memory consolidation status."
+  []
+  (hippo/consolidation-summary))
+
+(defn knowledge-decay-settings
+  "Return resolved knowledge decay settings."
+  []
+  (hippo/knowledge-decay-settings))
+
+(defn knowledge-decay-config-resolutions
+  "Return config-resolution metadata for knowledge decay settings."
+  []
+  (hippo/knowledge-decay-config-resolutions))
+
+(defn run-memory-maintenance!
+  "Run pending memory consolidation and knowledge maintenance."
+  [now]
+  (hippo/consolidate-if-pending!)
+  (hippo/maintain-knowledge! now))
 
 (defn clear-working-memory!
   "Clear installed working memory for a session."
@@ -139,6 +165,16 @@
   "Return a pending prompt or approval by session/task/channel selector."
   [selector]
   (prompt/pending-interaction selector))
+
+(defn register-interaction!
+  "Register a pending prompt or approval interaction."
+  [interaction]
+  (prompt/register-interaction! interaction))
+
+(defn clear-pending-interaction!
+  "Clear a pending prompt or approval interaction."
+  [selector]
+  (prompt/clear-pending-interaction! selector))
 
 (defn resolve-pending-interaction
   "Resolve the best pending interaction for a selector."

@@ -19,7 +19,6 @@
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
             [xia.runtime-state :as runtime-state]
-            [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
             [xia.util :as util])
   (:import [java.io ByteArrayOutputStream InputStream]
@@ -705,18 +704,19 @@
 
 (defn- http-prompt-handler
   [label & {:keys [mask?] :or {mask? false}}]
-  (let [sid (some-> (:session-id prompt/*interaction-context*) str)]
+  (let [interaction-context (bridge/interaction-context)
+        sid (some-> (:session-id interaction-context) str)]
     (when-not sid
       (throw (ex-info "HTTP prompt requires a session id"
                       {:label label})))
-    (let [task-id   (or (:task-id prompt/*interaction-context*)
+    (let [task-id   (or (:task-id interaction-context)
                         (current-session-task-id sid))
           prompt-id (str (random-uuid))
           response  (promise)
-          prompt*   (prompt/register-interaction!
+          prompt*   (bridge/register-interaction!
                      {:interaction-id prompt-id
                       :kind :prompt
-                      :channel (or (:channel prompt/*interaction-context*) :http)
+                      :channel (or (:channel interaction-context) :http)
                       :session-id sid
                       :task-id task-id
                       :prompt-id  prompt-id
@@ -727,27 +727,28 @@
       (try
         (let [result (deref response approval-timeout-ms ::timeout)]
           (if (= result ::timeout)
-            (throw (ex-info "Timed out waiting for interactive input"
-                            {:label label
-                             :session-id sid}))
-            (str (or result ""))))
+                            (throw (ex-info "Timed out waiting for interactive input"
+                                            {:label label
+                                             :session-id sid}))
+                            (str (or result ""))))
         (finally
-          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id prompt*)}))))))
+          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id prompt*)}))))))
 
 (defn- http-approval-handler
   [{:keys [session-id tool-id tool-name description arguments reason policy]}]
-  (let [sid (some-> session-id str)]
+  (let [interaction-context (bridge/interaction-context)
+        sid (some-> session-id str)]
     (when-not sid
       (throw (ex-info "HTTP approval requires a session id"
                       {:tool-id tool-id})))
-    (let [task-id     (or (:task-id prompt/*interaction-context*)
+    (let [task-id     (or (:task-id interaction-context)
                           (current-session-task-id sid))
           approval-id (str (random-uuid))
           response    (promise)
-          approval*   (prompt/register-interaction!
+          approval*   (bridge/register-interaction!
                        {:interaction-id approval-id
                         :kind :approval
-                        :channel (or (:channel prompt/*interaction-context*) :http)
+                        :channel (or (:channel interaction-context) :http)
                         :session-id sid
                         :task-id task-id
                         :approval-id approval-id
@@ -764,11 +765,11 @@
           (case result
             :allow true
             :deny  false
-            (throw (ex-info "Timed out waiting for tool approval"
-                            {:tool-id tool-id
-                             :session-id sid}))))
+                            (throw (ex-info "Timed out waiting for tool approval"
+                                            {:tool-id tool-id
+                                             :session-id sid}))))
         (finally
-          (prompt/clear-pending-interaction! {:interaction-id (:interaction-id approval*)}))))))
+          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id approval*)}))))))
 
 (declare touch-rest-session!)
 

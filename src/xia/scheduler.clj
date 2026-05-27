@@ -15,7 +15,6 @@
             [xia.backup :as backup]
             [xia.bridge :as bridge]
             [xia.db :as db]
-            [xia.hippocampus :as hippo]
             [xia.limits :as limits]
             [xia.llm :as llm]
             [xia.oauth :as oauth]
@@ -459,8 +458,7 @@
           (submit-work! "background maintenance"
                         (fn []
                           (try
-                            (hippo/consolidate-if-pending!)
-                            (hippo/maintain-knowledge! now)
+                            (bridge/run-memory-maintenance! now)
                             (reset! (last-maintenance-at-atom) now)
                             (catch Exception e
                               (log/error e "Background maintenance failed"))
