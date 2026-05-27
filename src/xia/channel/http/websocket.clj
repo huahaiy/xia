@@ -4,9 +4,7 @@
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [taoensso.timbre :as log]
-            [xia.bridge :as bridge]
-            [xia.hippocampus :as hippo]
-            [xia.working-memory :as wm]))
+            [xia.bridge :as bridge]))
 
 (def ^:private receive-retry-delay-ms 5000)
 
@@ -106,18 +104,18 @@
     (clear-receive-failure! deps sid)
     (let [topics-or-failure
           (try
-            (:topics (wm/get-wm sid))
+            (bridge/session-topics sid)
             (catch Exception e
               (record-session-finalization-failure! deps sid :websocket :load-working-memory e)
               ::finalization-failed))]
       (when-not (= ::finalization-failed topics-or-failure)
         (let [finalized?
               (try
-                (wm/clear-autonomy-state! sid)
-                (wm/snapshot! sid)
-                (hippo/record-conversation! sid :websocket
-                                            :topics topics-or-failure
-                                            :consolidation-mode :sync)
+                (bridge/clear-session-autonomy-state! sid)
+                (bridge/record-session-conversation! sid
+                                                     :websocket
+                                                     :topics topics-or-failure
+                                                     :consolidation-mode :sync)
                 true
                 (catch Exception e
                   (record-session-finalization-failure! deps sid :websocket :persist-session e)
@@ -125,7 +123,7 @@
           (when finalized?
             (swap! (:session-statuses-atom deps) dissoc (str sid))
             (try
-              (wm/clear-wm! sid)
+              (bridge/clear-working-memory! sid)
               (catch Exception e
                 (log/error e "Failed to clear WebSocket working memory"))))))))
   (swap! (:ws-sessions-atom deps) dissoc ch)

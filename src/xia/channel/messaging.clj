@@ -4,7 +4,6 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.audit :as audit]
             [xia.bridge :as bridge]
@@ -12,8 +11,7 @@
             [xia.db :as db]
             [xia.http-client :as http-client]
             [xia.prompt :as prompt]
-            [xia.runtime-state :as runtime-state]
-            [xia.task-inspection :as task-inspection])
+            [xia.runtime-state :as runtime-state])
   (:import [java.nio.charset StandardCharsets]
            [java.util Date]
            [java.util.concurrent Executors ScheduledExecutorService TimeUnit]
@@ -479,16 +477,7 @@
   ([session-id]
    (current-task-context session-id true))
   ([session-id compact?]
-   (when-let [task (db/current-session-task session-id)]
-     (let [autonomy-state (task-runtime/inspect-runtime-autonomy-state session-id (:id task))
-           inspection     (task-inspection/task-inspection
-                           {:truncate-text truncate-summary}
-                           task
-                           autonomy-state
-                           compact?)]
-       {:task task
-        :autonomy-state autonomy-state
-        :inspection inspection}))))
+   (bridge/current-task-context session-id compact?)))
 
 (defn- task-status-text
   [session-id]

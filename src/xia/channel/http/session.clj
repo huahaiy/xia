@@ -3,15 +3,13 @@
   (:require [charred.api :as json]
             [org.httpkit.server :as http]
             [taoensso.timbre :as log]
-            [xia.agent.task-runtime :as task-runtime]
             [xia.autonomous :as autonomous]
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.goal :as goal]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
-            [xia.task-event :as task-event]
-            [xia.task-inspection :as task-inspection]))
+            [xia.task-event :as task-event]))
 
 (def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
 
@@ -486,20 +484,16 @@
   ([deps task]
    (task->body deps
                task
-               (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))))
+               (bridge/task-autonomy-state task)))
   ([deps task autonomy-state]
    (let [runtime         (get-in task [:meta :runtime])
          execution-role  (task-execution-session-role task)
-         recovery        (task-runtime/task-recovery task)
-         boundary        (task-runtime/task-boundary-summary task)
-         checkpoint      (task-runtime/task-checkpoint task)
-         checkpoint-at   (task-runtime/task-checkpoint-at task)
-         resume-hint     (task-runtime/task-resume-hint task)
-         recovery-brief  (task-runtime/task-recovery-brief task)
+         {:keys [recovery checkpoint checkpoint-at resume-hint recovery-brief]
+          boundary :boundary-summary} (bridge/task-runtime-view task)
          persistent-goal (get-in task [:meta :persistent-goal])
          contract        (:contract task)
          constraints     (:constraints task)
-         inspection      (task-inspection/task-inspection
+         inspection      (bridge/task-inspection
                           {:instant->str #(instant->str* deps %)
                            :truncate-text #(truncate-text* deps %1 %2)}
                           task
@@ -564,7 +558,7 @@
   ([deps task]
    (history-task->body deps
                        task
-                       (task-runtime/inspect-runtime-autonomy-state (:session-id task) (:id task))
+                       (bridge/task-autonomy-state task)
                        nil))
   ([deps task autonomy-state]
    (history-task->body deps task autonomy-state nil))
@@ -574,15 +568,11 @@
          latest-turn (last turns)
          runtime     (get-in task [:meta :runtime])
          execution-role (task-execution-session-role task)
-         recovery    (task-runtime/task-recovery task)
-         boundary    (task-runtime/task-boundary-summary task)
-         checkpoint  (task-runtime/task-checkpoint task)
-         checkpoint-at (task-runtime/task-checkpoint-at task)
-         resume-hint (task-runtime/task-resume-hint task)
-         recovery-brief (task-runtime/task-recovery-brief task)
+         {:keys [recovery checkpoint checkpoint-at resume-hint recovery-brief]
+          boundary :boundary-summary} (bridge/task-runtime-view task)
          contract    (history-contract->body (:contract task))
          constraints (:constraints task)
-         inspection  (task-inspection/task-inspection
+         inspection  (bridge/task-inspection
                       {:instant->str #(instant->str* deps %)
                        :truncate-text #(truncate-text* deps %1 %2)}
                       task
@@ -1302,9 +1292,7 @@
                     {:tasks (->> tasks
                                  (into [] (map #(history-task->body deps
                                                                    %
-                                                                   (task-runtime/inspect-runtime-autonomy-state
-                                                                    (:session-id %)
-                                                                    (:id %))
+                                                                   (bridge/task-autonomy-state %)
                                                                    (get history-data (:id %))))))})))
 
 (defn handle-get-task

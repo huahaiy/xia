@@ -10,7 +10,6 @@
             [xia.memory :as memory]
             [xia.identity :as identity]
             [xia.prompt :as prompt]
-            [xia.working-memory :as wm]
             [xia.context :as context]))
 
 (defonce ^:private terminal-statuses (atom {}))
@@ -179,7 +178,7 @@
                 (recur))
 
             (= trimmed "/context")
-            (do (let [wm-ctx (wm/wm->context session-id)]
+            (do (let [wm-ctx (bridge/working-memory-context session-id)]
                   (if wm-ctx
                     (do (when (:topics wm-ctx)
                           (println (str "  Topic: " (:topics wm-ctx))))

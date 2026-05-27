@@ -5,9 +5,14 @@
   HTTP/WebSocket, command, IDE, and messaging integrations share one shape for
   message dispatch, interaction replies, controls, and runtime adapter wiring."
   (:require [xia.agent :as agent]
+            [xia.agent.task-runtime :as task-runtime]
+            [xia.agent.tools :as agent-tools]
             [xia.db :as db]
+            [xia.hippocampus :as hippo]
             [xia.prompt :as prompt]
-            [xia.session-lifecycle :as session-life]))
+            [xia.session-lifecycle :as session-life]
+            [xia.task-inspection :as task-inspection]
+            [xia.working-memory :as wm]))
 
 (defn register-channel-adapter!
   "Register the interaction adapter for a user-facing channel.
@@ -49,6 +54,74 @@
   without depending on agent internals."
   [session-id user-message & {:as opts}]
   (apply agent/process-message session-id user-message (mapcat identity opts)))
+
+(defn working-memory-context
+  "Return the channel-facing working-memory context for a session."
+  [session-id]
+  (wm/wm->context session-id))
+
+(defn session-topics
+  "Return the current working-memory topic summary for a session."
+  [session-id]
+  (:topics (wm/get-wm session-id)))
+
+(defn clear-session-autonomy-state!
+  "Clear autonomy state and snapshot working memory for a session."
+  [session-id]
+  (wm/clear-autonomy-state! session-id)
+  (wm/snapshot! session-id))
+
+(defn record-session-conversation!
+  "Persist a session conversation into long-term memory."
+  [session-id channel & {:as opts}]
+  (apply hippo/record-conversation! session-id channel (mapcat identity opts)))
+
+(defn clear-working-memory!
+  "Clear installed working memory for a session."
+  [session-id]
+  (wm/clear-wm! session-id))
+
+(defn current-task-context
+  "Return the current task, autonomy state, and compact inspection for a session."
+  ([session-id]
+   (current-task-context session-id true))
+  ([session-id compact?]
+   (when-let [task (db/current-session-task session-id)]
+     (let [autonomy-state (task-runtime/inspect-runtime-autonomy-state session-id (:id task))
+           inspection (task-inspection/task-inspection
+                       {:truncate-text agent-tools/truncate-summary}
+                       task
+                       autonomy-state
+                       compact?)]
+       {:task task
+        :autonomy-state autonomy-state
+        :inspection inspection}))))
+
+(defn task-autonomy-state
+  "Return the runtime autonomy state for `task` or the supplied session/task ids."
+  ([task]
+   (task-autonomy-state (:session-id task) (:id task)))
+  ([session-id task-id]
+   (task-runtime/inspect-runtime-autonomy-state session-id task-id)))
+
+(defn task-runtime-view
+  "Return channel-facing runtime metadata derived from a persisted task."
+  [task]
+  {:recovery (task-runtime/task-recovery task)
+   :boundary-summary (task-runtime/task-boundary-summary task)
+   :checkpoint (task-runtime/task-checkpoint task)
+   :checkpoint-at (task-runtime/task-checkpoint-at task)
+   :resume-hint (task-runtime/task-resume-hint task)
+   :recovery-brief (task-runtime/task-recovery-brief task)})
+
+(defn task-inspection
+  "Return a task inspection view for channel presentation."
+  ([opts task autonomy-state]
+   (task-inspection/task-inspection opts task autonomy-state))
+  ([opts task autonomy-state compact?]
+   (task-inspection/task-inspection opts task autonomy-state compact?))
+  ([opts task autonomy-state compact? history-data]
+   (task-inspection/task-inspection opts task autonomy-state compact? history-data)))
 
 (defn session-cancelled?
   "True when the session has been cancelled or interrupted."
