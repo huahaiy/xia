@@ -12,7 +12,4 @@
                              "timeout_ms"  {"type"        "integer"
                                             "description" "Optional timeout in milliseconds for waiting for the child Xia to stop."}}
                "required"   ["instance_id"]}
- :handler     "(fn [args]
-                 (xia.instance-supervisor/stop-instance!
-                   (get args \"instance_id\")
-                   :timeout-ms (get args \"timeout_ms\")))"}
+ :handler-var xia.tool.builtin/peer-instance-stop}

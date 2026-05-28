@@ -336,6 +336,7 @@
  :kg.fact/node #:db{:valueType :db.type/ref},
  :llm.log/duration-ms #:db{:valueType :db.type/long},
  :tool/handler #:db{:valueType :db.type/string},
+ :tool/handler-var #:db{:valueType :db.type/string},
  :task.item/role #:db{:valueType :db.type/keyword},
  :schedule/last-run #:db{:valueType :db.type/instant},
  :service/name #:db{:valueType :db.type/string},

@@ -14,9 +14,4 @@
                              "name"         {"type"        "string"
                                              "description" "Optional shared filename override."}}
                "required"   ["doc_id"]}
- :handler     "(fn [args]
-                 (dissoc (xia.workspace/publish-local-doc!
-                           (get args \"doc_id\")
-                           :workspace-id (get args \"workspace_id\")
-                           :name (get args \"name\"))
-                         :payload-path :sha256 :meta))"}
+ :handler-var xia.tool.builtin/workspace-publish-doc}

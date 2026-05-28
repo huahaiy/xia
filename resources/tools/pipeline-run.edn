@@ -13,5 +13,4 @@
                                 "max_calls" {"type"        "integer"
                                              "description" "Optional per-run tool call limit. It cannot exceed Xia's configured pipeline limit."}}
                   "required"   ["code"]}
- :handler        "(fn [args]
-                    (xia.pipeline/run! args))"}
+ :handler-var xia.tool.builtin/pipeline-run}

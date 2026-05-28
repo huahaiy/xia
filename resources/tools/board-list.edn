@@ -16,9 +16,4 @@
                                 "limit"            {"type"        "integer"
                                                     "description" "Maximum cards to return, up to 500."}}
                   "required"   []}
- :handler        "(fn [args]
-                    (xia.board/list-cards
-                      {:status (get args \"status\")
-                       :assignee (get args \"assignee\")
-                       :include-terminal? (get args \"include_terminal\")
-                       :limit (get args \"limit\")}))"}
+ :handler-var xia.tool.builtin/board-list}

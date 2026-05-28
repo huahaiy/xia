@@ -7,4 +7,4 @@
  :tags        #{:schedule :automation :task}
  :execution-mode :parallel-safe
  :parameters  {"type" "object" "properties" {}}
- :handler     "(fn [_] (xia.schedule/list-schedules))"}
+ :handler-var xia.tool.builtin/schedule-list}

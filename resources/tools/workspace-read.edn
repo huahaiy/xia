@@ -16,10 +16,4 @@
                                 "max_chars"    {"type"        "integer"
                                                 "description" "Maximum number of characters to return for text items (default 4000)."}}
                   "required"   ["item_id"]}
- :handler        "(fn [args]
-                    (dissoc (xia.workspace/read-item
-                              (get args \"item_id\")
-                              :workspace-id (get args \"workspace_id\")
-                              :offset (or (get args \"offset\") 0)
-                              :max-chars (or (get args \"max_chars\") 4000))
-                            :payload-path :sha256 :meta))"}
+ :handler-var xia.tool.builtin/workspace-read}

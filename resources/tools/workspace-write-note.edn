@@ -18,11 +18,4 @@
                              "workspace_id" {"type"        "string"
                                              "description" "Optional shared workspace id. Defaults to `default`."}}
                "required"   ["content"]}
- :handler     "(fn [args]
-                 (dissoc (xia.workspace/write-note!
-                           (get args \"content\")
-                           :workspace-id (get args \"workspace_id\")
-                           :title (get args \"title\")
-                           :name (get args \"name\")
-                           :media-type (get args \"media_type\"))
-                         :payload-path :sha256 :meta))"}
+ :handler-var xia.tool.builtin/workspace-write-note}

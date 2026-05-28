@@ -12,6 +12,4 @@
                                 "top"   {"type"        "integer"
                                          "description" "Maximum number of matching documents to return (default 5)."}}
                   "required"   ["query"]}
- :handler        "(fn [args]
-                    (xia.local-doc/search-visible-docs (get args \"query\")
-                                                       :top (or (get args \"top\") 5)))"}
+ :handler-var xia.tool.builtin/local-doc-search}

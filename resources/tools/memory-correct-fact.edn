@@ -16,9 +16,4 @@
                              "fact_id"        {"type"        "integer"
                                               "description" "Optional fact id returned by a prior ambiguous/not_found result to target one specific fact"}} 
                "required"   ["old_fact" "corrected_fact"]}
- :handler     "(fn [args]
-                 (xia.memory-edit/correct-fact!
-                   {:fact-id        (get args \"fact_id\")
-                    :old-fact       (get args \"old_fact\")
-                    :corrected-fact (get args \"corrected_fact\")
-                    :entity-name    (get args \"entity_name\")}))"}
+ :handler-var xia.tool.builtin/memory-correct-fact}

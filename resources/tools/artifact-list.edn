@@ -10,6 +10,4 @@
                   "properties" {"top" {"type"        "integer"
                                         "description" "Maximum number of artifacts to return (default 20)."}}
                   "required"   []}
- :handler        "(fn [args]
-                    (mapv #(dissoc % :text :sha256 :meta)
-                          (xia.artifact/list-visible-artifacts :top (or (get args \"top\") 20))))"}
+ :handler-var xia.tool.builtin/artifact-list}

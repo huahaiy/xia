@@ -22,12 +22,4 @@
                              "assignee"    {"type"        "string"
                                             "description" "Optional new assignee."}}
                "required"   ["card_id"]}
- :handler     "(fn [args]
-                 (xia.board/update-card!
-                   (get args \"card_id\")
-                   {:claim-token (get args \"claim_token\")
-                    :title (get args \"title\")
-                    :description (get args \"description\")
-                    :status (get args \"status\")
-                    :priority (get args \"priority\")
-                    :assignee (get args \"assignee\")}))"}
+ :handler-var xia.tool.builtin/board-update}

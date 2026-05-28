@@ -9,5 +9,4 @@
  :parameters  {"type"       "object"
                "properties" {}
                "required"   []}
- :handler     "(fn [_]
-                 (xia.browser/list-sites))"}
+ :handler-var xia.tool.builtin/browser-list-sites}

@@ -16,19 +16,4 @@
                                 "browser_limit" {"type"        "integer"
                                                  "description" "How many browser sessions to return (default 5)."}}
                   "required"   []}
- :handler        "(fn [args]
-                    (let [episode-limit  (or (get args \"episode_limit\") 5)
-                          artifact-limit (or (get args \"artifact_limit\") 5)
-                          document-limit (or (get args \"document_limit\") 5)
-                          browser-limit  (or (get args \"browser_limit\") 5)]
-                      {:recent_episodes (xia.memory/recent-episodes episode-limit)
-                       :browser_sessions (->> (xia.browser/list-sessions)
-                                              (sort-by (fn [session]
-                                                         [(long (or (:age-seconds session) 0))
-                                                          (str (:session-id session))]))
-                                              (take browser-limit)
-                                              vec)
-                       :artifacts (mapv #(dissoc % :text :sha256 :meta)
-                                        (xia.artifact/list-visible-artifacts :top artifact-limit))
-                       :local_documents (mapv #(dissoc % :text :sha256)
-                                              (xia.local-doc/list-visible-docs :top document-limit))}))"}
+ :handler-var xia.tool.builtin/recent-work}

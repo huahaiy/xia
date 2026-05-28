@@ -177,6 +177,41 @@
     :autonomous-scope nil
     :reason "changes autonomous background tasks"}])
 
+(def ^:private first-party-handler-policy-targets
+  {"xia.tool.builtin/artifact-create" ["xia.artifact/create-artifact!"]
+   "xia.tool.builtin/artifact-delete" ["xia.artifact/delete-artifact!"]
+   "xia.tool.builtin/branch-tasks" ["xia.agent/run-branch-tasks"]
+   "xia.tool.builtin/browser-click" ["xia.browser/click"]
+   "xia.tool.builtin/browser-fill-form" ["xia.browser/fill-form"]
+   "xia.tool.builtin/browser-login" ["xia.browser/login"]
+   "xia.tool.builtin/browser-login-interactive" ["xia.browser/login-interactive"]
+   "xia.tool.builtin/browser-navigate" ["xia.browser/navigate"]
+   "xia.tool.builtin/browser-open" ["xia.browser/open-session"]
+   "xia.tool.builtin/browser-query-elements" ["xia.browser/query-elements"]
+   "xia.tool.builtin/browser-read-page" ["xia.browser/read-page"]
+   "xia.tool.builtin/browser-screenshot" ["xia.browser/screenshot"]
+   "xia.tool.builtin/browser-wait" ["xia.browser/wait-for-page"]
+   "xia.tool.builtin/email-delete" ["xia.email/"]
+   "xia.tool.builtin/email-draft-delete" ["xia.email/"]
+   "xia.tool.builtin/email-draft-list" ["xia.email/"]
+   "xia.tool.builtin/email-draft-read" ["xia.email/"]
+   "xia.tool.builtin/email-draft-save" ["xia.email/"]
+   "xia.tool.builtin/email-draft-send" ["xia.email/"]
+   "xia.tool.builtin/email-label-list" ["xia.email/"]
+   "xia.tool.builtin/email-list" ["xia.email/"]
+   "xia.tool.builtin/email-read" ["xia.email/"]
+   "xia.tool.builtin/email-send" ["xia.email/"]
+   "xia.tool.builtin/email-update" ["xia.email/"]
+   "xia.tool.builtin/peer-chat" ["xia.peer/chat"]
+   "xia.tool.builtin/peer-instance-list" ["xia.instance-supervisor/"]
+   "xia.tool.builtin/peer-instance-start" ["xia.instance-supervisor/"]
+   "xia.tool.builtin/peer-instance-status" ["xia.instance-supervisor/"]
+   "xia.tool.builtin/peer-instance-stop" ["xia.instance-supervisor/"]
+   "xia.tool.builtin/schedule-create" ["xia.schedule/create-schedule!"]
+   "xia.tool.builtin/schedule-manage" ["xia.schedule/pause-schedule!"
+                                       "xia.schedule/resume-schedule!"
+                                       "xia.schedule/remove-schedule!"]})
+
 (defn supervisor-max-identical-iterations
   []
   (cfg/positive-long :agent/supervisor-max-identical-iterations
@@ -463,9 +498,21 @@
     :auto :auto
     :auto))
 
+(defn- tool-handler-match-text
+  [tool]
+  (let [handler     (or (:tool/handler tool) (:handler tool))
+        handler-var (or (:tool/handler-var tool) (:handler-var tool))
+        handler-var-text (when (some? handler-var) (str handler-var))]
+    (str/join "\n"
+              (remove str/blank?
+                      (concat [(str handler)
+                               handler-var-text]
+                              (get first-party-handler-policy-targets
+                                   handler-var-text))))))
+
 (defn matching-privileged-rules
   [tool]
-  (let [handler (or (:tool/handler tool) (:handler tool) "")]
+  (let [handler (tool-handler-match-text tool)]
     (filterv (fn [{:keys [match]}]
                (str/includes? handler match))
              privileged-handler-rules)))
@@ -551,7 +598,7 @@
                       "unknown-tool")
         tool-tags (set (:tool/tags tool))
         approval-policy (:policy approval-decision)
-        handler (or (:tool/handler tool) (:handler tool) "")
+        handler (tool-handler-match-text tool)
         handler-rule (some (fn [{:keys [match] :as rule}]
                              (when (str/includes? handler match)
                                rule))

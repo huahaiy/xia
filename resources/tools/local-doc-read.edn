@@ -14,7 +14,4 @@
                                 "max_chars" {"type"        "integer"
                                              "description" "Maximum number of characters to return (default 4000)."}}
                   "required"   ["doc_id"]}
- :handler        "(fn [args]
-                    (xia.local-doc/read-visible-doc (get args \"doc_id\")
-                                                    :offset (or (get args \"offset\") 0)
-                                                    :max-chars (or (get args \"max_chars\") 4000)))"}
+ :handler-var xia.tool.builtin/local-doc-read}

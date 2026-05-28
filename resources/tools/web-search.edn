@@ -12,6 +12,4 @@
                              "max_results" {"type"        "integer"
                                             "description" "Max number of results to return (default 5)"}}
                "required"   ["query"]}
- :handler     "(fn [args]
-                 (xia.web/search-web (get args \"query\")
-                                     :max-results (or (get args \"max_results\") 5)))"}
+ :handler-var xia.tool.builtin/web-search}

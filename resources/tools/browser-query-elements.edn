@@ -24,11 +24,4 @@
                                 "limit" {"type"        "integer"
                                          "description" "Maximum number of elements to return. Defaults to 25 and is capped internally."}}
                   "required"   ["session_id"]}
- :handler        "(fn [args]
-                    (xia.browser/query-elements (get args \"session_id\")
-                                                :kind (get args \"kind\")
-                                                :selector (get args \"selector\")
-                                                :text-contains (get args \"text_contains\")
-                                                :visible-only (boolean (get args \"visible_only\"))
-                                                :offset (or (get args \"offset\") 0)
-                                                :limit (or (get args \"limit\") 25)))"}
+ :handler-var xia.tool.builtin/browser-query-elements}

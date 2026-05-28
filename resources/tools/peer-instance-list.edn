@@ -8,5 +8,4 @@
  :parameters  {"type"       "object"
                "properties" {}
                "required"   []}
- :handler     "(fn [_args]
-                 {:instances (xia.instance-supervisor/list-managed-instances)})"}
+ :handler-var xia.tool.builtin/peer-instance-list}

@@ -24,12 +24,4 @@
                              "interval_minutes" {"type"        "integer"
                                                   "description" "Microsoft availability view interval, default 30"}}
                "required"   ["time_min" "time_max"]}
- :handler     "(fn [args]
-                 (xia.calendar/find-availability
-                   :service-id (get args \"service_id\")
-                   :calendars (or (get args \"calendars\")
-                                  (get args \"calendar_ids\"))
-                   :time-min (get args \"time_min\")
-                   :time-max (get args \"time_max\")
-                   :time-zone (get args \"time_zone\")
-                   :interval-minutes (get args \"interval_minutes\")))"}
+ :handler-var xia.tool.builtin/calendar-availability}

@@ -20,10 +20,4 @@
                              "url_contains" {"type"        "string"
                                              "description" "Optional URL substring to wait for"}}
                "required"   ["session_id"]}
- :handler     "(fn [args]
-                 (xia.browser/wait-for-page (get args \"session_id\")
-                   :timeout-ms (or (get args \"timeout_ms\") 10000)
-                   :interval-ms (or (get args \"interval_ms\") 500)
-                   :selector (get args \"selector\")
-                   :text (get args \"text\")
-                   :url-contains (get args \"url_contains\")))"}
+ :handler-var xia.tool.builtin/browser-wait}

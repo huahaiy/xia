@@ -16,9 +16,4 @@
                              "send_updates" {"type"        "string"
                                               "description" "Google sendUpdates value: all, externalOnly, or none"}}
                "required"   ["event_id"]}
- :handler     "(fn [args]
-                 (xia.calendar/delete-event
-                   (get args \"event_id\")
-                   :calendar-id (get args \"calendar_id\")
-                   :service-id (get args \"service_id\")
-                   :send-updates (get args \"send_updates\")))"}
+ :handler-var xia.tool.builtin/calendar-event-delete}

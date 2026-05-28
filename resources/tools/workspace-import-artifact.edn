@@ -16,10 +16,4 @@
                              "title"        {"type"        "string"
                                              "description" "Optional imported artifact title override."}}
                "required"   ["item_id"]}
- :handler     "(fn [args]
-                 (dissoc (xia.workspace/import-item-as-artifact!
-                           (get args \"item_id\")
-                           :workspace-id (get args \"workspace_id\")
-                           :name (get args \"name\")
-                           :title (get args \"title\"))
-                         :sha256 :meta :blob-id :blob-codec :compressed-size-bytes))"}
+ :handler-var xia.tool.builtin/workspace-import-artifact}

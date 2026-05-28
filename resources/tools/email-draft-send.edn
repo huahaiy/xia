@@ -12,7 +12,4 @@
                              "service_id" {"type"        "string"
                                            "description" "Optional email service id if you have more than one configured"}}
                "required"   ["draft_id"]}
- :handler     "(fn [args]
-                 (xia.email/send-draft
-                   (get args \"draft_id\")
-                   :service-id (get args \"service_id\")))"}
+ :handler-var xia.tool.builtin/email-draft-send}

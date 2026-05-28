@@ -16,10 +16,4 @@
                              "ocr_mode"     {"type"        "string"
                                              "description" "Optional OCR mode when importing an image-based workspace item."}}
                "required"   ["item_id"]}
- :handler     "(fn [args]
-                 (dissoc (xia.workspace/import-item-as-local-doc!
-                           (get args \"item_id\")
-                           :workspace-id (get args \"workspace_id\")
-                           :name (get args \"name\")
-                           :ocr-mode (get args \"ocr_mode\"))
-                         :sha256))"}
+ :handler-var xia.tool.builtin/workspace-import-doc}

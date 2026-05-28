@@ -10,5 +10,4 @@
                "properties" {"session_id" {"type"        "string"
                                            "description" "The browser session ID to inspect"}}
                "required"   ["session_id"]}
- :handler     "(fn [args]
-                 (xia.browser/read-page (get args \"session_id\")))"}
+ :handler-var xia.tool.builtin/browser-read-page}

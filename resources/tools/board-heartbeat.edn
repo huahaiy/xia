@@ -10,7 +10,4 @@
                              "claim_token" {"type"        "string"
                                             "description" "Claim token returned by board-claim."}}
                "required"   ["card_id" "claim_token"]}
- :handler     "(fn [args]
-                 (xia.board/heartbeat-card!
-                   (get args \"card_id\")
-                   {:claim-token (get args \"claim_token\")}))"}
+ :handler-var xia.tool.builtin/board-heartbeat}

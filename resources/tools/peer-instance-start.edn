@@ -20,11 +20,4 @@
                              "wait_for_ready_ms"  {"type"        "integer"
                                                   "description" "Optional timeout in milliseconds for waiting until the child Xia is ready."}}
                "required"   ["instance_id"]}
- :handler     "(fn [args]
-                 (xia.instance-supervisor/start-instance!
-                   (get args \"instance_id\")
-                   :template-instance (get args \"template_instance\")
-                   :port (get args \"port\")
-                   :service-id (get args \"service_id\")
-                   :service-name (get args \"service_name\")
-                   :wait-for-ready-ms (get args \"wait_for_ready_ms\")))"}
+ :handler-var xia.tool.builtin/peer-instance-start}

@@ -9,5 +9,4 @@
  :parameters  {"type"       "object"
                "properties" {"backend" {"type" "string"
                                         "description" "Optional backend to bootstrap: auto, playwright, or remote."}}}
- :handler     "(fn [args]
-                 (xia.browser/bootstrap-runtime! :backend (or (get args \"backend\") \"auto\")))"}
+ :handler-var xia.tool.builtin/browser-bootstrap-runtime}

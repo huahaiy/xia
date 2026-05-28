@@ -17,9 +17,4 @@
                              "backend" {"type" "string"
                                         "description" "Optional browser backend override: auto, playwright, or remote."}}
                "required"   ["url"]}
- :handler     "(fn [args]
-                 (let [js (get args \"js\")
-                       backend (get args \"backend\")]
-                   (xia.browser/open-session (get args \"url\")
-                                             :js (if (nil? js) true js)
-                                             :backend backend)))"}
+ :handler-var xia.tool.builtin/browser-open}

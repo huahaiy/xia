@@ -12,6 +12,4 @@
                                 "top"   {"type"        "integer"
                                          "description" "Maximum number of matching artifacts to return (default 5)."}}
                   "required"   ["query"]}
- :handler        "(fn [args]
-                    (xia.artifact/search-visible-artifacts (get args \"query\")
-                                                           :top (or (get args \"top\") 5)))"}
+ :handler-var xia.tool.builtin/artifact-search}

@@ -9,6 +9,11 @@
 
 (use-fixtures :each with-test-db)
 
+(defn clojure-handler
+  [args]
+  {"status" "clj"
+   "value" (get args "value")})
+
 (deftest safe-tool-runs-without-approval
   (db/install-tool! {:id          :safe-tool
                      :name        "safe-tool"
@@ -18,6 +23,17 @@
   (tool/load-tool! :safe-tool)
   (is (= {"status" "ok"}
          (tool/execute-tool :safe-tool {} {:channel :scheduler}))))
+
+(deftest clojure-handler-var-runs-without-sci
+  (db/install-tool! {:id          :clj-tool
+                     :name        "clj-tool"
+                     :description "Clojure handler tool"
+                     :approval    :auto
+                     :handler-var 'xia.tool-smoke-test/clojure-handler})
+  (tool/load-tool! :clj-tool)
+  (is (= {"status" "clj"
+          "value" 42}
+         (tool/execute-tool :clj-tool {"value" 42} {:channel :scheduler}))))
 
 (deftest privileged-tool-blocks-without-approval-handler
   (db/install-tool! {:id          :privileged-tool
@@ -88,8 +104,9 @@
   (is (contains? (get-in (db/get-tool :email-read)
                          [:tool/parameters "properties"])
                  "save_attachments"))
-  (is (re-find #"save-attachments\?"
-               (:tool/handler (db/get-tool :email-read)))))
+  (is (= "" (:tool/handler (db/get-tool :email-read))))
+  (is (= "xia.tool.builtin/email-read"
+         (:tool/handler-var (db/get-tool :email-read)))))
 
 (deftest artifact-create-tool-supports-binary-pdf-artifacts
   (tool/ensure-bundled-tools!)

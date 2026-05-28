@@ -16,7 +16,4 @@
                                        "enum"        ["auto" "low" "high"]
                                        "description" "Optional image detail hint for the vision model"}}
                "required"   ["session_id"]}
- :handler     "(fn [args]
-                 (xia.browser/screenshot (get args \"session_id\")
-                                         :full-page (boolean (get args \"full_page\"))
-                                         :detail (or (get args \"detail\") \"auto\")))"}
+ :handler-var xia.tool.builtin/browser-screenshot}

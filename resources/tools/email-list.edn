@@ -21,14 +21,4 @@
                                              "description" "When true, restrict results to the inbox. Defaults to true."}
                              "include_spam_trash" {"type"        "boolean"
                                                    "description" "When true, include matches from spam or trash folders when the backend supports it."}}}
- :handler     "(fn [args]
-                 (xia.email/list-messages
-                   :service-id (get args \"service_id\")
-                   :query (get args \"query\")
-                   :max-results (or (get args \"max_results\") 10)
-                   :page-token (get args \"page_token\")
-                   :unread-only? (boolean (get args \"unread_only\"))
-                   :inbox-only? (if (contains? args \"inbox_only\")
-                                  (boolean (get args \"inbox_only\"))
-                                  true)
-                   :include-spam-trash? (boolean (get args \"include_spam_trash\"))))"}
+ :handler-var xia.tool.builtin/email-list}

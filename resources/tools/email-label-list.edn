@@ -9,6 +9,4 @@
  :parameters  {"type"       "object"
                "properties" {"service_id" {"type"        "string"
                                            "description" "Optional email service id if you have more than one configured"}}}
- :handler     "(fn [args]
-                 (xia.email/list-labels
-                   :service-id (get args \"service_id\")))"}
+ :handler-var xia.tool.builtin/email-label-list}

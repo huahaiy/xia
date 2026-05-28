@@ -12,8 +12,4 @@
                              "text"    {"type"        "string"
                                         "description" "Comment text."}}
                "required"   ["card_id" "text"]}
- :handler     "(fn [args]
-                 (xia.board/comment-card!
-                   (get args \"card_id\")
-                   {:author (get args \"author\")
-                    :text (get args \"text\")}))"}
+ :handler-var xia.tool.builtin/board-comment}

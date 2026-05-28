@@ -22,13 +22,4 @@
                              "service_id"    {"type"        "string"
                                               "description" "Optional email service id if you have more than one configured"}}
                "required"   ["message_id"]}
- :handler     "(fn [args]
-                 (xia.email/update-message
-                   (get args \"message_id\")
-                   :archive? (when (contains? args \"archive\")
-                               (boolean (get args \"archive\")))
-                   :read? (when (contains? args \"read\")
-                            (boolean (get args \"read\")))
-                   :add-labels (get args \"add_labels\")
-                   :remove-labels (get args \"remove_labels\")
-                   :service-id (get args \"service_id\")))"}
+ :handler-var xia.tool.builtin/email-update}

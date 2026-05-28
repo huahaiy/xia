@@ -16,8 +16,4 @@
                              "form_selector"  {"type"        "string"
                                                "description" "CSS selector for the form (default: first form on page)"}}
                "required"   ["session_id" "fields"]}
- :handler     "(fn [args]
-                 (xia.browser/fill-form (get args \"session_id\")
-                                        (get args \"fields\")
-                   :form-selector (get args \"form_selector\")
-                   :submit (boolean (get args \"submit\"))))"}
+ :handler-var xia.tool.builtin/browser-fill-form}

@@ -12,6 +12,4 @@
                              "url"        {"type"        "string"
                                            "description" "The URL to navigate to"}}
                "required"   ["session_id" "url"]}
- :handler     "(fn [args]
-                 (xia.browser/navigate (get args \"session_id\")
-                                       (get args \"url\")))"}
+ :handler-var xia.tool.builtin/browser-navigate}

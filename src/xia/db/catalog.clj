@@ -940,10 +940,16 @@
 
 (declare get-tool)
 
+(defn- tool-handler-var-value
+  [handler-var]
+  (when (some? handler-var)
+    (str handler-var)))
+
 (defn install-tool!
   [deps
-   {:keys [id name description tags parameters handler approval execution-mode enabled? installed-at]}]
-  (let [existing (when id (get-tool deps id))]
+   {:keys [id name description tags parameters handler handler-var approval execution-mode enabled? installed-at]}]
+  (let [existing     (when id (get-tool deps id))
+        handler-var* (tool-handler-var-value handler-var)]
     (transact!*
       deps
       [(cond-> {:tool/id           id
@@ -961,6 +967,9 @@
                                        {})
                 :tool/handler      (or handler
                                        (:tool/handler existing)
+                                       "")
+                :tool/handler-var  (or handler-var*
+                                       (:tool/handler-var existing)
                                        "")
                 :tool/approval     (or approval
                                        (:tool/approval existing)

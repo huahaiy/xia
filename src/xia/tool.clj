@@ -1,9 +1,10 @@
 (ns xia.tool
   "Tool system — executable functions the LLM can call via function-calling.
 
-   Tools are code (interpreted via SCI in native-image) that the LLM
-   invokes by name with structured arguments. This is the 'tool_calls'
-   mechanism in the OpenAI API.
+   First-party tools are ordinary Clojure handlers referenced by var.
+   User/plugin tools may still provide SCI handler strings. The LLM invokes
+   both by name with structured arguments through the OpenAI 'tool_calls'
+   mechanism.
 
    Contrast with skills: a skill is text the LLM reads and follows;
    a tool is code the LLM triggers and gets results from."
@@ -315,6 +316,26 @@
 ;; Tool loading
 ;; ---------------------------------------------------------------------------
 
+(defn- normalize-handler
+  [handler]
+  (cond
+    (nil? handler) nil
+    (string? handler) handler
+    :else (pr-str handler)))
+
+(defn- normalize-handler-var
+  [handler-var]
+  (cond
+    (nil? handler-var) nil
+    (symbol? handler-var) handler-var
+    (and (string? handler-var)
+         (not (str/blank? handler-var))) (symbol handler-var)
+    :else nil))
+
+(defn- normalize-handler-var-string
+  [handler-var]
+  (some-> handler-var normalize-handler-var str))
+
 (defn- compile-handler
   "Interpret a tool handler string via SCI. Returns a callable fn."
   [handler-str]
@@ -325,14 +346,42 @@
         (log/error e "Failed to compile tool handler")
         nil))))
 
+(defn- resolve-handler-var
+  "Resolve a Clojure handler var. Returns a callable fn."
+  [handler-var]
+  (when-let [sym (normalize-handler-var handler-var)]
+    (try
+      (when-not (namespace sym)
+        (throw (ex-info "Tool handler-var must be namespace-qualified"
+                        {:handler-var sym})))
+      (let [resolved (requiring-resolve sym)
+            handler  (when (var? resolved) @resolved)]
+        (when-not (fn? handler)
+          (throw (ex-info "Tool handler-var did not resolve to a function"
+                          {:handler-var sym
+                           :resolved resolved})))
+        handler)
+      (catch Exception e
+        (log/error e "Failed to resolve tool handler var" {:handler-var (str sym)})
+        nil))))
+
+(defn- load-handler
+  [tool]
+  (if-let [handler-var (normalize-handler-var (:tool/handler-var tool))]
+    {:handler (resolve-handler-var handler-var)
+     :handler-kind :clojure}
+    {:handler (compile-handler (:tool/handler tool))
+     :handler-kind :sci}))
+
 (defn load-tool!
   "Load a tool from the DB into the runtime registry."
   [tool-id]
   (if-let [tool (db/get-tool tool-id)]
-    (let [handler (compile-handler (:tool/handler tool))]
+    (let [{:keys [handler handler-kind]} (load-handler tool)]
       (swap! (registry) assoc tool-id
-             {:tool    tool
-              :handler handler})
+             {:tool         tool
+              :handler      handler
+              :handler-kind handler-kind})
       (log/info "Loaded tool:" (name tool-id))
       tool)
     (log/warn "Tool not found:" tool-id)))
@@ -351,7 +400,7 @@
 (defn import-tool!
   "Import a tool from an EDN definition map. Installs in DB and loads it."
   [tool-def]
-  (let [{:keys [id name description tags parameters handler approval execution-mode]} tool-def]
+  (let [{:keys [id name description tags parameters handler handler-var approval execution-mode]} tool-def]
     (when-not id
       (throw (ex-info "Tool definition must have an :id" {:def tool-def})))
     (db/install-tool! {:id          id
@@ -359,7 +408,8 @@
                        :description (or description "")
                        :tags        (or tags #{})
                        :parameters  (or parameters {})
-                       :handler     (if (string? handler) handler (pr-str handler))
+                       :handler     (or (normalize-handler handler) "")
+                       :handler-var (normalize-handler-var-string handler-var)
                        :approval    (cond
                                       (keyword? approval) approval
                                       (string? approval) (keyword approval)
@@ -373,13 +423,14 @@
     tool-def))
 
 (defn- bundled-tool-install-map
-  [{:keys [id name description tags parameters handler approval execution-mode]}]
+  [{:keys [id name description tags parameters handler handler-var approval execution-mode]}]
   {:id          id
    :name        (or name (clojure.core/name id))
    :description (or description "")
    :tags        (or tags #{})
    :parameters  (or parameters {})
-   :handler     (if (string? handler) handler (pr-str handler))
+   :handler     (or (normalize-handler handler) "")
+   :handler-var (normalize-handler-var-string handler-var)
    :approval    (cond
                   (keyword? approval) approval
                   (string? approval) (keyword approval)
@@ -397,12 +448,13 @@
    :tags           (:tool/tags tool)
    :parameters     (:tool/parameters tool)
    :handler        (:tool/handler tool)
+   :handler-var    (:tool/handler-var tool)
    :approval       (:tool/approval tool)
    :execution-mode (:tool/execution-mode tool)})
 
 (defn- bundled-tool-refresh-needed?
   [installed desired]
-  (let [keys* (cond-> [:name :description :tags :parameters :handler :approval]
+  (let [keys* (cond-> [:name :description :tags :parameters :handler :handler-var :approval]
                 (some? (:execution-mode desired)) (conj :execution-mode))]
     (some (fn [k]
             (not= (get installed k) (get desired k)))
@@ -579,12 +631,19 @@
                  :tool-call-id (:tool-call-id context)
                  :data         entry})))
 
+(defn- invoke-handler
+  [handler-kind handler arguments]
+  (case handler-kind
+    :clojure (handler arguments)
+    :sci     (sci-env/call-fn handler arguments)
+    (sci-env/call-fn handler arguments)))
+
 (defn execute-tool
   "Execute a tool by id with the given arguments map."
   ([tool-id arguments]
    (execute-tool tool-id arguments {}))
   ([tool-id arguments context]
-   (if-let [{:keys [tool handler]} (get @(registry) tool-id)]
+   (if-let [{:keys [tool handler handler-kind]} (get @(registry) tool-id)]
      (if (fn? handler)
         (try
           (let [tool-name       (or (:tool/name tool) (name tool-id))
@@ -618,7 +677,7 @@
                                          :tool-name tool-name})
                         (try
                           (let [result (normalize-tool-result tool-id
-                                                              (sci-env/call-fn handler arguments))]
+                                                              (invoke-handler handler-kind handler arguments))]
                             (plugin/run-hooks! :post-tool
                                                (assoc hook-context
                                                       :status :success

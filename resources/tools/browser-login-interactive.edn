@@ -22,7 +22,4 @@
                              "backend" {"type" "string"
                                         "description" "Optional browser backend override: auto, playwright, or remote."}}
                "required"   ["url" "fields"]}
- :handler     "(fn [args]
-                 (xia.browser/login-interactive (get args \"url\")
-                                                (get args \"fields\")
-                                                :backend (get args \"backend\")))"}
+ :handler-var xia.tool.builtin/browser-login-interactive}

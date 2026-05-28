@@ -17,10 +17,4 @@
                              "parent_id"   {"type"        "string"
                                             "description" "Optional parent task/card UUID."}}
                "required"   ["title"]}
- :handler     "(fn [args]
-                 (xia.board/create-card!
-                   {:title (get args \"title\")
-                    :description (get args \"description\")
-                    :priority (get args \"priority\")
-                    :assignee (get args \"assignee\")
-                    :parent-id (get args \"parent_id\")}))"}
+ :handler-var xia.tool.builtin/board-create}

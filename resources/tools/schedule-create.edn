@@ -35,32 +35,4 @@
                              "prompt"           {"type"        "string"
                                                   "description" "Message for the AI agent (for type=prompt)"}}
                "required"   ["id" "type"]}
- :handler     "(fn [args]
-                 (let [id    (get args \"id\")
-                       nm    (get args \"name\")
-                       desc  (get args \"description\")
-                       typ   (get args \"type\")
-                       ival  (get args \"interval_minutes\")
-                       mins  (get args \"minute\")
-                       hrs   (get args \"hour\")
-                       doms  (get args \"dom\")
-                       mos   (get args \"month\")
-                       dows  (get args \"dow\")
-                       tid   (get args \"tool_id\")
-                       targs (get args \"tool_args\")
-                       prompt (get args \"prompt\")
-                       spec  (if ival
-                               {:interval-minutes ival}
-                               (cond-> {}
-                                 mins (assoc :minute (set mins))
-                                 hrs  (assoc :hour (set hrs))
-                                 doms (assoc :dom (set doms))
-                                 mos  (assoc :month (set mos))
-                                 dows (assoc :dow (set dows))))]
-                   (xia.schedule/create-schedule!
-                     (cond-> {:id (keyword id) :spec spec :type (keyword typ)}
-                       nm     (assoc :name nm)
-                       desc   (assoc :description desc)
-                       tid    (assoc :tool-id (keyword tid))
-                       targs  (assoc :tool-args targs)
-                       prompt (assoc :prompt prompt)))))"}
+ :handler-var xia.tool.builtin/schedule-create}

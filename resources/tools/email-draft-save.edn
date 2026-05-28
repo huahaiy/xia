@@ -47,18 +47,4 @@
                              "service_id"   {"type"        "string"
                                              "description" "Optional email service id if you have more than one configured"}}
                "required"   ["to" "subject" "body"]}
- :handler     "(fn [args]
-                 (xia.email/save-draft
-                   (get args \"to\")
-                   (get args \"subject\")
-                   (get args \"body\")
-                   :draft-id (get args \"draft_id\")
-                   :cc (get args \"cc\")
-                   :bcc (get args \"bcc\")
-                   :reply-to (get args \"reply_to\")
-                   :html-body (get args \"html_body\")
-                   :in-reply-to (get args \"in_reply_to\")
-                   :references (get args \"references\")
-                   :thread-id (get args \"thread_id\")
-                   :attachments (get args \"attachments\")
-                   :service-id (get args \"service_id\")))"}
+ :handler-var xia.tool.builtin/email-draft-save}

@@ -9,5 +9,4 @@
  :parameters     {"type"       "object"
                   "properties" {}
                   "required"   []}
- :handler        "(fn [_args]
-                    {:peers (xia.peer/list-peers)})"}
+ :handler-var xia.tool.builtin/peer-list}

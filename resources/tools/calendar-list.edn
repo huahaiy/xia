@@ -17,10 +17,4 @@
                                                 "description" "When true, include hidden Google calendars when supported"}
                              "time_zone"      {"type"        "string"
                                                 "description" "Optional preferred time zone for Microsoft responses"}}}
- :handler     "(fn [args]
-                 (xia.calendar/list-calendars
-                   :service-id (get args \"service_id\")
-                   :max-results (or (get args \"max_results\") 10)
-                   :page-token (get args \"page_token\")
-                   :include-hidden? (boolean (get args \"include_hidden\"))
-                   :time-zone (get args \"time_zone\")))"}
+ :handler-var xia.tool.builtin/calendar-list}

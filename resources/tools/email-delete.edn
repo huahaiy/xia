@@ -14,8 +14,4 @@
                              "service_id" {"type"        "string"
                                            "description" "Optional email service id if you have more than one configured"}}
                "required"   ["message_id"]}
- :handler     "(fn [args]
-                 (xia.email/delete-message
-                   (get args \"message_id\")
-                   :permanent? (boolean (get args \"permanent\"))
-                   :service-id (get args \"service_id\")))"}
+ :handler-var xia.tool.builtin/email-delete}

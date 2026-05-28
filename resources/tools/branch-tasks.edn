@@ -23,9 +23,4 @@
                                 "max_rounds"   {"type"        "integer"
                                                 "description" "Maximum tool-calling rounds per branch worker."}}
                   "required"   ["tasks"]}
- :handler        "(fn [args]
-                    (xia.agent/run-branch-tasks
-                      (or (get args \"tasks\") [])
-                      :objective (get args \"objective\")
-                      :max-parallel (get args \"max_parallel\")
-                      :max-tool-rounds (get args \"max_rounds\")))"}
+ :handler-var xia.tool.builtin/branch-tasks}

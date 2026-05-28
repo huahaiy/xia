@@ -9,10 +9,4 @@
                "properties" {"instance_id" {"type"        "string"
                                             "description" "Managed child Xia instance id."}}
                "required"   ["instance_id"]}
- :handler     "(fn [args]
-                 (if-let [status (xia.instance-supervisor/instance-status
-                                   (get args \"instance_id\"))]
-                   status
-                   (throw (ex-info \"Managed Xia instance not found\"
-                                   {:type :instance-supervisor/not-found
-                                    :instance-id (get args \"instance_id\")}))))"}
+ :handler-var xia.tool.builtin/peer-instance-status}

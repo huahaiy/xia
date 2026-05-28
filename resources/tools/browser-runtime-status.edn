@@ -8,5 +8,4 @@
  :execution-mode :parallel-safe
  :parameters     {"type"       "object"
                   "properties" {}}
- :handler        "(fn [_]
-                    (xia.browser/runtime-status))"}
+ :handler-var xia.tool.builtin/browser-runtime-status}

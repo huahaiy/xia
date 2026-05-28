@@ -14,10 +14,4 @@
                                 "source_type"  {"type"        "string"
                                                 "description" "Optional filter: `artifact`, `local-doc`, or `note`."}}
                   "required"   []}
- :handler        "(fn [args]
-                    {:workspace_id (or (get args \"workspace_id\") \"default\")
-                     :items (mapv #(dissoc % :payload-path :sha256 :meta)
-                                  (xia.workspace/list-items
-                                    :workspace-id (get args \"workspace_id\")
-                                    :top (or (get args \"top\") 20)
-                                    :source-type (get args \"source_type\")))})"}
+ :handler-var xia.tool.builtin/workspace-list}

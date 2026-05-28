@@ -25,14 +25,4 @@
                                                    "description" "When true, include cancelled/deleted events when supported"}
                              "time_zone"         {"type"        "string"
                                                    "description" "Optional time zone for provider responses"}}}
- :handler     "(fn [args]
-                 (xia.calendar/list-events
-                   :service-id (get args \"service_id\")
-                   :calendar-id (get args \"calendar_id\")
-                   :time-min (get args \"time_min\")
-                   :time-max (get args \"time_max\")
-                   :query (get args \"query\")
-                   :max-results (or (get args \"max_results\") 10)
-                   :page-token (get args \"page_token\")
-                   :include-cancelled? (boolean (get args \"include_cancelled\"))
-                   :time-zone (get args \"time_zone\")))"}
+ :handler-var xia.tool.builtin/calendar-event-list}

@@ -9,8 +9,4 @@
  :parameters  {"type"       "object"
                "properties" {"dry_run" {"type" "boolean"
                                          "description" "Preview install commands only when true (default true). Set false to execute Linux package installation."}}}
- :handler     "(fn [args]
-                 (xia.browser/install-browser-deps!
-                   :dry-run (if (contains? args \"dry_run\")
-                               (boolean (get args \"dry_run\"))
-                               true)))"}
+ :handler-var xia.tool.builtin/browser-install-deps}
