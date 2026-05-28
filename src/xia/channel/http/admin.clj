@@ -6,6 +6,9 @@
             [xia.backup :as backup]
             [xia.browser :as browser]
             [xia.bridge :as bridge]
+            [xia.channel.http.admin.instances :as admin-instances]
+            [xia.channel.http.admin.providers :as admin-providers]
+            [xia.channel.http.admin.schedules :as admin-schedules]
             [xia.channel.messaging :as messaging]
             [xia.config :as config]
             [xia.context :as context]
@@ -35,8 +38,6 @@
 (def ^:private service-auth-types #{:bearer :basic :api-key-header :query-param :oauth-account})
 (def ^:private service-email-backends #{:imap-smtp})
 (def ^:private mail-security-modes #{:ssl :starttls :none})
-(def ^:private provider-access-modes #{:local :api :account})
-(def ^:private provider-credential-sources #{:none :api-key :oauth-account})
 (def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
 (def ^:private ms-per-day (* 24 60 60 1000))
 
@@ -209,21 +210,6 @@
         used-ids  (map :skill/id (db/list-skills))]
     (next-available-id base used-ids)))
 
-(defn- infer-schedule-id
-  [data]
-  (let [name-text (nonblank-str (get data "name"))
-        tool-id   (some-> (get data "tool_id") nonblank-str normalize-id-segment)
-        prompt    (some-> (get data "prompt")
-                          nonblank-str
-                          (subs 0 (min 48 (count (nonblank-str (get data "prompt")))))
-                          normalize-id-segment)
-        base      (or (normalize-id-segment name-text)
-                      tool-id
-                      prompt
-                      "schedule")
-        used-ids  (map :id (schedule/list-schedules))]
-    (next-available-id base used-ids)))
-
 (defn- plugin->admin-body
   [deps plugin]
   (let [manifest (:plugin/manifest plugin)]
@@ -251,56 +237,6 @@
          (keep normalize-id-segment)
          (map keyword)
          set)))
-
-(defn- unique-provider-api-key
-  [providers]
-  (let [api-keys (->> providers
-                      (keep (comp nonblank-str :llm.provider/api-key))
-                      distinct
-                      vec)]
-    (when (= 1 (count api-keys))
-      (first api-keys))))
-
-(defn- infer-reusable-provider-api-key
-  [{:keys [provider-id template-id base-url]}]
-  (let [normalized-base-url (normalize-base-url base-url)
-        providers           (->> (db/list-providers)
-                                 (remove #(= provider-id (:llm.provider/id %)))
-                                 (filter #(= :api-key (llm/provider-credential-source %))))]
-    (or
-      (when (and template-id normalized-base-url)
-        (unique-provider-api-key
-          (filter #(and (= template-id (:llm.provider/template %))
-                        (= normalized-base-url
-                           (normalize-base-url (:llm.provider/base-url %))))
-                  providers)))
-      (when template-id
-        (unique-provider-api-key
-          (filter #(= template-id (:llm.provider/template %))
-                  providers)))
-      (when normalized-base-url
-        (unique-provider-api-key
-          (filter #(= normalized-base-url
-                      (normalize-base-url (:llm.provider/base-url %)))
-                  providers))))))
-
-(defn- parse-provider-workloads
-  [value]
-  (let [entries (cond
-                  (nil? value) []
-                  (sequential? value) value
-                  :else (str/split (str value) #","))]
-    (->> entries
-         (map nonblank-str)
-         (remove nil?)
-         distinct
-         (mapv (fn [entry]
-                 (let [workload (keyword entry)]
-                   (when-not (llm/known-workload? workload)
-                     (throw (ex-info "invalid workload"
-                                     {:field "workloads"
-                                      :value entry})))
-                   workload))))))
 
 (defn- parse-extra-fields
   [value]
@@ -341,60 +277,6 @@
     (some-> (parse-json-object-string value field-name)
             json/read-json)))
 
-(defn- parse-integer-list
-  [value field-name]
-  (cond
-    (nil? value)
-    nil
-
-    (not (sequential? value))
-    (throw (ex-info (str field-name " must be a list of integers")
-                    {:field field-name}))
-
-    :else
-    (mapv (fn [entry]
-            (try
-              (Integer/parseInt (str (or entry "")))
-              (catch Exception _
-                (throw (ex-info (str field-name " must contain only integers")
-                                {:field field-name
-                                 :value entry})))))
-          value)))
-
-(defn- parse-schedule-type
-  [value]
-  (let [schedule-type (some-> value nonblank-str keyword)]
-    (when-not (#{:tool :prompt} schedule-type)
-      (throw (ex-info "invalid schedule type"
-                      {:field "type"
-                       :value value})))
-    schedule-type))
-
-(defn- parse-schedule-spec
-  [data]
-  (let [interval-minutes (parse-optional-positive-long (get data "interval_minutes")
-                                                       "interval_minutes")
-        minute           (parse-integer-list (get data "minute") "minute")
-        hour             (parse-integer-list (get data "hour") "hour")
-        dom              (parse-integer-list (get data "dom") "dom")
-        month            (parse-integer-list (get data "month") "month")
-        dow              (parse-integer-list (get data "dow") "dow")]
-    (cond
-      interval-minutes
-      {:interval-minutes interval-minutes}
-
-      (some identity [minute hour dom month dow])
-      (cond-> {}
-        minute (assoc :minute minute)
-        hour   (assoc :hour hour)
-        dom    (assoc :dom dom)
-        month  (assoc :month month)
-        dow    (assoc :dow dow))
-
-      :else
-      (throw (ex-info "missing schedule timing fields"
-                      {:field "interval_minutes"})))))
-
 (defn- parse-auth-type
   [value]
   (let [auth-type (some-> value nonblank-str keyword)]
@@ -421,24 +303,6 @@
                       {:field field
                        :value value})))
     security))
-
-(defn- parse-provider-access-mode
-  [value]
-  (let [access-mode (some-> value nonblank-str keyword)]
-    (when-not (contains? provider-access-modes access-mode)
-      (throw (ex-info "invalid access_mode"
-                      {:field "access_mode"
-                       :value value})))
-    access-mode))
-
-(defn- parse-provider-credential-source
-  [value]
-  (let [auth-type (some-> value nonblank-str keyword)]
-    (when-not (contains? provider-credential-sources auth-type)
-      (throw (ex-info "invalid credential_source"
-                      {:field "credential_source"
-                       :value value})))
-    auth-type))
 
 (defn- sort-by-name
   [entries]
@@ -484,86 +348,11 @@
 
 (defn- provider->admin-body
   [provider]
-  (let [provider-id       (some-> (:llm.provider/id provider) name)
-        runtime-source    (when-let [provider-key (:llm.provider/id provider)]
-                            (name (runtime-overlay/entity-source :provider provider-key)))
-        access-mode       (llm/provider-access-mode provider)
-        credential-source (llm/provider-credential-source provider)
-        oauth-account     (some-> (:llm.provider/oauth-account provider) db/get-oauth-account)
-        health            (llm/provider-health-summary (:llm.provider/id provider))]
-    {:id                          provider-id
-     :runtime_source              runtime-source
-     :name                        (:llm.provider/name provider)
-     :template                    (some-> (:llm.provider/template provider) name)
-     :access_mode                 (some-> access-mode name)
-     :credential_source           (some-> credential-source name)
-     :auth_type                   (some-> credential-source name)
-     :oauth_account               (some-> (:llm.provider/oauth-account provider) name)
-     :oauth_account_name          (:oauth.account/name oauth-account)
-     :oauth_account_connected     (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
-     :base_url                    (:llm.provider/base-url provider)
-     :model                       (:llm.provider/model provider)
-     :workloads                   (->> (:llm.provider/workloads provider)
-                                       (map name)
-                                       sort
-                                       vec)
-     :vision                      (boolean (:llm.provider/vision? provider))
-     :allow_private_network       (boolean (:llm.provider/allow-private-network? provider))
-     :context_window              (:llm.provider/context-window provider)
-     :context_window_source       (some-> (:llm.provider/context-window-source provider) name)
-     :system_prompt_budget        (:llm.provider/system-prompt-budget provider)
-     :history_budget              (:llm.provider/history-budget provider)
-     :recommended_system_prompt_budget
-     (:llm.provider/recommended-system-prompt-budget provider)
-     :recommended_history_budget
-     (:llm.provider/recommended-history-budget provider)
-     :recommended_input_budget_cap
-     (:llm.provider/recommended-input-budget-cap provider)
-     :rate_limit_per_minute       (:llm.provider/rate-limit-per-minute provider)
-     :effective_rate_limit_per_minute (llm/effective-rate-limit-per-minute provider)
-     :health_status               (name (:status health))
-     :health_failures             (:consecutive-failures health)
-     :health_cooldown_ms          (:cooldown-remaining-ms health)
-     :health_last_error           (:last-error health)
-     :default                     (boolean (:llm.provider/default? provider))
-     :api_key_configured          (boolean (nonblank-str (:llm.provider/api-key provider)))}))
+  (admin-providers/provider->admin-body provider))
 
 (defn- llm-provider-template->admin-body
   [template]
-  (let [access-modes (->> (or (:access-modes template) [])
-                          (mapv (fn [mode]
-                                  {:id                 (some-> (:id mode) name)
-                                   :label              (:label mode)
-                                   :description        (:description mode)
-                                   :credential_sources (->> (or (:credential-sources mode) [])
-                                                            (map name)
-                                                            vec)
-                                   :default            (boolean (:default? mode))})))
-        auth-types   (->> access-modes
-                          (mapcat :credential_sources)
-                          distinct
-                          vec)]
-    {:id                       (some-> (:id template) name)
-     :name                     (:name template)
-     :description              (:description template)
-     :category                 (some-> (:category template) name)
-     :base_url                 (:base-url template)
-     :model_suggestion         (:model-suggestion template)
-     :account_url              (:account-url template)
-     :api_key_url              (:api-key-url template)
-     :docs_url                 (:docs-url template)
-     :install_url              (:install-url template)
-     :account_connector        (some-> (:account-connector template) name)
-     :access_modes             access-modes
-     :auth_types               auth-types
-     :oauth_provider_templates (->> (or (:oauth-provider-templates template) [])
-                                    (map name)
-                                    vec)
-     :oauth_setup_note         (:oauth-setup-note template)
-     :sign_in_options          (->> (or (:sign-in-options template) [])
-                                    (map name)
-                                    vec)
-     :notes                    (:notes template)}))
+  (admin-providers/template->admin-body template))
 
 (defn- memory-retention->admin-body
   [deps]
@@ -805,20 +594,7 @@
 
 (defn- managed-instance->admin-body
   [deps instance]
-  {:instance_id       (:instance_id instance)
-   :service_id        (:service_id instance)
-   :service_name      (:service_name instance)
-   :base_url          (:base_url instance)
-   :port              (:port instance)
-   :pid               (:pid instance)
-   :state             (:state instance)
-   :alive             (boolean (:alive instance))
-   :attached          (boolean (:attached instance))
-   :template_instance (:template_instance instance)
-   :log_path          (:log_path instance)
-   :started_at        (instant->str* deps (:started_at instance))
-   :exited_at         (instant->str* deps (:exited_at instance))
-   :exit_code         (:exit_code instance)})
+  (admin-instances/instance->admin-body deps instance))
 
 (defn- oauth-account->admin-body
   [deps account]
@@ -954,31 +730,7 @@
 
 (defn- schedule->admin-body
   [deps sched]
-  (let [task-state (schedule/task-state (:id sched))
-        latest-run (first (schedule/schedule-history (:id sched) 1))]
-    {:id                        (some-> (:id sched) name)
-     :name                      (:name sched)
-     :description               (:description sched)
-     :spec                      (:spec sched)
-     :type                      (some-> (:type sched) name)
-     :tool_id                   (some-> (:tool-id sched) name)
-     :tool_args                 (:tool-args sched)
-     :prompt                    (:prompt sched)
-     :trusted                   (boolean (:trusted? sched))
-     :enabled                   (boolean (:enabled? sched))
-     :created_at                (instant->str* deps (:created-at sched))
-     :last_run                  (instant->str* deps (:last-run sched))
-     :next_run                  (instant->str* deps (:next-run sched))
-     :latest_status             (some-> (:status latest-run) name)
-     :latest_error              (truncate-text* deps (:error latest-run) 160)
-     :task_status               (some-> (:status task-state) name)
-     :task_phase                (some-> (:phase task-state) name)
-     :task_last_error           (:last-error task-state)
-     :task_backoff_until        (instant->str* deps (:backoff-until task-state))
-     :task_checkpoint_at        (instant->str* deps (:checkpoint-at task-state))
-     :task_last_success_at      (instant->str* deps (:last-success-at task-state))
-     :task_last_failure_at      (instant->str* deps (:last-failure-at task-state))
-     :task_consecutive_failures (or (:consecutive-failures task-state) 0)}))
+  (admin-schedules/schedule->admin-body deps sched))
 
 (defn- tool->admin-body
   [tool]
@@ -1089,18 +841,9 @@
          "setTimeout(() => { try { window.close(); } catch (_err) {} }, 1200);"
          "</script></main></body></html>")))
 
-(defn handle-list-managed-instances
-  [deps _req]
-  (json-response* deps 200
-                  {:instances (mapv #(managed-instance->admin-body deps %)
-                                    (instance-supervisor/list-managed-instances))}))
+(def handle-list-managed-instances admin-instances/handle-list-managed-instances)
 
-(defn handle-stop-managed-instance
-  [deps instance-id]
-  (let [stopped (instance-supervisor/stop-instance! instance-id)]
-    (json-response* deps 200
-                    {:status "stopped"
-                     :instance (managed-instance->admin-body deps stopped)})))
+(def handle-stop-managed-instance admin-instances/handle-stop-managed-instance)
 
 (defn handle-reload-runtime-overlay
   [deps req]
@@ -1205,252 +948,13 @@
                        (into [] (map #(skill->body deps %)))
                        sort-by-name)})))
 
-(defn handle-fetch-provider-models
-  [deps req]
-  (try
-    (let [body        (read-body* deps req)
-          provider-id (when (contains? body "provider_id")
-                        (some-> (get body "provider_id") nonblank-str keyword))
-          provider    (when provider-id
-                        (or (db/get-provider provider-id)
-                            (throw (ex-info "unknown provider_id"
-                                            {:field "provider_id"
-                                             :value (name provider-id)}))))
-          base-url    (or (get body "base_url")
-                          (:llm.provider/base-url provider))
-          api-key     (or (nonblank-str (get body "api_key"))
-                          (nonblank-str (:llm.provider/api-key provider)))
-          auth-header (when (and provider
-                                 (nil? api-key)
-                                 (= :oauth-account (llm/provider-credential-source provider)))
-                        (when-let [account-id (:llm.provider/oauth-account provider)]
-                          (oauth/oauth-header (oauth/ensure-account-ready! account-id))))]
-      (when-not (nonblank-str base-url)
-        (throw (ex-info "base_url is required" {:type :http/bad-request})))
-      (let [models (llm/fetch-provider-models {:base-url    base-url
-                                               :api-key     api-key
-                                               :auth-header auth-header})]
-        (json-response* deps 200 {:models (or models [])})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))
-    (catch Exception e
-      (json-response* deps 502 {:error (str "Failed to fetch models: " (.getMessage e))}))))
+(def handle-fetch-provider-models admin-providers/handle-fetch-provider-models)
 
-(defn handle-fetch-provider-model-metadata
-  [deps req]
-  (try
-    (let [body        (read-body* deps req)
-          provider-id (when (contains? body "provider_id")
-                        (some-> (get body "provider_id") nonblank-str keyword))
-          provider    (when provider-id
-                        (or (db/get-provider provider-id)
-                            (throw (ex-info "unknown provider_id"
-                                            {:field "provider_id"
-                                             :value (name provider-id)}))))
-          base-url    (or (get body "base_url")
-                          (:llm.provider/base-url provider))
-          api-key     (or (nonblank-str (get body "api_key"))
-                          (nonblank-str (:llm.provider/api-key provider)))
-          auth-header (when (and provider
-                                 (nil? api-key)
-                                 (= :oauth-account (llm/provider-credential-source provider)))
-                        (when-let [account-id (:llm.provider/oauth-account provider)]
-                          (oauth/oauth-header (oauth/ensure-account-ready! account-id))))
-          model-id    (get body "model")]
-      (when-not (nonblank-str base-url)
-        (throw (ex-info "base_url is required" {:type :http/bad-request})))
-      (when-not (nonblank-str model-id)
-        (throw (ex-info "model is required" {:type :http/bad-request})))
-      (let [{:keys [id vision? vision-source
-                    context-window context-window-source
-                    recommended-system-prompt-budget
-                    recommended-history-budget
-                    recommended-input-budget-cap]}
-            (llm/fetch-provider-model-metadata {:base-url    base-url
-                                                :api-key     api-key
-                                                :auth-header auth-header
-                                                :model       model-id})]
-        (json-response*
-          deps
-          200
-          {:model (cond-> {:id            id
-                           :vision        (boolean vision?)
-                           :vision_source (some-> vision-source name)}
-                    context-window
-                    (assoc :context_window context-window
-                           :context_window_source (some-> context-window-source name))
+(def handle-fetch-provider-model-metadata admin-providers/handle-fetch-provider-model-metadata)
 
-                    recommended-system-prompt-budget
-                    (assoc :recommended_system_prompt_budget recommended-system-prompt-budget)
+(def handle-save-provider admin-providers/handle-save-provider)
 
-                    recommended-history-budget
-                    (assoc :recommended_history_budget recommended-history-budget)
-
-                    recommended-input-budget-cap
-                    (assoc :recommended_input_budget_cap recommended-input-budget-cap))})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))
-    (catch Exception e
-      (json-response* deps 502 {:error (str "Failed to fetch model metadata: " (.getMessage e))}))))
-
-(defn handle-save-provider
-  [deps req]
-  (try
-    (let [data                       (or (read-body* deps req) {})
-          provider-id                (parse-keyword-id (get data "id") "id")
-          existing-provider          (db/get-provider provider-id)
-          base-url                   (nonblank-str (get data "base_url"))
-          model                      (nonblank-str (get data "model"))
-          name                       (or (nonblank-str (get data "name"))
-                                         (name provider-id))
-          api-key                    (nonblank-str (get data "api_key"))
-          reuse-api-key-provider-id  (if (contains? data "reuse_api_key_provider_id")
-                                       (some-> (get data "reuse_api_key_provider_id") nonblank-str keyword)
-                                       nil)
-          template-id                (if (contains? data "template")
-                                       (some-> (get data "template") nonblank-str keyword)
-                                       nil)
-          access-mode                (if (contains? data "access_mode")
-                                       (parse-provider-access-mode (get data "access_mode"))
-                                       nil)
-          credential-source          (cond
-                                       (contains? data "credential_source")
-                                       (parse-provider-credential-source (get data "credential_source"))
-
-                                       (contains? data "auth_type")
-                                       (parse-provider-credential-source (get data "auth_type"))
-
-                                       :else
-                                       nil)
-          oauth-account-id           (if (contains? data "oauth_account")
-                                       (some-> (get data "oauth_account") nonblank-str keyword)
-                                       nil)
-          vision?                    (when (contains? data "vision")
-                                       (true? (get data "vision")))
-          allow-private-network?     (when (contains? data "allow_private_network")
-                                       (true? (get data "allow_private_network")))
-          workloads                  (when (contains? data "workloads")
-                                       (parse-provider-workloads (get data "workloads")))
-          system-prompt-budget       (parse-optional-positive-long (get data "system_prompt_budget")
-                                                                   "system_prompt_budget")
-          history-budget             (parse-optional-positive-long (get data "history_budget")
-                                                                   "history_budget")
-          context-window             (parse-optional-positive-long (get data "context_window")
-                                                                   "context_window")
-          context-window-source      (when-let [source (nonblank-str (get data "context_window_source"))]
-                                       (keyword source))
-          recommended-system-budget  (parse-optional-positive-long
-                                       (get data "recommended_system_prompt_budget")
-                                       "recommended_system_prompt_budget")
-          recommended-history-budget (parse-optional-positive-long
-                                       (get data "recommended_history_budget")
-                                       "recommended_history_budget")
-          recommended-input-budget   (parse-optional-positive-long
-                                       (get data "recommended_input_budget_cap")
-                                       "recommended_input_budget_cap")
-          rate-limit-per-minute      (parse-optional-positive-long (get data "rate_limit_per_minute")
-                                                                   "rate_limit_per_minute")
-          make-default               (true? (get data "default"))
-          has-default?               (some? (db/get-default-provider))
-          reused-api-key             (when reuse-api-key-provider-id
-                                       (let [provider (db/get-provider reuse-api-key-provider-id)]
-                                         (when-not provider
-                                           (throw (ex-info "unknown reuse_api_key_provider_id"
-                                                           {:field "reuse_api_key_provider_id"
-                                                            :value (name reuse-api-key-provider-id)})))
-                                         (or (nonblank-str (:llm.provider/api-key provider))
-                                             (throw (ex-info "reuse_api_key_provider_id does not have a stored API key"
-                                                             {:field "reuse_api_key_provider_id"
-                                                              :value (name reuse-api-key-provider-id)})))))
-          inferred-api-key           (when (and (= credential-source :api-key)
-                                                (nil? api-key)
-                                                (nil? reused-api-key)
-                                                (nil? (nonblank-str (:llm.provider/api-key existing-provider))))
-                                       (infer-reusable-provider-api-key {:provider-id provider-id
-                                                                         :template-id template-id
-                                                                         :base-url    base-url}))
-          effective-api-key          (or api-key reused-api-key inferred-api-key)
-          normalized-access-mode     (llm/provider-access-mode {:access-mode       access-mode
-                                                                :credential-source credential-source
-                                                                :template          template-id
-                                                                :base-url          base-url
-                                                                :oauth-account     oauth-account-id
-                                                                :api-key           effective-api-key})]
-      (when-not base-url
-        (throw (ex-info "missing 'base_url' field" {:field "base_url"})))
-      (when-not model
-        (throw (ex-info "missing 'model' field" {:field "model"})))
-      (when (and template-id
-                 (nil? (llm-provider-template/get-template template-id)))
-        (throw (ex-info "unknown template"
-                        {:field "template"
-                         :value (name template-id)})))
-      (when (and (= credential-source :oauth-account)
-                 (nil? oauth-account-id))
-        (throw (ex-info "oauth_account is required for oauth-account credential_source"
-                        {:field "oauth_account"})))
-      (when (contains? data "browser_session")
-        (throw (ex-info "browser_session is no longer supported; use API key or OAuth API sign-in."
-                        {:field "browser_session"})))
-      (when (and oauth-account-id
-                 (nil? (db/get-oauth-account oauth-account-id)))
-        (throw (ex-info "unknown oauth_account"
-                        {:field "oauth_account"
-                         :value (name oauth-account-id)})))
-      (db/upsert-provider! (cond-> {:id                    provider-id
-                                    :name                  name
-                                    :base-url              base-url
-                                    :model                 model
-                                    :system-prompt-budget  system-prompt-budget
-                                    :history-budget        history-budget
-                                    :rate-limit-per-minute rate-limit-per-minute}
-                             (contains? data "context_window")
-                             (assoc :context-window context-window)
-                             (contains? data "context_window_source")
-                             (assoc :context-window-source context-window-source)
-                             (contains? data "recommended_system_prompt_budget")
-                             (assoc :recommended-system-prompt-budget recommended-system-budget)
-                             (contains? data "recommended_history_budget")
-                             (assoc :recommended-history-budget recommended-history-budget)
-                             (contains? data "recommended_input_budget_cap")
-                             (assoc :recommended-input-budget-cap recommended-input-budget)
-                             (contains? data "template")
-                             (assoc :template template-id)
-                             (contains? data "access_mode")
-                             (assoc :access-mode normalized-access-mode)
-                             (or (contains? data "credential_source")
-                                 (contains? data "auth_type"))
-                             (assoc :credential-source credential-source
-                                    :auth-type credential-source)
-                             (contains? data "oauth_account")
-                             (assoc :oauth-account oauth-account-id)
-                             (contains? data "vision")
-                             (assoc :vision? vision?)
-                             (contains? data "allow_private_network")
-                             (assoc :allow-private-network? allow-private-network?)
-                             (contains? data "workloads")
-                             (assoc :workloads workloads)
-                             effective-api-key
-                             (assoc :api-key effective-api-key)))
-      (when (or make-default (not has-default?))
-        (db/set-default-provider! provider-id))
-      (when (setup/needs-setup?)
-        (db/set-config! :setup/complete "true"))
-      (json-response* deps 200 {:provider (provider->admin-body (db/get-provider provider-id))}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
-
-(defn handle-delete-provider
-  [deps req]
-  (try
-    (let [data        (or (read-body* deps req) {})
-          provider-id (parse-keyword-id (get data "id") "id")]
-      (when-not (db/get-provider provider-id)
-        (throw (ex-info "provider not found" {:type :http/not-found :field "id"})))
-      (db/delete-provider! provider-id)
-      (json-response* deps 200 {:deleted (name provider-id)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+(def handle-delete-provider admin-providers/handle-delete-provider)
 
 (defn handle-save-memory-retention
   [deps req]
@@ -2067,102 +1571,13 @@
     (catch clojure.lang.ExceptionInfo e
       (exception-response* deps e))))
 
-(defn handle-save-schedule
-  [deps req]
-  (try
-    (let [data          (or (read-body* deps req) {})
-          schedule-id   (if-let [id-text (nonblank-str (get data "id"))]
-                          (parse-keyword-id id-text "id")
-                          (infer-schedule-id data))
-          existing      (schedule/get-schedule schedule-id)
-          schedule-type (parse-schedule-type (get data "type"))
-          name          (or (nonblank-str (get data "name"))
-                            (some-> existing :name)
-                            (name schedule-id))
-          description   (if (contains? data "description")
-                          (or (nonblank-str (get data "description")) "")
-                          (:description existing))
-          spec          (parse-schedule-spec data)
-          tool-id       (when (= schedule-type :tool)
-                          (parse-keyword-id (get data "tool_id") "tool_id"))
-          tool-args     (when (= schedule-type :tool)
-                          (parse-json-object-value (get data "tool_args") "tool_args"))
-          prompt        (when (= schedule-type :prompt)
-                          (nonblank-str (get data "prompt")))
-          trusted?      (if (contains? data "trusted")
-                          (true? (get data "trusted"))
-                          (if existing
-                            (boolean (:trusted? existing))
-                            true))
-          enabled?      (if (contains? data "enabled")
-                          (true? (get data "enabled"))
-                          (if existing
-                            (boolean (:enabled? existing))
-                            true))
-          saved         (if existing
-                          (schedule/update-schedule!
-                            schedule-id
-                            (cond-> {:name        name
-                                     :description description
-                                     :spec        spec
-                                     :type        schedule-type
-                                     :trusted?    trusted?
-                                     :enabled?    enabled?}
-                              (= schedule-type :tool)
-                              (assoc :tool-id tool-id
-                                     :tool-args tool-args)
-                              (= schedule-type :prompt)
-                              (assoc :prompt prompt)))
-                          (do
-                            (schedule/create-schedule!
-                              (cond-> {:id          schedule-id
-                                       :name        name
-                                       :description description
-                                       :spec        spec
-                                       :type        schedule-type
-                                       :trusted?    trusted?}
-                                (= schedule-type :tool)
-                                (assoc :tool-id tool-id
-                                       :tool-args tool-args)
-                                (= schedule-type :prompt)
-                                (assoc :prompt prompt)))
-                            (if enabled?
-                              (schedule/get-schedule schedule-id)
-                              (schedule/pause-schedule! schedule-id))))]
-      (json-response* deps 200 {:schedule (schedule->admin-body deps saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+(def handle-save-schedule admin-schedules/handle-save-schedule)
 
-(defn handle-delete-schedule
-  [deps schedule-id]
-  (try
-    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")]
-      (if (schedule/get-schedule schedule-key)
-        (do
-          (schedule/remove-schedule! schedule-key)
-          (json-response* deps 200 {:status "deleted"
-                                    :schedule_id (name schedule-key)}))
-        (json-response* deps 404 {:error "schedule not found"})))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+(def handle-delete-schedule admin-schedules/handle-delete-schedule)
 
-(defn handle-pause-schedule
-  [deps schedule-id]
-  (try
-    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")
-          saved        (schedule/pause-schedule! schedule-key)]
-      (json-response* deps 200 {:schedule (schedule->admin-body deps saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+(def handle-pause-schedule admin-schedules/handle-pause-schedule)
 
-(defn handle-resume-schedule
-  [deps schedule-id]
-  (try
-    (let [schedule-key (parse-keyword-id schedule-id "schedule_id")
-          saved        (schedule/resume-schedule! schedule-key)]
-      (json-response* deps 200 {:schedule (schedule->admin-body deps saved)}))
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+(def handle-resume-schedule admin-schedules/handle-resume-schedule)
 
 (defn handle-save-skill
   [deps req]
