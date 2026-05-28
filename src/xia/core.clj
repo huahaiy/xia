@@ -290,6 +290,9 @@
      :xia/working-memory-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
 
+     :xia/bridge-runtime
+     {}
+
      :xia/runtime-support
      {:db (ig/ref :xia/db)
       :overlay (ig/ref :xia/runtime-overlay)
@@ -300,7 +303,8 @@
       :async-runtime (ig/ref :xia/async-runtime)
       :prompt-runtime (ig/ref :xia/prompt-runtime)
       :agent-runtime (ig/ref :xia/agent-runtime)
-      :working-memory-runtime (ig/ref :xia/working-memory-runtime)}
+      :working-memory-runtime (ig/ref :xia/working-memory-runtime)
+      :bridge-runtime (ig/ref :xia/bridge-runtime)}
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)}

@@ -295,7 +295,7 @@
   ([deps session history-data]
    (let [{:keys [message-count last-message]}
          (or history-data
-             (let [messages (->> (db/session-messages (:id session))
+             (let [messages (->> (bridge/session-messages (:id session))
                                  (filter #(#{:user :assistant} (:role %)))
                                  vec)]
                {:message-count (count messages)
@@ -670,8 +670,8 @@
                                          :channel channel
                                          :local-doc-ids local-doc-ids
                                          :artifact-ids artifact-ids)
-          assistant-message (db/latest-session-message session-id #{:assistant})
-          task              (db/current-session-task session-id)
+          assistant-message (bridge/latest-session-message session-id #{:assistant})
+          task              (bridge/current-session-task session-id)
           persistent-goal   (goal/current-goal session-id)
           body              (cond-> {:session_id (str session-id)
                                      :role       "assistant"
@@ -746,7 +746,7 @@
        :else
        (do
          (touch-rest-session!* deps sid)
-         (let [task   (db/current-session-task (java.util.UUID/fromString sid))
+         (let [task   (bridge/current-session-task sid)
                persistent-goal (goal/current-goal (java.util.UUID/fromString sid))
                status (or (when task
                             (task-runtime-status deps task))
@@ -779,7 +779,7 @@
        :else
        (do
          (touch-rest-session!* deps sid)
-         (let [task (db/current-session-task (java.util.UUID/fromString sid))
+         (let [task (bridge/current-session-task sid)
                persistent-goal (goal/current-goal (java.util.UUID/fromString sid))]
            (json-response* deps 200
                            (cond-> {:session_id sid
@@ -1192,7 +1192,7 @@
      (let [sid (java.util.UUID/fromString session-id)]
        (if-not (session-accessible?* deps sid expected-channel)
          (json-response* deps 404 {:error "session not found"})
-         (let [messages (->> (db/session-messages sid)
+         (let [messages (->> (bridge/session-messages sid)
                              (into [] (comp
                                        (filter #(#{:user :assistant} (:role %)))
                                        (map #(session-message->body deps %)))))]

@@ -5,7 +5,6 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.async :as async]
-            [xia.audit :as audit]
             [xia.bridge :as bridge]
             [xia.config :as cfg]
             [xia.db :as db]
@@ -301,12 +300,10 @@
                        :mask? (boolean mask?)
                        :created-at (Date.)
                        :response (promise)}]
-      (bridge/register-interaction! interaction)
-      (try
-        (send-session-message! channel session-id (prompt-request-text interaction))
-        (str (await-interaction-result session-id channel interaction))
-        (finally
-          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
+      (bridge/request-channel-interaction!
+       interaction
+       #(send-session-message! channel session-id (prompt-request-text %))
+       #(str (await-interaction-result session-id channel %))))))
 
 (defn- messaging-approval
   [{:keys [tool-id tool-name description arguments reason]}]
@@ -328,12 +325,11 @@
                        :reason reason
                        :created-at (Date.)
                        :response (promise)}]
-      (bridge/register-interaction! interaction)
-      (try
-        (send-session-message! channel session-id (approval-request-text interaction))
-        (= :allow (await-interaction-result session-id channel interaction))
-        (finally
-          (bridge/clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))))
+      (= :allow
+         (bridge/request-channel-interaction!
+          interaction
+          #(send-session-message! channel session-id (approval-request-text %))
+          #(await-interaction-result session-id channel %))))))
 
 (defn valid-slack-signature?
   [body-bytes timestamp signature]
@@ -367,7 +363,7 @@
 
 (defn- session-meta
   [session-id]
-  (or (db/session-external-meta session-id) {}))
+  (bridge/session-external-meta session-id))
 
 (defn- slack-conversation-key
   [{:keys [team-id channel-id thread-ts]}]
@@ -400,31 +396,18 @@
 
 (defn- ensure-external-session!
   [channel external-key external-meta & {:keys [label]}]
-  (let [existing (db/find-session-by-external-key external-key)]
-    (if-let [session-id (:id existing)]
-      (do
-        (bridge/resume-session! session-id
-                                :expected-channel channel)
-        (db/save-session-external-meta! session-id external-meta)
-        session-id)
-      (:session-id (bridge/create-session! channel
-                                           {:label label
-                                            :external-key external-key
-                                            :external-meta external-meta})))))
+  (bridge/ensure-external-session! channel
+                                   external-key
+                                   external-meta
+                                   :label label))
 
 (defn- persist-external-user-message!
   [session-id channel user-message external-message-id external-sender]
-  (let [message-id (db/add-message! session-id :user user-message
-                                    :external-sender external-sender)]
-    (audit/log! {:session-id session-id
-                 :channel channel}
-                {:actor :user
-                 :type :user-message
-                 :message-id message-id
-                 :data (cond-> {:external_message_id external-message-id}
-                         external-sender (assoc :external_sender external-sender)
-                         true (assoc :messaging true))})
-    message-id))
+  (bridge/record-external-user-message! session-id
+                                        channel
+                                        user-message
+                                        external-message-id
+                                        external-sender))
 
 (defn- normalize-outbound-text
   [text]
@@ -531,7 +514,7 @@
 
 (defn- task-help-text
   [session-id]
-  (let [task (db/current-session-task session-id)
+  (let [task (bridge/current-session-task session-id)
         task-state (some-> task :state)]
     (str/join
      "\n"

@@ -3,7 +3,6 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.bridge :as bridge]
-            [xia.db :as db]
             [xia.skill :as skill]
             [xia.skill.openclaw :as openclaw-skill]
             [xia.tool :as tool]
@@ -116,11 +115,11 @@
           (cond
             (or (= trimmed "/quit") (= trimmed "/exit"))
             (do (println "consolidating memories...")
-                (bridge/finalize-session! session-id
-                                          :reason :terminal-exit
-                                          :default-channel :terminal
-                                          :mark-inactive? false
-                                          :consolidation-mode :sync)
+                (bridge/finalize-channel-session! session-id
+                                                  :terminal
+                                                  :reason :terminal-exit
+                                                  :mark-inactive? false
+                                                  :consolidation-mode :sync)
                 (println "goodbye.")
                 (System/exit 0))
 
@@ -151,7 +150,7 @@
                 (recur))
 
             (= trimmed "/tools")
-            (do (let [tools (db/list-tools)]
+            (do (let [tools (bridge/installed-tools)]
                   (if (seq tools)
                     (doseq [t tools]
                       (println (str "  " (name (:tool/id t))
@@ -216,7 +215,7 @@
 
             (= trimmed "/compact")
             (do (println "  compacting message history...")
-                (let [messages (db/session-messages session-id)
+                (let [messages (bridge/session-messages session-id)
                       msg-count (count messages)
                       tokens (->> messages (map #(context/estimate-tokens (:content %))) (reduce +))]
                   (println (str "  current: " msg-count " messages, ~" tokens " tokens"))

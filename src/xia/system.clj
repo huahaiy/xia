@@ -6,6 +6,7 @@
             [xia.agent :as agent]
             [xia.async :as async]
             [xia.browser :as browser]
+            [xia.bridge :as bridge]
             [xia.channel.messaging :as messaging]
             [xia.checkpoint :as checkpoint]
             [xia.crypto :as crypto]
@@ -160,10 +161,20 @@
   [_ _]
   (agent/clear-runtime!))
 
+(defmethod ig/init-key :xia/bridge-runtime
+  [_ _]
+  {:runtime (bridge/install-runtime!)})
+
+(defmethod ig/halt-key! :xia/bridge-runtime
+  [_ {:keys [runtime]}]
+  (if runtime
+    (bridge/clear-runtime! runtime)
+    (bridge/clear-runtime!)))
+
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay runtime-state-runtime retrieval-runtime oauth-runtime
              browser-runtime async-runtime prompt-runtime agent-runtime
-             working-memory-runtime]}]
+             working-memory-runtime bridge-runtime]}]
   (hippo/reset-runtime!)
   (checkpoint/reset-runtime!)
   (llm/reset-runtime!)
@@ -182,7 +193,8 @@
    :async-runtime async-runtime
    :prompt-runtime prompt-runtime
    :agent-runtime agent-runtime
-   :working-memory-runtime working-memory-runtime})
+   :working-memory-runtime working-memory-runtime
+   :bridge-runtime bridge-runtime})
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]

@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [xia.channel.http]
             [xia.channel.messaging]
+            [xia.bridge :as bridge]
             [xia.checkpoint :as checkpoint]
             [xia.core :as core]
             [xia.crypto :as crypto]
@@ -34,6 +35,7 @@
 (defn- reset-core-runtime!
   []
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
+  (bridge/clear-runtime!)
   (xia.channel.messaging/clear-runtime!)
   (xia.channel.http/clear-runtime!)
   (xia.db/clear-runtime!)

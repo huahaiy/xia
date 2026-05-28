@@ -16,7 +16,6 @@
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.limits :as limits]
-            [xia.llm :as llm]
             [xia.oauth :as oauth]
             [xia.plugin :as plugin]
             [xia.runtime-state :as runtime-state]
@@ -272,10 +271,10 @@
 
 (defn- finalize-prompt-schedule-session!
   [session-id]
-  (bridge/finalize-session! session-id
-                            :reason :schedule-finish
-                            :default-channel :scheduler
-                            :mark-inactive? false))
+  (bridge/finalize-channel-session! session-id
+                                    :scheduler
+                                    :reason :schedule-finish
+                                    :mark-inactive? false))
 
 (defn- execute-prompt-schedule
   "Execute a :prompt type schedule — runs through the full agent loop."
@@ -313,22 +312,22 @@
                                 :phase :start
                                 :schedule-type :prompt
                                 :started-at started))
-      (let [result (binding [llm/*request-budget-guard*
-                             (fn [_request]
-                               (limits/throw-if-exhausted! budget-state))
-                             llm/*request-observer*
-                             (fn [request]
-                               (limits/record-schedule-run-request!
-                                budget-state
-                                request))]
-                     (bridge/send-message! session-id
-                                           prompt*
-                                           :channel :scheduler
-                                           :task-id task-id
-                                           :runtime-op (if (= task-id existing-task-id)
-                                                         :resume
-                                                         :start)
-                                           :tool-context execution-context))]
+      (let [result (bridge/send-message! session-id
+                                         prompt*
+                                         :channel :scheduler
+                                         :task-id task-id
+                                         :runtime-op (if (= task-id existing-task-id)
+                                                       :resume
+                                                       :start)
+                                         :tool-context execution-context
+                                         :request-budget-guard
+                                         (fn [_request]
+                                           (limits/throw-if-exhausted! budget-state))
+                                         :request-observer
+                                         (fn [request]
+                                           (limits/record-schedule-run-request!
+                                            budget-state
+                                            request)))]
         (plugin/run-hooks! :schedule-run
                            (assoc execution-context
                                   :session-id session-id

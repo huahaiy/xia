@@ -8,9 +8,11 @@
             [xia.agent :as agent]
             [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
+            [xia.audit :as audit]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
+            [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
             [xia.task-event :as task-event]
@@ -19,6 +21,41 @@
   (:import [java.util Date]))
 
 (def ^:private max-live-task-runtime-events 200)
+(defonce ^:private installed-runtime-atom (atom nil))
+
+(defn make-runtime
+  []
+  {:task-runtime-events-atom (atom {})
+   :task-runtime-stream-subscribers-atom (atom {})})
+
+(declare clear-runtime!)
+
+(defn install-runtime!
+  ([] (install-runtime! (make-runtime)))
+  ([runtime]
+   (when-let [current @installed-runtime-atom]
+     (when-not (identical? current runtime)
+       (clear-runtime! current)))
+   (reset! installed-runtime-atom runtime)
+   runtime))
+
+(defn- current-runtime
+  []
+  (or @installed-runtime-atom
+      (install-runtime!)))
+
+(defn clear-runtime!
+  ([]
+   (when-let [runtime @installed-runtime-atom]
+     (clear-runtime! runtime))
+   nil)
+  ([runtime]
+   (when runtime
+     (reset! (:task-runtime-events-atom runtime) {})
+     (reset! (:task-runtime-stream-subscribers-atom runtime) {})
+     (when (identical? runtime @installed-runtime-atom)
+       (reset! installed-runtime-atom nil)))
+   nil))
 
 (defn register-channel-adapter!
   "Register the interaction adapter for a user-facing channel.
@@ -84,10 +121,17 @@
     (count sessions)))
 
 (defn runtime-event-store
-  "Create a bridge runtime-event store over caller-owned atoms."
-  [events-atom subscribers-atom]
-  {:events-atom events-atom
-   :subscribers-atom subscribers-atom})
+  "Return a bridge runtime-event store.
+   With no args, uses the installed bridge runtime. The two-atom arity remains
+   for isolated tests and temporary adapters."
+  ([]
+   (runtime-event-store (current-runtime)))
+  ([runtime]
+   {:events-atom (:task-runtime-events-atom runtime)
+    :subscribers-atom (:task-runtime-stream-subscribers-atom runtime)})
+  ([events-atom subscribers-atom]
+   {:events-atom events-atom
+    :subscribers-atom subscribers-atom}))
 
 (defn append-task-runtime-event!
   "Append a task runtime event to a bounded per-task live event buffer."
@@ -173,9 +217,18 @@
 
   Options are passed through to `xia.agent/process-message` so callers can provide
   channel, persistence, local doc, artifact, and future runner-scoped options
-  without depending on agent internals."
-  [session-id user-message & {:as opts}]
-  (apply agent/process-message session-id user-message (mapcat identity opts)))
+  without depending on agent internals.
+
+  Runner-scoped `:request-budget-guard` and `:request-observer` options are
+  installed around the run instead of being forwarded to the agent."
+  [session-id user-message & {:keys [request-budget-guard request-observer]
+                              :as opts}]
+  (let [agent-opts (dissoc opts :request-budget-guard :request-observer)]
+    (binding [llm/*request-budget-guard* (or request-budget-guard
+                                            llm/*request-budget-guard*)
+              llm/*request-observer* (or request-observer
+                                         llm/*request-observer*)]
+      (apply agent/process-message session-id user-message (mapcat identity agent-opts)))))
 
 (defn interaction-context
   "Return the current bridge interaction context."
@@ -202,6 +255,57 @@
   "Persist a session conversation into long-term memory."
   [session-id channel & {:as opts}]
   (apply hippo/record-conversation! session-id channel (mapcat identity opts)))
+
+(defn installed-tools
+  "Return installed tools for channel presentation."
+  []
+  (db/list-tools))
+
+(defn session-messages
+  "Return persisted messages for a channel session."
+  [session-id]
+  (db/session-messages session-id))
+
+(defn latest-session-message
+  "Return the latest persisted message for a channel session."
+  ([session-id]
+   (db/latest-session-message session-id))
+  ([session-id roles]
+   (db/latest-session-message session-id roles)))
+
+(defn session-external-meta
+  "Return transport routing metadata for an externally addressed session."
+  [session-id]
+  (or (db/session-external-meta session-id) {}))
+
+(defn ensure-external-session!
+  "Find or create a channel session keyed by external transport identity."
+  [channel external-key external-meta & {:keys [label]}]
+  (let [existing (db/find-session-by-external-key external-key)]
+    (if-let [session-id (:id existing)]
+      (do
+        (resume-session! session-id :expected-channel channel)
+        (db/save-session-external-meta! session-id external-meta)
+        session-id)
+      (:session-id (create-session! channel
+                                    {:label label
+                                     :external-key external-key
+                                     :external-meta external-meta})))))
+
+(defn record-external-user-message!
+  "Persist and audit a user message received from an external transport."
+  [session-id channel user-message external-message-id external-sender]
+  (let [message-id (db/add-message! session-id :user user-message
+                                    :external-sender external-sender)]
+    (audit/log! {:session-id session-id
+                 :channel channel}
+                {:actor :user
+                 :type :user-message
+                 :message-id message-id
+                 :data (cond-> {:external_message_id external-message-id}
+                         external-sender (assoc :external_sender external-sender)
+                         true (assoc :messaging true))})
+    message-id))
 
 (defn memory-consolidation-summary
   "Return current long-term memory consolidation status."
@@ -397,6 +501,18 @@
   "Clear a pending prompt or approval interaction."
   [selector]
   (prompt/clear-pending-interaction! selector))
+
+(defn request-channel-interaction!
+  "Register a channel interaction, notify the transport, wait for a result, then clear it."
+  [interaction notify! await!]
+  (register-interaction! interaction)
+  (try
+    (when notify!
+      (notify! interaction))
+    (when await!
+      (await! interaction))
+    (finally
+      (clear-pending-interaction! {:interaction-id (:interaction-id interaction)}))))
 
 (defn resolve-pending-interaction
   "Resolve the best pending interaction for a selector."

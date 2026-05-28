@@ -46,8 +46,6 @@
    :ws-sessions-atom                    (atom {})
    :websocket-receive-failures-atom     (atom {})
    :session-statuses-atom               (atom {})
-   :task-runtime-events-atom            (atom {})
-   :task-runtime-stream-subscribers-atom (atom {})
    :web-dev-state-atom                  (atom {:enabled? false
                                                :root nil})
    :command-shutdown-handler-atom       (atom nil)
@@ -102,14 +100,6 @@
 (defn- websocket-receive-failures-atom
   []
   (:websocket-receive-failures-atom (current-runtime)))
-
-(defn- task-runtime-events-atom
-  []
-  (:task-runtime-events-atom (current-runtime)))
-
-(defn- task-runtime-stream-subscribers-atom
-  []
-  (:task-runtime-stream-subscribers-atom (current-runtime)))
 
 (defn- web-dev-state-atom
   []
@@ -440,9 +430,7 @@
 (defn- status-handler-deps
   []
   {:session-statuses-atom (session-statuses-atom)
-   :runtime-event-store (bridge/runtime-event-store
-                         (task-runtime-events-atom)
-                         (task-runtime-stream-subscribers-atom))})
+   :runtime-event-store (bridge/runtime-event-store)})
 
 (defn- clear-session-status!
   [session-id]
@@ -1053,7 +1041,6 @@
         (bridge/clear-channel-adapter! :websocket)
         (reset! (websocket-receive-failures-atom) {})
         (reset! (session-statuses-atom) {})
-        (reset! (task-runtime-events-atom) {})
         (reset-runtime-ingress-rate-limits! (current-runtime))
         (reset-runtime-command-auth! (current-runtime))
         (reset-runtime-managed-proxy-auth! (current-runtime))
@@ -1093,8 +1080,6 @@
           (reset! (:ws-sessions-atom runtime) {})
           (reset! (:websocket-receive-failures-atom runtime) {})
           (reset! (:session-statuses-atom runtime) {})
-          (reset! (:task-runtime-events-atom runtime) {})
-          (reset! (:task-runtime-stream-subscribers-atom runtime) {})
           (reset! (:web-dev-state-atom runtime) {:enabled? false
                                                  :root nil})
           (reset! (:command-shutdown-handler-atom runtime) nil)

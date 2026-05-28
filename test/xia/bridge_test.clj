@@ -2,8 +2,10 @@
   (:require [clojure.test :refer :all]
             [xia.agent :as agent]
             [xia.agent.task-runtime :as task-runtime]
+            [xia.audit :as audit]
             [xia.bridge :as bridge]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
             [xia.task-event :as task-event]
@@ -35,6 +37,122 @@
                     :local-doc-ids ["doc-1"]
                     :artifact-ids ["artifact-1"]}}]
            @calls))))
+
+(deftest bridge-installs-runner-observers-around-message-dispatch
+  (let [{:keys [session-id]} (bridge/create-session! :scheduler)
+        budget-guard (fn [_request])
+        request-observer (fn [_request])
+        call (atom nil)]
+    (with-redefs [agent/process-message
+                  (fn [sid text & {:as opts}]
+                    (reset! call {:session-id sid
+                                  :text text
+                                  :opts opts
+                                  :budget-guard llm/*request-budget-guard*
+                                  :request-observer llm/*request-observer*})
+                    "scheduled response")]
+      (is (= "scheduled response"
+             (bridge/send-message! session-id
+                                   "run schedule"
+                                   :channel :scheduler
+                                   :request-budget-guard budget-guard
+                                   :request-observer request-observer))))
+    (is (= {:session-id session-id
+            :text "run schedule"
+            :opts {:channel :scheduler}
+            :budget-guard budget-guard
+            :request-observer request-observer}
+           @call))))
+
+(deftest bridge-owns-external-session-and-message-persistence
+  (let [session-id (random-uuid)
+        new-session-id (random-uuid)
+        calls (atom [])]
+    (with-redefs [db/find-session-by-external-key
+                  (fn [external-key]
+                    (swap! calls conj [:find external-key])
+                    {:id session-id})
+                  session-life/resume!
+                  (fn [sid & opts]
+                    (swap! calls conj [:resume sid (apply hash-map opts)])
+                    true)
+                  db/save-session-external-meta!
+                  (fn [sid meta]
+                    (swap! calls conj [:save-meta sid meta])
+                    true)]
+      (is (= session-id
+             (bridge/ensure-external-session! :slack
+                                              "slack:T:C:main"
+                                              {:channel-id "C"}
+                                              :label "Slack C"))))
+    (is (= [[:find "slack:T:C:main"]
+            [:resume session-id {:expected-channel :slack}]
+            [:save-meta session-id {:channel-id "C"}]]
+           @calls))
+    (reset! calls [])
+    (with-redefs [db/find-session-by-external-key
+                  (fn [external-key]
+                    (swap! calls conj [:find external-key])
+                    nil)
+                  session-life/create!
+                  (fn [channel opts]
+                    (swap! calls conj [:create channel opts])
+                    {:session-id new-session-id
+                     :channel channel})]
+      (is (= new-session-id
+             (bridge/ensure-external-session! :telegram
+                                              "telegram:1:main"
+                                              {:chat-id 1}
+                                              :label "Telegram"))))
+    (is (= [[:find "telegram:1:main"]
+            [:create :telegram {:label "Telegram"
+                                :external-key "telegram:1:main"
+                                :external-meta {:chat-id 1}}]]
+           @calls))
+    (reset! calls [])
+    (with-redefs [db/add-message!
+                  (fn [sid role content & {:as opts}]
+                    (swap! calls conj [:add-message sid role content opts])
+                    42)
+                  audit/log!
+                  (fn [context event]
+                    (swap! calls conj [:audit context event])
+                    true)]
+      (is (= 42
+             (bridge/record-external-user-message! session-id
+                                                   :slack
+                                                   "hello"
+                                                   "slack:evt"
+                                                   {:user-id "U"}))))
+    (is (= [[:add-message session-id :user "hello" {:external-sender {:user-id "U"}}]
+            [:audit {:session-id session-id
+                     :channel :slack}
+             {:actor :user
+              :type :user-message
+              :message-id 42
+              :data {:external_message_id "slack:evt"
+                     :external_sender {:user-id "U"}
+                     :messaging true}}]]
+           @calls))))
+
+(deftest bridge-exposes-channel-session-message-views
+  (let [session-id (random-uuid)
+        messages [{:role :user
+                   :content "hello"}]
+        assistant-message {:role :assistant
+                           :content "hi"}]
+    (with-redefs [db/session-messages
+                  (fn [sid]
+                    (is (= session-id sid))
+                    messages)
+                  db/latest-session-message
+                  (fn [sid roles]
+                    (is (= session-id sid))
+                    (is (= #{:assistant} roles))
+                    assistant-message)]
+      (is (= messages (bridge/session-messages session-id)))
+      (is (= assistant-message
+             (bridge/latest-session-message session-id #{:assistant}))))))
 
 (deftest bridge-submits-pending-prompt-and-approval-replies
   (let [{:keys [session-id]} (bridge/create-session! :http)
@@ -83,6 +201,31 @@
         (is (= :allow (deref (:response approval) 0 nil)))
         (finally
           (prompt/clear-pending-interaction! {:interaction-id (:interaction-id approval)}))))))
+
+(deftest bridge-owns-channel-interaction-lifecycle
+  (let [interaction {:interaction-id "interaction-1"
+                     :kind :prompt}
+        calls (atom [])]
+    (with-redefs [prompt/register-interaction!
+                  (fn [interaction*]
+                    (swap! calls conj [:register interaction*])
+                    interaction*)
+                  prompt/clear-pending-interaction!
+                  (fn [selector]
+                    (swap! calls conj [:clear selector])
+                    nil)]
+      (is (= :done
+             (bridge/request-channel-interaction!
+              interaction
+              #(swap! calls conj [:notify %])
+              (fn [interaction*]
+                (swap! calls conj [:await interaction*])
+                :done)))))
+    (is (= [[:register interaction]
+            [:notify interaction]
+            [:await interaction]
+            [:clear {:interaction-id "interaction-1"}]]
+           @calls))))
 
 (deftest bridge-applies-task-control-messages
   (let [{:keys [session-id]} (bridge/create-session! :slack)
@@ -233,6 +376,24 @@
              (bridge/task-runtime-events-after store task-id 1))))
     (bridge/unregister-task-runtime-event-subscriber! store task-id "subscriber-1")
     (is (empty? @subscribers-atom))))
+
+(deftest bridge-runtime-owns-default-task-runtime-event-store
+  (let [runtime (bridge/install-runtime!)]
+    (try
+      (let [store (bridge/runtime-event-store)
+            task-id (random-uuid)
+            event (bridge/handle-task-runtime-event!
+                   store
+                   {:type :task.status
+                    :task-id task-id
+                    :summary "working"
+                    :data {:state :running}})]
+        (is (= [event]
+               (:events (bridge/task-runtime-events-after store task-id 0))))
+        (is (= event
+               (bridge/latest-task-runtime-status-event store task-id))))
+      (finally
+        (bridge/clear-runtime! runtime)))))
 
 (deftest bridge-reports-missing-task-for-non-interrupt-control
   (let [{:keys [session-id]} (bridge/create-session! :imessage)]
