@@ -202,12 +202,16 @@
 
 (defmethod ig/init-key :xia/http-runtime
   [_ {:keys [runtime-support]}]
-  {:runtime (http/install-runtime!)
-   :runtime-support runtime-support})
+  (let [runtime (http/make-runtime)]
+    (http/install-runtime! runtime)
+    {:runtime runtime
+     :runtime-support runtime-support}))
 
 (defmethod ig/halt-key! :xia/http-runtime
-  [_ _]
-  (http/clear-runtime!))
+  [_ {:keys [runtime]}]
+  (if runtime
+    (http/clear-runtime! runtime)
+    (http/clear-runtime!)))
 
 (defmethod ig/init-key :xia/sci-runtime
   [_ {:keys [db]}]
@@ -306,13 +310,19 @@
 
 (defmethod ig/init-key :xia/http
   [_ {:keys [http-runtime scheduler messaging bind-host port web-dev?]}]
-  (http/start! bind-host port {:web-dev? (true? web-dev?)})
-  {:http-runtime http-runtime
-   :scheduler scheduler
-   :messaging messaging
-   :bind-host bind-host
-   :port (or (http/current-port) port)})
+  (let [runtime (:runtime http-runtime)]
+    (http/with-runtime runtime
+      #(do
+         (http/start! bind-host port {:web-dev? (true? web-dev?)})
+         {:http-runtime http-runtime
+          :runtime runtime
+          :scheduler scheduler
+          :messaging messaging
+          :bind-host bind-host
+          :port (or (http/current-port) port)}))))
 
 (defmethod ig/halt-key! :xia/http
-  [_ _]
-  (http/stop!))
+  [_ {:keys [runtime]}]
+  (if runtime
+    (http/stop! runtime)
+    (http/stop!)))

@@ -3,7 +3,6 @@
   (:require [charred.api :as json]
             [org.httpkit.server :as http]
             [taoensso.timbre :as log]
-            [xia.autonomous :as autonomous]
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.goal :as goal]
@@ -296,7 +295,7 @@
      :latest_status (some-> (:status latest-run) name)
      :latest_error  (truncate-text* deps (:error latest-run) 160)}))
 
-(declare user-profile->body history-user-profile->body workspace->body history-workspace->body stack->body)
+(declare user-profile->body history-user-profile->body workspace->body history-workspace->body stack-view->body)
 
 (defn- history-session->body
   ([deps session]
@@ -375,24 +374,18 @@
     (:started-at turn) (assoc :started_at (instant->str* deps (:started-at turn)))
     (:finished-at turn) (assoc :finished_at (instant->str* deps (:finished-at turn)))))
 
-(declare stack->body user-profile->body)
-
-(defn- task-execution-session-role
-  [task]
-  (some (fn [{:keys [session-id role]}]
-          (when (= session-id (:session-id task))
-            role))
-        (:session-links task)))
+(declare stack-view->body user-profile->body)
 
 (defn- session-link->body
-  [deps execution-session-id {:keys [session-id role created-at updated-at]}]
-  (let [execution-current? (= session-id execution-session-id)]
-    (cond-> {:session_id         (some-> session-id str)
-             :current            execution-current?
-             :execution_current  execution-current?}
-    role (assoc :role (name role))
-    created-at (assoc :created_at (instant->str* deps created-at))
-    updated-at (assoc :updated_at (instant->str* deps updated-at)))))
+  [deps {:keys [session-id role created-at updated-at current? execution-current?]}]
+  (let [current?           (boolean current?)
+        execution-current? (boolean execution-current?)]
+    (cond-> {:session_id        (some-> session-id str)
+             :current           current?
+             :execution_current execution-current?}
+      role (assoc :role (name role))
+      created-at (assoc :created_at (instant->str* deps created-at))
+      updated-at (assoc :updated_at (instant->str* deps updated-at)))))
 
 (defn- user-profile->body
   [deps user-profile]
@@ -482,26 +475,22 @@
 
 (defn- task->body
   ([deps task]
-   (task->body deps
-               task
-               (bridge/task-autonomy-state task)))
+   (task->body deps task nil))
   ([deps task autonomy-state]
-   (let [runtime         (get-in task [:meta :runtime])
-         execution-role  (task-execution-session-role task)
+   (let [{:keys [state execution-session-role runtime-view inspection session-links stack]}
+         (bridge/task-view
+          {:instant->str #(instant->str* deps %)
+           :truncate-text #(truncate-text* deps %1 %2)}
+          task
+          (cond-> {}
+            autonomy-state (assoc :autonomy-state autonomy-state)))
          {:keys [recovery checkpoint checkpoint-at resume-hint recovery-brief]
-          boundary :boundary-summary} (bridge/task-runtime-view task)
+          boundary :boundary-summary} runtime-view
          persistent-goal (get-in task [:meta :persistent-goal])
          contract        (:contract task)
          constraints     (:constraints task)
-         inspection      (bridge/task-inspection
-                          {:instant->str #(instant->str* deps %)
-                           :truncate-text #(truncate-text* deps %1 %2)}
-                          task
-                          autonomy-state)
-         state           (or (:state runtime) (:state task))
-         session-links   (not-empty (mapv #(session-link->body deps (:session-id task) %)
-                                          (:session-links task)))
-         stack           (stack->body deps autonomy-state)]
+         session-links   (not-empty (mapv #(session-link->body deps %) session-links))
+         stack           (stack-view->body deps stack)]
      (cond-> {:id         (some-> (:id task) str)
               :session_id (some-> (:session-id task) str)
               :execution_session_id (some-> (:session-id task) str)
@@ -510,7 +499,7 @@
               :state      (some-> state name)
               :created_at (instant->str* deps (:created-at task))
               :updated_at (instant->str* deps (:updated-at task))}
-       execution-role (assoc :execution_session_role (name execution-role))
+       execution-session-role (assoc :execution_session_role (name execution-session-role))
        (:parent-id task) (assoc :parent_id (str (:parent-id task)))
        (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
        (:title task) (assoc :title (:title task))
@@ -543,46 +532,34 @@
     (:compressed? frame) (assoc :compressed true)
     (:compressed-count frame) (assoc :compressed_count (:compressed-count frame))))
 
-(defn- stack->body
-  [deps autonomy-state]
-  (when autonomy-state
-    (let [stack* (vec (:stack (autonomous/normalize-state autonomy-state)))
-          tip    (peek stack*)
-          root   (first stack*)]
-      {:depth (count stack*)
-       :current_focus (:title tip)
-       :root_goal (:title root)
-       :frames (mapv #(stack-frame->body deps %) stack*)})))
+(defn- stack-view->body
+  [deps stack-view]
+  (when stack-view
+    {:depth (:depth stack-view)
+     :current_focus (:current-focus stack-view)
+     :root_goal (:root-goal stack-view)
+     :frames (mapv #(stack-frame->body deps %) (:frames stack-view))}))
 
 (defn- history-task->body
   ([deps task]
-   (history-task->body deps
-                       task
-                       (bridge/task-autonomy-state task)
-                       nil))
-  ([deps task autonomy-state]
-   (history-task->body deps task autonomy-state nil))
-  ([deps task autonomy-state history-data]
+   (history-task->body deps task nil))
+  ([deps task history-data]
    (let [{:keys [turns]} (or history-data {})
          turns       (or turns [])
          latest-turn (last turns)
-         runtime     (get-in task [:meta :runtime])
-         execution-role (task-execution-session-role task)
+         {:keys [state execution-session-role runtime-view inspection session-links stack]}
+         (bridge/task-view
+          {:instant->str #(instant->str* deps %)
+           :truncate-text #(truncate-text* deps %1 %2)}
+          task
+          {:compact? true
+           :history-data history-data})
          {:keys [recovery checkpoint checkpoint-at resume-hint recovery-brief]
-          boundary :boundary-summary} (bridge/task-runtime-view task)
+          boundary :boundary-summary} runtime-view
          contract    (history-contract->body (:contract task))
          constraints (:constraints task)
-         inspection  (bridge/task-inspection
-                      {:instant->str #(instant->str* deps %)
-                       :truncate-text #(truncate-text* deps %1 %2)}
-                      task
-                      autonomy-state
-                      true
-                      history-data)
-         state       (or (:state runtime) (:state task))
-         session-links (not-empty (mapv #(session-link->body deps (:session-id task) %)
-                                        (:session-links task)))
-         stack       (stack->body deps autonomy-state)]
+         session-links (not-empty (mapv #(session-link->body deps %) session-links))
+         stack       (stack-view->body deps stack)]
      (cond-> {:id          (some-> (:id task) str)
               :session_id  (some-> (:session-id task) str)
               :execution_session_id (some-> (:session-id task) str)
@@ -592,7 +569,7 @@
               :turn_count  (count turns)
               :created_at  (instant->str* deps (:created-at task))
               :updated_at  (instant->str* deps (:updated-at task))}
-       execution-role (assoc :execution_session_role (name execution-role))
+       execution-session-role (assoc :execution_session_role (name execution-session-role))
        (:current-turn-id task) (assoc :current_turn_id (str (:current-turn-id task)))
        (:title task) (assoc :title (:title task))
        (:summary task) (assoc :summary (:summary task))
@@ -1292,7 +1269,6 @@
                     {:tasks (->> tasks
                                  (into [] (map #(history-task->body deps
                                                                    %
-                                                                   (bridge/task-autonomy-state %)
                                                                    (get history-data (:id %))))))})))
 
 (defn handle-get-task

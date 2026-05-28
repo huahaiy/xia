@@ -12,26 +12,6 @@
   [deps throwable]
   ((:throwable-message deps) throwable))
 
-(defn- record-session-finalization-failure!
-  [deps session-id channel step ^Throwable e]
-  (let [sid-str (str session-id)]
-    (swap! (:session-statuses-atom deps) assoc
-           sid-str
-           {:session-id         sid-str
-            :state              :error
-            :phase              :finalizing
-            :message            (str "Failed to finalize "
-                                     (name channel)
-                                     " session; working memory preserved for retry.")
-            :error              (throwable-message* deps e)
-            :finalization-step  step
-            :updated-at         (java.util.Date.)})
-    (log/error e
-               "Failed to finalize session; preserving working memory for retry"
-               sid-str
-               "channel" (name channel)
-               "step" (name step))))
-
 (defn- clear-receive-failure!
   [deps session-id]
   (swap! (:websocket-receive-failures-atom deps) dissoc (str session-id)))
@@ -102,30 +82,11 @@
   [deps ch]
   (when-let [sid (get @(:ws-sessions-atom deps) ch)]
     (clear-receive-failure! deps sid)
-    (let [topics-or-failure
-          (try
-            (bridge/session-topics sid)
-            (catch Exception e
-              (record-session-finalization-failure! deps sid :websocket :load-working-memory e)
-              ::finalization-failed))]
-      (when-not (= ::finalization-failed topics-or-failure)
-        (let [finalized?
-              (try
-                (bridge/clear-session-autonomy-state! sid)
-                (bridge/record-session-conversation! sid
-                                                     :websocket
-                                                     :topics topics-or-failure
-                                                     :consolidation-mode :sync)
-                true
-                (catch Exception e
-                  (record-session-finalization-failure! deps sid :websocket :persist-session e)
-                  false))]
-          (when finalized?
-            (swap! (:session-statuses-atom deps) dissoc (str sid))
-            (try
-              (bridge/clear-working-memory! sid)
-              (catch Exception e
-                (log/error e "Failed to clear WebSocket working memory"))))))))
+    (bridge/finalize-channel-session! sid
+                                      :websocket
+                                      :reason :websocket-close
+                                      :consolidation-mode :sync)
+    (swap! (:session-statuses-atom deps) dissoc (str sid)))
   (swap! (:ws-sessions-atom deps) dissoc ch)
   (log/info "WebSocket disconnected"))
 

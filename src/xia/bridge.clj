@@ -7,6 +7,7 @@
   (:require [xia.agent :as agent]
             [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
+            [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.hippocampus :as hippo]
             [xia.prompt :as prompt]
@@ -45,6 +46,37 @@
   "Finalize a session through the shared lifecycle path."
   [session-id & {:as opts}]
   (apply session-life/finalize! session-id (mapcat identity opts)))
+
+(defn finalize-channel-session!
+  "Finalize a channel-owned session through the shared lifecycle path."
+  [session-id channel & {:keys [reason consolidation-mode mark-inactive?]
+                         :or   {reason :channel-close
+                                mark-inactive? true}}]
+  (finalize-session! session-id
+                     :reason reason
+                     :default-channel channel
+                     :clear-state! session-life/clear-session-state!
+                     :mark-inactive? mark-inactive?
+                     :consolidation-mode consolidation-mode))
+
+(defn active-channel-sessions
+  "Return active sessions for the supplied channel set."
+  [channels]
+  (let [channels* (set channels)]
+    (->> (db/list-sessions {:include-workers? true})
+         (filter (fn [{:keys [channel active?]}]
+                   (and active?
+                        (contains? channels* channel))))
+         vec)))
+
+(defn finalize-active-channel-sessions!
+  "Finalize active sessions belonging to the supplied channel set."
+  [channels finalize! & {:keys [reason]
+                         :or   {reason :server-stop}}]
+  (let [sessions (active-channel-sessions channels)]
+    (doseq [{:keys [id]} sessions]
+      (finalize! id reason))
+    (count sessions)))
 
 (defn send-message!
   "Run one user message through Xia for an existing session.
@@ -107,13 +139,25 @@
   [session-id]
   (wm/clear-wm! session-id))
 
+(defn current-session-task
+  "Return the currently active task for a channel session."
+  [session-id]
+  (when-let [sid (session-life/session-uuid session-id)]
+    (db/current-session-task sid)))
+
+(defn current-session-task-id
+  "Return the current task id for a channel session, if one exists."
+  [session-id]
+  (some-> (current-session-task session-id) :id))
+
 (defn current-task-context
   "Return the current task, autonomy state, and compact inspection for a session."
   ([session-id]
    (current-task-context session-id true))
   ([session-id compact?]
-   (when-let [task (db/current-session-task session-id)]
-     (let [autonomy-state (task-runtime/inspect-runtime-autonomy-state session-id (:id task))
+   (when-let [task (current-session-task session-id)]
+     (let [session-id*     (:session-id task)
+           autonomy-state (task-runtime/inspect-runtime-autonomy-state session-id* (:id task))
            inspection (task-inspection/task-inspection
                        {:truncate-text agent-tools/truncate-summary}
                        task
@@ -148,6 +192,70 @@
    (task-inspection/task-inspection opts task autonomy-state compact?))
   ([opts task autonomy-state compact? history-data]
    (task-inspection/task-inspection opts task autonomy-state compact? history-data)))
+
+(defn- task-execution-session-role
+  [task]
+  (some (fn [{:keys [session-id role]}]
+          (when (= session-id (:session-id task))
+            role))
+        (:session-links task)))
+
+(defn- task-session-link-views
+  [task]
+  (let [execution-session-id (:session-id task)]
+    (not-empty
+     (mapv (fn [{:keys [session-id] :as link}]
+             (let [execution-current? (= session-id execution-session-id)]
+               (assoc link
+                      :current? execution-current?
+                      :execution-current? execution-current?)))
+           (:session-links task)))))
+
+(defn- task-stack-view
+  [autonomy-state]
+  (when autonomy-state
+    (let [stack* (vec (:stack (autonomous/normalize-state autonomy-state)))
+          tip    (peek stack*)
+          root   (first stack*)]
+      {:depth (count stack*)
+       :current-focus (:title tip)
+       :root-goal (:title root)
+       :frames stack*})))
+
+(defn- task-inspection-view
+  [opts task autonomy-state options]
+  (let [compact-provided? (contains? options :compact?)
+        history-provided? (contains? options :history-data)
+        compact?          (:compact? options)
+        history-data      (:history-data options)]
+    (cond
+      history-provided?
+      (task-inspection/task-inspection opts task autonomy-state compact? history-data)
+
+      compact-provided?
+      (task-inspection/task-inspection opts task autonomy-state compact?)
+
+      :else
+      (task-inspection/task-inspection opts task autonomy-state))))
+
+(defn task-view
+  "Return the channel-facing task projection inputs for HTTP, terminal, and
+   other adapters. Wire-format rendering stays in the channel."
+  ([opts task]
+   (task-view opts task {}))
+  ([opts task options]
+   (let [autonomy-state (or (:autonomy-state options)
+                            (task-autonomy-state task))
+         runtime        (get-in task [:meta :runtime])]
+     {:task task
+      :autonomy-state autonomy-state
+      :runtime runtime
+      :state (or (:state runtime) (:state task))
+      :execution-session-role (task-execution-session-role task)
+      :runtime-view (task-runtime-view task)
+      :inspection (task-inspection-view opts task autonomy-state options)
+      :session-links (task-session-link-views task)
+      :stack (task-stack-view autonomy-state)})))
 
 (defn session-cancelled?
   "True when the session has been cancelled or interrupted."

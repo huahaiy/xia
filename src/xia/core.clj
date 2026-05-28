@@ -207,6 +207,20 @@
 (declare make-cleanup)
 (declare stop-runtime!)
 
+(defn- current-http-runtime
+  []
+  (get-in @runtime-system-atom [:system :xia/http-runtime :runtime]))
+
+(defn- with-current-http-runtime
+  [f]
+  (if-let [runtime (current-http-runtime)]
+    (http/with-runtime runtime f)
+    (f)))
+
+(defn- current-http-port
+  []
+  (with-current-http-runtime #(http/current-port)))
+
 (defn- apply-run-defaults
   [options]
   (let [instance-id (paths/resolve-instance-id (:instance options))
@@ -362,9 +376,12 @@
 (defn- register-http-runtime-controls!
   [options root-keys]
   (if (some #{:xia/http} root-keys)
-    (http/register-command-shutdown-handler!
-      #(stop-runtime! options))
-    (http/clear-command-shutdown-handler!)))
+    (with-current-http-runtime
+      (fn []
+        (http/register-command-shutdown-handler!
+          (fn [] (stop-runtime! options)))))
+    (with-current-http-runtime
+      #(http/clear-command-shutdown-handler!))))
 
 (defn start-server-runtime!
   "Start Xia in non-blocking server mode for REPL-driven development."
@@ -379,7 +396,7 @@
       (initialize-runtime! options* server-runtime-root-keys)
       (register-http-runtime-controls! options* server-runtime-root-keys)
       (runtime-state/mark-running!)
-      (let [options** (assoc options* :port (or (http/current-port) port*))]
+      (let [options** (assoc options* :port (or (current-http-port) port*))]
         (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
         (println (str "open " (local-ui-url (:bind options**) (:port options**))))
         options**)
@@ -421,12 +438,12 @@
       ;; Start channels based on mode
       (case (:mode options*)
         "server"   (do (runtime-state/mark-running!)
-                       (let [port* (or (http/current-port) (:port options*))]
+                       (let [port* (or (current-http-port) (:port options*))]
                          (println (str "Xia server running on " (:bind options*) ":" port*))
                          (println (str "open " (local-ui-url (:bind options*) port*))))
                        @(promise))
         "both"     (do (runtime-state/mark-running!)
-                       (let [port* (or (http/current-port) (:port options*))]
+                       (let [port* (or (current-http-port) (:port options*))]
                          (println (str "Xia server running on " (:bind options*) ":" port*))
                          (println (str "open " (local-ui-url (:bind options*) port*))))
                        (terminal/start!))

@@ -1,7 +1,6 @@
 (ns xia.channel.http.interaction
   "HTTP prompt and approval interaction handlers."
-  (:require [xia.bridge :as bridge]
-            [xia.db :as db])
+  (:require [xia.bridge :as bridge])
   (:import [java.util Date]))
 
 (def ^:private interaction-timeout-ms (* 5 60 1000))
@@ -31,14 +30,6 @@
    :masked     (boolean mask?)
    :created_at (instant->str created-at)})
 
-(defn- current-session-task-id
-  [session-id]
-  (try
-    (let [sid (java.util.UUID/fromString session-id)]
-      (some-> (db/current-session-task sid) :id))
-    (catch IllegalArgumentException _
-      nil)))
-
 (defn prompt-handler
   [label & {:keys [mask?] :or {mask? false}}]
   (let [interaction-context (bridge/interaction-context)
@@ -47,7 +38,7 @@
       (throw (ex-info "HTTP prompt requires a session id"
                       {:label label})))
     (let [task-id   (or (:task-id interaction-context)
-                        (current-session-task-id sid))
+                        (bridge/current-session-task-id sid))
           prompt-id (str (random-uuid))
           response  (promise)
           prompt*   (bridge/register-interaction!
@@ -79,7 +70,7 @@
       (throw (ex-info "HTTP approval requires a session id"
                       {:tool-id tool-id})))
     (let [task-id     (or (:task-id interaction-context)
-                          (current-session-task-id sid))
+                          (bridge/current-session-task-id sid))
           approval-id (str (random-uuid))
           response    (promise)
           approval*   (bridge/register-interaction!

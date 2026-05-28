@@ -115,3 +115,12 @@
                              :clear-state! #(clear-state! deps %)
                              :mark-inactive? true
                              :consolidation-mode :sync)))
+
+(defn finalize-active!
+  ([deps]
+   (finalize-active! deps :server-stop))
+  ([deps reason]
+   (bridge/finalize-active-channel-sessions!
+    rest-session-channels
+    #(finalize! deps %1 %2)
+    :reason reason)))

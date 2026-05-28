@@ -1,10 +1,12 @@
 (ns xia.bridge-test
   (:require [clojure.test :refer :all]
             [xia.agent :as agent]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
+            [xia.task-inspection :as task-inspection]
             [xia.test-helpers :refer [with-test-db]]))
 
 (use-fixtures :each with-test-db)
@@ -142,6 +144,61 @@
                                              :context {:session-id session-id
                                                        :channel :http}))))))
 
+(deftest bridge-finalizes-channel-sessions-through-shared-lifecycle
+  (let [session-id (random-uuid)
+        call (atom nil)]
+    (with-redefs [session-life/finalize!
+                  (fn [sid & opts]
+                    (reset! call {:session-id sid
+                                  :opts (apply hash-map opts)})
+                    true)]
+      (is (true? (bridge/finalize-channel-session! session-id
+                                                   :websocket
+                                                   :reason :websocket-close
+                                                   :consolidation-mode :sync)))
+      (is (= session-id (:session-id @call)))
+      (is (= {:reason :websocket-close
+              :default-channel :websocket
+              :mark-inactive? true
+              :consolidation-mode :sync}
+             (select-keys (:opts @call)
+                          [:reason
+                           :default-channel
+                           :mark-inactive?
+                           :consolidation-mode])))
+      (is (= session-life/clear-session-state!
+             (:clear-state! (:opts @call)))))))
+
+(deftest bridge-finalizes-active-channel-sessions
+  (let [http-session-id (random-uuid)
+        command-session-id (random-uuid)
+        websocket-session-id (random-uuid)
+        finalized (atom [])]
+    (with-redefs [db/list-sessions
+                  (fn [opts]
+                    (is (= {:include-workers? true} opts))
+                    [{:id http-session-id
+                      :channel :http
+                      :active? true}
+                     {:id command-session-id
+                      :channel :command
+                      :active? true}
+                     {:id websocket-session-id
+                      :channel :websocket
+                      :active? true}
+                     {:id (random-uuid)
+                      :channel :http
+                      :active? false}])]
+      (is (= 2
+             (bridge/finalize-active-channel-sessions!
+              #{:http :command}
+              (fn [session-id reason]
+                (swap! finalized conj [session-id reason]))
+              :reason :server-stop)))
+      (is (= [[http-session-id :server-stop]
+              [command-session-id :server-stop]]
+             @finalized)))))
+
 (deftest bridge-reports-missing-task-for-non-interrupt-control
   (let [{:keys [session-id]} (bridge/create-session! :imessage)]
     (with-redefs [db/current-session-task (constantly nil)]
@@ -150,3 +207,74 @@
         (is (= :task (:scope result)))
         (is (= {:status :missing} (:result result)))
         (is (= "No current task to control." (:text result)))))))
+
+(deftest bridge-builds-channel-task-view
+  (let [session-id (random-uuid)
+        other-session-id (random-uuid)
+        task-id (random-uuid)
+        task {:id task-id
+              :session-id session-id
+              :state :running
+              :meta {:runtime {:state :waiting_input}}
+              :session-links [{:session-id session-id
+                               :role :execution}
+                              {:session-id other-session-id
+                               :role :observer}]}
+        autonomy-state {:stack [{:title "Root goal"}
+                                {:title "Current step"
+                                 :progress-status :in-progress}]}]
+    (with-redefs [task-runtime/task-recovery (constantly {:mode :resume})
+                  task-runtime/task-boundary-summary (constantly {:status :inside})
+                  task-runtime/task-checkpoint (constantly {:turn 2})
+                  task-runtime/task-checkpoint-at (constantly ::checkpoint-at)
+                  task-runtime/task-resume-hint (constantly "resume here")
+                  task-runtime/task-recovery-brief (constantly "brief")
+                  task-inspection/task-inspection
+                  (fn [& args]
+                    {:arg-count (count args)
+                     :compact? (nth args 3 nil)
+                     :history-data (nth args 4 nil)})]
+      (let [view (bridge/task-view {}
+                                   task
+                                   {:autonomy-state autonomy-state
+                                    :compact? true
+                                    :history-data {:turns []}})]
+        (is (= :waiting_input (:state view)))
+        (is (= :execution (:execution-session-role view)))
+        (is (= {:recovery {:mode :resume}
+                :boundary-summary {:status :inside}
+                :checkpoint {:turn 2}
+                :checkpoint-at ::checkpoint-at
+                :resume-hint "resume here"
+                :recovery-brief "brief"}
+               (:runtime-view view)))
+        (is (= {:arg-count 5
+                :compact? true
+                :history-data {:turns []}}
+               (:inspection view)))
+        (is (= [{:session-id session-id
+                 :role :execution
+                 :current? true
+                 :execution-current? true}
+                {:session-id other-session-id
+                 :role :observer
+                 :current? false
+                 :execution-current? false}]
+               (:session-links view)))
+        (is (= {:depth 2
+                :current-focus "Current step"
+                :root-goal "Root goal"}
+               (select-keys (:stack view) [:depth :current-focus :root-goal])))))))
+
+(deftest bridge-resolves-current-session-task-id
+  (let [session-id (random-uuid)
+        task-id (random-uuid)
+        calls (atom [])]
+    (with-redefs [db/current-session-task
+                  (fn [sid]
+                    (swap! calls conj sid)
+                    {:id task-id
+                     :session-id sid})]
+      (is (= task-id (bridge/current-session-task-id (str session-id))))
+      (is (nil? (bridge/current-session-task-id "not-a-uuid"))))
+    (is (= [session-id] @calls))))

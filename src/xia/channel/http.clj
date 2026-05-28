@@ -34,12 +34,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:dynamic ^:private *runtime* nil)
 
 (def ^:private session-finalize-lock-count session-life/default-finalize-lock-count)
 (def ^:private http-port-search-limit 100)
 (declare install-runtime! clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:server-atom                         (atom nil)
    :ws-sessions-atom                    (atom {})
@@ -66,13 +67,21 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or *runtime* @installed-runtime-atom))
 
 (defn- current-runtime
   []
   (or (maybe-current-runtime)
       (throw (ex-info "HTTP runtime is not installed"
                       {:component :xia/http}))))
+
+(defn with-runtime
+  "Runs f with runtime as the current HTTP runtime.
+   This lets Integrant own runtime maps while legacy helpers still resolve the
+   current runtime through one compatibility point."
+  [runtime f]
+  (binding [*runtime* runtime]
+    (f)))
 
 (defn- server-atom
   []
@@ -903,28 +912,31 @@
 ;; Router
 ;; ---------------------------------------------------------------------------
 
-(defn- router* [req]
-  (http-routes/route (route-deps) req))
+(defn- router* [runtime req]
+  (with-runtime runtime
+    #(http-routes/route (route-deps) req)))
 
-(def ^:private multipart-router
-  (multipart/wrap-multipart-params router*))
-
-(defn- router
-  [req]
-  (try
-    (multipart-router req)
-    (catch clojure.lang.ExceptionInfo e
-      (exception-response e))
-    (catch Exception e
-      (exception-response e))))
+(defn- make-router
+  [runtime]
+  (let [multipart-router (multipart/wrap-multipart-params #(router* runtime %))]
+    (fn [req]
+      (with-runtime runtime
+        #(try
+           (multipart-router req)
+           (catch clojure.lang.ExceptionInfo e
+             (exception-response e))
+           (catch Exception e
+             (exception-response e)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle
 ;; ---------------------------------------------------------------------------
 
 (defn current-port
-  []
-  (some-> (maybe-server-atom) deref :port))
+  ([]
+   (some-> (maybe-server-atom) deref :port))
+  ([runtime]
+   (some-> runtime :server-atom deref :port)))
 
 (defn- port-bind-conflict?
   [^Throwable error]
@@ -936,11 +948,11 @@
           (take-while some? (iterate #(some-> ^Throwable % .getCause) error)))))
 
 (defn- start-server-with-port-fallback
-  [bind-host requested-port]
+  [runtime bind-host requested-port]
   (loop [port (int requested-port)
          attempts 0]
     (let [result (try
-                   {:stop-fn (http/run-server router {:ip bind-host :port port})
+                   {:stop-fn (http/run-server (make-router runtime) {:ip bind-host :port port})
                     :port port}
                    (catch Exception e
                      (if (port-bind-conflict? e)
@@ -959,6 +971,44 @@
                           (:error result))))
         result))))
 
+(defn- runtime-callback
+  [runtime handler]
+  (fn [& args]
+    (with-runtime runtime
+      #(apply handler args))))
+
+(defn- start-with-current-runtime!
+  [bind-host port {:keys [web-dev?] :or {web-dev? false}}]
+  (let [runtime (current-runtime)]
+    (when-let [{:keys [bind-host port]} @(server-atom)]
+      (throw (ex-info "HTTP/WebSocket server already running"
+                      {:bind-host bind-host
+                       :port port})))
+    (configure-web-dev! web-dev?)
+    (bridge/register-channel-adapter! :http
+                                      {:prompt (runtime-callback runtime http-interaction/prompt-handler)
+                                       :approval (runtime-callback runtime http-interaction/approval-handler)
+                                       :status (runtime-callback runtime http-status-handler)
+                                       :runtime-event (runtime-callback runtime http-runtime-event-handler)})
+    (bridge/register-channel-adapter! :command
+                                      {:prompt (runtime-callback runtime http-interaction/prompt-handler)
+                                       :approval (runtime-callback runtime http-interaction/approval-handler)
+                                       :status (runtime-callback runtime http-status-handler)
+                                       :runtime-event (runtime-callback runtime http-runtime-event-handler)})
+    (bridge/register-channel-adapter! :websocket
+                                      {:approval (runtime-callback runtime http-interaction/approval-handler)
+                                       :status (runtime-callback runtime http-status-handler)
+                                       :runtime-event (runtime-callback runtime http-runtime-event-handler)})
+    (let [^ScheduledExecutorService finalizer-exec
+          (Executors/newSingleThreadScheduledExecutor)
+          {:keys [stop-fn port]} (start-server-with-port-fallback runtime bind-host port)]
+      (reset! (rest-session-finalizer-executor-atom) finalizer-exec)
+      (reset! (server-atom) {:stop-fn stop-fn
+                             :bind-host bind-host
+                             :port port})
+      (log/info "HTTP/WebSocket server started on" bind-host ":" port)
+      stop-fn)))
+
 (defn start!
   "Start the HTTP/WebSocket server.
    Defaults to loopback-only binding."
@@ -966,98 +1016,83 @@
    (start! "127.0.0.1" port nil))
   ([bind-host port]
    (start! bind-host port nil))
-  ([bind-host port {:keys [web-dev?] :or {web-dev? false}}]
-   (when-let [{:keys [bind-host port]} @(server-atom)]
-     (throw (ex-info "HTTP/WebSocket server already running"
-                     {:bind-host bind-host
-                      :port port})))
-   (configure-web-dev! web-dev?)
-   (bridge/register-channel-adapter! :http
-                                     {:prompt http-interaction/prompt-handler
-                                      :approval http-interaction/approval-handler
-                                      :status http-status-handler
-                                      :runtime-event http-runtime-event-handler})
-   (bridge/register-channel-adapter! :command
-                                     {:prompt http-interaction/prompt-handler
-                                      :approval http-interaction/approval-handler
-                                      :status http-status-handler
-                                      :runtime-event http-runtime-event-handler})
-   (bridge/register-channel-adapter! :websocket
-                                     {:approval http-interaction/approval-handler
-                                      :status http-status-handler
-                                      :runtime-event http-runtime-event-handler})
-   (let [^ScheduledExecutorService finalizer-exec
-         (Executors/newSingleThreadScheduledExecutor)
-         {:keys [stop-fn port]} (start-server-with-port-fallback bind-host port)]
-     (reset! (rest-session-finalizer-executor-atom) finalizer-exec)
-     (reset! (server-atom) {:stop-fn stop-fn
-                            :bind-host bind-host
-                            :port port})
-     (log/info "HTTP/WebSocket server started on" bind-host ":" port)
-     stop-fn)))
+  ([bind-host port opts]
+   (start-with-current-runtime! bind-host port opts))
+  ([runtime bind-host port opts]
+   (with-runtime runtime
+     #(start-with-current-runtime! bind-host port opts))))
 
-(defn stop! []
-  (when-let [{:keys [stop-fn]} @(server-atom)]
-    (doseq [{:keys [id channel active?]} (db/list-sessions {:include-workers? true})
-            :when (and (http-session-life/rest-session-channel? channel) active?)]
-      (finalize-rest-session! id :server-stop))
-    (stop-fn) ; http-kit stop fn
-    (when-let [^ScheduledExecutorService exec @(rest-session-finalizer-executor-atom)]
-      (clear-rest-session-finalizers!)
-      (.shutdown exec)
-      (try
-        (.awaitTermination exec 5 TimeUnit/SECONDS)
-        (catch InterruptedException _
-          (.shutdownNow exec)))
-      (reset! (rest-session-finalizer-executor-atom) nil))
-    (bridge/clear-channel-adapter! :http)
-    (bridge/clear-channel-adapter! :command)
-    (bridge/clear-channel-adapter! :websocket)
-    (reset! (websocket-receive-failures-atom) {})
-    (reset! (session-statuses-atom) {})
-    (reset! (task-runtime-events-atom) {})
-    (reset-runtime-ingress-rate-limits! (current-runtime))
-    (reset-runtime-command-auth! (current-runtime))
-    (reset-runtime-managed-proxy-auth! (current-runtime))
-    (clear-command-shutdown-handler!)
-    (configure-web-dev! false)
-    (reset! (server-atom) nil)
-    (log/info "Server stopped")))
+(defn stop!
+  ([]
+   (stop! (current-runtime)))
+  ([runtime]
+   (with-runtime runtime
+     #(when-let [{:keys [stop-fn]} @(server-atom)]
+        (http-session-life/finalize-active! (session-lifecycle-deps) :server-stop)
+        (stop-fn) ; http-kit stop fn
+        (when-let [^ScheduledExecutorService exec @(rest-session-finalizer-executor-atom)]
+          (clear-rest-session-finalizers!)
+          (.shutdown exec)
+          (try
+            (.awaitTermination exec 5 TimeUnit/SECONDS)
+            (catch InterruptedException _
+              (.shutdownNow exec)))
+          (reset! (rest-session-finalizer-executor-atom) nil))
+        (bridge/clear-channel-adapter! :http)
+        (bridge/clear-channel-adapter! :command)
+        (bridge/clear-channel-adapter! :websocket)
+        (reset! (websocket-receive-failures-atom) {})
+        (reset! (session-statuses-atom) {})
+        (reset! (task-runtime-events-atom) {})
+        (reset-runtime-ingress-rate-limits! (current-runtime))
+        (reset-runtime-command-auth! (current-runtime))
+        (reset-runtime-managed-proxy-auth! (current-runtime))
+        (clear-command-shutdown-handler!)
+        (configure-web-dev! false)
+        (reset! (server-atom) nil)
+        (log/info "Server stopped")))))
 
 (defn install-runtime!
   ([] (install-runtime! (make-runtime)))
   ([runtime]
-   (when-let [current (maybe-current-runtime)]
+   (when-let [current @installed-runtime-atom]
      (when-not (identical? current runtime)
-       (clear-runtime!)))
+       (clear-runtime! current)))
    (reset! installed-runtime-atom runtime)
    runtime))
 
 (defn clear-runtime!
-  []
-  (when-let [runtime (maybe-current-runtime)]
-    (when (some-> (:server-atom runtime) deref some?)
-      (stop!))
-    (when-let [^ScheduledExecutorService exec @(:rest-session-finalizer-executor-atom runtime)]
-      (clear-rest-session-finalizers!)
-      (.shutdown exec)
-      (try
-        (.awaitTermination exec 5 TimeUnit/SECONDS)
-        (catch InterruptedException _
-          (.shutdownNow exec))))
-    (reset! (:server-atom runtime) nil)
-    (reset! (:ws-sessions-atom runtime) {})
-    (reset! (:websocket-receive-failures-atom runtime) {})
-    (reset! (:session-statuses-atom runtime) {})
-    (reset! (:task-runtime-events-atom runtime) {})
-    (reset! (:task-runtime-stream-subscribers-atom runtime) {})
-    (reset! (:web-dev-state-atom runtime) {:enabled? false
-                                           :root nil})
-    (reset! (:command-shutdown-handler-atom runtime) nil)
-    (reset-runtime-ingress-rate-limits! runtime)
-    (reset-runtime-command-auth! runtime)
-    (reset-runtime-managed-proxy-auth! runtime)
-    (reset! (:rest-session-finalizer-executor-atom runtime) nil)
-    (reset! (:rest-session-finalizers-atom runtime) {})
-    (reset! installed-runtime-atom nil))
-  nil)
+  ([]
+   (when-let [runtime (maybe-current-runtime)]
+     (clear-runtime! runtime))
+   nil)
+  ([runtime]
+   (when runtime
+     (with-runtime runtime
+       #(do
+          (when (some-> (:server-atom runtime) deref some?)
+            (stop! runtime))
+          (when-let [^ScheduledExecutorService exec @(:rest-session-finalizer-executor-atom runtime)]
+            (clear-rest-session-finalizers!)
+            (.shutdown exec)
+            (try
+              (.awaitTermination exec 5 TimeUnit/SECONDS)
+              (catch InterruptedException _
+                (.shutdownNow exec))))
+          (reset! (:server-atom runtime) nil)
+          (reset! (:ws-sessions-atom runtime) {})
+          (reset! (:websocket-receive-failures-atom runtime) {})
+          (reset! (:session-statuses-atom runtime) {})
+          (reset! (:task-runtime-events-atom runtime) {})
+          (reset! (:task-runtime-stream-subscribers-atom runtime) {})
+          (reset! (:web-dev-state-atom runtime) {:enabled? false
+                                                 :root nil})
+          (reset! (:command-shutdown-handler-atom runtime) nil)
+          (reset-runtime-ingress-rate-limits! runtime)
+          (reset-runtime-command-auth! runtime)
+          (reset-runtime-managed-proxy-auth! runtime)
+          (reset! (:rest-session-finalizer-executor-atom runtime) nil)
+          (reset! (:rest-session-finalizers-atom runtime) {})))
+     (when (identical? runtime @installed-runtime-atom)
+       (reset! installed-runtime-atom nil)))
+   nil))
