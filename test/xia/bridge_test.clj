@@ -6,6 +6,7 @@
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
+            [xia.task-event :as task-event]
             [xia.task-inspection :as task-inspection]
             [xia.test-helpers :refer [with-test-db]]))
 
@@ -299,6 +300,42 @@
                 :current-focus "Current step"
                 :root-goal "Root goal"}
                (select-keys (:stack view) [:depth :current-focus :root-goal])))))))
+
+(deftest bridge-builds-task-detail-and-event-history
+  (let [task-id (random-uuid)
+        turn-id (random-uuid)
+        task {:id task-id
+              :state :completed}
+        turn {:id turn-id
+              :task-id task-id}
+        item {:id (random-uuid)
+              :turn-id turn-id}
+        event {:id 1
+               :type :turn.item}]
+    (with-redefs [db/get-task (fn [id]
+                                (when (= task-id id)
+                                  task))
+                  db/task-turns (fn [id]
+                                  (is (= task-id id))
+                                  [turn])
+                  db/turn-items (fn [id]
+                                  (is (= turn-id id))
+                                  [item])
+                  task-event/task-events (fn [task* turns turn-items]
+                                           (is (= task task*))
+                                           (is (= [turn] turns))
+                                           (is (= {turn-id [item]} turn-items))
+                                           [event])]
+      (is (= {:task task
+              :turns [{:turn turn
+                       :items [item]}]}
+             (bridge/task-detail-view task-id)))
+      (is (= {:task-id task-id
+              :task task
+              :events [event]}
+             (bridge/task-event-history task-id)))
+      (is (nil? (bridge/task-detail-view (random-uuid))))
+      (is (nil? (bridge/task-event-history (random-uuid)))))))
 
 (deftest bridge-resolves-current-session-task-id
   (let [session-id (random-uuid)

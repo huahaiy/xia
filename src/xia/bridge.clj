@@ -13,6 +13,7 @@
             [xia.hippocampus :as hippo]
             [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
+            [xia.task-event :as task-event]
             [xia.task-inspection :as task-inspection]
             [xia.working-memory :as wm])
   (:import [java.util Date]))
@@ -345,6 +346,30 @@
       :inspection (task-inspection-view opts task autonomy-state options)
       :session-links (task-session-link-views task)
       :stack (task-stack-view autonomy-state)})))
+
+(defn task-detail-view
+  "Return a persisted task plus its turns and turn items."
+  [task-id]
+  (when-let [task (db/get-task task-id)]
+    (let [turns (db/task-turns task-id)]
+      {:task task
+       :turns (mapv (fn [turn]
+                      {:turn turn
+                       :items (db/turn-items (:id turn))})
+                    turns)})))
+
+(defn task-event-history
+  "Return persisted task events derived from task turns and items."
+  [task-id]
+  (when-let [task (db/get-task task-id)]
+    (let [turns      (db/task-turns task-id)
+          turn-items (into {}
+                           (map (fn [turn]
+                                  [(:id turn) (db/turn-items (:id turn))]))
+                           turns)]
+      {:task-id task-id
+       :task task
+       :events (task-event/task-events task turns turn-items)})))
 
 (defn session-cancelled?
   "True when the session has been cancelled or interrupted."

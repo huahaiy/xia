@@ -7,8 +7,7 @@
             [xia.db :as db]
             [xia.goal :as goal]
             [xia.runtime-state :as runtime-state]
-            [xia.schedule :as schedule]
-            [xia.task-event :as task-event]))
+            [xia.schedule :as schedule]))
 
 (def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
 
@@ -1267,37 +1266,26 @@
 (defn handle-get-task
   [deps task-id]
   (try
-    (let [uuid (java.util.UUID/fromString task-id)
-          task (db/get-task uuid)]
-      (if-not task
-        (json-response* deps 404 {:error "task not found"})
-        (let [turns (db/task-turns uuid)]
-          (json-response* deps 200
-                          {:task  (task->body deps task)
-                           :turns (mapv (fn [turn]
-                                          (task-turn->body deps
-                                                           turn
-                                                           (db/turn-items (:id turn))))
-                                        turns)}))))
+    (let [uuid (java.util.UUID/fromString task-id)]
+      (if-let [{:keys [task turns]} (bridge/task-detail-view uuid)]
+        (json-response* deps 200
+                        {:task  (task->body deps task)
+                         :turns (mapv (fn [{:keys [turn items]}]
+                                        (task-turn->body deps turn items))
+                                     turns)})
+        (json-response* deps 404 {:error "task not found"})))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 
 (defn handle-get-task-events
   [deps task-id]
   (try
-    (let [uuid (java.util.UUID/fromString task-id)
-          task (db/get-task uuid)]
-      (if-not task
-        (json-response* deps 404 {:error "task not found"})
-        (let [turns      (db/task-turns uuid)
-              turn-items (into {}
-                               (map (fn [turn]
-                                      [(:id turn) (db/turn-items (:id turn))]))
-                               turns)
-              events     (task-event/task-events task turns turn-items)]
-          (json-response* deps 200
-                          {:task_id (str uuid)
-                           :events  (mapv #(task-event->body deps %) events)}))))
+    (let [uuid (java.util.UUID/fromString task-id)]
+      (if-let [{:keys [events]} (bridge/task-event-history uuid)]
+        (json-response* deps 200
+                        {:task_id (str uuid)
+                         :events  (mapv #(task-event->body deps %) events)})
+        (json-response* deps 404 {:error "task not found"})))
     (catch IllegalArgumentException _
       (json-response* deps 400 {:error "invalid task id"}))))
 
