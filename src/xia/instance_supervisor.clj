@@ -30,9 +30,32 @@
 (def ^:private parent-instance-config-key :instance/parent-instance-id)
 (def ^:private parent-instance-env "XIA_PARENT_INSTANCE_ID")
 
-(defonce ^:private capability-state (atom {:enabled? false
-                                           :command nil}))
-(defonce ^:private managed-instances (atom {}))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:capability-state (atom {:enabled? false
+                            :command nil})
+   :managed-instances (atom {})})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Instance supervisor runtime is not installed"
+                      {:component :xia/instance-supervisor}))))
+
+(defn- capability-state
+  []
+  (:capability-state (current-runtime)))
+
+(defn- managed-instances
+  []
+  (:managed-instances (current-runtime)))
 
 (defn- nonblank-string
   [value]
@@ -65,14 +88,14 @@
 
 (defn configure!
   [{:keys [enabled? command]}]
-  (reset! capability-state {:enabled? (boolean enabled?)
-                            :command  (when enabled?
-                                        (resolve-instance-command command))})
+  (reset! (capability-state) {:enabled? (boolean enabled?)
+                              :command  (when enabled?
+                                          (resolve-instance-command command))})
   nil)
 
 (defn- host-capability-enabled?
   []
-  (:enabled? @capability-state))
+  (:enabled? @(capability-state)))
 
 (defn- default-controller-instance?
   []
@@ -91,7 +114,7 @@
 
 (defn instance-command
   []
-  (:command @capability-state))
+  (:command @(capability-state)))
 
 (defn capabilities
   []
@@ -108,7 +131,7 @@
 
 (defn admin-body
   []
-  (let [capability @capability-state]
+  (let [capability @(capability-state)]
     {:configured (instance-management-configured?)
      :enabled (instance-management-enabled?)
      :host_capability_enabled (boolean (:enabled? capability))
@@ -372,12 +395,12 @@
 
 (defn- mark-exited!
   [instance-id process]
-  (when-let [entry (get @managed-instances instance-id)]
+  (when-let [entry (get @(managed-instances) instance-id)]
     (when (= process (:process entry))
       (let [exit-code (process-exit-value process)
             exited-at (Date.)
             service-id (:service-id entry)]
-        (swap! managed-instances assoc instance-id
+        (swap! (managed-instances) assoc instance-id
                (-> entry
                    (assoc :state :exited
                           :exited-at exited-at
@@ -404,7 +427,7 @@
                        (map persisted-status)
                        (map (fn [entry] [(:instance_id entry) entry]))
                        (into {}))
-        runtime   (->> @managed-instances
+        runtime   (->> @(managed-instances)
                        vals
                        (map public-status)
                        (map (fn [entry] [(:instance_id entry) entry]))
@@ -516,12 +539,12 @@
   (let [instance-id* (normalize-instance-id instance-id
                                             "instance_id"
                                             :instance-supervisor/invalid-instance-id)
-        entry        (get @managed-instances instance-id*)
+        entry        (get @(managed-instances) instance-id*)
         process      (:process entry)]
     (if-not entry
       (shutdown-detached-instance! instance-id* timeout-ms)
       (do
-        (swap! managed-instances assoc instance-id*
+        (swap! (managed-instances) assoc instance-id*
                (assoc entry :state :stopping))
         (persist-managed-child! (-> entry
                                     (assoc :state :stopping)))
@@ -531,7 +554,7 @@
             (destroy-process! process true)
             (wait-for-exit process timeout-ms)))
         (mark-exited! instance-id* process)
-        (public-status (get @managed-instances instance-id*))))))
+        (public-status (get @(managed-instances) instance-id*))))))
 
 (defn start-instance!
   [instance-id & {:keys [template-instance port bind service-id service-name
@@ -557,7 +580,7 @@
         base-url            (service-base-url bind* port*)
         token               (random-token)
         started-at          (Date.)]
-    (when-let [existing (get @managed-instances instance-id*)]
+    (when-let [existing (get @(managed-instances) instance-id*)]
       (when (contains? #{"starting" "running" "stopping"} (:state (public-status existing)))
         (throw (ex-info "Managed Xia instance is already running"
                         {:type :instance-supervisor/already-running
@@ -590,7 +613,7 @@
                    :command command
                    :args args
                    :process process}]
-      (swap! managed-instances assoc instance-id* entry)
+      (swap! (managed-instances) assoc instance-id* entry)
       (try
         (wait-until-ready! base-url process wait-for-ready-ms log-path)
         (let [existing-service (db/get-service (keyword service-id*))
@@ -610,11 +633,11 @@
                              :enabled?               true})
           (persist-managed-child! (-> running-entry
                                       (assoc :pid (process-pid process))))
-          (swap! managed-instances assoc instance-id* running-entry)
+          (swap! (managed-instances) assoc instance-id* running-entry)
           (start-exit-watcher! instance-id* process)
           (public-status running-entry))
         (catch Throwable t
-          (swap! managed-instances dissoc instance-id*)
+          (swap! (managed-instances) dissoc instance-id*)
           (try
             (destroy-process! process true)
             (catch Exception _))
@@ -628,21 +651,32 @@
 
 (defn shutdown!
   []
-  (doseq [instance-id (keys @managed-instances)]
+  (doseq [instance-id (keys @(managed-instances))]
     (try
       (stop-managed-instance! instance-id default-stop-timeout-ms)
       (catch Exception e
         (log/warn e "Failed to stop managed Xia instance during shutdown" instance-id))))
-  (reset! managed-instances {})
+  (reset! (managed-instances) {})
   nil)
 
 (defn reset-runtime!
   []
   (shutdown!)
-  (reset! capability-state {:enabled? false
-                            :command nil})
+  (reset! (capability-state) {:enabled? false
+                              :command nil})
   nil)
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []
-  (reset-runtime!))
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)

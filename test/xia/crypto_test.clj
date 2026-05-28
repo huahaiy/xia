@@ -105,12 +105,13 @@
   (let [db-path (temp-db-path)]
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
       #(do
-         (db/connect! db-path (th/test-connect-options
-                                {:passphrase-provider (constantly "db-passphrase")}))
+         (db/install-runtime! (db/make-runtime))
          (try
+           (db/connect! db-path (th/test-connect-options
+                                  {:passphrase-provider (constantly "db-passphrase")}))
            (is (= :prompt-passphrase (:source (crypto/current-key-source))))
            (finally
-             (db/close!)))))))
+             (db/clear-runtime!)))))))
 
 (deftest configure-accepts-explicit-key-file
   (let [db-path  (temp-db-path)

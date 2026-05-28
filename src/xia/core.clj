@@ -272,7 +272,7 @@
      {}
 
      :xia/browser-runtime
-     {}
+     {:db (ig/ref :xia/db)}
 
      :xia/db
      {:db-path db
@@ -285,12 +285,32 @@
      {:async-runtime (ig/ref :xia/async-runtime)}
 
      :xia/agent-runtime
-     {:async-runtime (ig/ref :xia/async-runtime)}
+     {:db (ig/ref :xia/db)
+      :async-runtime (ig/ref :xia/async-runtime)}
 
      :xia/working-memory-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
 
      :xia/bridge-runtime
+     {}
+
+     :xia/llm-runtime
+     {:db (ig/ref :xia/db)}
+
+     :xia/hippocampus-runtime
+     {:db (ig/ref :xia/db)
+      :llm-runtime (ig/ref :xia/llm-runtime)}
+
+     :xia/checkpoint-runtime
+     {:db (ig/ref :xia/db)}
+
+     :xia/local-ocr-runtime
+     {}
+
+     :xia/service-runtime
+     {}
+
+     :xia/web-runtime
      {}
 
      :xia/runtime-support
@@ -304,7 +324,13 @@
       :prompt-runtime (ig/ref :xia/prompt-runtime)
       :agent-runtime (ig/ref :xia/agent-runtime)
       :working-memory-runtime (ig/ref :xia/working-memory-runtime)
-      :bridge-runtime (ig/ref :xia/bridge-runtime)}
+      :bridge-runtime (ig/ref :xia/bridge-runtime)
+      :hippocampus-runtime (ig/ref :xia/hippocampus-runtime)
+      :checkpoint-runtime (ig/ref :xia/checkpoint-runtime)
+      :llm-runtime (ig/ref :xia/llm-runtime)
+      :local-ocr-runtime (ig/ref :xia/local-ocr-runtime)
+      :service-runtime (ig/ref :xia/service-runtime)
+      :web-runtime (ig/ref :xia/web-runtime)}
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)}
@@ -379,13 +405,19 @@
 
 (defn- register-http-runtime-controls!
   [options root-keys]
-  (if (some #{:xia/http} root-keys)
-    (with-current-http-runtime
+  (when-let [runtime (current-http-runtime)]
+    (http/with-runtime
+      runtime
       (fn []
-        (http/register-command-shutdown-handler!
-          (fn [] (stop-runtime! options)))))
-    (with-current-http-runtime
-      #(http/clear-command-shutdown-handler!))))
+        (if (some #{:xia/http} root-keys)
+          (http/register-command-shutdown-handler!
+            (fn [] (stop-runtime! options)))
+          (http/clear-command-shutdown-handler!))))))
+
+(defn- mark-runtime-stopped-if-installed!
+  []
+  (when (runtime-state/installed?)
+    (runtime-state/mark-stopped!)))
 
 (defn start-server-runtime!
   "Start Xia in non-blocking server mode for REPL-driven development."
@@ -395,9 +427,9 @@
                           options))
         bind*    (or bind (:bind options*))
         port*    (or port (:port options*))]
-    (runtime-state/mark-starting!)
     (try
       (initialize-runtime! options* server-runtime-root-keys)
+      (runtime-state/mark-starting!)
       (register-http-runtime-controls! options* server-runtime-root-keys)
       (runtime-state/mark-running!)
       (let [options** (assoc options* :port (or (current-http-port) port*))]
@@ -409,7 +441,7 @@
           (halt-runtime!)
           (catch Exception halt-error
             (log/error halt-error "Failed to halt partially initialized runtime")))
-        (runtime-state/mark-stopped!)
+        (mark-runtime-stopped-if-installed!)
         (throw t)))))
 
 (defn stop-runtime!
@@ -430,13 +462,13 @@
 (defn- start!
   [options]
   (let [options* (apply-run-defaults options)]
-    (runtime-state/mark-starting!)
     (try
       (let [root-keys (case (:mode options*)
                         "server" server-runtime-root-keys
                         "both" server-runtime-root-keys
                         base-runtime-root-keys)]
         (initialize-runtime! options* root-keys)
+        (runtime-state/mark-starting!)
         (register-http-runtime-controls! options* root-keys))
 
       ;; Start channels based on mode
@@ -460,7 +492,7 @@
           (halt-runtime!)
           (catch Exception halt-error
             (log/error halt-error "Failed to halt partially initialized runtime")))
-        (runtime-state/mark-stopped!)
+        (mark-runtime-stopped-if-installed!)
         (throw t)))))
 
 (defn- resolve-run-options

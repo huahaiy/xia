@@ -16,7 +16,7 @@
 
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:prompt-handlers-atom            (atom {})
    :approval-handlers-atom          (atom {})
@@ -714,13 +714,12 @@
   (some? (resolve-handler (runtime-event-handlers-atom))))
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

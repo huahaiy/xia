@@ -41,9 +41,36 @@
 (def ^:private imessage-chat-db-path
   (str (System/getProperty "user.home") "/Library/Messages/chat.db"))
 
-(defonce ^:private recent-external-message-ids (atom {}))
-(defonce ^:private imessage-poller-executor (atom nil))
-(defonce ^:private imessage-last-rowid (atom 0))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:recent-external-message-ids-atom (atom {})
+   :imessage-poller-executor-atom (atom nil)
+   :imessage-last-rowid-atom (atom 0)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Messaging runtime is not installed"
+                      {:component :xia/messaging}))))
+
+(defn- recent-external-message-ids-atom
+  []
+  (:recent-external-message-ids-atom (current-runtime)))
+
+(defn- imessage-poller-executor-atom
+  []
+  (:imessage-poller-executor-atom (current-runtime)))
+
+(defn- imessage-last-rowid-atom
+  []
+  (:imessage-last-rowid-atom (current-runtime)))
 
 (declare send-session-message!)
 
@@ -205,10 +232,10 @@
   [external-message-id]
   (when external-message-id
     (loop []
-      (let [state @recent-external-message-ids
+      (let [state @(recent-external-message-ids-atom)
             state* (prune-recent-message-ids state)]
         (if (not= state state*)
-          (if (compare-and-set! recent-external-message-ids state state*)
+          (if (compare-and-set! (recent-external-message-ids-atom) state state*)
             (recur)
             (recur))
           (contains? state* external-message-id))))))
@@ -216,7 +243,7 @@
 (defn- mark-external-message!
   [external-message-id]
   (when external-message-id
-    (swap! recent-external-message-ids
+    (swap! (recent-external-message-ids-atom)
            (fn [entries]
              (assoc (prune-recent-message-ids entries)
                     external-message-id
@@ -1004,13 +1031,13 @@
              (mac-os?)
              (.exists (java.io.File. ^String imessage-chat-db-path)))
     (try
-      (let [after-rowid @imessage-last-rowid
+      (let [after-rowid @(imessage-last-rowid-atom)
             rows        (fetch-new-imessages after-rowid)]
         (when-let [max-rowid (some->> rows
                                       (map #(long (or (get % "rowid") 0)))
                                       seq
                                       (apply max))]
-          (reset! imessage-last-rowid max-rowid))
+          (reset! (imessage-last-rowid-atom) max-rowid))
         (doseq [row rows
                 :let [text      (nonblank-str (get row "text"))
                       chat-guid (nonblank-str (get row "chat_guid"))
@@ -1036,13 +1063,13 @@
 
 (defn- stop-imessage-poller!
   []
-  (when-let [^ScheduledExecutorService exec @imessage-poller-executor]
+  (when-let [^ScheduledExecutorService exec @(imessage-poller-executor-atom)]
     (.shutdown exec)
     (try
       (.awaitTermination exec 2 TimeUnit/SECONDS)
       (catch InterruptedException _
         (.shutdownNow exec)))
-    (reset! imessage-poller-executor nil)))
+    (reset! (imessage-poller-executor-atom) nil)))
 
 (defn- clear-channel-adapters!
   []
@@ -1057,14 +1084,25 @@
 (defn reset-runtime!
   []
   (stop-imessage-poller!)
-  (reset! recent-external-message-ids {})
-  (reset! imessage-last-rowid 0)
+  (reset! (recent-external-message-ids-atom) {})
+  (reset! (imessage-last-rowid-atom) 0)
   nil)
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []
-  (clear-channel-adapters!)
-  (reset-runtime!))
+  (when (maybe-current-runtime)
+    (clear-channel-adapters!)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn- start-imessage-poller!
   []
@@ -1072,19 +1110,20 @@
   (when (and (imessage-enabled?)
              (mac-os?)
              (.exists (java.io.File. ^String imessage-chat-db-path)))
-    (reset! imessage-last-rowid (or (current-imessage-max-rowid) 0))
+    (reset! (imessage-last-rowid-atom) (or (current-imessage-max-rowid) 0))
     (let [exec (Executors/newSingleThreadScheduledExecutor)]
       (.scheduleWithFixedDelay exec
                                ^Runnable poll-imessage-once!
                                (long (imessage-poll-interval-ms))
                                (long (imessage-poll-interval-ms))
                                TimeUnit/MILLISECONDS)
-      (reset! imessage-poller-executor exec)
+      (reset! (imessage-poller-executor-atom) exec)
       true)))
 
 (defn start!
   []
-  (clear-runtime!)
+  (clear-channel-adapters!)
+  (reset-runtime!)
   (doseq [channel [:slack :telegram :imessage]]
     (bridge/register-channel-adapter! channel
                                       {:prompt messaging-prompt

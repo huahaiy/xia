@@ -4,7 +4,7 @@
 (defonce ^:private installed-runtime-atom (atom nil))
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:phase-atom (atom :stopped)
    :drain-state-atom (atom nil)})
@@ -13,12 +13,15 @@
   []
   @installed-runtime-atom)
 
-(defn- ensure-runtime-installed!
+(defn installed?
+  []
+  (boolean (maybe-current-runtime)))
+
+(defn- current-runtime
   []
   (or (maybe-current-runtime)
-      (let [runtime (make-runtime)]
-        (reset! installed-runtime-atom runtime)
-        runtime)))
+      (throw (ex-info "Runtime state is not installed"
+                      {:component :xia/runtime-state-runtime}))))
 
 (defn- maybe-phase-atom
   []
@@ -30,21 +33,19 @@
 
 (defn- phase-atom
   []
-  (:phase-atom (ensure-runtime-installed!)))
+  (:phase-atom (current-runtime)))
 
 (defn- drain-state-atom
   []
-  (:drain-state-atom (ensure-runtime-installed!)))
+  (:drain-state-atom (current-runtime)))
 
 (defn install-runtime!
-  ([] (or (maybe-current-runtime)
-          (install-runtime! (make-runtime))))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

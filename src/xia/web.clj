@@ -60,32 +60,66 @@
 ;; Rate limiting — simple per-domain token bucket
 ;; ---------------------------------------------------------------------------
 
-(defonce ^ConcurrentHashMap ^:private rate-limits (ConcurrentHashMap.))
-(defonce ^AtomicLong ^:private rate-limit-cleanup (AtomicLong. 0))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:rate-limits (ConcurrentHashMap.)
+   :rate-limit-cleanup (AtomicLong. 0)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Web runtime is not installed"
+                      {:component :xia/web-runtime}))))
+
+(defn- ^ConcurrentHashMap rate-limits
+  []
+  (:rate-limits (current-runtime)))
+
+(defn- ^AtomicLong rate-limit-cleanup
+  []
+  (:rate-limit-cleanup (current-runtime)))
 
 (def ^:private rate-limit-max 30)         ; max requests
 (def ^:private rate-limit-window-ms 60000) ; per minute
 
 (defn reset-runtime!
   []
-  (.clear rate-limits)
-  (.set rate-limit-cleanup 0)
+  (.clear (rate-limits))
+  (.set (rate-limit-cleanup) 0)
   nil)
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []
-  (reset-runtime!))
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn- check-rate-limit!
   "Enforce per-domain rate limiting. Throws if limit exceeded."
   [url]
   (let [host (.getHost (URI. url))
         now  (System/currentTimeMillis)
-        _    (rate-limit/maybe-prune-states! rate-limits
-                                             rate-limit-cleanup
+        _    (rate-limit/maybe-prune-states! (rate-limits)
+                                             (rate-limit-cleanup)
                                              now
                                              rate-limit-window-ms)
-        state (.computeIfAbsent rate-limits host
+        state (.computeIfAbsent (rate-limits) host
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
     (rate-limit/consume-slot!

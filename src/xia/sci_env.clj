@@ -45,10 +45,41 @@
 (def ^:private reader-eof (Object.))
 
 (def ^:dynamic *sci-timeout-state* nil)
-(defonce ^:private sci-worker-seq (AtomicLong. 0))
-(defonce ^:private active-sci-workers (atom {}))
-(defonce ^:private shutdown? (atom false))
-(defonce ^:private current-ctx* (atom nil))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:sci-worker-seq (AtomicLong. 0)
+   :active-sci-workers (atom {})
+   :shutdown? (atom false)
+   :current-ctx-atom (atom nil)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "SCI runtime is not installed"
+                      {:component :xia/sci-runtime}))))
+
+(defn- ^AtomicLong sci-worker-seq
+  []
+  (:sci-worker-seq (current-runtime)))
+
+(defn- active-sci-workers
+  []
+  (:active-sci-workers (current-runtime)))
+
+(defn- shutdown?-atom
+  []
+  (:shutdown? (current-runtime)))
+
+(defn- current-ctx-atom
+  []
+  (:current-ctx-atom (current-runtime)))
 
 (defn- sci-timeout-ex
   [stage timeout-ms]
@@ -359,11 +390,11 @@
 
 (defn- current-ctx
   []
-  (or @current-ctx*
+  (or @(current-ctx-atom)
       (let [ctx (make-ctx)]
-        (if (compare-and-set! current-ctx* nil ctx)
+        (if (compare-and-set! (current-ctx-atom) nil ctx)
           ctx
-          @current-ctx*))))
+          @(current-ctx-atom)))))
 
 (defn- sci-eval-timeout-ms
   []
@@ -493,7 +524,7 @@
 
 (defn- reap-finished-sci-workers!
   []
-  (swap! active-sci-workers
+  (swap! (active-sci-workers)
          (fn [workers]
            (reduce-kv (fn [live worker-id {:keys [^Thread thread] :as worker-state}]
                         (if (and thread (.isAlive thread))
@@ -523,7 +554,7 @@
 
 (defn- register-sci-worker!
   [worker-id stage timeout-ms ^Thread worker]
-  (swap! active-sci-workers
+  (swap! (active-sci-workers)
          assoc
          worker-id
          {:worker-id worker-id
@@ -536,11 +567,11 @@
 
 (defn- unregister-sci-worker!
   [worker-id]
-  (swap! active-sci-workers dissoc worker-id))
+  (swap! (active-sci-workers) dissoc worker-id))
 
 (defn- mark-sci-worker-timed-out!
   [worker-id]
-  (swap! active-sci-workers
+  (swap! (active-sci-workers)
          (fn [workers]
            (if-let [worker-state (get workers worker-id)]
              (assoc workers
@@ -552,10 +583,19 @@
 
 (defn reset-runtime!
   []
-  (reset! shutdown? false)
+  (reset! (shutdown?-atom) false)
   (reap-finished-sci-workers!)
-  (reset! current-ctx* (make-ctx))
+  (reset! (current-ctx-atom) (make-ctx))
   nil)
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  (reset-runtime!)
+  runtime)
 
 (defn- sci-worker-thread
   [worker-id stage timeout-ms f result*]
@@ -601,23 +641,30 @@
 
 (defn prepare-shutdown!
   []
-  (reset! shutdown? true)
+  (reset! (shutdown?-atom) true)
   (let [workers (vals (reap-finished-sci-workers!))]
     (doseq [{:keys [worker-id stage timeout-ms ^Thread thread]} workers]
       (when (and thread (.isAlive thread))
         (interrupt-sci-worker! worker-id stage timeout-ms thread)))
-    (reset! current-ctx* nil)
+    (reset! (current-ctx-atom) nil)
     (count workers)))
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (prepare-shutdown!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn- call-with-timeout
   [timeout-ms stage f]
-  (when @shutdown?
+  (when @(shutdown?-atom)
     (throw (ex-info "SCI runtime is shutting down"
                     {:type :sci/shutdown
                      :status 503
                      :stage stage})))
   (ensure-sci-worker-capacity!)
-  (let [worker-id (.incrementAndGet ^AtomicLong sci-worker-seq)
+  (let [worker-id (.incrementAndGet ^AtomicLong (sci-worker-seq))
         result*  (promise)
         ^Thread worker (sci-worker-thread worker-id stage timeout-ms f result*)
         timeout  (Object.)

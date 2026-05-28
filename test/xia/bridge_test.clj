@@ -378,7 +378,7 @@
     (is (empty? @subscribers-atom))))
 
 (deftest bridge-runtime-owns-default-task-runtime-event-store
-  (let [runtime (bridge/install-runtime!)]
+  (let [runtime (bridge/install-runtime! (bridge/make-runtime))]
     (try
       (let [store (bridge/runtime-event-store)
             task-id (random-uuid)

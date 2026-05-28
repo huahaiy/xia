@@ -11,7 +11,7 @@
 
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:executors-atom    (atom {})
    :accepting-atom    (atom true)
@@ -223,14 +223,13 @@
      true)))
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! (:accepting-atom runtime) true)
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! (:accepting-atom runtime) true)
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

@@ -31,7 +31,7 @@
 (defonce ^:private installed-runtime-atom (atom nil))
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:tick-executor-atom (atom nil)
    :work-executor-atom (atom nil)
@@ -45,40 +45,39 @@
   []
   @installed-runtime-atom)
 
-(defn- ensure-runtime-installed!
+(defn- current-runtime
   []
   (or (maybe-current-runtime)
-      (let [runtime (make-runtime)]
-        (reset! installed-runtime-atom runtime)
-        runtime)))
+      (throw (ex-info "Scheduler runtime is not installed"
+                      {:component :xia/scheduler}))))
 
 (defn- tick-executor-atom
   []
-  (:tick-executor-atom (ensure-runtime-installed!)))
+  (:tick-executor-atom (current-runtime)))
 
 (defn- work-executor-atom
   []
-  (:work-executor-atom (ensure-runtime-installed!)))
+  (:work-executor-atom (current-runtime)))
 
 (defn- running-schedules-atom
   []
-  (:running-schedules-atom (ensure-runtime-installed!)))
+  (:running-schedules-atom (current-runtime)))
 
 (defn- maintenance-running?-atom
   []
-  (:maintenance-running?-atom (ensure-runtime-installed!)))
+  (:maintenance-running?-atom (current-runtime)))
 
 (defn- last-maintenance-at-atom
   []
-  (:last-maintenance-at-atom (ensure-runtime-installed!)))
+  (:last-maintenance-at-atom (current-runtime)))
 
 (defn- thread-counter-atom
   []
-  (:thread-counter-atom (ensure-runtime-installed!)))
+  (:thread-counter-atom (current-runtime)))
 
 (defn- runtime-lock
   []
-  (:runtime-lock (ensure-runtime-installed!)))
+  (:runtime-lock (current-runtime)))
 
 (def ^:private maintenance-interval-ms (* 24 60 60 1000))
 (defn- max-concurrent-runs
@@ -477,7 +476,6 @@
 (defn start!
   "Start the background scheduler. Ticks every 60 seconds."
   []
-  (ensure-runtime-installed!)
   (when @(tick-executor-atom)
     (log/warn "Scheduler already running"))
   (when-not @(tick-executor-atom)
@@ -511,14 +509,12 @@
   nil)
 
 (defn install-runtime!
-  ([] (or (maybe-current-runtime)
-          (install-runtime! (make-runtime))))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

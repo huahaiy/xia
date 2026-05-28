@@ -73,7 +73,7 @@
 (defmethod ig/init-key :xia/db
   [_ {:keys [db-path connect-options]}]
   (ensure-db-dir! db-path)
-  (db/install-runtime!)
+  (db/install-runtime! (db/make-runtime))
   (db/connect! db-path connect-options)
   {:db-path db-path})
 
@@ -94,7 +94,7 @@
 
 (defmethod ig/init-key :xia/runtime-state-runtime
   [_ _]
-  {:runtime (runtime-state/install-runtime!)})
+  {:runtime (runtime-state/install-runtime! (runtime-state/make-runtime))})
 
 (defmethod ig/halt-key! :xia/runtime-state-runtime
   [_ _]
@@ -102,7 +102,7 @@
 
 (defmethod ig/init-key :xia/retrieval-runtime
   [_ _]
-  {:runtime (retrieval-state/install-runtime!)})
+  {:runtime (retrieval-state/install-runtime! (retrieval-state/make-runtime))})
 
 (defmethod ig/halt-key! :xia/retrieval-runtime
   [_ _]
@@ -110,23 +110,25 @@
 
 (defmethod ig/init-key :xia/oauth-runtime
   [_ _]
-  {:runtime (oauth/install-runtime!)})
+  {:runtime (oauth/install-runtime! (oauth/make-runtime))})
 
 (defmethod ig/halt-key! :xia/oauth-runtime
   [_ _]
   (oauth/clear-runtime!))
 
 (defmethod ig/init-key :xia/browser-runtime
-  [_ _]
-  {:runtime (playwright/install-runtime!)})
+  [_ {:keys [db]}]
+  {:runtime (playwright/install-runtime! (playwright/make-runtime))
+   :db db})
 
 (defmethod ig/halt-key! :xia/browser-runtime
   [_ _]
+  (browser/release-all-sessions!)
   (playwright/clear-runtime!))
 
 (defmethod ig/init-key :xia/working-memory-runtime
   [_ {:keys [async-runtime]}]
-  {:runtime (wm/install-runtime!)})
+  {:runtime (wm/install-runtime! (wm/make-runtime))})
 
 (defmethod ig/halt-key! :xia/working-memory-runtime
   [_ _]
@@ -136,16 +138,18 @@
 
 (defmethod ig/init-key :xia/async-runtime
   [_ {:keys [db]}]
-  {:runtime (async/install-runtime!)
+  {:runtime (async/install-runtime! (async/make-runtime))
    :db db})
 
 (defmethod ig/halt-key! :xia/async-runtime
   [_ _]
+  (async/prepare-shutdown!)
+  (async/await-background-tasks!)
   (async/clear-runtime!))
 
 (defmethod ig/init-key :xia/prompt-runtime
   [_ {:keys [async-runtime]}]
-  {:runtime (prompt/install-runtime!)
+  {:runtime (prompt/install-runtime! (prompt/make-runtime))
    :async-runtime async-runtime})
 
 (defmethod ig/halt-key! :xia/prompt-runtime
@@ -153,17 +157,24 @@
   (prompt/clear-runtime!))
 
 (defmethod ig/init-key :xia/agent-runtime
-  [_ {:keys [async-runtime]}]
-  {:runtime (agent/install-runtime!)
-   :async-runtime async-runtime})
+  [_ {:keys [db async-runtime]}]
+  (let [runtime   (agent/install-runtime! (agent/make-runtime))
+        recovered (agent/recover-runtime-tasks!)]
+    (when (seq recovered)
+      (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart"))
+    {:runtime runtime
+     :db db
+     :async-runtime async-runtime
+     :recovered recovered}))
 
 (defmethod ig/halt-key! :xia/agent-runtime
   [_ _]
+  (agent/cancel-all-sessions! "runtime stopping")
   (agent/clear-runtime!))
 
 (defmethod ig/init-key :xia/bridge-runtime
   [_ _]
-  {:runtime (bridge/install-runtime!)})
+  {:runtime (bridge/install-runtime! (bridge/make-runtime))})
 
 (defmethod ig/halt-key! :xia/bridge-runtime
   [_ {:keys [runtime]}]
@@ -171,19 +182,68 @@
     (bridge/clear-runtime! runtime)
     (bridge/clear-runtime!)))
 
+(defmethod ig/init-key :xia/hippocampus-runtime
+  [_ {:keys [db llm-runtime]}]
+  {:runtime (hippo/install-runtime! (hippo/make-runtime))
+   :db db
+   :llm-runtime llm-runtime})
+
+(defmethod ig/halt-key! :xia/hippocampus-runtime
+  [_ _]
+  (hippo/prepare-shutdown!)
+  (hippo/await-background-tasks!)
+  (hippo/clear-runtime!))
+
+(defmethod ig/init-key :xia/checkpoint-runtime
+  [_ {:keys [db]}]
+  {:runtime (checkpoint/install-runtime! (checkpoint/make-runtime))
+   :db db})
+
+(defmethod ig/halt-key! :xia/checkpoint-runtime
+  [_ _]
+  (checkpoint/prepare-shutdown!)
+  (checkpoint/await-background-tasks!)
+  (checkpoint/clear-runtime!))
+
+(defmethod ig/init-key :xia/llm-runtime
+  [_ {:keys [db]}]
+  {:runtime (llm/install-runtime! (llm/make-runtime))
+   :db db})
+
+(defmethod ig/halt-key! :xia/llm-runtime
+  [_ _]
+  (llm/clear-runtime!))
+
+(defmethod ig/init-key :xia/local-ocr-runtime
+  [_ _]
+  {:runtime (local-ocr/install-runtime! (local-ocr/make-runtime))})
+
+(defmethod ig/halt-key! :xia/local-ocr-runtime
+  [_ _]
+  (local-ocr/clear-runtime!))
+
+(defmethod ig/init-key :xia/service-runtime
+  [_ _]
+  {:runtime (service/install-runtime! (service/make-runtime))})
+
+(defmethod ig/halt-key! :xia/service-runtime
+  [_ _]
+  (service/clear-runtime!))
+
+(defmethod ig/init-key :xia/web-runtime
+  [_ _]
+  {:runtime (web/install-runtime! (web/make-runtime))})
+
+(defmethod ig/halt-key! :xia/web-runtime
+  [_ _]
+  (web/clear-runtime!))
+
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay runtime-state-runtime retrieval-runtime oauth-runtime
              browser-runtime async-runtime prompt-runtime agent-runtime
-             working-memory-runtime bridge-runtime]}]
-  (hippo/reset-runtime!)
-  (checkpoint/reset-runtime!)
-  (llm/reset-runtime!)
-  (local-ocr/reset-runtime!)
-  (service/reset-runtime!)
-  (web/reset-runtime!)
-  (let [recovered (agent/recover-runtime-tasks!)]
-    (when (seq recovered)
-      (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart")))
+             working-memory-runtime bridge-runtime hippocampus-runtime
+             checkpoint-runtime llm-runtime local-ocr-runtime
+             service-runtime web-runtime]}]
   {:db db
    :overlay overlay
    :runtime-state-runtime runtime-state-runtime
@@ -194,23 +254,17 @@
    :prompt-runtime prompt-runtime
    :agent-runtime agent-runtime
    :working-memory-runtime working-memory-runtime
-   :bridge-runtime bridge-runtime})
+   :bridge-runtime bridge-runtime
+   :hippocampus-runtime hippocampus-runtime
+   :checkpoint-runtime checkpoint-runtime
+   :llm-runtime llm-runtime
+   :local-ocr-runtime local-ocr-runtime
+   :service-runtime service-runtime
+   :web-runtime web-runtime})
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
-  (agent/cancel-all-sessions! "runtime stopping")
-  (browser/release-all-sessions!)
-  (async/prepare-shutdown!)
-  (hippo/prepare-shutdown!)
-  (checkpoint/prepare-shutdown!)
-  (llm/prepare-shutdown!)
-  (hippo/await-background-tasks!)
-  (checkpoint/await-background-tasks!)
-  (checkpoint/reset-runtime!)
-  (llm/await-background-tasks!)
-  (async/await-background-tasks!)
-  (async/clear-runtime!)
-  (local-ocr/reset-runtime!))
+  nil)
 
 (defmethod ig/init-key :xia/http-runtime
   [_ {:keys [runtime-support]}]
@@ -227,16 +281,16 @@
 
 (defmethod ig/init-key :xia/sci-runtime
   [_ {:keys [db]}]
-  (sci-env/reset-runtime!)
-  {:db db})
+  {:runtime (sci-env/install-runtime! (sci-env/make-runtime))
+   :db db})
 
 (defmethod ig/halt-key! :xia/sci-runtime
   [_ _]
-  (sci-env/prepare-shutdown!))
+  (sci-env/clear-runtime!))
 
 (defmethod ig/init-key :xia/instance-supervisor
   [_ {:keys [db enabled? command]}]
-  (instance-supervisor/reset-runtime!)
+  (instance-supervisor/install-runtime! (instance-supervisor/make-runtime))
   (instance-supervisor/configure! {:enabled? enabled?
                                    :command command})
   {:db db
@@ -286,23 +340,24 @@
 
 (defmethod ig/init-key :xia/tool-runtime
   [_ {:keys [identity sci-runtime]}]
-  (let [bundled-count (tool/ensure-bundled-tools!)]
+  (let [runtime       (tool/install-runtime! (tool/make-runtime))
+        bundled-count (tool/ensure-bundled-tools!)]
     (when (pos? (long bundled-count))
-      (log/info "Installed" bundled-count "bundled tools")))
-  (tool/reset-runtime!)
-  (tool/load-all-tools!)
-  (log/info "Loaded" (count (tool/registered-tools)) "tools,"
-            (count (skill/all-enabled-skills)) "skills")
-  {:identity identity
-   :sci-runtime sci-runtime})
+      (log/info "Installed" bundled-count "bundled tools"))
+    (tool/load-all-tools!)
+    (log/info "Loaded" (count (tool/registered-tools)) "tools,"
+              (count (skill/all-enabled-skills)) "skills")
+    {:runtime runtime
+     :identity identity
+     :sci-runtime sci-runtime}))
 
 (defmethod ig/halt-key! :xia/tool-runtime
   [_ _]
-  (tool/reset-runtime!))
+  (tool/clear-runtime!))
 
 (defmethod ig/init-key :xia/scheduler
   [_ {:keys [tool-runtime]}]
-  (scheduler/install-runtime!)
+  (scheduler/install-runtime! (scheduler/make-runtime))
   (scheduler/start!)
   {:tool-runtime tool-runtime})
 
@@ -313,6 +368,7 @@
 
 (defmethod ig/init-key :xia/messaging
   [_ {:keys [runtime-support]}]
+  (messaging/install-runtime! (messaging/make-runtime))
   (messaging/start!)
   {:runtime-support runtime-support})
 

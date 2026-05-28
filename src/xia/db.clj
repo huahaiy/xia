@@ -51,9 +51,9 @@
 
 (defonce ^:private installed-runtime-atom (atom nil))
 
-(declare install-runtime! clear-runtime!)
+(declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:conn-atom               (atom nil)
    :embedding-provider-atom (atom nil)
@@ -72,11 +72,6 @@
   (or (maybe-current-runtime)
       (throw (ex-info "DB runtime is not installed"
                       {:component :xia/db}))))
-
-(defn- ensure-runtime-installed!
-  []
-  (or (maybe-current-runtime)
-      (install-runtime!)))
 
 (defn- conn-atom
   []
@@ -549,7 +544,6 @@
   "Open (or create) the Datalevin database at `db-path`."
   ([db-path] (connect! db-path nil))
   ([db-path crypto-opts]
-   (ensure-runtime-installed!)
    (let [callsite       (capture-callsite "db/connect! callsite")
          instance-id    (paths/resolve-instance-id (:instance-id crypto-opts))
          datalevin-opts (-> (resolve-datalevin-opts crypto-opts)
@@ -587,13 +581,12 @@
   (some-> (maybe-conn-atom) deref some?))
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn- not-connected-ex?
   [ex]

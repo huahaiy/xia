@@ -27,6 +27,7 @@
 (use-fixtures :each
   (fn [f]
     (db/clear-runtime!)
+    (db/install-runtime! (db/make-runtime))
     (try
       (f)
       (finally

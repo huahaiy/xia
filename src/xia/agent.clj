@@ -34,9 +34,10 @@
 
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
-  (run-state/make-runtime))
+  (assoc (run-state/make-runtime)
+         :fact-review-runtime (fact-review/make-runtime)))
 
 (defn- maybe-current-runtime
   []
@@ -228,18 +229,17 @@
   (run-state/runtime-activity (current-runtime)))
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (fact-review/reset-runtime!)
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (fact-review/install-runtime! (:fact-review-runtime runtime))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []
-  (fact-review/reset-runtime!)
+  (fact-review/clear-runtime!)
   (when-let [runtime (maybe-current-runtime)]
     (run-state/clear-runtime-state! runtime)
     (reset! installed-runtime-atom nil))

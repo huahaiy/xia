@@ -16,7 +16,7 @@
 (defonce ^:private installed-runtime-atom (atom nil))
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:pending-authorizations-atom (atom {})
    :proactive-refresh-lock (Object.)
@@ -26,34 +26,31 @@
   []
   @installed-runtime-atom)
 
-(defn- ensure-runtime-installed!
+(defn- current-runtime
   []
   (or (maybe-current-runtime)
-      (let [runtime (make-runtime)]
-        (reset! installed-runtime-atom runtime)
-        runtime)))
+      (throw (ex-info "OAuth runtime is not installed"
+                      {:component :xia/oauth-runtime}))))
 
 (defn- pending-authorizations-atom
   []
-  (:pending-authorizations-atom (ensure-runtime-installed!)))
+  (:pending-authorizations-atom (current-runtime)))
 
 (defn- proactive-refresh-lock
   []
-  (:proactive-refresh-lock (ensure-runtime-installed!)))
+  (:proactive-refresh-lock (current-runtime)))
 
 (defn- last-proactive-refresh-at-ms-atom
   []
-  (:last-proactive-refresh-at-ms-atom (ensure-runtime-installed!)))
+  (:last-proactive-refresh-at-ms-atom (current-runtime)))
 
 (defn install-runtime!
-  ([] (or (maybe-current-runtime)
-          (install-runtime! (make-runtime))))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

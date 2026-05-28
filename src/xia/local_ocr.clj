@@ -35,10 +35,37 @@
   (str "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5-GGUF/resolve/main/"
        default-mmproj-file
        "?download=true"))
-(def ^:private managed-asset-lock (Object.))
-(def ^:private vision-runtime-lock (Object.))
 (def ^:private supported-backends #{:local :external})
-(defonce ^:private vision-runtime-atom (atom {}))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:managed-asset-lock (Object.)
+   :vision-runtime-lock (Object.)
+   :vision-runtime-atom (atom {})})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Local OCR runtime is not installed"
+                      {:component :xia/local-ocr-runtime}))))
+
+(defn- managed-asset-lock
+  []
+  (:managed-asset-lock (current-runtime)))
+
+(defn- vision-runtime-lock
+  []
+  (:vision-runtime-lock (current-runtime)))
+
+(defn- vision-runtime-atom
+  []
+  (:vision-runtime-atom (current-runtime)))
 
 (def ^:private ocr-mode-definitions
   {:ocr {:id :ocr
@@ -337,7 +364,7 @@
   (when (and (seq target-path)
              (seq url)
              (not (.exists (io/file target-path))))
-    (locking managed-asset-lock
+    (locking (managed-asset-lock)
       (when-not (.exists (io/file target-path))
         (announce-managed-download! label target-path)
         (download-file! url target-path))))
@@ -398,10 +425,25 @@
 
 (defn reset-runtime!
   []
-  (locking vision-runtime-lock
-    (doseq [runtime (vals @vision-runtime-atom)]
+  (locking (vision-runtime-lock)
+    (doseq [runtime (vals @(vision-runtime-atom))]
       (destroy-vision-runtime! runtime))
-    (reset! vision-runtime-atom {})))
+    (reset! (vision-runtime-atom) {})))
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn- daemon-thread-factory
   [prefix]
@@ -450,11 +492,11 @@
 (defn- shared-vision-runtime!
   [mode]
   (let [runtime-key (vision-runtime-key mode)]
-    (or (get @vision-runtime-atom runtime-key)
-        (locking vision-runtime-lock
-          (or (get @vision-runtime-atom runtime-key)
+    (or (get @(vision-runtime-atom) runtime-key)
+        (locking (vision-runtime-lock)
+          (or (get @(vision-runtime-atom) runtime-key)
               (let [runtime (create-vision-runtime! mode)]
-                (swap! vision-runtime-atom assoc runtime-key runtime)
+                (swap! (vision-runtime-atom) assoc runtime-key runtime)
                 runtime))))))
 
 (defn- run-vision-operation!

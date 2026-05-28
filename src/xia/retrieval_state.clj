@@ -5,7 +5,7 @@
 (defonce ^:private installed-runtime-atom (atom nil))
 (declare clear-runtime!)
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:retrieval-state-atom
    (atom {:knowledge-epoch 0
@@ -15,26 +15,23 @@
   []
   @installed-runtime-atom)
 
-(defn- ensure-runtime-installed!
+(defn- current-runtime
   []
   (or (maybe-current-runtime)
-      (let [runtime (make-runtime)]
-        (reset! installed-runtime-atom runtime)
-        runtime)))
+      (throw (ex-info "Retrieval runtime is not installed"
+                      {:component :xia/retrieval-runtime}))))
 
 (defn- retrieval-state-atom
   []
-  (:retrieval-state-atom (ensure-runtime-installed!)))
+  (:retrieval-state-atom (current-runtime)))
 
 (defn install-runtime!
-  ([] (or (maybe-current-runtime)
-          (install-runtime! (make-runtime))))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

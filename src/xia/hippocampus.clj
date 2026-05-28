@@ -85,10 +85,33 @@ Rules:
    :tasks #{}
    :stats (runtime-stats-template)})
 
-(defonce ^:private background-consolidation-state
-  (atom (background-consolidation-state-template)))
-(defonce ^:private background-consolidation-lock
-  (Object.))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:background-consolidation-state-atom
+   (atom (background-consolidation-state-template))
+   :background-consolidation-lock
+   (Object.)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Hippocampus runtime is not installed"
+                      {:component :xia/hippocampus-runtime}))))
+
+(defn- background-consolidation-state-atom
+  []
+  (:background-consolidation-state-atom (current-runtime)))
+
+(defn- background-consolidation-lock
+  []
+  (:background-consolidation-lock (current-runtime)))
 
 (def ^:private importance-prompt
   "You are rating which episodic memories deserve longer retention.
@@ -237,8 +260,8 @@ Rules:
 
 (defn- update-runtime-stats!
   [f & args]
-  (locking background-consolidation-lock
-    (apply swap! background-consolidation-state update :stats f args)))
+  (locking (background-consolidation-lock)
+    (apply swap! (background-consolidation-state-atom) update :stats f args)))
 
 (defn- record-success!
   [{:keys [entities relations facts]}]
@@ -684,16 +707,31 @@ Rules:
 (defn reset-runtime!
   "Re-enable background consolidation submission for a fresh runtime."
   []
-  (locking background-consolidation-lock
-    (reset! background-consolidation-state
+  (locking (background-consolidation-lock)
+    (reset! (background-consolidation-state-atom)
             (background-consolidation-state-template))))
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn prepare-shutdown!
   "Stop accepting new background consolidations and return the pending count."
   []
-  (locking background-consolidation-lock
+  (locking (background-consolidation-lock)
     (let [{:keys [tasks]}
-          (swap! background-consolidation-state assoc :accepting? false)
+          (swap! (background-consolidation-state-atom) assoc :accepting? false)
           pending (count tasks)]
       (when (pos? pending)
         (log/info "Waiting for" pending "hippocampus background task(s) before database close"))
@@ -703,8 +741,8 @@ Rules:
   "Block until currently tracked background consolidations finish."
   []
   (loop []
-    (when-let [task (locking background-consolidation-lock
-                      (first (:tasks @background-consolidation-state)))]
+    (when-let [task (locking (background-consolidation-lock)
+                      (first (:tasks @(background-consolidation-state-atom))))]
       (try
         @task
       (catch Exception _
@@ -714,16 +752,16 @@ Rules:
 (defn runtime-activity
   "Return coarse hippocampus runtime activity for control-plane inspection."
   []
-  (locking background-consolidation-lock
-    {:accepting? (boolean (:accepting? @background-consolidation-state))
-     :pending-background-task-count (count (:tasks @background-consolidation-state))}))
+  (locking (background-consolidation-lock)
+    {:accepting? (boolean (:accepting? @(background-consolidation-state-atom)))
+     :pending-background-task-count (count (:tasks @(background-consolidation-state-atom)))}))
 
 (defn consolidation-summary
   "Return a small operational summary for memory consolidation observability."
   []
   (let [{:keys [accepting? tasks stats]}
-        (locking background-consolidation-lock
-          (let [{:keys [accepting? tasks stats]} @background-consolidation-state]
+        (locking (background-consolidation-lock)
+          (let [{:keys [accepting? tasks stats]} @(background-consolidation-state-atom)]
             {:accepting? accepting?
              :tasks tasks
              :stats stats}))
@@ -762,8 +800,8 @@ Rules:
 
 (defn- submit-background-consolidation!
   [session-id]
-  (locking background-consolidation-lock
-    (when (:accepting? @background-consolidation-state)
+  (locking (background-consolidation-lock)
+    (when (:accepting? @(background-consolidation-state-atom))
       (let [self (promise)
             task (async/submit-background!
                   "hippocampus-consolidation"
@@ -773,10 +811,10 @@ Rules:
                        (catch Exception e
                          (log/error e "Background consolidation failed for session" session-id))
                        (finally
-                         (locking background-consolidation-lock
-                           (swap! background-consolidation-state update :tasks disj me))))))]
+                         (locking (background-consolidation-lock)
+                           (swap! (background-consolidation-state-atom) update :tasks disj me))))))]
         (when task
-          (swap! background-consolidation-state update :tasks conj task)
+          (swap! (background-consolidation-state-atom) update :tasks conj task)
           (deliver self task))
         task))))
 

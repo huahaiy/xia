@@ -5,6 +5,7 @@
 (use-fixtures :each
   (fn [f]
     (llm/clear-runtime!)
+    (llm/install-runtime! (llm/make-runtime))
     (try
       (f)
       (finally
@@ -44,9 +45,7 @@
                              {:llm.provider/id :openai-b
                               :llm.provider/workloads #{:assistant}}])
                 xia.db/get-default-provider
-                (constantly {:llm.provider/id :fallback})
-                xia.llm/workload-counters
-                (atom {})]
+                (constantly {:llm.provider/id :fallback})]
     (let [first-selection  (llm/resolve-provider-selection {:workload :assistant})
           second-selection (llm/resolve-provider-selection {:workload :assistant})
           third-selection  (llm/resolve-provider-selection {:workload :assistant})]
@@ -56,7 +55,6 @@
 
 (deftest chat-enforces-provider-rate-limit-before-http-request
   (let [request-count    (atom 0)
-        provider-health* (atom {})
         decisions        (atom [])]
     (with-redefs [xia.db/get-default-provider
                   (constantly {:llm.provider/id :default
@@ -64,12 +62,6 @@
                                :llm.provider/api-key "sk-test"
                                :llm.provider/model "gpt-test"
                                :llm.provider/rate-limit-per-minute 2})
-                  xia.llm/provider-rate-limits
-                  (java.util.concurrent.ConcurrentHashMap.)
-                  xia.llm/provider-rate-limit-cleanup
-                  (java.util.concurrent.atomic.AtomicLong. 0)
-                  xia.llm/provider-health
-                  provider-health*
                   xia.llm/now-ms
                   (constantly 1000)
                   xia.llm/max-provider-retry-rounds
@@ -102,8 +94,9 @@
                                   [:decision-type :allowed? :mode :provider-id :workload :limit])
                    @decisions)))
       (is (= 2 @request-count))
-      (is (= 0 (get-in @provider-health* [:default :consecutive-failures])))
-      (is (nil? (get-in @provider-health* [:default :last-error]))))))
+      (let [health (llm/provider-health-summary :default)]
+        (is (= 0 (:consecutive-failures health)))
+        (is (nil? (:last-error health)))))))
 
 (deftest reset-runtime-clears-workload-selection-and-local-rate-limit-state
   (let [request-count (atom 0)

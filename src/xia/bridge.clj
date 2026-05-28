@@ -31,18 +31,18 @@
 (declare clear-runtime!)
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current @installed-runtime-atom]
-     (when-not (identical? current runtime)
-       (clear-runtime! current)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current @installed-runtime-atom]
+    (when-not (identical? current runtime)
+      (clear-runtime! current)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn- current-runtime
   []
   (or @installed-runtime-atom
-      (install-runtime!)))
+      (throw (ex-info "Bridge runtime is not installed"
+                      {:component :xia/bridge-runtime}))))
 
 (defn clear-runtime!
   ([]

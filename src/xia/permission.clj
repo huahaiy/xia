@@ -10,7 +10,26 @@
             [xia.prompt :as prompt]
             [xia.task-policy :as task-policy]))
 
-(defonce ^:private session-grants (atom {}))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:session-grants (atom {})})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Permission runtime is not installed"
+                      {:component :xia/tool-runtime}))))
+
+(defn- session-grants
+  []
+  (:session-grants (current-runtime)))
 
 (def ^:dynamic *approval-callback*
   "Optional bridge callback for permission prompts.
@@ -22,11 +41,26 @@
 
 (defn reset-runtime!
   []
-  (reset! session-grants {}))
+  (reset! (session-grants) {}))
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn clear-session-grants!
   [session-id]
-  (swap! session-grants dissoc session-id))
+  (swap! (session-grants) dissoc session-id))
 
 (defn tool-approval-policy
   [tool]
@@ -127,12 +161,12 @@
 
 (defn- approved-for-session?
   [session-id grant-key]
-  (contains? (get @session-grants session-id #{}) grant-key))
+  (contains? (get @(session-grants) session-id #{}) grant-key))
 
 (defn- remember-session-grant!
   [session-id grant-key]
   (when session-id
-    (swap! session-grants update session-id (fnil conj #{}) grant-key)))
+    (swap! (session-grants) update session-id (fnil conj #{}) grant-key)))
 
 (defn- session-grant-key
   [tool]

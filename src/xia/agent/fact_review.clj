@@ -7,11 +7,45 @@
 (def ^:private default-fact-utility-review-debounce-ms 2000)
 (def ^:private fact-utility-review-batch-size 20)
 (def ^:private fact-utility-review-max-pending 120)
-(defonce fact-utility-review-state (atom {}))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:fact-utility-review-state (atom {})})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Fact review runtime is not installed"
+                      {:component :xia/agent-runtime}))))
+
+(defn- fact-utility-review-state
+  []
+  (:fact-utility-review-state (current-runtime)))
 
 (defn reset-runtime!
   []
-  (reset! fact-utility-review-state {})
+  (reset! (fact-utility-review-state) {})
+  nil)
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
   nil)
 
 (defn- fact-utility-observations
@@ -36,7 +70,7 @@
 
 (defn- update-fact-utility-review-state!
   ([f]
-   (update-fact-utility-review-state! fact-utility-review-state compare-and-set! f))
+   (update-fact-utility-review-state! (fact-utility-review-state) compare-and-set! f))
   ([state-atom cas-fn f]
    (loop [attempt 1]
      (let [before @state-atom

@@ -47,7 +47,7 @@
 (def ^:private live-task-states
   #{:running :waiting_input :waiting_approval :paused :resumable})
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:wm-state-atom      (atom {})
    :runtime-state-atom (atom {:generation 0
@@ -1440,33 +1440,28 @@ Rules:
           (recur))))))
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (prepare-shutdown!)
-       (clear-wm!)))
-   (reset! installed-runtime-atom runtime)
-   (reset-runtime!)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (prepare-shutdown!)
+      (clear-wm!)))
+  (reset! installed-runtime-atom runtime)
+  (reset-runtime!)
+  runtime)
 
 (defn reset-runtime!
   []
-  (let [runtime (or (maybe-current-runtime)
-                    (let [runtime (make-runtime)]
-                      (reset! installed-runtime-atom runtime)
-                      runtime))]
-    (locking (runtime-lock)
-      (let [runtime-state-atom* (runtime-state-atom)]
-        (when-let [^java.util.concurrent.Future future (:reaper-future @runtime-state-atom*)]
-          (.cancel future true))
-        (let [generation (inc (long (:generation @runtime-state-atom*)))
-              future     (async/submit-background! "wm-reaper"
-                                                   #(run-reaper-loop! runtime-state-atom*
-                                                                      generation))]
-          (reset! (wm-state-atom) {})
-          (reset! runtime-state-atom* {:generation generation
-                                       :reaper-future future})))))
+  (locking (runtime-lock)
+    (let [runtime-state-atom* (runtime-state-atom)]
+      (when-let [^java.util.concurrent.Future future (:reaper-future @runtime-state-atom*)]
+        (.cancel future true))
+      (let [generation (inc (long (:generation @runtime-state-atom*)))
+            future     (async/submit-background! "wm-reaper"
+                                                 #(run-reaper-loop! runtime-state-atom*
+                                                                    generation))]
+        (reset! (wm-state-atom) {})
+        (reset! runtime-state-atom* {:generation generation
+                                     :reaper-future future}))))
   nil)
 
 (defn prepare-shutdown!

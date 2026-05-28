@@ -41,7 +41,7 @@
    :driver-resource-fs nil
    :driver-resource-fs-owned? false})
 
-(defn- make-runtime
+(defn make-runtime
   []
   {:runtime-atom (atom (empty-runtime-state))
    :runtime-lock (Object.)
@@ -53,24 +53,23 @@
   []
   @installed-runtime-atom)
 
-(defn- ensure-runtime-installed!
+(defn- current-runtime
   []
   (or (maybe-current-runtime)
-      (let [runtime (make-runtime)]
-        (reset! installed-runtime-atom runtime)
-        runtime)))
+      (throw (ex-info "Playwright runtime is not installed"
+                      {:component :xia/browser-runtime}))))
 
 (defn- runtime-atom
   []
-  (:runtime-atom (ensure-runtime-installed!)))
+  (:runtime-atom (current-runtime)))
 
 (defn- runtime-lock
   []
-  (:runtime-lock (ensure-runtime-installed!)))
+  (:runtime-lock (current-runtime)))
 
 (defn- ^ConcurrentHashMap sessions-map
   []
-  (:sessions (ensure-runtime-installed!)))
+  (:sessions (current-runtime)))
 
 (defn- session-count
   ^long []
@@ -102,7 +101,7 @@
 
 (defn- session-snapshot-locks
   []
-  (:session-snapshot-locks (ensure-runtime-installed!)))
+  (:session-snapshot-locks (current-runtime)))
 
 (defn- now-ms
   ^long []
@@ -1375,14 +1374,12 @@
   (->PlaywrightBackend ops))
 
 (defn install-runtime!
-  ([] (or (maybe-current-runtime)
-          (install-runtime! (make-runtime))))
-  ([runtime]
-   (when-let [current (maybe-current-runtime)]
-     (when-not (identical? current runtime)
-       (clear-runtime!)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []

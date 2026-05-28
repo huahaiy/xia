@@ -293,8 +293,6 @@
 
 (defn register-command-shutdown-handler!
   [handler]
-  (when-not (maybe-current-runtime)
-    (install-runtime!))
   (reset! (command-shutdown-handler-atom) handler)
   nil)
 
@@ -1050,13 +1048,12 @@
         (log/info "Server stopped")))))
 
 (defn install-runtime!
-  ([] (install-runtime! (make-runtime)))
-  ([runtime]
-   (when-let [current @installed-runtime-atom]
-     (when-not (identical? current runtime)
-       (clear-runtime! current)))
-   (reset! installed-runtime-atom runtime)
-   runtime))
+  [runtime]
+  (when-let [current @installed-runtime-atom]
+    (when-not (identical? current runtime)
+      (clear-runtime! current)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   ([]

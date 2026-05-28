@@ -56,15 +56,52 @@
     :label "Fact Utility"
     :description "Post-response rating of which retrieved facts were useful."
     :async? true}])
-(defonce ^:private workload-counters (atom {}))
-(defonce ^:private provider-health (atom {}))
-(defonce ^ConcurrentHashMap ^:private provider-rate-limits (ConcurrentHashMap.))
-(defonce ^AtomicLong ^:private provider-rate-limit-cleanup (AtomicLong. 0))
-(defonce ^:private async-log-state
-  (atom {:accepting? true
-         :tasks #{}}))
-(defonce ^:private async-log-lock
-  (Object.))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:workload-counters (atom {})
+   :provider-health (atom {})
+   :provider-rate-limits (ConcurrentHashMap.)
+   :provider-rate-limit-cleanup (AtomicLong. 0)
+   :async-log-state (atom {:accepting? true
+                           :tasks #{}})
+   :async-log-lock (Object.)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "LLM runtime is not installed"
+                      {:component :xia/llm-runtime}))))
+
+(defn- workload-counters
+  []
+  (:workload-counters (current-runtime)))
+
+(defn- provider-health
+  []
+  (:provider-health (current-runtime)))
+
+(defn- ^ConcurrentHashMap provider-rate-limits
+  []
+  (:provider-rate-limits (current-runtime)))
+
+(defn- ^AtomicLong provider-rate-limit-cleanup
+  []
+  (:provider-rate-limit-cleanup (current-runtime)))
+
+(defn- async-log-state
+  []
+  (:async-log-state (current-runtime)))
+
+(defn- async-log-lock
+  []
+  (:async-log-lock (current-runtime)))
 (def ^:private loopback-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
 (def ^:private rate-limit-window-ms 60000)
 (def ^:private anthropic-api-version "2023-06-01")
@@ -83,46 +120,56 @@
 
 (defn- reset-runtime-state!
   []
-  (reset! workload-counters {})
-  (reset! provider-health {})
-  (.clear provider-rate-limits)
-  (.set provider-rate-limit-cleanup 0))
+  (reset! (workload-counters) {})
+  (reset! (provider-health) {})
+  (.clear (provider-rate-limits))
+  (.set (provider-rate-limit-cleanup) 0))
 
 (defn reset-runtime!
   "Reset in-memory LLM runtime state for a fresh runtime."
   []
-  (llm-routing/prepare-shutdown! async-log-lock async-log-state)
-  (llm-routing/await-background-tasks! async-log-lock async-log-state)
+  (llm-routing/prepare-shutdown! (async-log-lock) (async-log-state))
+  (llm-routing/await-background-tasks! (async-log-lock) (async-log-state))
   (reset-runtime-state!)
-  (llm-routing/reset-runtime! async-log-lock async-log-state))
+  (llm-routing/reset-runtime! (async-log-lock) (async-log-state)))
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   "Fully clear in-memory LLM runtime state."
   []
-  (reset-runtime!)
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
   nil)
 
 (defn prepare-shutdown!
   "Stop accepting new async LLM log writes and return the pending count."
   []
-  (llm-routing/prepare-shutdown! async-log-lock async-log-state))
+  (llm-routing/prepare-shutdown! (async-log-lock) (async-log-state)))
 
 (defn await-background-tasks!
   "Block until tracked async LLM log writes finish."
   []
-  (llm-routing/await-background-tasks! async-log-lock async-log-state))
+  (llm-routing/await-background-tasks! (async-log-lock) (async-log-state)))
 
 (defn runtime-activity
   "Return coarse LLM runtime activity for control-plane inspection."
   []
-  (locking async-log-lock
-    {:accepting? (boolean (:accepting? @async-log-state))
-     :pending-log-write-count (count (:tasks @async-log-state))}))
+  (locking (async-log-lock)
+    {:accepting? (boolean (:accepting? @(async-log-state)))
+     :pending-log-write-count (count (:tasks @(async-log-state)))}))
 
 (defn- submit-log-write!
   [log-entry]
-  (llm-routing/submit-log-write! {:async-log-lock async-log-lock
-                                  :async-log-state async-log-state
+  (llm-routing/submit-log-write! {:async-log-lock (async-log-lock)
+                                  :async-log-state (async-log-state)
                                   :submit-background! async/submit-background!
                                   :log-llm-call! db/log-llm-call!}
                                  log-entry))
@@ -183,19 +230,19 @@
 (defn provider-health-summary
   "Return the current in-memory health status for a provider."
   [provider-id]
-  (llm-routing/provider-health-summary {:provider-health provider-health
+  (llm-routing/provider-health-summary {:provider-health (provider-health)
                                         :get-default-provider db/get-default-provider
                                         :now-ms now-ms}
                                        provider-id))
 
 (defn- record-provider-success!
   [provider-id]
-  (llm-routing/record-provider-success! provider-health now-ms provider-id))
+  (llm-routing/record-provider-success! (provider-health) now-ms provider-id))
 
 (defn- record-provider-failure!
   [provider-id error-message & {:keys [cooldown-ms]}]
   (llm-routing/record-provider-failure!
-   {:provider-health provider-health
+   {:provider-health (provider-health)
     :now-ms now-ms
     :base-cooldown-ms provider-health-base-cooldown-ms
     :max-cooldown-ms provider-health-max-cooldown-ms}
@@ -243,7 +290,7 @@
                                   :get-provider db/get-provider
                                   :get-default-provider db/get-default-provider
                                   :list-providers db/list-providers
-                                  :workload-counters workload-counters
+                                  :workload-counters (workload-counters)
                                   :provider-health-summary-fn provider-health-summary}
                                  {:provider-id provider-id
                                   :workload workload}))
@@ -262,7 +309,7 @@
      :get-provider db/get-provider
      :get-default-provider db/get-default-provider
      :list-providers db/list-providers
-     :workload-counters workload-counters
+     :workload-counters (workload-counters)
      :provider-health-summary-fn provider-health-summary}
     {:provider-id provider-id
      :workload workload})))
@@ -1082,11 +1129,12 @@
   [provider-id provider workload]
   (let [limit (effective-rate-limit-per-minute provider)
         now   (long (now-ms))
-        _     (rate-limit/maybe-prune-states! provider-rate-limits
-                                              provider-rate-limit-cleanup
+        provider-rate-limits* (provider-rate-limits)
+        _     (rate-limit/maybe-prune-states! provider-rate-limits*
+                                              (provider-rate-limit-cleanup)
                                               now
                                               rate-limit-window-ms)
-        state (.computeIfAbsent provider-rate-limits provider-id
+        state (.computeIfAbsent provider-rate-limits* provider-id
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
     (rate-limit/consume-slot!

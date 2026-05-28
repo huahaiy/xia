@@ -26,7 +26,27 @@
 ;; Tool registry (runtime — compiled handlers)
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private registry (atom {}))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:registry (atom {})
+   :permission-runtime (permission/make-runtime)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Tool runtime is not installed"
+                      {:component :xia/tool-runtime}))))
+
+(defn- registry
+  []
+  (:registry (current-runtime)))
 
 (def ^:private bundled-tool-resources
   ["tools/web-search.edn"
@@ -261,13 +281,30 @@
 (defn registered-tools
   "Return all currently loaded tool handlers."
   []
-  @registry)
+  @(registry))
 
 (defn reset-runtime!
   "Clear runtime-only tool state so a fresh load can rebuild handlers."
   []
-  (reset! registry {})
+  (reset! (registry) {})
   (permission/reset-runtime!))
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (permission/install-runtime! (:permission-runtime runtime))
+  (reset! installed-runtime-atom runtime)
+  runtime)
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil)
+    (permission/clear-runtime!))
+  nil)
 
 (defn clear-session-approvals!
   "Clear cached approval decisions for a session."
@@ -293,7 +330,7 @@
   [tool-id]
   (if-let [tool (db/get-tool tool-id)]
     (let [handler (compile-handler (:tool/handler tool))]
-      (swap! registry assoc tool-id
+      (swap! (registry) assoc tool-id
              {:tool    tool
               :handler handler})
       (log/info "Loaded tool:" (name tool-id))
@@ -392,7 +429,7 @@
   "True when a tool is safe to execute in parallel with other independent
    tool calls in the same model round."
   [tool-id]
-  (when-let [{:keys [tool]} (get @registry tool-id)]
+  (when-let [{:keys [tool]} (get @(registry) tool-id)]
     (let [{:keys [policy]} (permission/tool-approval-policy tool)]
       (and (= :auto policy)
            (= :parallel-safe (execution-mode tool))))))
@@ -400,7 +437,7 @@
 (defn restart-risk-policy
   "Return the restart-risk policy decision for a loaded tool."
   [tool-id]
-  (if-let [{:keys [tool]} (get @registry tool-id)]
+  (if-let [{:keys [tool]} (get @(registry) tool-id)]
     (permission/tool-restart-risk-policy tool)
     {:decision-type :tool-restart-risk-policy
      :tool-id tool-id
@@ -442,7 +479,7 @@
                              (installed-tool-install-map tool)
                              desired)
                        (db/install-tool! desired)
-                       (when (contains? @registry id)
+                       (when (contains? @(registry) id)
                          (load-tool! id)))
                      count*)
                    (do
@@ -495,7 +532,7 @@
              (str/lower-case (or (:tool/name tool)
                                  (some-> (:tool/id tool) name)
                                  "")))]
-     (let [visible-tools (->> @registry
+     (let [visible-tools (->> @(registry)
                               vals
                               (filter :handler)
                               (map :tool)
@@ -547,7 +584,7 @@
   ([tool-id arguments]
    (execute-tool tool-id arguments {}))
   ([tool-id arguments context]
-   (if-let [{:keys [tool handler]} (get @registry tool-id)]
+   (if-let [{:keys [tool handler]} (get @(registry) tool-id)]
      (if (fn? handler)
         (try
           (let [tool-name       (or (:tool/name tool) (name tool-id))

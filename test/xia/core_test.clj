@@ -39,23 +39,24 @@
   (xia.channel.messaging/clear-runtime!)
   (xia.channel.http/clear-runtime!)
   (xia.db/clear-runtime!)
-  (instance-supervisor/reset-runtime!)
-  (tool/reset-runtime!)
-  (checkpoint/reset-runtime!)
-  (hippo/reset-runtime!)
+  (instance-supervisor/clear-runtime!)
+  (tool/clear-runtime!)
+  (checkpoint/clear-runtime!)
+  (hippo/clear-runtime!)
   (llm/clear-runtime!)
-  (local-ocr/reset-runtime!)
+  (local-ocr/clear-runtime!)
   (scheduler/clear-runtime!)
   (playwright/clear-runtime!)
   (oauth/clear-runtime!)
   (retrieval-state/clear-runtime!)
   (runtime-state/clear-runtime!)
-  (sci-env/reset-runtime!)
-  (service/reset-runtime!)
-  (web/reset-runtime!)
+  (sci-env/clear-runtime!)
+  (service/clear-runtime!)
+  (web/clear-runtime!)
   (xia.channel.http/clear-command-shutdown-handler!)
   (runtime-overlay/clear!)
-  (runtime-state/install-runtime!)
+  (xia.db/install-runtime! (xia.db/make-runtime))
+  (runtime-state/install-runtime! (runtime-state/make-runtime))
   (runtime-state/mark-stopped!))
 
 (use-fixtures :each
@@ -177,13 +178,11 @@
                      #'xia.setup/needs-setup? (constantly false)
                      #'xia.setup/run-setup! (fn [] (swap! calls conj :setup/run))
                      #'xia.identity/init-identity! (fn [] (swap! calls conj :identity/init))
-                     #'xia.sci-env/reset-runtime! (fn [] (swap! calls conj :sci/reset))
                      #'xia.instance-supervisor/configure! (fn [opts]
                                                             (swap! calls conj [:instance-supervisor/configure
                                                                                (:enabled? opts)
                                                                                (:command opts)]))
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
-                     #'xia.tool/reset-runtime! (fn [] (swap! calls conj :tool/reset))
                      #'xia.tool/load-all-tools! (fn [] (swap! calls conj :tool/load))
                      #'xia.tool/registered-tools (fn [] [:tool-a :tool-b])
                      #'xia.skill/all-enabled-skills (fn [] [:skill-a])
@@ -206,8 +205,6 @@
             [:db/connect "/tmp/xia-dev-repl" true]
             [:instance-supervisor/configure true nil]
             :identity/init
-            :sci/reset
-            :tool/reset
             :tool/load
             :scheduler/start
             [:http/start "0.0.0.0" 4011 {:web-dev? true}]]
@@ -233,7 +230,6 @@
                                                                                (:enabled? opts)
                                                                                (:command opts)]))
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
-                     #'xia.tool/reset-runtime! (fn [] nil)
                      #'xia.tool/load-all-tools! (fn [] nil)
                      #'xia.tool/registered-tools (fn [] [])
                      #'xia.skill/all-enabled-skills (fn [] [])
@@ -257,7 +253,6 @@
                      #'xia.identity/init-identity! (fn [] nil)
                      #'xia.instance-supervisor/configure! (fn [_] nil)
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
-                     #'xia.tool/reset-runtime! (fn [] nil)
                      #'xia.tool/load-all-tools! (fn [] nil)
                      #'xia.tool/registered-tools (fn [] [])
                      #'xia.skill/all-enabled-skills (fn [] [])
@@ -289,7 +284,6 @@
                      #'xia.identity/init-identity! (fn [] nil)
                      #'xia.instance-supervisor/configure! (fn [_] nil)
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
-                     #'xia.tool/reset-runtime! (fn [] nil)
                      #'xia.tool/load-all-tools! (fn [] nil)
                      #'xia.tool/registered-tools (fn [] [])
                      #'xia.skill/all-enabled-skills (fn [] [])
@@ -315,7 +309,6 @@
                      #'xia.identity/init-identity! (fn [] nil)
                      #'xia.instance-supervisor/configure! (fn [_] nil)
                      #'xia.tool/ensure-bundled-tools! (fn [] 0)
-                     #'xia.tool/reset-runtime! (fn [] nil)
                      #'xia.tool/load-all-tools! (fn [] nil)
                      #'xia.tool/registered-tools (fn [] [])
                      #'xia.skill/all-enabled-skills (fn [] [])

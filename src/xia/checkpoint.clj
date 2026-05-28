@@ -23,11 +23,37 @@
 (def ^:private checkpoint-ready-name "checkpoint.ready")
 (def ^:private included-support-file-names #{"master.salt"})
 (def ^:private excluded-support-file-names #{"master.key" "master.passphrase"})
-(defonce ^:private checkpoint-state
-  (atom {:accepting? true
-         :tasks {}
-         :statuses {}}))
-(defonce ^:private checkpoint-lock (Object.))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn- checkpoint-state-template
+  []
+  {:accepting? true
+   :tasks {}
+   :statuses {}})
+
+(defn make-runtime
+  []
+  {:checkpoint-state-atom (atom (checkpoint-state-template))
+   :checkpoint-lock (Object.)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Checkpoint runtime is not installed"
+                      {:component :xia/checkpoint-runtime}))))
+
+(defn- checkpoint-state-atom
+  []
+  (:checkpoint-state-atom (current-runtime)))
+
+(defn- checkpoint-lock
+  []
+  (:checkpoint-lock (current-runtime)))
 
 (defn- absolute-path
   [path]
@@ -159,31 +185,44 @@
 
 (defn- update-checkpoint-status!
   [checkpoint-id f]
-  (locking checkpoint-lock
-    (when-let [status (get-in @checkpoint-state [:statuses checkpoint-id])]
+  (locking (checkpoint-lock)
+    (when-let [status (get-in @(checkpoint-state-atom) [:statuses checkpoint-id])]
       (let [next-status (f status)]
-        (swap! checkpoint-state assoc-in [:statuses checkpoint-id] next-status)
+        (swap! (checkpoint-state-atom) assoc-in [:statuses checkpoint-id] next-status)
         next-status))))
 
 (defn reset-runtime!
   []
-  (locking checkpoint-lock
-    (reset! checkpoint-state {:accepting? true
-                              :tasks {}
-                              :statuses {}})))
+  (locking (checkpoint-lock)
+    (reset! (checkpoint-state-atom) (checkpoint-state-template))))
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn prepare-shutdown!
   []
-  (locking checkpoint-lock
+  (locking (checkpoint-lock)
     (let [{:keys [tasks]}
-          (swap! checkpoint-state assoc :accepting? false)]
+          (swap! (checkpoint-state-atom) assoc :accepting? false)]
       (count tasks))))
 
 (defn await-background-tasks!
   []
   (loop []
-    (when-let [task (locking checkpoint-lock
-                      (first (vals (:tasks @checkpoint-state))))]
+    (when-let [task (locking (checkpoint-lock)
+                      (first (vals (:tasks @(checkpoint-state-atom)))))]
       (try
         @task
         (catch Exception _
@@ -192,8 +231,8 @@
 
 (defn checkpoint-status
   [checkpoint-id]
-  (locking checkpoint-lock
-    (get-in @checkpoint-state [:statuses checkpoint-id])))
+  (locking (checkpoint-lock)
+    (get-in @(checkpoint-state-atom) [:statuses checkpoint-id])))
 
 (defn create-online-checkpoint!
   "Create a restore-safe staged checkpoint from the live DB while Xia remains online.
@@ -257,18 +296,18 @@
                                                      :checkpoint-id checkpoint_id
                                                      :created-at created-at
                                                      :db-snapshot @(db/conn)))]
-      (locking checkpoint-lock
-        (swap! checkpoint-state assoc-in [:statuses checkpoint_id] manifest))
+      (locking (checkpoint-lock)
+        (swap! (checkpoint-state-atom) assoc-in [:statuses checkpoint_id] manifest))
       manifest)
     (catch Throwable t
       (let [failed (checkpoint-failure request t)]
-        (locking checkpoint-lock
-          (swap! checkpoint-state assoc-in [:statuses checkpoint_id] failed))
+        (locking (checkpoint-lock)
+          (swap! (checkpoint-state-atom) assoc-in [:statuses checkpoint_id] failed))
         (log/error t "Managed checkpoint creation failed" {:checkpoint-id checkpoint_id})
         failed))
     (finally
-      (locking checkpoint-lock
-        (swap! checkpoint-state update :tasks dissoc checkpoint_id)))))
+      (locking (checkpoint-lock)
+        (swap! (checkpoint-state-atom) update :tasks dissoc checkpoint_id)))))
 
 (defn submit-online-checkpoint!
   ([] (submit-online-checkpoint! nil))
@@ -285,22 +324,22 @@
                                                 :created-at created-at
                                                 :source-db-path source-db-path*
                                                 :staging-root staging-root*})]
-       (locking checkpoint-lock
-         (when-not (:accepting? @checkpoint-state)
+       (locking (checkpoint-lock)
+         (when-not (:accepting? @(checkpoint-state-atom))
            (throw (ex-info "Checkpoint creation is shutting down."
                            {:status 503
                             :error "checkpoint creation is shutting down"})))
-         (swap! checkpoint-state assoc-in [:statuses checkpoint-id] request))
+         (swap! (checkpoint-state-atom) assoc-in [:statuses checkpoint-id] request))
        (if-let [task (async/submit-background!
                        (str "managed checkpoint " checkpoint-id)
                        #(run-checkpoint-task! request created-at {:staging-root staging-root*}))]
          (do
-           (locking checkpoint-lock
-             (swap! checkpoint-state assoc-in [:tasks checkpoint-id] task))
+           (locking (checkpoint-lock)
+             (swap! (checkpoint-state-atom) assoc-in [:tasks checkpoint-id] task))
            request)
          (do
-           (locking checkpoint-lock
-             (swap! checkpoint-state update :statuses dissoc checkpoint-id))
+           (locking (checkpoint-lock)
+             (swap! (checkpoint-state-atom) update :statuses dissoc checkpoint-id))
            (throw (ex-info "Checkpoint queue is unavailable."
                            {:status 503
                             :error "checkpoint queue is unavailable"}))))))))

@@ -171,19 +171,54 @@
 ;; Rate limiting
 ;; ---------------------------------------------------------------------------
 
-(defonce ^ConcurrentHashMap ^:private service-rate-limits (ConcurrentHashMap.))
-(defonce ^AtomicLong ^:private service-rate-limit-cleanup (AtomicLong. 0))
+(defonce ^:private installed-runtime-atom (atom nil))
+(declare clear-runtime!)
+
+(defn make-runtime
+  []
+  {:service-rate-limits (ConcurrentHashMap.)
+   :service-rate-limit-cleanup (AtomicLong. 0)})
+
+(defn- maybe-current-runtime
+  []
+  @installed-runtime-atom)
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Service runtime is not installed"
+                      {:component :xia/service-runtime}))))
+
+(defn- ^ConcurrentHashMap service-rate-limits
+  []
+  (:service-rate-limits (current-runtime)))
+
+(defn- ^AtomicLong service-rate-limit-cleanup
+  []
+  (:service-rate-limit-cleanup (current-runtime)))
+
 (def ^:private rate-limit-window-ms 60000)
 
 (defn reset-runtime!
   []
-  (.clear service-rate-limits)
-  (.set service-rate-limit-cleanup 0)
+  (.clear (service-rate-limits))
+  (.set (service-rate-limit-cleanup) 0)
   nil)
+
+(defn install-runtime!
+  [runtime]
+  (when-let [current (maybe-current-runtime)]
+    (when-not (identical? current runtime)
+      (clear-runtime!)))
+  (reset! installed-runtime-atom runtime)
+  runtime)
 
 (defn clear-runtime!
   []
-  (reset-runtime!))
+  (when (maybe-current-runtime)
+    (reset-runtime!)
+    (reset! installed-runtime-atom nil))
+  nil)
 
 (defn- normalize-base-url
   [base-url]
@@ -216,11 +251,11 @@
   [service-id service]
   (let [limit (effective-rate-limit-per-minute service)
         now   (current-time-ms)
-        _     (rate-limit/maybe-prune-states! service-rate-limits
-                                              service-rate-limit-cleanup
+        _     (rate-limit/maybe-prune-states! (service-rate-limits)
+                                              (service-rate-limit-cleanup)
                                               now
                                               rate-limit-window-ms)
-        state (.computeIfAbsent service-rate-limits service-id
+        state (.computeIfAbsent (service-rate-limits) service-id
                 (reify java.util.function.Function
                   (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
     (rate-limit/consume-slot!
