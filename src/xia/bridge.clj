@@ -4,7 +4,8 @@
   Channels should enter the autonomous runtime through this namespace so terminal,
   HTTP/WebSocket, command, IDE, and messaging integrations share one shape for
   message dispatch, interaction replies, controls, and runtime adapter wiring."
-  (:require [xia.agent :as agent]
+  (:require [taoensso.timbre :as log]
+            [xia.agent :as agent]
             [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
             [xia.autonomous :as autonomous]
@@ -13,7 +14,10 @@
             [xia.prompt :as prompt]
             [xia.session-lifecycle :as session-life]
             [xia.task-inspection :as task-inspection]
-            [xia.working-memory :as wm]))
+            [xia.working-memory :as wm])
+  (:import [java.util Date]))
+
+(def ^:private max-live-task-runtime-events 200)
 
 (defn register-channel-adapter!
   "Register the interaction adapter for a user-facing channel.
@@ -77,6 +81,91 @@
     (doseq [{:keys [id]} sessions]
       (finalize! id reason))
     (count sessions)))
+
+(defn runtime-event-store
+  "Create a bridge runtime-event store over caller-owned atoms."
+  [events-atom subscribers-atom]
+  {:events-atom events-atom
+   :subscribers-atom subscribers-atom})
+
+(defn append-task-runtime-event!
+  "Append a task runtime event to a bounded per-task live event buffer."
+  [store event]
+  (when-let [task-id (some-> (:task-id event) str)]
+    (let [received-at (Date.)]
+      (-> (swap! (:events-atom store)
+                 (fn [state]
+                   (let [{:keys [next-index events]} (get state task-id)
+                         next-index* (inc (long (or next-index 0)))
+                         event* (assoc event
+                                       :stream-index next-index*
+                                       :received-at received-at)
+                         events* (conj (vec (or events [])) event*)
+                         trimmed (if (> (count events*) max-live-task-runtime-events)
+                                   (subvec events* (- (count events*) max-live-task-runtime-events))
+                                   events*)]
+                     (assoc state task-id {:next-index next-index*
+                                           :events trimmed}))))
+          (get task-id)
+          :events
+          last))))
+
+(defn task-runtime-events-after
+  "Return buffered task runtime events after `stream-index`."
+  [store task-id stream-index]
+  (let [{:keys [next-index events]} (get @(:events-atom store) (str task-id))
+        after (long (or stream-index 0))]
+    {:next-index (long (or next-index 0))
+     :events (->> (or events [])
+                  (filter #(> (long (or (:stream-index %) 0)) after))
+                  vec)}))
+
+(defn latest-task-runtime-status-event
+  "Return the latest buffered `:task.status` runtime event for a task."
+  [store task-id]
+  (some->> (get @(:events-atom store) (str task-id))
+           :events
+           reverse
+           (some #(when (= :task.status (:type %)) %))))
+
+(defn register-task-runtime-event-subscriber!
+  [store task-id subscriber-id callback]
+  (when (and task-id subscriber-id callback)
+    (swap! (:subscribers-atom store)
+           update
+           (str task-id)
+           (fnil assoc {})
+           subscriber-id
+           callback)))
+
+(defn unregister-task-runtime-event-subscriber!
+  [store task-id subscriber-id]
+  (when (and task-id subscriber-id)
+    (swap! (:subscribers-atom store)
+           (fn [state]
+             (let [task-key (str task-id)
+                   subscribers (dissoc (get state task-key {}) subscriber-id)]
+               (if (seq subscribers)
+                 (assoc state task-key subscribers)
+                 (dissoc state task-key)))))))
+
+(defn notify-task-runtime-event-subscribers!
+  [store event]
+  (when-let [task-id (some-> (:task-id event) str)]
+    (doseq [[subscriber-id callback] (get @(:subscribers-atom store) task-id)]
+      (try
+        (callback event)
+        (catch Exception e
+          (log/warn e "Failed to deliver runtime event to task stream subscriber"
+                    "task" task-id
+                    "subscriber" subscriber-id)
+          (unregister-task-runtime-event-subscriber! store task-id subscriber-id))))))
+
+(defn handle-task-runtime-event!
+  [store event]
+  (when-let [event* (append-task-runtime-event! store event)]
+    (notify-task-runtime-event-subscribers! store event*)
+    event*))
 
 (defn send-message!
   "Run one user message through Xia for an existing session.

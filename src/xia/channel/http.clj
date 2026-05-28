@@ -440,8 +440,9 @@
 (defn- status-handler-deps
   []
   {:session-statuses-atom (session-statuses-atom)
-   :task-runtime-events-atom (task-runtime-events-atom)
-   :task-runtime-stream-subscribers-atom (task-runtime-stream-subscribers-atom)})
+   :runtime-event-store (bridge/runtime-event-store
+                         (task-runtime-events-atom)
+                         (task-runtime-stream-subscribers-atom))})
 
 (defn- clear-session-status!
   [session-id]
@@ -461,6 +462,14 @@
    (status-handler-deps)
    task-id
    subscriber-id))
+
+(defn- task-runtime-events-after
+  [task-id stream-index]
+  (http-status/task-runtime-events-after (status-handler-deps) task-id stream-index))
+
+(defn- latest-task-status-event
+  [task-id]
+  (http-status/latest-task-status-event (status-handler-deps) task-id))
 
 (defn- http-status-handler
   [status]
@@ -523,6 +532,7 @@
    :finalize-rest-session!       finalize-rest-session!
    :instant->str                 instant->str
    :json-response                json-response
+   :latest-task-status-event     latest-task-status-event
    :maybe-resume-http-session!   maybe-resume-http-session!
    :parse-keyword-id             parse-keyword-id
    :parse-query-string           parse-query-string
@@ -534,7 +544,7 @@
    :session-active?              session-active?
    :session-busy?                session-busy?
    :session-statuses-atom        (session-statuses-atom)
-   :task-runtime-events-atom     (task-runtime-events-atom)
+   :task-runtime-events-after    task-runtime-events-after
    :throwable-message            throwable-message
    :touch-rest-session!          touch-rest-session!
    :truncate-text                truncate-text

@@ -108,10 +108,6 @@
   [deps]
   (:session-statuses-atom deps))
 
-(defn- task-runtime-events-atom
-  [deps]
-  (:task-runtime-events-atom deps))
-
 (defn- live-task?
   [task]
   (contains? #{:running :waiting_input :waiting_approval} (:state task)))
@@ -163,10 +159,7 @@
 
 (defn- latest-task-status-event
   [deps task-id]
-  (some->> (get @(task-runtime-events-atom deps) (str task-id))
-           :events
-           reverse
-           (some #(when (= :task.status (:type %)) %))))
+  ((:latest-task-status-event deps) task-id))
 
 (defn- event-status->runtime-status
   [event]
@@ -1317,12 +1310,8 @@
           after  (or (some-> (get params "after") parse-long) 0)]
       (if-not task
         (json-response* deps 404 {:error "task not found"})
-        (let [{:keys [next-index events]} (get @(task-runtime-events-atom deps)
-                                               (str uuid))
-              events* (->> (or events [])
-                           (filter #(> (long (or (:stream-index %) 0))
-                                       (long after)))
-                           (mapv #(task-event->body deps %)))]
+        (let [{:keys [next-index events]} ((:task-runtime-events-after deps) uuid after)
+              events* (mapv #(task-event->body deps %) events)]
           (json-response* deps 200
                           {:task_id (str uuid)
                            :after after
@@ -1333,13 +1322,7 @@
 
 (defn- task-live-events-after
   [deps task-id after]
-  (let [{:keys [next-index events]} (get @(task-runtime-events-atom deps)
-                                         (str task-id))]
-    {:next-index (long (or next-index 0))
-     :events (->> (or events [])
-                  (filter #(> (long (or (:stream-index %) 0))
-                              (long after)))
-                  vec)}))
+  ((:task-runtime-events-after deps) task-id after))
 
 (defn- task-event-stream-after
   [deps req]

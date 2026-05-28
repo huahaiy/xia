@@ -199,6 +199,40 @@
               [command-session-id :server-stop]]
              @finalized)))))
 
+(deftest bridge-records-and-streams-task-runtime-events
+  (let [events-atom (atom {})
+        subscribers-atom (atom {})
+        store (bridge/runtime-event-store events-atom subscribers-atom)
+        task-id (random-uuid)
+        delivered (atom [])]
+    (bridge/register-task-runtime-event-subscriber!
+     store
+     task-id
+     "subscriber-1"
+     #(swap! delivered conj %))
+    (is (nil? (bridge/handle-task-runtime-event!
+               store
+               {:type :task.status
+                :summary "missing task"})))
+    (let [event (bridge/handle-task-runtime-event!
+                 store
+                 {:type :task.status
+                  :task-id task-id
+                  :summary "working"
+                  :data {:state :running}})]
+      (is (= 1 (:stream-index event)))
+      (is (some? (:received-at event)))
+      (is (= [event] @delivered))
+      (is (= event (bridge/latest-task-runtime-status-event store task-id)))
+      (is (= {:next-index 1
+              :events [event]}
+             (bridge/task-runtime-events-after store task-id 0)))
+      (is (= {:next-index 1
+              :events []}
+             (bridge/task-runtime-events-after store task-id 1))))
+    (bridge/unregister-task-runtime-event-subscriber! store task-id "subscriber-1")
+    (is (empty? @subscribers-atom))))
+
 (deftest bridge-reports-missing-task-for-non-interrupt-control
   (let [{:keys [session-id]} (bridge/create-session! :imessage)]
     (with-redefs [db/current-session-task (constantly nil)]
