@@ -9,7 +9,8 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http-client]
-            [xia.runtime-state :as runtime-state])
+            [xia.runtime-state :as runtime-state]
+            [xia.task-event :as task-event])
   (:import [java.nio.charset StandardCharsets]
            [java.util Date]
            [java.util.concurrent Executors ScheduledExecutorService TimeUnit]
@@ -764,19 +765,17 @@
                    :channel channel})))))
 
 (defn- messaging-runtime-event
-  [{:keys [session-id channel type data summary]}]
+  [{:keys [session-id channel] :as event}]
   (when (contains? #{:slack :telegram :imessage} channel)
-    (when (= :message.assistant type)
-      (let [text (or (nonblank-str (:text data))
-                     (nonblank-str summary))]
-        (when text
-          (try
-            (send-session-message! channel session-id text)
-            (catch Exception e
-              (log/warn e "Failed to deliver messaging runtime event"
-                        {:session-id session-id
-                         :channel channel
-                         :type type}))))))))
+    (when-let [text (some-> (task-event/assistant-message-text event)
+                            nonblank-str)]
+      (try
+        (send-session-message! channel session-id text)
+        (catch Exception e
+          (log/warn e "Failed to deliver messaging runtime event"
+                    {:session-id session-id
+                     :channel channel
+                     :type (:type event)}))))))
 
 (defn- handle-pending-interaction-reply!
   [session-id channel user-message]

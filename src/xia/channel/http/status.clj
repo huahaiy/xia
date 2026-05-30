@@ -1,6 +1,7 @@
 (ns xia.channel.http.status
   "HTTP session status and live task-runtime event state."
-  (:require [xia.bridge :as bridge])
+  (:require [xia.bridge :as bridge]
+            [xia.task-event :as task-event])
   (:import [java.util Date]))
 
 (defn- session-statuses-atom
@@ -39,16 +40,16 @@
   [deps task-id]
   (bridge/latest-task-runtime-status-event (runtime-event-store deps) task-id))
 
-(defn- terminal-status-state?
-  [state]
-  (contains? #{:completed :done :error :cancelled} state))
-
 (defn status-handler
-  [deps {:keys [session-id state] :as status}]
+  [deps {:keys [session-id] :as status}]
   (when-let [sid (some-> session-id str)]
-    (if (terminal-status-state? state)
+    (if (task-event/terminal-status? status)
       (clear-session-status! deps sid)
-      (swap! (session-statuses-atom deps) assoc sid (assoc status :updated-at (Date.))))))
+      (swap! (session-statuses-atom deps)
+             assoc
+             sid
+             (assoc (or (task-event/normalize-runtime-status status) status)
+                    :updated-at (Date.))))))
 
 (defn runtime-event-handler
   [deps event]

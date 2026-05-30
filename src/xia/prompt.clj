@@ -6,7 +6,8 @@
    Tool code calls (prompt! ...) or privileged tool execution calls
    (approve! ...) which delegates to the current channel handler."
   (:require [clojure.string :as str]
-            [xia.audit :as audit]))
+            [xia.audit :as audit]
+            [xia.task-event :as task-event]))
 
 ;; ---------------------------------------------------------------------------
 ;; Prompt callback registry
@@ -664,9 +665,10 @@
   "Report an execution status update for the current interaction context.
    Returns nil if no status handler is registered for the current channel."
   [status]
-  (invoke-runtime-hook! :task-runtime/on-status status)
-  (when-let [f (resolve-handler (status-handlers-atom))]
-    (f (merge {:channel (current-channel)} *interaction-context* status))))
+  (let [status* (or (task-event/normalize-runtime-status status) status)]
+    (invoke-runtime-hook! :task-runtime/on-status status*)
+    (when-let [f (resolve-handler (status-handlers-atom))]
+      (f (merge {:channel (current-channel)} *interaction-context* status*)))))
 
 (defn status-available?
   "True if a status handler is registered."
@@ -706,7 +708,8 @@
    Returns nil if no runtime event handler is registered for the current channel."
   [event]
   (when-let [f (resolve-handler (runtime-event-handlers-atom))]
-    (f (merge {:channel (current-channel)} *interaction-context* event))))
+    (f (task-event/runtime-event
+        (merge {:channel (current-channel)} *interaction-context* event)))))
 
 (defn runtime-event-available?
   "True if a runtime event handler is registered."

@@ -467,13 +467,14 @@
 (defn- set-task-runtime-status!
   [task-id status]
   (when task-id
-    (merge-task-meta! task-id
-                      (fn [meta]
-                        (assoc meta
-                               :runtime
-                               (clean-runtime-status
-                                (assoc status :updated-at (java.util.Date.))))))
-    (record-task-restart! task-id status)))
+    (let [status* (or (task-event/normalize-runtime-status status) status)]
+      (merge-task-meta! task-id
+                        (fn [meta]
+                          (assoc meta
+                                 :runtime
+                                 (clean-runtime-status
+                                  (assoc status* :updated-at (java.util.Date.))))))
+      (record-task-restart! task-id status*))))
 
 (defn save-task-checkpoint!
   [task-id checkpoint]

@@ -7,7 +7,8 @@
             [xia.db :as db]
             [xia.goal :as goal]
             [xia.runtime-state :as runtime-state]
-            [xia.schedule :as schedule]))
+            [xia.schedule :as schedule]
+            [xia.task-event :as task-event]))
 
 (def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
 
@@ -111,77 +112,13 @@
   [task]
   (contains? #{:running :waiting_input :waiting_approval} (:state task)))
 
-(def ^:private live-task-states
-  #{:running :waiting_input :waiting_approval})
-
-(def ^:private runtime-status-key-aliases
-  {:partial_content :partial-content
-   :tool_id :tool-id
-   :tool_name :tool-name
-   :max_iterations :max-iterations
-   :current_focus :current-focus
-   :progress_status :progress-status
-   :intent_focus :intent-focus
-   :intent_agenda_item :intent-agenda-item
-   :intent_plan_step :intent-plan-step
-   :intent_why :intent-why
-   :intent_tool_name :intent-tool-name
-   :intent_tool_args_summary :intent-tool-args-summary
-   :stack_depth :stack-depth
-   :tool_count :tool-count
-   :updated_at :updated-at})
-
-(defn- normalize-runtime-status-map
-  [status]
-  (reduce-kv (fn [m k v]
-               (assoc m (get runtime-status-key-aliases k k) v))
-             {}
-             status))
-
-(defn- runtime-status-value
-  [value]
-  (cond
-    (= value :done)
-    :completed
-
-    (and (string? value) (#{"running" "completed" "done" "error" "cancelled"} value))
-    (if (= "done" value)
-      :completed
-      (keyword value))
-
-    (and (string? value) (#{"understanding" "working-memory" "planning" "llm" "tool-plan"
-                            "tool" "approval" "finalizing" "observing" "updating"
-                            "restarting" "paused" "cancelled" "error"} value))
-    (keyword value)
-
-    :else value))
-
 (defn- latest-task-status-event
   [deps task-id]
   ((:latest-task-status-event deps) task-id))
 
-(defn- event-status->runtime-status
-  [event]
-  (let [data (some-> (:data event) normalize-runtime-status-map)]
-    (when (map? data)
-      (-> data
-          (update :state runtime-status-value)
-          (update :phase runtime-status-value)
-          (update :tool-id runtime-status-value)
-          (assoc :updated-at (or (:received-at event)
-                                 (:created-at event)))
-          (update :message #(or % (:summary event)))))))
-
 (defn- task-runtime-status
   [deps task]
-  (when (contains? live-task-states (:state task))
-    (or (some-> (latest-task-status-event deps (:id task))
-                event-status->runtime-status)
-        (some-> (get-in task [:meta :runtime])
-                normalize-runtime-status-map
-                (update :state runtime-status-value)
-                (update :phase runtime-status-value)
-                (update :tool-id runtime-status-value)))))
+  (task-event/task-runtime-status task (latest-task-status-event deps (:id task))))
 
 (defn- local-doc-ref->body
   [doc]
@@ -237,31 +174,8 @@
 
 (defn- status->body
   [deps status]
-  (when status
-    {:state      (some-> (:state status) name)
-     :phase      (some-> (:phase status) name)
-     :message    (:message status)
-     :error      (:error status)
-     :finalization_step (some-> (:finalization-step status) name)
-     :partial_content (:partial-content status)
-     :tool_id    (some-> (:tool-id status) name)
-     :tool_name  (:tool-name status)
-     :iteration  (:iteration status)
-     :max_iterations (:max-iterations status)
-     :current_focus (:current-focus status)
-     :progress_status (:progress-status status)
-     :intent_focus (:intent-focus status)
-     :intent_agenda_item (:intent-agenda-item status)
-     :intent_plan_step (:intent-plan-step status)
-     :intent_why (:intent-why status)
-     :intent_tool_name (:intent-tool-name status)
-     :intent_tool_args_summary (:intent-tool-args-summary status)
-     :stack_depth (:stack-depth status)
-     :agenda     (:agenda status)
-     :stack      (:stack status)
-     :round      (:round status)
-     :tool_count (:tool-count status)
-     :updated_at (instant->str* deps (:updated-at status))}))
+  (task-event/runtime-status->wire-body status
+                                        :instant->str #(instant->str* deps %)))
 
 (defn- history-run->body
   [deps run]
@@ -330,23 +244,8 @@
 
 (defn- task-event->body
   [deps event]
-  (cond-> {:id         (:id event)
-           :index      (:index event)
-           :type       (some-> (:type event) name)
-           :task_id    (some-> (:task-id event) str)
-           :created_at (instant->str* deps (:created-at event))}
-    (:stream-index event) (assoc :stream_index (:stream-index event))
-    (:received-at event) (assoc :received_at (instant->str* deps (:received-at event)))
-    (:turn-id event) (assoc :turn_id (str (:turn-id event)))
-    (:item-id event) (assoc :item_id (str (:item-id event)))
-    (:summary event) (assoc :summary (:summary event))
-    (:status event) (assoc :status (name (:status event)))
-    (:role event) (assoc :role (name (:role event)))
-    (:tool-id event) (assoc :tool_id (:tool-id event))
-    (:tool-call-id event) (assoc :tool_call_id (:tool-call-id event))
-    (:llm-call-id event) (assoc :llm_call_id (str (:llm-call-id event)))
-    (:message-id event) (assoc :message_id (str (:message-id event)))
-    (:data event) (assoc :data (:data event))))
+  (task-event/event->wire-body event
+                               :instant->str #(instant->str* deps %)))
 
 (defn- task-turn->body
   [deps turn items]

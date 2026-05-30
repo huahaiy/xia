@@ -136,24 +136,25 @@
 (defn append-task-runtime-event!
   "Append a task runtime event to a bounded per-task live event buffer."
   [store event]
-  (when-let [task-id (some-> (:task-id event) str)]
-    (let [received-at (Date.)]
-      (-> (swap! (:events-atom store)
-                 (fn [state]
-                   (let [{:keys [next-index events]} (get state task-id)
-                         next-index* (inc (long (or next-index 0)))
-                         event* (assoc event
-                                       :stream-index next-index*
-                                       :received-at received-at)
-                         events* (conj (vec (or events [])) event*)
-                         trimmed (if (> (count events*) max-live-task-runtime-events)
-                                   (subvec events* (- (count events*) max-live-task-runtime-events))
-                                   events*)]
-                     (assoc state task-id {:next-index next-index*
-                                           :events trimmed}))))
-          (get task-id)
-          :events
-          last))))
+  (when-let [event (task-event/runtime-event event)]
+    (when-let [task-id (some-> (:task-id event) str)]
+      (let [received-at (Date.)]
+        (-> (swap! (:events-atom store)
+                   (fn [state]
+                     (let [{:keys [next-index events]} (get state task-id)
+                           next-index* (inc (long (or next-index 0)))
+                           event* (assoc event
+                                         :stream-index next-index*
+                                         :received-at received-at)
+                           events* (conj (vec (or events [])) event*)
+                           trimmed (if (> (count events*) max-live-task-runtime-events)
+                                     (subvec events* (- (count events*) max-live-task-runtime-events))
+                                     events*)]
+                       (assoc state task-id {:next-index next-index*
+                                             :events trimmed}))))
+            (get task-id)
+            :events
+            last)))))
 
 (defn task-runtime-events-after
   "Return buffered task runtime events after `stream-index`."

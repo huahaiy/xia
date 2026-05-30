@@ -8,7 +8,8 @@
             [xia.tool :as tool]
             [xia.memory :as memory]
             [xia.identity :as identity]
-            [xia.context :as context]))
+            [xia.context :as context]
+            [xia.task-event :as task-event]))
 
 (defonce ^:private terminal-statuses (atom {}))
 
@@ -76,25 +77,15 @@
     (println)
     (flush)))
 
-(defn- runtime-event-keyword
-  [value]
-  (cond
-    (keyword? value) value
-    (string? value) (keyword value)
-    :else nil))
-
 (defn- terminal-runtime-event
-  [{:keys [type data summary]}]
-  (case type
-    :task.status
-    (terminal-status {:session-id (:session-id (bridge/interaction-context))
-                      :state (runtime-event-keyword (:state data))
-                      :phase (runtime-event-keyword (:phase data))
-                      :message (or (:message data) summary)
-                      :partial-content (:partial_content data)})
-    :message.assistant
-    (terminal-assistant-message {:text (or (:text data) summary)})
-    nil))
+  [event]
+  (or (some-> (task-event/terminal-status-projection
+               event
+               (:session-id (bridge/interaction-context)))
+              terminal-status)
+      (some-> (task-event/assistant-message-text event)
+              (hash-map :text)
+              terminal-assistant-message)))
 
 (defn start!
   "Start the terminal REPL loop."
