@@ -5,7 +5,7 @@
             [taoensso.timbre :as log]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
-            [xia.task-policy :as task-policy]))
+            [xia.policy :as task-policy]))
 
 (def ^:private loop-signature-stopwords
   #{"a" "an" "and" "are" "for" "from" "into" "its" "more" "now" "of" "on" "or"

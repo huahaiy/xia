@@ -4,7 +4,7 @@
             [clojure.string :as str]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import (com.fasterxml.jackson.core JsonFactory JsonToken)))
 
 (def ^:private default-control-field-chars 280)

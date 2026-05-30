@@ -7,7 +7,7 @@
             [xia.browser.backend :as backend]
             [xia.browser.query :as browser.query]
             [xia.config :as cfg]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.web :as web])
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]

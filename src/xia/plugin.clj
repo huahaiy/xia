@@ -8,7 +8,7 @@
             [taoensso.timbre :as log]
             [xia.audit :as audit]
             [xia.db :as db]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import [java.util Date]
            [java.util.concurrent.atomic AtomicLong]))
 

@@ -25,7 +25,7 @@
             [xia.prompt :as prompt]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 

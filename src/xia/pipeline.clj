@@ -5,7 +5,7 @@
             [clojure.tools.reader :as tr]
             [clojure.tools.reader.reader-types :as rt]
             [sci.core :as sci]
-            [xia.task-policy :as task-policy]))
+            [xia.policy :as task-policy]))
 
 (def ^:private reader-eof (Object.))
 

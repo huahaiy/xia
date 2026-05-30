@@ -3,7 +3,7 @@
   (:require [xia.autonomous :as autonomous]
             [xia.agent.task-runtime :as task-runtime]
             [xia.prompt :as prompt]
-            [xia.task-policy :as task-policy]))
+            [xia.policy :as task-policy]))
 
 (defn- current-time-ms
   []

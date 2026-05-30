@@ -4,7 +4,7 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.async :as async]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.prompt :as prompt]
             [xia.ssrf :as ssrf]
             [xia.tool :as tool]

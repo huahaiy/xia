@@ -6,7 +6,7 @@
             [xia.agent.task-runtime :as task-runtime]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.working-memory :as wm]))
 
 (defn- normalize-branch-task

@@ -1,6 +1,7 @@
 (ns xia.plugin-test
   (:require [clojure.test :refer :all]
             [xia.db :as db]
+            [xia.policy :as policy]
             [xia.plugin :as plugin]
             [xia.test-helpers :as th]
             [xia.tool :as tool]))
@@ -128,7 +129,7 @@
              :event :post-llm
              :handler "(fn [_] (while true nil))"}]})
   (plugin/enable-plugin! :looping-hook true)
-  (with-redefs [xia.task-policy/plugin-hook-timeout-ms (constantly 10)]
+  (with-redefs [policy/plugin-hook-timeout-ms (constantly 10)]
     (let [results (plugin/run-hooks! :post-llm {:session-id (db/create-session! :terminal)
                                                 :channel :terminal})]
       (is (= :error (:status (first results))))

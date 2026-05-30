@@ -1,7 +1,7 @@
 (ns xia.async
   "Shared bounded executors for internal Xia async work."
   (:require [taoensso.timbre :as log]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import [java.util.concurrent Callable ExecutorService LinkedBlockingQueue
             RejectedExecutionException RejectedExecutionHandler ThreadFactory
             ThreadPoolExecutor TimeUnit]))

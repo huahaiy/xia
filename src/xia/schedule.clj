@@ -17,7 +17,7 @@
             [xia.cron :as cron]
             [xia.db :as db]
             [xia.prompt :as prompt]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.working-memory :as wm]))
 
 ;; ---------------------------------------------------------------------------

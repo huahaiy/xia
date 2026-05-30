@@ -14,7 +14,7 @@
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
             [xia.rate-limit :as rate-limit]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.util :as util])
   (:import [java.net URI URLEncoder]
            [java.nio.charset StandardCharsets]

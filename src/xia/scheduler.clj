@@ -21,7 +21,7 @@
             [xia.runtime-state :as runtime-state]
             [xia.tool :as tool]
             [xia.schedule :as schedule]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import [java.util.concurrent ExecutorService Executors ScheduledExecutorService ThreadFactory TimeUnit RejectedExecutionException ThreadPoolExecutor]))
 
 ;; ---------------------------------------------------------------------------

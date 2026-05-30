@@ -12,7 +12,7 @@
             [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.tool :as tool]
             [xia.working-memory :as wm]))
 

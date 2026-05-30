@@ -33,7 +33,7 @@
             [xia.secret :as secret]
             [xia.service :as service]
             [xia.skill :as skill]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.web :as web]
             [xia.workspace :as workspace]
             [xia.working-memory :as wm])

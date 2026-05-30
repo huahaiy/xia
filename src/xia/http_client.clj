@@ -3,7 +3,7 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.ssrf :as ssrf]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import [java.io BufferedInputStream BufferedOutputStream BufferedReader ByteArrayOutputStream
             EOFException InputStream InputStreamReader]
            [java.net InetAddress InetSocketAddress Socket SocketTimeoutException URI URLEncoder]

@@ -8,7 +8,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.paths :as paths]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import [datalevin.dtlvnative DTLV DTLV$dtlv_llama_vision_generator]
            [java.io File InputStream]
            [java.net URI]

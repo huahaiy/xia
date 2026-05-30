@@ -8,7 +8,7 @@
             [xia.autonomous :as autonomous]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
-            [xia.task-policy :as task-policy]))
+            [xia.policy :as task-policy]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
 (declare clear-runtime!)

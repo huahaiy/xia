@@ -24,7 +24,7 @@
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
             [xia.rate-limit :as rate-limit]
-            [xia.task-policy :as task-policy])
+            [xia.policy :as task-policy])
   (:import [java.util Base64]
            [java.util.concurrent ConcurrentHashMap]
            [java.util.concurrent.atomic AtomicLong]))

@@ -9,7 +9,7 @@
             [xia.goal :as goal]
             [xia.limits :as limits]
             [xia.prompt :as prompt]
-            [xia.task-policy :as task-policy]
+            [xia.policy :as task-policy]
             [xia.working-memory :as wm])
   (:import [java.util Date]))
 
