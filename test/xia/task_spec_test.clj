@@ -1,9 +1,11 @@
 (ns xia.task-spec-test
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is use-fixtures]]
             [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.bridge :as bridge]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.task-spec :as task-spec]
             [xia.test-helpers :as th]))
@@ -58,7 +60,7 @@
                            :kind :value
                            :value 1}
                           {:id :judge
-                           :kind :llm
+                           :kind :external-judge
                            :prompt "Decide what to do"}
                           {:id :done
                            :kind :value
@@ -68,10 +70,10 @@
         task*   (db/get-task task-id)
         resumed (task-spec/run-task!
                  task-id
-                 :executors {:llm (fn [_]
-                                    {:status :success
-                                     :summary "Judged"
-                                     :output {:decision "ok"}})})
+                 :executors {:external-judge (fn [_]
+                                                {:status :success
+                                                 :summary "Judged"
+                                                 :output {:decision "ok"}})})
         task**  (db/get-task task-id)]
     (is (= :paused (:status paused)))
     (is (= :resumable (:state task*)))
@@ -81,6 +83,95 @@
     (is (= :completed (:state task**)))
     (is (= {:decision "ok"}
            (get-in task** [:meta :task-spec :outputs :done])))))
+
+(deftest task-spec-llm-step-evaluates-inputs-and-structured-output
+  (let [calls   (atom [])
+        call-id (random-uuid)
+        task-id (task-spec/create-task!
+                 {:goal "Render report"
+                  :inputs {:topic "Xia"}
+                  :steps [{:id :draft
+                           :kind :llm
+                           :mode :transform
+                           :prompt "Write a compact report about the topic."
+                           :inputs {:topic [:input :topic]}
+                           :output-schema {:type :object
+                                           :required [:body]
+                                           :properties {:body {:type :string}}}
+                           :provider-id :test-provider
+                           :workload :assistant
+                           :temperature 0
+                           :max-tokens 128}
+                          {:id :publish
+                           :kind :value
+                           :value [:output :draft :body]}]})]
+    (with-redefs [llm/chat-message
+                  (fn [messages & opts]
+                    (swap! calls conj {:messages messages
+                                       :opts (apply hash-map opts)})
+                    (with-meta {"role" "assistant"
+                                "content" "{\"body\":\"About Xia\"}"}
+                      {:provider-id :test-provider
+                       :model "test-model"
+                       :workload :assistant
+                       :llm-call-id call-id}))]
+      (let [result (task-spec/run-task! task-id)
+            task   (db/get-task task-id)
+            turns  (db/task-turns task-id)
+            items  (mapcat #(db/turn-items (:id %)) turns)
+            call   (first @calls)
+            user-content (get-in call [:messages 1 "content"])]
+        (is (= :completed (:status result)))
+        (is (= "About Xia"
+               (get-in task [:meta :task-spec :outputs :publish])))
+        (is (= {:body "About Xia"}
+               (get-in task [:meta :task-spec :outputs :draft])))
+        (is (= :test-provider (get-in call [:opts :provider-id])))
+        (is (= :assistant (get-in call [:opts :workload])))
+        (is (= 0.0 (get-in call [:opts :temperature])))
+        (is (= 128 (get-in call [:opts :max-tokens])))
+        (is (str/includes? user-content "Xia"))
+        (is (str/includes? user-content "Return only valid JSON"))
+        (is (some #(and (= :assistant-message (:type %))
+                        (= call-id (:llm-call-id %))
+                        (= {:body "About Xia"} (get-in % [:data :output])))
+                  items))))))
+
+(deftest task-spec-llm-agent-mode-pauses-without-agent-executor
+  (let [task-id (task-spec/create-task!
+                 {:goal "Open-ended work"
+                  :steps [{:id :work
+                           :kind :llm
+                           :mode :agent
+                           :prompt "Work with the user."}]})
+        result  (task-spec/run-task! task-id)
+        task    (db/get-task task-id)]
+    (is (= :paused (:status result)))
+    (is (= :resumable (:state task)))
+    (is (= :missing-executor
+           (get-in task [:meta :task-spec :pause-reason])))
+    (is (= :paused
+           (get-in task [:meta :task-spec :steps :work :status])))))
+
+(deftest task-spec-llm-step-validates-output-schema
+  (let [task-id (task-spec/create-task!
+                 {:goal "Validate report"
+                  :steps [{:id :draft
+                           :kind :llm
+                           :prompt "Return the report."
+                           :output-schema {:type :object
+                                           :required [:body]
+                                           :properties {:body {:type :string}}}}]})]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" "{}"})]
+      (let [result (task-spec/run-task! task-id)
+            task   (db/get-task task-id)]
+        (is (= :failed (:status result)))
+        (is (= :failed (:state task)))
+        (is (str/includes? (get-in task [:meta :task-spec :steps :draft :error])
+                           "missing required field"))))))
 
 (deftest registered-executor-runs-custom-step-kind
   (let [calls (atom [])]
@@ -246,7 +337,7 @@
                            :kind :subtask
                            :spec {:goal "Judge in child"
                                   :steps [{:id :judge
-                                           :kind :llm
+                                           :kind :external-judge
                                            :prompt "Judge this"}
                                           {:id :done
                                            :kind :value
@@ -260,10 +351,10 @@
         child*  (db/get-task child-id)
         resumed (task-spec/run-task!
                  task-id
-                 :executors {:llm (fn [_]
-                                    {:status :success
-                                     :summary "Child judged"
-                                     :output {:decision "ship"}})})
+                 :executors {:external-judge (fn [_]
+                                                {:status :success
+                                                 :summary "Child judged"
+                                                 :output {:decision "ship"}})})
         task**  (db/get-task task-id)
         child-id* (get-in task** [:meta :task-spec :outputs :delegate :task-id])
         child** (db/get-task child-id*)]

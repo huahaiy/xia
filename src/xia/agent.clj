@@ -841,25 +841,35 @@
 (defn- task-spec-llm-executor
   [{:keys [session-id channel message runtime-op provider-id resource-session-id
            max-tool-rounds tool-context turn-reservation-token]}]
-  (fn [{:keys [task-id step context]}]
-    (let [prompt* (or (:message context)
-                      message
-                      (:prompt step)
-                      (:goal step)
-                      "Continue the task.")]
-      {:status :success
-       :summary "LLM task step completed"
-       :output (process-message session-id
-                                prompt*
-                                :channel channel
-                                :task-id task-id
-                                :runtime-op runtime-op
-                                :provider-id provider-id
-                                :resource-session-id resource-session-id
-                                :max-tool-rounds max-tool-rounds
-                                :tool-context (or tool-context {})
-                                :persist-message? false
-                                :turn-reservation-token turn-reservation-token)})))
+  (fn [{:keys [task-id step context] :as args}]
+    (if (task-spec/llm-agent-step? step)
+      (let [prompt* (or (:message context)
+                        message
+                        (:prompt step)
+                        (:goal step)
+                        "Continue the task.")]
+        {:status :success
+         :summary "LLM agent task step completed"
+         :output (process-message session-id
+                                  prompt*
+                                  :channel channel
+                                  :task-id task-id
+                                  :runtime-op runtime-op
+                                  :provider-id provider-id
+                                  :resource-session-id resource-session-id
+                                  :max-tool-rounds max-tool-rounds
+                                  :tool-context (or tool-context {})
+                                  :persist-message? false
+                                  :turn-reservation-token turn-reservation-token)})
+      (task-spec/llm-executor
+       (assoc args
+              :context (cond-> (merge context
+                                       {:session-id session-id
+                                        :channel channel
+                                        :message (or (:message context) message)})
+                         provider-id (assoc :provider-id provider-id)
+                         resource-session-id (assoc :resource-session-id resource-session-id)
+                         runtime-op (assoc :runtime-op runtime-op)))))))
 
 (defn- run-task-spec!
   [task-id & {:keys [message channel runtime-op provider-id resource-session-id

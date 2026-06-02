@@ -1,9 +1,11 @@
 (ns xia.task-spec
   "Declarative task specs on top of the durable task runtime."
-  (:require [clojure.string :as str]
+  (:require [charred.api :as json]
+            [clojure.string :as str]
             [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.tool :as tool]))
 
@@ -478,8 +480,8 @@
                  tool-id (assoc :tool-id (name tool-id))
                  policy (assoc :policy (name policy)))})))})
 
-(defn- with-interaction-context
-  [task-id turn-id context f]
+(defn- interaction-context
+  [task-id turn-id context]
   (let [task     (db/get-task task-id)
         context* (merge context
                         {:session-id (task-session-id task context)
@@ -487,6 +489,11 @@
                          :task-turn-id turn-id
                          :channel (task-channel task context)}
                         (interaction-hooks task-id turn-id))]
+    context*))
+
+(defn- with-interaction-context
+  [task-id turn-id context f]
+  (let [context* (interaction-context task-id turn-id context)]
     (binding [prompt/*interaction-context* context*]
       (f))))
 
@@ -551,6 +558,472 @@
              :output {:approved false}
              :error (str "approval denied for " tool-name)
              :summary (str "Approval denied for " tool-name)}))))))
+
+(def ^:private llm-agent-modes
+  #{:agent :interactive})
+
+(defn- llm-step-mode
+  [step]
+  (or (normalize-kind (:mode step)) :transform))
+
+(defn llm-agent-step?
+  "Return true when an `:llm` task step should use the open-ended agent loop."
+  [step]
+  (contains? llm-agent-modes (llm-step-mode step)))
+
+(defn- step-option
+  [state context step key]
+  (when (contains? step key)
+    (eval-step-expr state context (get step key))))
+
+(defn- map-value
+  [m key]
+  (when (map? m)
+    (let [key-name (some-> key name)]
+      (or (get m key)
+          (when key-name
+            (or (get m key-name)
+                (get m (keyword key-name))))))))
+
+(defn- normalize-llm-keyword
+  [value]
+  (cond
+    (nil? value) nil
+    (keyword? value) value
+    (symbol? value) (keyword (name value))
+    (string? value) (some-> value str/trim not-empty keyword)
+    :else value))
+
+(defn- parse-long-option
+  [value]
+  (cond
+    (nil? value) nil
+    (integer? value) (long value)
+    (number? value) (long value)
+    (string? value) (try
+                      (Long/parseLong (str/trim value))
+                      (catch Exception _
+                        nil))
+    :else nil))
+
+(defn- parse-double-option
+  [value]
+  (cond
+    (nil? value) nil
+    (number? value) (double value)
+    (string? value) (try
+                      (Double/parseDouble (str/trim value))
+                      (catch Exception _
+                        nil))
+    :else nil))
+
+(defn- json-text
+  [value]
+  (try
+    (json/write-json-str value {:indent-str "  "})
+    (catch Exception _
+      (pr-str value))))
+
+(defn- llm-value-text
+  [value]
+  (cond
+    (nil? value) nil
+    (string? value) value
+    :else (json-text value)))
+
+(defn- step-text-option
+  [state context step key]
+  (some-> (step-option state context step key)
+          llm-value-text
+          nonblank-string))
+
+(defn- llm-step-inputs
+  [state context step]
+  (if (contains? step :inputs)
+    (let [inputs (eval-step-expr state context (:inputs step))]
+      (when-not (or (nil? inputs) (map? inputs))
+        (throw (ex-info "Task spec llm :inputs must evaluate to a map"
+                        {:type :task-spec/invalid
+                         :step-id (:id step)
+                         :inputs inputs})))
+      (or inputs {}))
+    {}))
+
+(defn- llm-output-schema
+  [state context step]
+  (when (contains? step :output-schema)
+    (let [schema-form (:output-schema step)
+          schema      (if (and (vector? schema-form)
+                               (seq schema-form)
+                               (or (keyword? (first schema-form))
+                                   (symbol? (first schema-form))))
+                        (eval-step-expr state context schema-form)
+                        schema-form)]
+      (when-not (map? schema)
+        (throw (ex-info "Task spec llm :output-schema must evaluate to a map"
+                        {:type :task-spec/invalid
+                         :step-id (:id step)
+                         :output-schema schema})))
+      schema)))
+
+(defn- llm-output-format
+  [state context step]
+  (or (normalize-kind (step-option state context step :output-format))
+      (normalize-kind (step-option state context step :format))))
+
+(defn- llm-json-output?
+  [state context step schema]
+  (boolean
+   (or schema
+       (= :json (llm-output-format state context step))
+       (truthy? (step-option state context step :json?))
+       (truthy? (step-option state context step :structured-output?)))))
+
+(defn- schema-key
+  [key]
+  (cond
+    (keyword? key) key
+    (symbol? key) (keyword (name key))
+    (string? key) (keyword key)
+    :else key))
+
+(defn- keywordize-json
+  [value]
+  (cond
+    (map? value)
+    (into {}
+          (map (fn [[k v]]
+                 [(schema-key k) (keywordize-json v)]))
+          value)
+
+    (vector? value)
+    (mapv keywordize-json value)
+
+    (sequential? value)
+    (mapv keywordize-json value)
+
+    :else
+    value))
+
+(defn- schema-types
+  [schema]
+  (let [type* (map-value schema :type)]
+    (cond
+      (nil? type*) []
+      (sequential? type*) (into [] (keep normalize-kind) type*)
+      :else (cond-> [] (normalize-kind type*) (conj (normalize-kind type*))))))
+
+(defn- schema-path-label
+  [path]
+  (if (seq path)
+    (str "$." (str/join "." (map name path)))
+    "$"))
+
+(defn- schema-type-match?
+  [type* value]
+  (case type*
+    :object (map? value)
+    :array (sequential? value)
+    :string (string? value)
+    :number (number? value)
+    :integer (integer? value)
+    :boolean (or (true? value) (false? value))
+    :null (nil? value)
+    true))
+
+(declare validate-output-schema!)
+
+(defn- validate-object-schema!
+  [schema value path]
+  (let [required   (into [] (map schema-key) (or (map-value schema :required) []))
+        properties (when-let [properties* (map-value schema :properties)]
+                     (into {}
+                           (map (fn [[k v]]
+                                  [(schema-key k) v]))
+                           properties*))]
+    (doseq [key required]
+      (when-not (contains? value key)
+        (throw (ex-info (str "LLM output missing required field "
+                             (schema-path-label (conj path key)))
+                        {:type :task-spec/schema-validation
+                         :path (conj path key)
+                         :required required
+                         :output value}))))
+    (doseq [[key child-schema] properties
+            :when (contains? value key)]
+      (validate-output-schema! child-schema (get value key) (conj path key)))))
+
+(defn- validate-array-schema!
+  [schema value path]
+  (when-let [item-schema (map-value schema :items)]
+    (doseq [[idx item] (map-indexed vector value)]
+      (validate-output-schema! item-schema item (conj path (keyword (str idx)))))))
+
+(defn- validate-output-schema!
+  ([schema value]
+   (validate-output-schema! schema value []))
+  ([schema value path]
+   (when (map? schema)
+     (let [types       (set (schema-types schema))
+           objectish?  (or (contains? types :object)
+                           (map-value schema :properties)
+                           (seq (map-value schema :required)))
+           arrayish?   (or (contains? types :array)
+                           (map-value schema :items))]
+       (when (and (seq types)
+                  (not-any? #(schema-type-match? % value) types))
+         (throw (ex-info (str "LLM output field "
+                              (schema-path-label path)
+                              " does not match schema type "
+                              (str/join "|" (map name types)))
+                         {:type :task-spec/schema-validation
+                          :path path
+                          :schema schema
+                          :output value})))
+       (when objectish?
+         (when-not (map? value)
+           (throw (ex-info (str "LLM output field "
+                                (schema-path-label path)
+                                " must be an object")
+                           {:type :task-spec/schema-validation
+                            :path path
+                            :schema schema
+                            :output value})))
+         (validate-object-schema! schema value path))
+       (when arrayish?
+         (when-not (sequential? value)
+           (throw (ex-info (str "LLM output field "
+                                (schema-path-label path)
+                                " must be an array")
+                           {:type :task-spec/schema-validation
+                            :path path
+                            :schema schema
+                            :output value})))
+         (validate-array-schema! schema value path))))
+   value))
+
+(defn- strip-json-fence
+  [text]
+  (let [text* (str/trim text)]
+    (if-let [[_ body] (re-matches #"(?is)^```(?:json)?\s*(.*?)\s*```$" text*)]
+      (str/trim body)
+      text*)))
+
+(defn- json-start-index
+  [text]
+  (let [object-start (.indexOf text "{")
+        array-start  (.indexOf text "[")]
+    (cond
+      (and (neg? object-start) (neg? array-start)) -1
+      (neg? object-start) array-start
+      (neg? array-start) object-start
+      :else (min object-start array-start))))
+
+(defn- extract-json-candidate
+  [text]
+  (let [start (json-start-index text)]
+    (when-not (neg? start)
+      (let [end-char (case (.charAt text start)
+                       \{ "}"
+                       \[ "]"
+                       nil)
+            end      (when end-char
+                       (.lastIndexOf text end-char))]
+        (when (and end (<= start end))
+          (subs text start (inc end)))))))
+
+(defn- parse-json-output!
+  [step content]
+  (let [candidate (strip-json-fence content)
+        parse*    (fn [text]
+                    (keywordize-json (json/read-json text)))]
+    (try
+      (parse* candidate)
+      (catch Exception e
+        (if-let [extracted (extract-json-candidate candidate)]
+          (try
+            (parse* extracted)
+            (catch Exception e2
+              (throw (ex-info "LLM task step returned invalid JSON"
+                              {:type :task-spec/invalid-json-output
+                               :step-id (:id step)
+                               :response-preview (subs candidate
+                                                       0
+                                                       (min 240 (count candidate)))}
+                              e2))))
+          (throw (ex-info "LLM task step returned invalid JSON"
+                          {:type :task-spec/invalid-json-output
+                           :step-id (:id step)
+                           :response-preview (subs candidate
+                                                   0
+                                                   (min 240 (count candidate)))}
+                          e)))))))
+
+(defn- llm-step-prompt
+  [state context step]
+  (or (step-text-option state context step :prompt)
+      (step-text-option state context step :message)
+      (step-text-option state context step :goal)
+      (step-text-option state context step :task)
+      (nonblank-string (:message context))
+      "Complete this task step."))
+
+(defn- llm-system-instruction
+  [mode]
+  (str "You are executing one declarative task step. "
+       "Complete only this step and do not continue the broader task. "
+       (case mode
+         :judge "Make a bounded judgment from the prompt and inputs. "
+         :judgment "Make a bounded judgment from the prompt and inputs. "
+         :transform "Transform the inputs according to the prompt. "
+         "")))
+
+(defn- llm-output-instruction
+  [schema json-output?]
+  (cond
+    schema
+    (str "Return only valid JSON matching this JSON schema. "
+         "Do not include Markdown fences or commentary.\n"
+         (json-text schema))
+
+    json-output?
+    "Return only valid JSON. Do not include Markdown fences or commentary."
+
+    :else
+    "Return only the result for this step."))
+
+(defn- llm-step-messages
+  [state context step inputs schema json-output?]
+  (let [mode   (llm-step-mode step)
+        prompt* (llm-step-prompt state context step)
+        user-content (str prompt*
+                          (when (seq inputs)
+                            (str "\n\nInputs:\n" (json-text inputs)))
+                          "\n\n"
+                          (llm-output-instruction schema json-output?))]
+    [{"role" "system"
+      "content" (llm-system-instruction mode)}
+     {"role" "user"
+      "content" user-content}]))
+
+(defn- llm-request-options
+  [state context step]
+  (let [budget      (when (contains? step :budget)
+                      (eval-step-expr state context (:budget step)))
+        provider-id (or (step-option state context step :provider-id)
+                        (step-option state context step :provider)
+                        (:provider-id context))
+        workload    (or (step-option state context step :workload)
+                        (:workload context)
+                        :assistant)
+        model       (or (step-option state context step :model)
+                        (map-value budget :model))
+        temperature (or (step-option state context step :temperature)
+                        (map-value budget :temperature))
+        max-tokens  (or (step-option state context step :max-tokens)
+                        (step-option state context step :max-output-tokens)
+                        (map-value budget :max-tokens)
+                        (map-value budget :max-output-tokens))]
+    (cond-> {}
+      (:session-id context)
+      (assoc :session-id (:session-id context))
+
+      provider-id
+      (assoc :provider-id (normalize-llm-keyword provider-id))
+
+      workload
+      (assoc :workload (normalize-llm-keyword workload))
+
+      model
+      (assoc :model (str model))
+
+      (some? (parse-double-option temperature))
+      (assoc :temperature (parse-double-option temperature))
+
+      (some? (parse-long-option max-tokens))
+      (assoc :max-tokens (parse-long-option max-tokens)))))
+
+(defn- assistant-content
+  [message]
+  (or (get message "content")
+      (:content message)
+      ""))
+
+(defn- short-summary
+  [text max-chars]
+  (when-let [text* (nonblank-string text)]
+    (if (> (count text*) max-chars)
+      (str (subs text* 0 max-chars) "...")
+      text*)))
+
+(defn- record-llm-request!
+  [turn-id step inputs schema json-output? opts]
+  (task-runtime/record-task-item!
+   turn-id
+   {:type :system-note
+    :status :requested
+    :summary (str "Requested LLM " (name (llm-step-mode step)) " step")
+    :data (cond-> {:kind "llm-request"
+                   :step-id (name (:id step))
+                   :step-mode (name (llm-step-mode step))
+                   :structured-output (boolean json-output?)
+                   :inputs inputs}
+            schema (assoc :output-schema schema)
+            (:provider-id opts) (assoc :provider-id (name (:provider-id opts)))
+            (:workload opts) (assoc :workload (name (:workload opts)))
+            (:model opts) (assoc :model (:model opts))
+            (:temperature opts) (assoc :temperature (:temperature opts))
+            (:max-tokens opts) (assoc :max-tokens (:max-tokens opts)))}))
+
+(defn- record-llm-result!
+  [turn-id step content output metadata structured?]
+  (task-runtime/record-task-item!
+   turn-id
+   (cond-> {:type :assistant-message
+            :role :assistant
+            :status :success
+            :summary (or (short-summary content 240)
+                         (str "LLM " (name (llm-step-mode step)) " step completed"))
+            :data {:kind "llm-result"
+                   :step-id (name (:id step))
+                   :step-mode (name (llm-step-mode step))
+                   :structured-output (boolean structured?)
+                   :content content
+                   :output output}}
+     (:llm-call-id metadata) (assoc :llm-call-id (:llm-call-id metadata))
+     (:provider-id metadata) (assoc-in [:data :provider-id] (name (:provider-id metadata)))
+     (:workload metadata) (assoc-in [:data :workload] (name (:workload metadata)))
+     (:model metadata) (assoc-in [:data :model] (:model metadata)))))
+
+(defn llm-executor
+  "Run a bounded `:llm` task step as first-class task-spec dataflow."
+  [{:keys [state context step task-id turn-id]}]
+  (if (llm-agent-step? step)
+    {:status :paused
+     :pause-reason :missing-executor
+     :summary "Paused before agent LLM task step"
+     :error "missing task step executor: llm agent"}
+    (let [context* (interaction-context task-id turn-id context)]
+      (binding [prompt/*interaction-context* context*]
+        (let [inputs       (llm-step-inputs state context* step)
+              schema       (llm-output-schema state context* step)
+              json-output? (llm-json-output? state context* step schema)
+              messages     (llm-step-messages state context* step inputs schema json-output?)
+              opts         (llm-request-options state context* step)]
+          (record-llm-request! turn-id step inputs schema json-output? opts)
+          (let [message  (apply llm/chat-message messages (mapcat identity opts))
+                metadata (meta message)
+                content  (assistant-content message)
+                output   (if json-output?
+                           (let [parsed (parse-json-output! step content)]
+                             (when schema
+                               (validate-output-schema! schema parsed))
+                             parsed)
+                           content)]
+            (record-llm-result! turn-id step content output metadata json-output?)
+            {:status :success
+             :summary (str "LLM " (name (llm-step-mode step)) " step completed")
+             :output output}))))))
 
 (defn- task-execution-mode
   [task]
@@ -938,7 +1411,7 @@
    :tool tool-executor
    :input input-executor
    :approval approval-executor
-   :llm (missing-executor :llm)
+   :llm llm-executor
    :branch branch-executor
    :subtask subtask-executor})
 
