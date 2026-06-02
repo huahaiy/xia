@@ -15,6 +15,11 @@
 (def ^:private default-retry-max-attempts 2)
 (def ^:private default-retry-delay-ms 0)
 (def ^:private default-retry-backoff-factor 1.0)
+(def ^:private pause-payload-keys
+  [:reason :pause-reason :waiting-for :resume-token :deadline :deadline-at
+   :resume-input :resume-input-schema :data])
+(def ^:private step-pause-state-keys
+  [:pause :pause-reason :waiting-for :resume-token :deadline :deadline-at])
 (def ^:private terminal-step-statuses #{:success :skipped :failed})
 (def ^:private success-step-statuses #{:success})
 (defonce ^:private executor-registry-atom (atom {}))
@@ -57,7 +62,8 @@
   "Return the globally registered task step executors.
 
    Executor functions receive:
-   `{:task-id ... :turn-id ... :state ... :context ... :step ...}`
+   `{:task-id ... :turn-id ... :state ... :context ... :step ...
+     :pause ... :resume-token ... :resume-input ...}`
 
    They return a step result map:
    `{:status :success|:skipped|:failed|:paused :output ... :summary ...}`."
@@ -1437,6 +1443,90 @@
   [state step-id f & args]
   (apply update-in state [:steps step-id] f args))
 
+(defn- pause-reason
+  [result]
+  (or (:pause-reason result)
+      (:reason result)
+      (get-in result [:pause :reason])
+      (get-in result [:pause :pause-reason])
+      :paused))
+
+(defn- normalize-pause-payload
+  [result]
+  (let [pause*  (when (map? (:pause result))
+                  (select-keys (:pause result) pause-payload-keys))
+        payload (merge pause*
+                       (select-keys result pause-payload-keys))
+        reason  (normalize-kind (pause-reason result))]
+    (cond-> (-> payload
+                (dissoc :pause-reason)
+                (assoc :reason reason))
+      (nil? (:waiting-for payload))
+      (assoc :waiting-for reason))))
+
+(defn- paused-result
+  [result]
+  (let [pause (normalize-pause-payload result)]
+    (assoc result
+           :pause pause
+           :pause-reason (:reason pause)
+           :waiting-for (:waiting-for pause))))
+
+(defn- step-pause-state
+  [state step]
+  (let [step-state (get-in state [:steps (:id step)])
+        pause      (:pause step-state)]
+    (cond
+      (map? pause)
+      pause
+
+      (:pause-reason step-state)
+      (normalize-pause-payload step-state)
+
+      :else
+      nil)))
+
+(defn- context-resume-token
+  [context]
+  (or (:resume-token context)
+      (get-in context [:resume :token])))
+
+(defn- context-resume-input
+  [context step]
+  (cond
+    (contains? context :resume-input)
+    {:provided? true
+     :value (:resume-input context)}
+
+    (contains? context :resume)
+    {:provided? (contains? (:resume context) :input)
+     :value (get-in context [:resume :input])}
+
+    (contains? (:resume-inputs context) (:id step))
+    {:provided? true
+     :value (get-in context [:resume-inputs (:id step)])}
+
+    (contains? (:resume-inputs context) (name (:id step)))
+    {:provided? true
+     :value (get-in context [:resume-inputs (name (:id step))])}
+
+    :else
+    {:provided? false
+     :value nil}))
+
+(defn- with-pause-context
+  [context pause resume-token resume-input]
+  (cond-> context
+    pause
+    (assoc :pause pause)
+
+    resume-token
+    (assoc :resume-token resume-token)
+
+    (:provided? resume-input)
+    (assoc :resume-input (:value resume-input)
+           :resume-input-provided? true)))
+
 (defn- mark-step-running
   [state step]
   (let [at (now)]
@@ -1455,26 +1545,46 @@
   (let [at      (now)
         status  (result-status result)
         summary (step-summary step result)]
-    (cond-> (-> state
+    (cond-> (-> (cond-> state
+                  (not= :paused status)
+                  (as-> state*
+                        (apply dissoc state* step-pause-state-keys)))
                 (assoc :updated-at at)
                 (update-step-state (:id step)
-                                   merge
-                                   (cond-> {:status status
-                                            :summary summary
-                                            :finished-at at
-                                            :updated-at at}
-                                     (contains? result :output)
-                                     (assoc :output (:output result))
-                                     (:error result)
-                                     (assoc :error (:error result))
-                                     (:attempt result)
-                                     (assoc :attempt (:attempt result))
-                                     (:attempts result)
-                                     (assoc :attempts (:attempts result))
-                                     (:max-attempts result)
-                                     (assoc :max-attempts (:max-attempts result))
-                                     (:timeout-ms result)
-                                     (assoc :timeout-ms (:timeout-ms result)))))
+                                   (fn [step-state]
+                                     (merge (cond-> (or step-state {})
+                                              (not= :paused status)
+                                              (as-> step-state*
+                                                    (apply dissoc step-state*
+                                                           step-pause-state-keys)))
+                                            (cond-> {:status status
+                                                     :summary summary
+                                                     :finished-at at
+                                                     :updated-at at}
+                                              (contains? result :output)
+                                              (assoc :output (:output result))
+                                              (:error result)
+                                              (assoc :error (:error result))
+                                              (:attempt result)
+                                              (assoc :attempt (:attempt result))
+                                              (:attempts result)
+                                              (assoc :attempts (:attempts result))
+                                              (:max-attempts result)
+                                              (assoc :max-attempts (:max-attempts result))
+                                              (:timeout-ms result)
+                                              (assoc :timeout-ms (:timeout-ms result))
+                                              (:pause result)
+                                              (assoc :pause (:pause result))
+                                              (:pause-reason result)
+                                              (assoc :pause-reason (:pause-reason result))
+                                              (:waiting-for result)
+                                              (assoc :waiting-for (:waiting-for result))
+                                              (get-in result [:pause :resume-token])
+                                              (assoc :resume-token (get-in result [:pause :resume-token]))
+                                              (get-in result [:pause :deadline])
+                                              (assoc :deadline (get-in result [:pause :deadline]))
+                                              (get-in result [:pause :deadline-at])
+                                              (assoc :deadline-at (get-in result [:pause :deadline-at])))))))
       (contains? result :output)
       (assoc-in [:outputs (:id step)] (:output result)))))
 
@@ -1499,7 +1609,13 @@
      (:max-attempts result)
      (assoc-in [:data :max-attempts] (:max-attempts result))
      (:timeout-ms result)
-     (assoc-in [:data :timeout-ms] (:timeout-ms result)))))
+     (assoc-in [:data :timeout-ms] (:timeout-ms result))
+     (:pause result)
+     (assoc-in [:data :pause] (:pause result))
+     (:pause-reason result)
+     (assoc-in [:data :pause-reason] (name (:pause-reason result)))
+     (:waiting-for result)
+     (assoc-in [:data :waiting-for] (name (:waiting-for result))))))
 
 (defn- skipped-result
   [step reason]
@@ -1666,17 +1782,28 @@
   (if (and (contains? step :when)
            (not (truthy? (eval-step-expr state context (:when step)))))
     (skipped-result step "Skipped because task step condition was false")
-    (if-let [executor (get executors (:kind step))]
-      (executor {:task-id task-id
-                 :turn-id turn-id
-                 :state state
-                 :context context
-                 :executors executors
-                 :step step})
-      {:status :paused
-       :summary (str "Paused before unsupported task step kind "
-                     (name (:kind step)))
-       :error (str "unsupported task step kind: " (name (:kind step)))})))
+    (let [pause        (step-pause-state state step)
+          resume-token (context-resume-token context)
+          resume-input (context-resume-input context step)
+          context*     (with-pause-context context pause resume-token resume-input)]
+      (if-let [executor (get executors (:kind step))]
+        (executor (cond-> {:task-id task-id
+                           :turn-id turn-id
+                           :state state
+                           :context context*
+                           :executors executors
+                           :step step}
+                    pause (assoc :pause pause)
+                    resume-token (assoc :resume-token resume-token)
+                    (:provided? resume-input)
+                    (assoc :resume-input (:value resume-input)
+                           :resume-input-provided? true)))
+        {:status :paused
+         :pause-reason :unsupported-step
+         :waiting-for :executor
+         :summary (str "Paused before unsupported task step kind "
+                       (name (:kind step)))
+         :error (str "unsupported task step kind: " (name (:kind step)))}))))
 
 (defn- execute-step-attempt
   [executors state context task-id turn-id step timeout-ms]
@@ -1740,17 +1867,20 @@
         policy      (retry-policy state context step)
         max-attempts (long (:max-attempts policy))]
     (loop [attempt 1]
-      (let [result (with-attempt-metadata
-                     (execute-step-attempt executors
-                                           state
-                                           context
-                                           task-id
-                                           turn-id
-                                           step
-                                           timeout-ms*)
-                     attempt
-                     max-attempts
-                     timeout-ms*)]
+      (let [raw-result (with-attempt-metadata
+                         (execute-step-attempt executors
+                                               state
+                                               context
+                                               task-id
+                                               turn-id
+                                               step
+                                               timeout-ms*)
+                         attempt
+                         max-attempts
+                         timeout-ms*)
+            result     (if (= :paused (result-status raw-result))
+                         (paused-result raw-result)
+                         raw-result)]
         (if (and (< (long attempt) max-attempts)
                  (retryable-result? result))
           (let [delay-ms (retry-delay-ms policy attempt)]
@@ -1796,8 +1926,8 @@
 
    Step executors are resolved in this order: built-ins, globally registered
    executors, then per-run `:executors`. Executor functions receive
-   `{:task-id ... :turn-id ... :state ... :context ... :step ...}` and return
-   a result map."
+   `{:task-id ... :turn-id ... :state ... :context ... :step ...
+     :pause ... :resume-token ... :resume-input ...}` and return a result map."
   [task-id & {:keys [context executors max-steps operation]
               :or {context {}
                    max-steps default-max-steps}}]
@@ -1834,10 +1964,14 @@
         (cond
           (>= step-count (long max-steps))
           (let [summary "Paused after reaching task step guardrail"
+                pause   {:reason :max-steps
+                         :waiting-for :resume}
                 state*  (assoc state
                                :status :paused
                                :updated-at (now)
-                               :pause-reason :max-steps)]
+                               :pause-reason :max-steps
+                               :waiting-for :resume
+                               :pause pause)]
             (sync-task-state! task-id
                               (dissoc state* :spec)
                               {:state :resumable
@@ -1848,6 +1982,7 @@
              :task-id task-id
              :turn-id turn-id
              :summary summary
+             :pause pause
              :state (dissoc state* :spec)})
 
           :else
@@ -1880,11 +2015,20 @@
                 (recur state* (inc step-count))
 
                 :paused
-                (let [state** (assoc state*
-                                     :status :paused
-                                     :pause-reason (or (:pause-reason result)
-                                                       :unsupported-step)
-                                     :updated-at (now))]
+                (let [pause   (or (:pause result)
+                                  (normalize-pause-payload result))
+                      state** (cond-> (assoc state*
+                                             :status :paused
+                                             :pause pause
+                                             :pause-reason (:reason pause)
+                                             :waiting-for (:waiting-for pause)
+                                             :updated-at (now))
+                                (:resume-token pause)
+                                (assoc :resume-token (:resume-token pause))
+                                (:deadline pause)
+                                (assoc :deadline (:deadline pause))
+                                (:deadline-at pause)
+                                (assoc :deadline-at (:deadline-at pause)))]
                   (sync-task-state! task-id
                                     (dissoc state** :spec)
                                     {:state :resumable
@@ -1895,6 +2039,7 @@
                    :task-id task-id
                    :turn-id turn-id
                    :summary summary
+                   :pause pause
                    :state (dissoc state** :spec)})
 
                 :failed

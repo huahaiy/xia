@@ -84,6 +84,80 @@
     (is (= {:decision "ok"}
            (get-in task** [:meta :task-spec :outputs :done])))))
 
+(deftest task-spec-pause-payload-persists-and-resumes-with-input
+  (let [calls    (atom [])
+        deadline "2026-06-02T18:00:00Z"
+        task-id  (task-spec/create-task!
+                  {:goal "Wait externally"
+                   :steps [{:id :wait
+                            :kind :custom}
+                           {:id :done
+                            :kind :value
+                            :value [:output :wait :value]}]})
+        executor (fn [{:keys [pause resume-token resume-input
+                              resume-input-provided? context]}]
+                   (swap! calls conj {:pause pause
+                                      :resume-token resume-token
+                                      :resume-input resume-input
+                                      :resume-input-provided? resume-input-provided?
+                                      :context-pause (:pause context)
+                                      :context-resume-input (:resume-input context)})
+                   (if resume-input-provided?
+                     {:status :success
+                      :summary "External wait resumed"
+                      :output {:value (:value resume-input)}}
+                     {:status :paused
+                      :pause-reason :external-wait
+                      :waiting-for :webhook
+                      :resume-token "token-1"
+                      :deadline deadline
+                      :summary "Waiting for webhook"
+                      :output {:request-id "req-1"}}))]
+    (let [paused (task-spec/run-task! task-id
+                                      :executors {:custom executor})
+          task*  (db/get-task task-id)
+          pause  {:reason :external-wait
+                  :waiting-for :webhook
+                  :resume-token "token-1"
+                  :deadline deadline}]
+      (is (= :paused (:status paused)))
+      (is (= pause (:pause paused)))
+      (is (= pause (get-in task* [:meta :task-spec :pause])))
+      (is (= pause (get-in task* [:meta :task-spec :steps :wait :pause])))
+      (is (= :external-wait
+             (get-in task* [:meta :task-spec :pause-reason])))
+      (is (= {:request-id "req-1"}
+             (get-in task* [:meta :task-spec :outputs :wait])))
+      (is (= [{:pause nil
+               :resume-token nil
+               :resume-input nil
+               :resume-input-provided? nil
+               :context-pause nil
+               :context-resume-input nil}]
+             @calls)))
+    (let [resumed (task-spec/run-task!
+                   task-id
+                   :context {:resume-token "token-1"
+                             :resume-input {:value "ready"}}
+                   :executors {:custom executor})
+          task**  (db/get-task task-id)
+          second-call (second @calls)]
+      (is (= :completed (:status resumed)))
+      (is (= "ready"
+             (get-in task** [:meta :task-spec :outputs :done])))
+      (is (= {:reason :external-wait
+              :waiting-for :webhook
+              :resume-token "token-1"
+              :deadline deadline}
+             (:pause second-call)))
+      (is (= "token-1" (:resume-token second-call)))
+      (is (= {:value "ready"} (:resume-input second-call)))
+      (is (true? (:resume-input-provided? second-call)))
+      (is (= (:pause second-call) (:context-pause second-call)))
+      (is (= {:value "ready"} (:context-resume-input second-call)))
+      (is (nil? (get-in task** [:meta :task-spec :pause])))
+      (is (nil? (get-in task** [:meta :task-spec :steps :wait :pause]))))))
+
 (deftest task-spec-llm-step-evaluates-inputs-and-structured-output
   (let [calls   (atom [])
         call-id (random-uuid)
