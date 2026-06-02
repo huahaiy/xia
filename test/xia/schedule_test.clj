@@ -3,7 +3,9 @@
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.schedule :as schedule]
+            [xia.scheduler :as scheduler]
             [xia.test-helpers :refer [with-test-db]]
+            [xia.tool :as tool]
             [xia.working-memory :as wm]))
 
 (use-fixtures :each with-test-db)
@@ -375,6 +377,47 @@
 ;; Durable task state / recovery
 ;; ---------------------------------------------------------------------------
 
+(deftest schedule-task-creation-uses-canonical-task-shape
+  (let [_       (schedule/create-schedule!
+                 {:id :task-shape
+                  :spec {:minute #{0} :hour #{9}}
+                  :type :prompt
+                  :prompt "Summarize the dashboard"})
+        sched   (schedule/get-schedule :task-shape)
+        task-id (schedule/ensure-schedule-task! sched)
+        task    (db/get-task task-id)]
+    (is (= :task (:type task)))
+    (is (= :task (get-in task [:contract :kind])))
+    (is (= :schedule (get-in task [:meta :trigger :kind])))
+    (is (= :agent (get-in task [:meta :execution :mode])))
+    (is (= :llm (get-in task [:contract :spec :steps 0 :kind])))))
+
+(deftest tool-schedule-runs-through-task-spec-runner
+  (db/install-tool! {:id          :scheduled-safe
+                     :name        "scheduled-safe"
+                     :description "Scheduled safe tool"
+                     :approval    :auto
+                     :handler     "(fn [_] {\"summary\" \"scheduled ok\" \"content\" \"ok\"})"})
+  (tool/load-tool! :scheduled-safe)
+  (schedule/create-schedule!
+    {:id :runner-schedule
+     :spec {:minute #{0} :hour #{9}}
+     :type :tool
+     :tool-id :scheduled-safe})
+  (let [sched   (schedule/get-schedule :runner-schedule)
+        _       (scheduler/run-tool-schedule! sched)
+        task-id (schedule/schedule-task-id :runner-schedule)
+        task    (db/get-task task-id)
+        items   (mapcat #(db/turn-items (:id %))
+                        (db/task-turns task-id))
+        run     (first (schedule/schedule-history :runner-schedule))]
+    (is (= :completed (:state task)))
+    (is (= :completed (get-in task [:meta :task-spec :status])))
+    (is (= :success (:status run)))
+    (is (some #(= :task-step (:type %)) items))
+    (is (some #(= :tool-call (:type %)) items))
+    (is (some #(= :tool-result (:type %)) items))))
+
 (deftest task-state-builds-recovery-context
   (schedule/create-schedule!
     {:id :recoverable :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Check the dashboard"})
@@ -430,7 +473,7 @@
 (deftest failed-prompt-schedule-exposes-resumable-session
   (let [session-id (db/create-session! :scheduler)]
     (schedule/create-schedule!
-      {:id :resume-me :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Continue the workflow"})
+      {:id :resume-me :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Continue the task"})
     (wm/create-wm! session-id)
     (schedule/save-task-checkpoint!
       :resume-me

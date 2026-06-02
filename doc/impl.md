@@ -26,7 +26,7 @@ Xia keeps its state in its database, but encrypted secrets are protected by exte
 - `xia pack` can bundle local support files into a portable archive.
 - `xia backup.xia` opens that archive directly for non-technical users.
 
-Typical portable workflow:
+Typical portable path:
 
 ```bash
 # use Xia normally
@@ -293,7 +293,7 @@ The local browser UI is intended to be the main interface for non-technical user
 - **OAuth templates:** start from common provider presets and edit as needed.
 - **OAuth-to-service handoff:** prefill service forms from saved OAuth accounts.
 - **Calendar integrations:** manage Google Calendar, Microsoft Calendar, generic CalDAV collections, and read-only iCalendar feeds for events and availability.
-- **Local document workflows:** upload text, PDF, and Office docs, then insert summaries or excerpts into chat and notes.
+- **Local documents:** upload text, PDF, and Office docs, then insert summaries or excerpts into chat and notes.
 - **Skill import and curation:** install Xia skills directly, import a safe prompt-only subset of OpenClaw skills from directories, zip files, or ClawHub zip URLs, track provenance/hash/trust/lifecycle metadata, check imported sources for updates without applying them, and run a curator pass that archives only stale agent-authored skills.
 - **Local trust boundary:** Xia binds to localhost by default and uses a local session secret cookie, while privileged actions still go through approval policy.
 
@@ -339,7 +339,7 @@ approval decision, and policy-decision audit events for that callback path.
 
 ### Restricted Tool Pipelines
 
-`pipeline-run` is a bundled tool for repetitive retrieval workflows where
+`pipeline-run` is a bundled tool for repetitive retrieval tasks where
 intermediate tool results would waste model context. The tool evaluates a short
 SCI/Clojure pipeline and returns only the pipeline's final structured value to
 the model.

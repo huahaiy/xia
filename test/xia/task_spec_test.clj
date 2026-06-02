@@ -1,0 +1,390 @@
+(ns xia.task-spec-test
+  (:require [clojure.test :refer [deftest is use-fixtures]]
+            [xia.agent.task-runtime :as task-runtime]
+            [xia.async :as async]
+            [xia.bridge :as bridge]
+            [xia.db :as db]
+            [xia.prompt :as prompt]
+            [xia.task-spec :as task-spec]
+            [xia.test-helpers :as th]))
+
+(defn- with-clear-executors
+  [f]
+  (task-spec/clear-registered-executors!)
+  (try
+    (f)
+    (finally
+      (task-spec/clear-registered-executors!))))
+
+(use-fixtures :each th/with-test-db with-clear-executors)
+
+(deftest task-spec-runs-deterministic-steps-through-task-runtime
+  (let [task-id (task-spec/create-task!
+                 {:goal "Prepare report"
+                  :inputs {:rows []}
+                  :steps [{:id :load
+                           :kind :value
+                           :value [:input :rows]}
+                          {:id :has-rows
+                           :kind :condition
+                           :expr [:>= [:count [:output :load]] 1]}
+                          {:id :render
+                           :kind :value
+                           :when [:step-ok? :has-rows]
+                           :value {:body [:str "Rows: " [:count [:output :load]]]}}]})
+        result  (task-spec/run-task! task-id
+                                     :context {:inputs {:rows [{:id 1} {:id 2}]}})
+        task    (db/get-task task-id)
+        turns   (db/task-turns task-id)
+        items   (mapcat #(db/turn-items (:id %)) turns)
+        events  (:events (bridge/task-event-history task-id))]
+    (is (= :completed (:status result)))
+    (is (= :task (:type task)))
+    (is (= :completed (:state task)))
+    (is (= :task (get-in task [:contract :kind])))
+    (is (= :task (get-in task [:contract :spec :kind])))
+    (is (= :hybrid (get-in task [:meta :execution :mode])))
+    (is (= "Rows: 2"
+           (get-in task [:meta :task-spec :outputs :render :body])))
+    (is (= [:success :success :success]
+           (mapv :status (filter #(= :task-step (:type %)) items))))
+    (is (some #(= :item.task-step (:type %)) events))
+    (is (some #(= :task.completed (:type %)) events))))
+
+(deftest task-spec-pauses-at-unsupported-step-and-resumes-with-executor
+  (let [task-id (task-spec/create-task!
+                 {:goal "Hybrid task"
+                  :steps [{:id :seed
+                           :kind :value
+                           :value 1}
+                          {:id :judge
+                           :kind :llm
+                           :prompt "Decide what to do"}
+                          {:id :done
+                           :kind :value
+                           :when [:step-ok? :judge]
+                           :value [:output :judge]}]})
+        paused  (task-spec/run-task! task-id)
+        task*   (db/get-task task-id)
+        resumed (task-spec/run-task!
+                 task-id
+                 :executors {:llm (fn [_]
+                                    {:status :success
+                                     :summary "Judged"
+                                     :output {:decision "ok"}})})
+        task**  (db/get-task task-id)]
+    (is (= :paused (:status paused)))
+    (is (= :resumable (:state task*)))
+    (is (= :task-spec-paused (:stop-reason task*)))
+    (is (= :paused (get-in task* [:meta :task-spec :steps :judge :status])))
+    (is (= :completed (:status resumed)))
+    (is (= :completed (:state task**)))
+    (is (= {:decision "ok"}
+           (get-in task** [:meta :task-spec :outputs :done])))))
+
+(deftest registered-executor-runs-custom-step-kind
+  (let [calls (atom [])]
+    (is (= :custom
+           (task-spec/register-executor!
+            :custom
+            (fn [{:keys [task-id step context]}]
+              (swap! calls conj {:task-id task-id
+                                 :step-id (:id step)
+                                 :context context})
+              {:status :success
+               :summary "Custom step completed"
+               :output {:source (:source context)}}))))
+    (let [task-id (task-spec/create-task!
+                   {:goal "Run custom step"
+                    :steps [{:id :run
+                             :kind :custom}
+                            {:id :done
+                             :kind :value
+                             :value [:output :run]}]})
+          result  (task-spec/run-task! task-id
+                                       :context {:source "registry"})
+          task    (db/get-task task-id)]
+      (is (= :completed (:status result)))
+      (is (= {:source "registry"}
+             (get-in task [:meta :task-spec :outputs :done])))
+      (is (= [{:task-id task-id
+               :step-id :run
+               :context {:source "registry"}}]
+             @calls)))))
+
+(deftest per-run-executor-overrides-registered-executor
+  (task-spec/register-executor!
+   :custom
+   (fn [_]
+     {:status :success
+      :output "registered"}))
+  (let [task-id (task-spec/create-task!
+                 {:goal "Override custom step"
+                  :steps [{:id :run
+                           :kind :custom}]})
+        result  (task-spec/run-task!
+                 task-id
+                 :executors {:custom (fn [_]
+                                       {:status :success
+                                        :output "per-run"})})
+        task    (db/get-task task-id)]
+    (is (= :completed (:status result)))
+    (is (= "per-run"
+           (get-in task [:meta :task-spec :outputs :run])))))
+
+(deftest task-spec-input-step-uses-channel-prompt
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :task
+                                     :state :resumable
+                                     :title "Input spec"
+                                     :summary "Input spec"
+                                     :contract (task-spec/task-contract
+                                                {:goal "Input spec"
+                                                 :steps [{:id :ask
+                                                          :kind :input
+                                                          :label "Access code"}
+                                                         {:id :echo
+                                                          :kind :value
+                                                          :value [:output :ask]}]})
+                                     :meta {:execution {:mode :interactive}}})
+        prompts    (atom [])]
+    (prompt/register-prompt!
+     :terminal
+     (fn [label & {:keys [mask?]}]
+       (swap! prompts conj {:label label :mask? mask?})
+       "123456"))
+    (let [result (task-spec/run-task! task-id)
+          task   (db/get-task task-id)
+          items  (mapcat #(db/turn-items (:id %))
+                         (db/task-turns task-id))]
+      (is (= :completed (:status result)))
+      (is (= "123456"
+             (get-in task [:meta :task-spec :outputs :echo])))
+      (is (= [{:label "Access code" :mask? false}] @prompts))
+      (is (some #(= :input-request (:type %)) items))
+      (is (some #(= "input-response" (get-in % [:data :kind])) items)))))
+
+(deftest task-spec-approval-step-uses-channel-approval
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :task
+                                     :state :resumable
+                                     :title "Approval spec"
+                                     :summary "Approval spec"
+                                     :contract (task-spec/task-contract
+                                                {:goal "Approval spec"
+                                                 :steps [{:id :confirm-delete
+                                                          :kind :approval
+                                                          :tool-id :dangerous-action
+                                                          :tool-name "Dangerous action"
+                                                          :description "Confirm the action"
+                                                          :args {:id 42}}
+                                                         {:id :done
+                                                          :kind :value
+                                                          :when [:step-ok? :confirm-delete]
+                                                          :value "approved"}]})
+                                     :meta {:execution {:mode :interactive}}})
+        approvals (atom [])]
+    (prompt/register-approval!
+     :terminal
+     (fn [request]
+       (swap! approvals conj request)
+       true))
+    (let [result (task-spec/run-task! task-id)
+          task   (db/get-task task-id)
+          items  (mapcat #(db/turn-items (:id %))
+                         (db/task-turns task-id))]
+      (is (= :completed (:status result)))
+      (is (= "approved"
+             (get-in task [:meta :task-spec :outputs :done])))
+      (is (= :dangerous-action
+             (:tool-id (first @approvals))))
+      (is (= {:id 42}
+             (:arguments (first @approvals))))
+      (is (some #(= :approval-request (:type %)) items))
+      (is (some #(= "approval-decision" (get-in % [:data :kind])) items)))))
+
+(deftest task-spec-runs-subtask-inline
+  (let [task-id (task-spec/create-task!
+                 {:goal "Run parent task"
+                  :inputs {:name "Xia"}
+                  :steps [{:id :prepare
+                           :kind :subtask
+                           :title "Prepare greeting"
+                           :inputs {:name [:input :name]}
+                           :spec {:goal "Prepare greeting"
+                                  :steps [{:id :render
+                                           :kind :value
+                                           :value {:body [:str "Hello " [:input :name]]}}
+                                          {:id :done
+                                           :kind :value
+                                           :value [:output :render]}]}}
+                          {:id :publish
+                           :kind :value
+                           :value [:output :prepare [:outputs :done :body]]}]})
+        result  (task-spec/run-task! task-id)
+        task    (db/get-task task-id)
+        output  (get-in task [:meta :task-spec :outputs :prepare])
+        child   (db/get-task (:task-id output))]
+    (is (= :completed (:status result)))
+    (is (= "Hello Xia"
+           (get-in task [:meta :task-spec :outputs :publish])))
+    (is (= :completed (:state child)))
+    (is (= task-id (:parent-id child)))
+    (is (= :subtask (get-in child [:meta :trigger :kind])))
+    (is (= :prepare (get-in child [:meta :trigger :parent-step-id])))
+    (is (= "Hello Xia"
+           (get-in child [:meta :task-spec :outputs :done :body])))))
+
+(deftest task-spec-subtask-pauses-and-resumes-same-child
+  (let [task-id (task-spec/create-task!
+                 {:goal "Run parent task with child executor"
+                  :steps [{:id :delegate
+                           :kind :subtask
+                           :spec {:goal "Judge in child"
+                                  :steps [{:id :judge
+                                           :kind :llm
+                                           :prompt "Judge this"}
+                                          {:id :done
+                                           :kind :value
+                                           :value [:output :judge]}]}}
+                          {:id :publish
+                           :kind :value
+                           :value [:output :delegate [:outputs :done :decision]]}]})
+        paused  (task-spec/run-task! task-id)
+        task*   (db/get-task task-id)
+        child-id (get-in task* [:meta :task-spec :outputs :delegate :task-id])
+        child*  (db/get-task child-id)
+        resumed (task-spec/run-task!
+                 task-id
+                 :executors {:llm (fn [_]
+                                    {:status :success
+                                     :summary "Child judged"
+                                     :output {:decision "ship"}})})
+        task**  (db/get-task task-id)
+        child-id* (get-in task** [:meta :task-spec :outputs :delegate :task-id])
+        child** (db/get-task child-id*)]
+    (is (= :paused (:status paused)))
+    (is (= :resumable (:state task*)))
+    (is (= :resumable (:state child*)))
+    (is (= :paused (get-in child* [:meta :task-spec :steps :judge :status])))
+    (is (= :completed (:status resumed)))
+    (is (= child-id child-id*))
+    (is (= :completed (:state child**)))
+    (is (= "ship"
+           (get-in task** [:meta :task-spec :outputs :publish])))))
+
+(deftest task-spec-branch-join-runs-independent-child-and-collects-outputs
+  (let [task-id (task-spec/create-task!
+                 {:goal "Run parent task with joined branch"
+                  :inputs {:topic "Xia"}
+                  :steps [{:id :research
+                           :kind :branch
+                           :mode :join
+                           :title "Research branch"
+                           :inputs {:topic [:input :topic]}
+                           :spec {:goal "Research branch"
+                                  :steps [{:id :findings
+                                           :kind :value
+                                           :value {:body [:str "Findings for " [:input :topic]]}}]}}
+                          {:id :publish
+                           :kind :value
+                           :value [:output :research [:outputs :findings :body]]}]})
+        result  (task-spec/run-task! task-id)
+        task    (db/get-task task-id)
+        output  (get-in task [:meta :task-spec :outputs :research])
+        child   (db/get-task (:task-id output))]
+    (is (= :completed (:status result)))
+    (is (= "Findings for Xia"
+           (get-in task [:meta :task-spec :outputs :publish])))
+    (is (= :completed (:state child)))
+    (is (= :branch (:channel child)))
+    (is (= task-id (:parent-id child)))
+    (is (= :branch (get-in child [:meta :trigger :kind])))
+    (is (= :research (get-in child [:meta :trigger :parent-step-id])))
+    (is (true? (get-in child [:meta :branch-worker])))
+    (is (= "Findings for Xia"
+           (get-in child [:meta :task-spec :outputs :findings :body])))))
+
+(deftest task-spec-branch-async-spawns-child-and-continues
+  (let [submitted (atom nil)
+        task-id   (task-spec/create-task!
+                   {:goal "Run parent task with async branch"
+                    :steps [{:id :research
+                             :kind :branch
+                             :mode :async
+                             :spec {:goal "Async research"
+                                    :steps [{:id :findings
+                                             :kind :value
+                                             :value {:body "async findings"}}]}}
+                            {:id :record-child
+                             :kind :value
+                             :value [:output :research :task-id]}]})]
+    (with-redefs [async/submit-background! (fn [_ f]
+                                             (reset! submitted f)
+                                             ::future)]
+      (let [result (task-spec/run-task! task-id)
+            task   (db/get-task task-id)
+            child-id (get-in task [:meta :task-spec :outputs :research :task-id])
+            child  (db/get-task child-id)]
+        (is (= :completed (:status result)))
+        (is (= child-id
+               (get-in task [:meta :task-spec :outputs :record-child])))
+        (is (= :running
+               (get-in task [:meta :task-spec :outputs :research :status])))
+        (is (true? (get-in task [:meta :task-spec :outputs :research :async])))
+        (is (= :resumable (:state child)))
+        (is (= :branch (:channel child)))
+        (is (= :branch (get-in child [:meta :trigger :kind])))
+        (is (fn? @submitted))
+        (@submitted)
+        (let [child* (db/get-task child-id)]
+          (is (= :completed (:state child*)))
+          (is (= "async findings"
+                 (get-in child* [:meta :task-spec :outputs :findings :body]))))))))
+
+(deftest task-control-resume-routes-task-spec-through-runner
+  (let [session-id (db/create-session! :terminal)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :terminal
+                                     :type :task
+                                     :state :resumable
+                                     :title "Resume spec"
+                                     :summary "Resume spec"
+                                     :contract {:kind :task
+                                                :version 1
+                                                :goal "Resume spec"
+                                                :spec {:kind :task
+                                                       :version 1
+                                                       :goal "Resume spec"
+                                                       :steps [{:id :continue
+                                                                :kind :llm
+                                                                :prompt "Continue"}]}}
+                                     :meta {:execution {:mode :agent}}})
+        calls      (atom [])]
+    (with-redefs [async/submit-background! (fn [_ f]
+                                             (f)
+                                             true)]
+      (let [result (task-runtime/resume-task!
+                    {:task-run-entry (constantly nil)
+                     :session-run-entry (constantly nil)
+                     :reserve-next-session-turn! (fn [& _] ::reservation)
+                     :clear-session-turn-reservation! (fn [& args]
+                                                        (swap! calls conj [:clear (vec args)]))
+                     :run-task-spec! (fn [& args]
+                                       (swap! calls conj [:runner (vec args)])
+                                       {:status :completed})}
+                    task-id
+                    :message "Continue now")]
+        (is (= :running (:status result)))
+        (is (= [:runner
+                [task-id
+                 :message "Continue now"
+                 :channel :terminal
+                 :runtime-op :resume
+                 :turn-reservation-token ::reservation]]
+               (first @calls)))
+        (is (= :clear (ffirst (rest @calls))))))))

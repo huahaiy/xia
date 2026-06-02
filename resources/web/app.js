@@ -808,6 +808,98 @@ function currentTaskLatestOutputView() {
   return asObject(asArray(inspection.recent_output)[0] || inspection.last_output);
 }
 
+function objectField(data) {
+  const obj = asObject(data);
+  for (let index = 1; index < arguments.length; index += 1) {
+    const key = arguments[index];
+    if (Object.prototype.hasOwnProperty.call(obj, key)) return obj[key];
+  }
+  return undefined;
+}
+
+function tokenText(value) {
+  return firstPresentText(value).replace(/^:/, '');
+}
+
+function taskSpecFromContract(contract) {
+  return asObject(objectField(contract, 'spec'));
+}
+
+function taskSpecStepRuntimeById(steps) {
+  return asArray(steps).reduce((acc, step) => {
+    const stepObj = asObject(step);
+    const id = tokenText(firstPresentText(stepObj.id, stepObj.step_id));
+    if (id) acc[id] = stepObj;
+    return acc;
+  }, {});
+}
+
+function currentTaskSpecView() {
+  const task = asObject(state.currentTask);
+  const contract = asObject(task.contract);
+  const spec = taskSpecFromContract(contract);
+  const inspection = currentTaskInspection();
+  const runtime = asObject(inspection.task_spec);
+  const specSteps = asArray(spec.steps);
+  const runtimeSteps = asArray(runtime.steps);
+  const hasTaskSpec = specSteps.length > 0
+    || runtimeSteps.length > 0;
+  if (!hasTaskSpec) return null;
+
+  const runtimeById = taskSpecStepRuntimeById(runtimeSteps);
+  const steps = specSteps.length
+    ? specSteps.map((specStep, index) => {
+      const specStepObj = asObject(specStep);
+      const id = tokenText(firstPresentText(specStepObj.id, specStepObj.step_id, String(index + 1)));
+      const runtimeStep = asObject(runtimeById[id]);
+      return {
+        id,
+        kind: tokenText(firstPresentText(specStepObj.kind, runtimeStep.kind)),
+        status: tokenText(firstPresentText(runtimeStep.status, specStepObj.status, 'pending')),
+        summary: firstPresentText(runtimeStep.summary, specStepObj.summary),
+        error: firstPresentText(runtimeStep.error),
+        tool: tokenText(firstPresentText(
+          objectField(specStepObj, 'tool-id', 'tool_id', 'toolId'),
+          specStepObj.tool
+        )),
+        hasCondition: Object.prototype.hasOwnProperty.call(specStepObj, 'when')
+          || Object.prototype.hasOwnProperty.call(specStepObj, 'expr')
+      };
+    })
+    : runtimeSteps.map((step, index) => {
+      const stepObj = asObject(step);
+      return {
+        id: tokenText(firstPresentText(stepObj.id, stepObj.step_id, String(index + 1))),
+        kind: tokenText(firstPresentText(stepObj.kind, stepObj.step_kind)),
+        status: tokenText(firstPresentText(stepObj.status, 'pending')),
+        summary: firstPresentText(stepObj.summary),
+        error: firstPresentText(stepObj.error),
+        tool: tokenText(firstPresentText(stepObj.tool_id, stepObj.tool)),
+        hasCondition: false
+      };
+    });
+
+  const stepCount = typeof runtime.step_count === 'number' ? runtime.step_count : steps.length;
+  const completedCount = typeof runtime.completed_count === 'number'
+    ? runtime.completed_count
+    : steps.filter((step) => ['success', 'skipped'].includes(step.status)).length;
+  const failedCount = typeof runtime.failed_count === 'number'
+    ? runtime.failed_count
+    : steps.filter((step) => step.status === 'failed').length;
+
+  return {
+    status: tokenText(firstPresentText(runtime.status, 'ready')),
+    currentStepId: tokenText(firstPresentText(runtime.current_step_id)),
+    pauseReason: tokenText(firstPresentText(runtime.pause_reason)),
+    stepCount,
+    completedCount,
+    failedCount,
+    goal: firstPresentText(spec.goal, contract.goal, task.title),
+    steps,
+    spec
+  };
+}
+
 function currentTaskControlActions() {
   const task = asObject(state.currentTask);
   const taskState = firstPresentText(currentTaskStateView().taskState, task.state).toLowerCase();
@@ -1048,6 +1140,111 @@ function createTaskActivityItem(entry) {
   return item;
 }
 
+function createTaskSpecStepItem(step) {
+  const item = document.createElement('div');
+  item.className = 'task-list-item task-spec-step-item';
+  const head = document.createElement('div');
+  head.className = 'task-list-item-head';
+  const title = document.createElement('div');
+  title.className = 'task-list-title';
+  title.textContent = firstPresentText(step.id, 'Step');
+  head.appendChild(title);
+  const badge = document.createElement('span');
+  badge.className = 'task-state-badge';
+  badge.dataset.tone = taskBadgeTone(step.status);
+  badge.textContent = titleizeToken(firstPresentText(step.status, 'pending'));
+  head.appendChild(badge);
+  item.appendChild(head);
+
+  const metaParts = [];
+  if (step.kind) metaParts.push(titleizeToken(step.kind));
+  if (step.tool) metaParts.push(step.tool);
+  if (step.hasCondition) metaParts.push('Conditional');
+  const meta = document.createElement('div');
+  meta.className = 'task-list-meta';
+  meta.textContent = metaParts.join(' · ');
+  item.appendChild(meta);
+
+  const detail = firstPresentText(step.error, step.summary);
+  if (detail) {
+    const summary = document.createElement('p');
+    summary.className = 'task-list-summary';
+    summary.textContent = detail;
+    item.appendChild(summary);
+  }
+  return item;
+}
+
+function createTaskSpecCard(taskSpec) {
+  const card = document.createElement('section');
+  card.className = 'task-card task-spec-card';
+  const header = document.createElement('div');
+  header.className = 'task-card-header';
+  const copy = document.createElement('div');
+  copy.className = 'task-card-copy';
+  const title = document.createElement('h3');
+  title.className = 'task-card-title';
+  title.textContent = 'Task Spec';
+  copy.appendChild(title);
+  const subtitle = [
+    taskSpec.goal,
+    taskSpec.stepCount ? (taskSpec.stepCount + ' step' + (taskSpec.stepCount === 1 ? '' : 's')) : ''
+  ].filter(Boolean).join(' · ');
+  if (subtitle) {
+    const summary = document.createElement('p');
+    summary.className = 'task-card-summary';
+    summary.textContent = subtitle;
+    copy.appendChild(summary);
+  }
+  header.appendChild(copy);
+  const badge = document.createElement('span');
+  badge.className = 'task-state-badge';
+  badge.dataset.tone = taskBadgeTone(taskSpec.status);
+  badge.textContent = titleizeToken(firstPresentText(taskSpec.status, 'ready'));
+  header.appendChild(badge);
+  card.appendChild(header);
+
+  const metaGrid = document.createElement('div');
+  metaGrid.className = 'task-meta-grid';
+  [
+    ['Completed', taskSpec.completedCount + '/' + taskSpec.stepCount],
+    ['Failed', taskSpec.failedCount ? String(taskSpec.failedCount) : '0'],
+    ['Current Step', taskSpec.currentStepId],
+    ['Pause Reason', titleizeToken(taskSpec.pauseReason)]
+  ].forEach(([label, value]) => {
+    if (!firstPresentText(value)) return;
+    metaGrid.appendChild(createTaskMetaItem(label, value));
+  });
+  if (metaGrid.childNodes.length) {
+    card.appendChild(metaGrid);
+  }
+
+  if (taskSpec.steps.length) {
+    const list = document.createElement('div');
+    list.className = 'task-list task-spec-step-list';
+    taskSpec.steps.forEach((step) => {
+      list.appendChild(createTaskSpecStepItem(step));
+    });
+    card.appendChild(list);
+  }
+
+  if (Object.keys(asObject(taskSpec.spec)).length) {
+    const details = document.createElement('details');
+    details.className = 'task-spec-details';
+    const summary = document.createElement('summary');
+    summary.className = 'task-spec-summary';
+    summary.textContent = 'Spec';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.className = 'task-spec-code';
+    pre.textContent = prettyJson(taskSpec.spec);
+    details.appendChild(pre);
+    card.appendChild(details);
+  }
+
+  return card;
+}
+
 function renderCurrentTaskPanel() {
   if (!currentTaskPanelEl || !currentTaskNoteEl) return;
   currentTaskPanelEl.replaceChildren();
@@ -1078,6 +1275,7 @@ function renderCurrentTaskPanel() {
   const agenda = currentTaskAgendaView();
   const checkpoint = currentTaskCheckpointView();
   const budget = currentTaskBudgetView();
+  const taskSpec = currentTaskSpecView();
   const title = firstPresentText(task.title, currentState.currentFocus, 'Current task');
   const subtitle = firstPresentText(currentState.message, task.summary);
   currentTaskNoteEl.textContent = firstPresentText(
@@ -1193,6 +1391,10 @@ function renderCurrentTaskPanel() {
   }
   currentTaskPanelEl.appendChild(overview);
 
+  if (taskSpec) {
+    currentTaskPanelEl.appendChild(createTaskSpecCard(taskSpec));
+  }
+
   if (firstPresentText(attention.kind, attention.summary)) {
     const attentionCard = document.createElement('section');
     attentionCard.className = 'task-card attention-card';
@@ -1303,7 +1505,7 @@ function renderCurrentTaskPanel() {
     currentTaskPanelEl.appendChild(activityCard);
   }
 
-  if (!agenda.length && !activity.length && !firstPresentText(attention.kind, attention.summary)) {
+  if (!taskSpec && !agenda.length && !activity.length && !firstPresentText(attention.kind, attention.summary)) {
     const empty = document.createElement('p');
     empty.className = 'task-empty-note';
     empty.textContent = 'Task detail is available, but there is no recent agenda or activity yet.';
@@ -2077,6 +2279,8 @@ function taskActivityKindLabel(kind) {
       return 'Status';
     case 'task.checkpoint':
       return 'Checkpoint';
+    case 'task.step':
+      return 'Task step';
     case 'input.requested':
       return 'Input requested';
     case 'approval.requested':

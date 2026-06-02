@@ -79,7 +79,7 @@ This is intended for editing:
 
 ## Limitations
 
-- `--web-dev` only works when the web resources are file-backed on the classpath, which is the normal source checkout workflow.
+- `--web-dev` only works when the web resources are file-backed on the classpath, which is the normal source checkout setup.
 - In packaged or native-image distributions, Xia falls back to the bundled web assets and live reload is not enabled.
 
 ## Notes

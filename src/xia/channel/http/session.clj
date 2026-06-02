@@ -316,16 +316,18 @@
 (defn- history-contract->body
   [contract]
   (when (map? contract)
-    (let [kind (:kind contract)]
+    (let [kind (:kind contract)
+          task-spec (:spec contract)]
       (cond-> {}
         kind (assoc :kind kind)
         (:goal contract) (assoc :goal (:goal contract))
-        (and (= kind :branch) (:objective contract)) (assoc :objective (:objective contract))
-        (and (= kind :branch) (:parent-task-id contract)) (assoc :parent-task-id (:parent-task-id contract))
-        (and (= kind :schedule) (:schedule-id contract)) (assoc :schedule-id (:schedule-id contract))
-        (and (= kind :schedule) (:schedule-type contract)) (assoc :schedule-type (:schedule-type contract))
-        (and (= kind :schedule) (contains? contract :trusted?)) (assoc :trusted? (:trusted? contract))
-        (and (= kind :schedule) (:tool-id contract)) (assoc :tool-id (:tool-id contract))))))
+        (:objective contract) (assoc :objective (:objective contract))
+        (:parent-task-id contract) (assoc :parent-task-id (:parent-task-id contract))
+        (:schedule-id contract) (assoc :schedule-id (:schedule-id contract))
+        (:schedule-type contract) (assoc :schedule-type (:schedule-type contract))
+        (contains? contract :trusted?) (assoc :trusted? (:trusted? contract))
+        (:tool-id contract) (assoc :tool-id (:tool-id contract))
+        task-spec (assoc :step-count (count (:steps task-spec)))))))
 
 (defn- persistent-goal->body
   [deps goal]

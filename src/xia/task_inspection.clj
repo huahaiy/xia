@@ -14,6 +14,8 @@
 (def ^:private detail-checkpoint-limit 5)
 (def ^:private detail-activity-limit 12)
 
+(declare truncate-envelope-value)
+
 (defn- instant->str*
   [opts value]
   (when-let [f (:instant->str opts)]
@@ -231,6 +233,19 @@
       (:progress-status data) (assoc :progress_status (keyword->str (:progress-status data)))
       (:stack-action data) (assoc :stack_action (keyword->str (:stack-action data))))))
 
+(defn- task-step-entry
+  [opts item]
+  (let [data (:data item)]
+    (cond-> {:turn_id (uuid->str (:turn-id item))
+             :created_at (instant->str* opts (:created-at item))
+             :summary (truncate-text* opts (:summary item) 240)}
+      (:step-id data) (assoc :step_id (:step-id data))
+      (:step-kind data) (assoc :step_kind (:step-kind data))
+      (:status item) (assoc :status (keyword->str (:status item)))
+      (:status data) (assoc :task_status (:status data))
+      (contains? data :output) (assoc :output (truncate-envelope-value opts (:output data)))
+      (:error data) (assoc :error (truncate-text* opts (:error data) 240)))))
+
 (defn- recent-checkpoints
   [opts items limit]
   (->> items
@@ -281,6 +296,7 @@
     :tool-result (assoc (tool-activity-entry opts item) :kind "tool.completed")
     :status (assoc (status-update-entry opts item) :kind "task.status")
     :checkpoint (assoc (checkpoint-entry opts item) :kind "task.checkpoint")
+    :task-step (assoc (task-step-entry opts item) :kind "task.step")
     :input-request (interaction-entry opts "input.requested" item)
     :approval-request (interaction-entry opts "approval.requested" item)
     :system-note (note-entry opts item)
@@ -439,6 +455,33 @@
         (assoc :status {:kind (keyword->str (:kind status))
                         :summary (limits/budget-summary status)})))))
 
+(defn- task-spec-step-summary
+  [step]
+  (when (map? step)
+    (cond-> {:id (some-> (:id step) name)
+             :kind (keyword->str (:kind step))
+             :status (keyword->str (:status step))}
+      (:summary step) (assoc :summary (:summary step))
+      (:error step) (assoc :error (:error step)))))
+
+(defn- task-spec-body
+  [task]
+  (when-let [task-spec (get-in task [:meta :task-spec])]
+    (let [step-map (:steps task-spec)
+          spec     (get-in task [:contract :spec])
+          steps    (vec (if-let [spec-steps (seq (:steps spec))]
+                          (keep #(get step-map (:id %)) spec-steps)
+                          (vals step-map)))]
+      (cond-> {:status (keyword->str (:status task-spec))
+               :step_count (count steps)
+               :completed_count (count (filter #(contains? #{:success :skipped}
+                                                            (:status %))
+                                                steps))
+               :failed_count (count (filter #(= :failed (:status %)) steps))}
+        (:current-step-id task-spec) (assoc :current_step_id (name (:current-step-id task-spec)))
+        (:pause-reason task-spec) (assoc :pause_reason (keyword->str (:pause-reason task-spec)))
+        (seq steps) (assoc :steps (mapv task-spec-step-summary steps))))))
+
 (defn- truncate-envelope-value
   [opts value]
   (cond
@@ -490,6 +533,7 @@
          activity-limit        (if compact? 1 detail-activity-limit)
          current-tip           (current-tip-body opts autonomy-state)
          budget                (budget-body task)
+         task-spec             (task-spec-body task)
          output                (recent-output opts items output-limit)
          tool-activity         (recent-tool-activity opts items tool-limit)
          policy-decisions      (recent-policy-decisions opts items policy-limit)
@@ -497,14 +541,15 @@
          checkpoints           (recent-checkpoints opts items checkpoint-limit)
          activity              (recent-activity opts items activity-limit)
          operating-envelope    (operating-envelope-body opts task)
-         base                  {:current_tip current-tip
-                                :stack_summary (stack-summary opts autonomy-state compact?)
-                                :last_checkpoint (checkpoint-body opts task)
-                                :current_state (current-state-body opts task runtime current-tip checkpoint)
-                                :attention (attention-body opts task runtime items budget)
-                                :budget budget
-                                :operating_envelope operating-envelope
-                                :counts (counts-body turns items)}]
+         base                  (cond-> {:current_tip current-tip
+                                         :stack_summary (stack-summary opts autonomy-state compact?)
+                                         :last_checkpoint (checkpoint-body opts task)
+                                         :current_state (current-state-body opts task runtime current-tip checkpoint)
+                                         :attention (attention-body opts task runtime items budget)
+                                         :budget budget
+                                         :operating_envelope operating-envelope
+                                         :counts (counts-body turns items)}
+                                 task-spec (assoc :task_spec task-spec))]
      (if compact?
        (cond-> base
          (first output) (assoc :last_output (first output))

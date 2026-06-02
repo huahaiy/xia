@@ -1207,6 +1207,9 @@ textarea:focus-visible {
   border-color: rgba(202, 138, 4, 0.16);
   background: rgba(254, 252, 232, 0.92);
 }
+.task-card.task-spec-card {
+  grid-column: 1 / -1;
+}
 .task-card-header {
   display: flex;
   justify-content: space-between;
@@ -1347,6 +1350,39 @@ textarea:focus-visible {
   color: var(--ink);
   font-size: 0.84rem;
   line-height: 1.55;
+}
+.task-spec-step-list {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.task-spec-step-item {
+  min-width: 0;
+}
+.task-spec-details {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  overflow: hidden;
+}
+.task-spec-summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.task-spec-code {
+  margin: 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  padding: 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .task-empty-note {
   margin: 0;

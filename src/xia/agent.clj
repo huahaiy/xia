@@ -20,12 +20,14 @@
             [xia.async :as async]
             [xia.autonomous :as autonomous]
             [xia.context :as context]
+            [xia.db :as db]
             [xia.limits :as limits]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.policy :as task-policy]
+            [xia.task-spec :as task-spec]
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
@@ -836,6 +838,58 @@
                                                         session-id
                                                         @runtime-task))))))))))
 
+(defn- task-spec-llm-executor
+  [{:keys [session-id channel message runtime-op provider-id resource-session-id
+           max-tool-rounds tool-context turn-reservation-token]}]
+  (fn [{:keys [task-id step context]}]
+    (let [prompt* (or (:message context)
+                      message
+                      (:prompt step)
+                      (:goal step)
+                      "Continue the task.")]
+      {:status :success
+       :summary "LLM task step completed"
+       :output (process-message session-id
+                                prompt*
+                                :channel channel
+                                :task-id task-id
+                                :runtime-op runtime-op
+                                :provider-id provider-id
+                                :resource-session-id resource-session-id
+                                :max-tool-rounds max-tool-rounds
+                                :tool-context (or tool-context {})
+                                :persist-message? false
+                                :turn-reservation-token turn-reservation-token)})))
+
+(defn- run-task-spec!
+  [task-id & {:keys [message channel runtime-op provider-id resource-session-id
+                     max-tool-rounds tool-context turn-reservation-token operation]
+              :or {tool-context {}}}]
+  (if-let [task (db/get-task task-id)]
+    (let [session-id (:session-id task)
+          channel*   (or channel (:channel task) :terminal)
+          runtime-op* (or runtime-op
+                          (if (= :ready (get-in task [:meta :task-spec :status]))
+                            :start
+                            :resume))]
+      (task-spec/run-task!
+       task-id
+       :operation operation
+       :context {:message message}
+       :executors {:llm
+                   (task-spec-llm-executor
+                    {:session-id session-id
+                     :channel channel*
+                     :message message
+                     :runtime-op runtime-op*
+                     :provider-id provider-id
+                     :resource-session-id resource-session-id
+                     :max-tool-rounds max-tool-rounds
+                     :tool-context tool-context
+                     :turn-reservation-token turn-reservation-token})}))
+    {:status :not-found
+     :error "task not found"}))
+
 (defn- task-control-deps
   []
   (merge (task-runtime-deps)
@@ -844,6 +898,7 @@
           :process-message process-message
           :register-child-session! register-child-session!
           :reserve-next-session-turn! reserve-next-session-turn!
+          :run-task-spec! run-task-spec!
           :session-run-entry session-run-entry
           :task-run-entry task-run-entry
           :task-control-wait-ms task-control-wait-ms
@@ -896,6 +951,7 @@
    :process-message process-message
    :register-child-session! register-child-session!
    :report-status! report-status!
+   :run-task-spec! run-task-spec!
    :throw-if-cancelled! throw-if-cancelled!
    :throw-if-runtime-stopping! throw-if-runtime-stopping!
    :throwable-detail throwable-detail

@@ -8,7 +8,8 @@
             [xia.db :as db])
   (:import [java.util Date UUID]))
 
-(def board-task-type :board-card)
+(def board-task-type :task)
+(def legacy-board-task-type :board-card)
 (def board-channel :board)
 
 (def statuses #{:open :claimed :blocked :completed :cancelled})
@@ -80,7 +81,8 @@
 
 (defn- board-task?
   [task]
-  (= board-task-type (:type task)))
+  (or (= legacy-board-task-type (:type task))
+      (some? (get-in task [:meta :board]))))
 
 (defn- require-card
   [card-id]
@@ -158,7 +160,21 @@
                              :state status*
                              :title title*
                              :summary (or (nonblank-str description) "")
-                             :meta {:board (cond-> {:priority priority*
+                             :contract {:kind :task
+                                        :version 1
+                                        :goal title*
+                                        :spec {:kind :task
+                                               :version 1
+                                               :goal title*
+                                               :steps [{:id :work
+                                                        :kind :llm
+                                                        :mode :agent
+                                                        :prompt (or (nonblank-str description)
+                                                                    title*)}]}}
+                             :meta {:trigger {:kind :user}
+                                    :execution {:mode :agent}
+                                    :board (cond-> {:visible? true
+                                                    :priority priority*
                                                     :comments []}
                                              assignee* (assoc :assignee assignee*))}}
                       task-id (assoc :id task-id)

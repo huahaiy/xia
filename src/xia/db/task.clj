@@ -139,6 +139,50 @@
     (transact!* deps [{:db/id task-eid*
                        :task/updated-at (now)}])))
 
+(def ^:private canonical-task-type :task)
+
+(def ^:private legacy-task-types
+  #{:interactive :schedule :branch :board-card})
+
+(defn- normalize-task-type
+  [type]
+  (cond
+    (nil? type) canonical-task-type
+    (contains? legacy-task-types type) canonical-task-type
+    :else type))
+
+(defn- deep-merge
+  [& maps]
+  (letfn [(merge-entry [left right]
+            (if (and (map? left) (map? right))
+              (merge-with merge-entry left right)
+              right))]
+    (apply merge-with merge-entry maps)))
+
+(defn- legacy-task-meta
+  [type {:keys [session-id parent-id channel]}]
+  (case type
+    :interactive (cond-> {:trigger {:kind :user}
+                          :execution {:mode :interactive}}
+                   session-id (assoc-in [:trigger :session-id] session-id)
+                   channel (assoc-in [:trigger :channel] channel))
+    :schedule {:trigger {:kind :schedule}
+               :execution {:mode :hybrid}}
+    :branch {:trigger (cond-> {:kind :branch}
+                       parent-id (assoc :parent-task-id parent-id))
+             :execution {:mode :agent}}
+    :board-card {:trigger {:kind :user}
+                 :board {:visible? true}}
+    {}))
+
+(defn- normalize-task-meta
+  [type meta context]
+  (let [defaults (legacy-task-meta type context)]
+    (cond
+      (and (seq defaults) (map? meta)) (deep-merge defaults meta)
+      (seq defaults) defaults
+      :else meta)))
+
 (defn create-task!
   "Create a durable task.
 
@@ -149,6 +193,9 @@
                 constraints boundary stop-reason error meta autonomy-state current-turn-id started-at finished-at]}]
   (let [task-id      (or id (random-uuid))
         created-at   (now)
+        meta*        (normalize-task-meta type meta {:session-id session-id
+                                                     :parent-id parent-id
+                                                     :channel channel})
         session-eid* (when session-id
                        (or (session-eid deps session-id)
                            (throw (ex-info "Cannot create task: session not found"
@@ -156,7 +203,7 @@
     (transact!*
      deps
      [(cond-> {:task/id task-id
-               :task/type (or type :interactive)
+               :task/type (normalize-task-type type)
                :task/state (or state :running)
                :task/title (or title "")
                :task/created-at created-at
@@ -170,7 +217,7 @@
         (some? boundary) (assoc :task/boundary boundary)
         stop-reason (assoc :task/stop-reason stop-reason)
         (some? error) (assoc :task/error error)
-        (some? meta) (assoc :task/meta meta)
+        (some? meta*) (assoc :task/meta meta*)
         (some? autonomy-state) (assoc :task/autonomy-state autonomy-state)
         current-turn-id (assoc :task/current-turn-id current-turn-id)
         (some? started-at) (assoc :task/started-at started-at)
@@ -249,7 +296,7 @@
                 session-eid* (assoc :task/session session-eid*)
                 parent-id (assoc :task/parent-id parent-id)
                 channel (assoc :task/channel channel)
-                type (assoc :task/type type)
+                (contains? attrs :type) (assoc :task/type (normalize-task-type type))
                 state (assoc :task/state state)
                 (some? title) (assoc :task/title title)
                 (some? summary) (assoc :task/summary summary)

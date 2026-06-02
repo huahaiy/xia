@@ -1,5 +1,5 @@
 (ns xia.pipeline
-  "Restricted SCI pipelines for repetitive tool workflows."
+  "Restricted SCI pipelines for repetitive tool tasks."
   (:refer-clojure :exclude [run!])
   (:require [clojure.string :as str]
             [clojure.tools.reader :as tr]

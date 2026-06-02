@@ -239,7 +239,8 @@
 
 (defn- resume-target-label
   [task]
-  (if (= :schedule (:type task))
+  (if (or (= :schedule (:type task))
+          (= :schedule (get-in task [:meta :trigger :kind])))
     "the next scheduled run"
     "the next turn"))
 
@@ -320,7 +321,8 @@
 
 (defn- boundary-schedule-run-hint
   [task next-step resume-hint]
-  (if (= :schedule (:type task))
+  (if (or (= :schedule (:type task))
+          (= :schedule (get-in task [:meta :trigger :kind])))
     (or resume-hint
         (str "On the next scheduled run, continue with: " next-step))
     "No scheduled run is associated with this task."))
@@ -691,14 +693,31 @@
   [existing-contract channel goal user-message]
   (let [message* (some-> user-message str str/trim not-empty)]
     (cond-> (merge (when (map? existing-contract) existing-contract)
-                   {:kind :interactive
+                   {:kind :task
+                    :version 1
                     :goal goal
-                    :channel channel})
+                    :channel channel
+                    :spec {:kind :task
+                           :version 1
+                           :goal goal
+                           :steps [{:id :work-with-user
+                                    :kind :llm
+                                    :mode :interactive
+                                    :prompt (or message* goal)}]}})
       message* (assoc :initial_message message*))))
+
+(defn- interactive-task?
+  [task]
+  (or (= :interactive (:type task))
+      (= :interactive (get-in task [:meta :execution :mode]))))
+
+(defn- task-spec-task?
+  [task]
+  (boolean (seq (get-in task [:contract :spec :steps]))))
 
 (defn- refresh-interactive-task-goal?
   [task operation user-message]
-  (and (= :interactive (:type task))
+  (and (interactive-task? task)
        (= :steer operation)
        (some-> user-message str str/trim not-empty)))
 
@@ -777,11 +796,15 @@
         resolved-task-id (or task-id
                              (db/create-task! {:session-id session-id
                                                :channel channel
-                                               :type :interactive
+                                               :type :task
                                                :state :running
                                                :title title
                                                :summary title
                                                :contract contract
+                                               :meta {:trigger {:kind :user
+                                                                :session-id session-id
+                                                                :channel channel}
+                                                      :execution {:mode :interactive}}
                                                :autonomy-state autonomy-state
                                                :started-at (java.util.Date.)}))]
     (when task-id
@@ -1298,46 +1321,55 @@
         (runtime-draining-result task-id session-id)
 
         :else
-        (if-let [reservation-token ((:reserve-next-session-turn! deps)
-                                    session-id
-                                    {:task-id task-id
-                                     :runtime-op :resume})]
-          (if-let [_future
-                   (async/submit-background!
-                    (str "task-resume:" task-id)
-                    #(try
-                       ((:process-message deps) session-id
-                        message*
-                        :channel channel
-                        :task-id task-id
-                        :runtime-op :resume
-                        :persist-message? false
-                        :turn-reservation-token reservation-token)
-                       (finally
-                         ((:clear-session-turn-reservation! deps)
-                          session-id
-                          reservation-token))))]
-            (do
-              (sync-runtime-task! task-id
-                                  {:state :running
-                                   :stop-reason nil
-                                   :error nil
-                                   :finished-at nil
-                                   :summary "Task resumed"})
-              (record-task-resume! task-id :resume message*)
-              {:status :running
-               :task-id task-id
-               :session-id session-id})
-            (do
-              ((:clear-session-turn-reservation! deps) session-id reservation-token)
-              {:status :unavailable
-               :task-id task-id
-               :session-id session-id
-               :error "resume worker unavailable"}))
-          {:status :busy
-           :task-id task-id
-           :session-id session-id
-           :error "session is busy"})))
+        (let [run-task-spec! (:run-task-spec! deps)
+              task-spec?     (and run-task-spec!
+                                  (task-spec-task? task))]
+          (if-let [reservation-token ((:reserve-next-session-turn! deps)
+                                      session-id
+                                      {:task-id task-id
+                                       :runtime-op :resume})]
+            (if-let [_future
+                     (async/submit-background!
+                      (str "task-resume:" task-id)
+                      #(try
+                         (if task-spec?
+                           (run-task-spec! task-id
+                                           :message message*
+                                           :channel channel
+                                           :runtime-op :resume
+                                           :turn-reservation-token reservation-token)
+                           ((:process-message deps) session-id
+                            message*
+                            :channel channel
+                            :task-id task-id
+                            :runtime-op :resume
+                            :persist-message? false
+                            :turn-reservation-token reservation-token))
+                         (finally
+                           ((:clear-session-turn-reservation! deps)
+                            session-id
+                            reservation-token))))]
+              (do
+                (sync-runtime-task! task-id
+                                    {:state :running
+                                     :stop-reason nil
+                                     :error nil
+                                     :finished-at nil
+                                     :summary "Task resumed"})
+                (record-task-resume! task-id :resume message*)
+                {:status :running
+                 :task-id task-id
+                 :session-id session-id})
+              (do
+                ((:clear-session-turn-reservation! deps) session-id reservation-token)
+                {:status :unavailable
+                 :task-id task-id
+                 :session-id session-id
+                 :error "resume worker unavailable"}))
+            {:status :busy
+             :task-id task-id
+             :session-id session-id
+             :error "session is busy"}))))
     {:status :not-found
      :error "task not found"}))
 
@@ -1525,10 +1557,23 @@
               child-task-id    (db/create-task! {:session-id child-session-id
                                                  :parent-id task-id
                                                  :channel :branch
-                                                 :type :branch
+                                                 :type :task
                                                  :state :running
                                                  :title title
                                                  :summary title
+                                                 :contract {:kind :task
+                                                            :version 1
+                                                            :goal title
+                                                            :spec {:kind :task
+                                                                   :version 1
+                                                                   :goal title
+                                                                   :steps [{:id :work-on-branch
+                                                                            :kind :llm
+                                                                            :mode :agent
+                                                                            :prompt message*}]}}
+                                                 :meta {:trigger {:kind :branch
+                                                                  :parent-task-id task-id}
+                                                        :execution {:mode :agent}}
                                                  :started-at (java.util.Date.)})
               _                (attach-child-task-to-parent! task child-task-id title)
               submit-fork!     (fn []
@@ -1537,15 +1582,25 @@
                                   #(do
                                      ((:register-child-session! deps) parent-session-id child-session-id)
                                      (try
-                                       ((:process-message deps) child-session-id
-                                        message*
-                                        :channel :branch
-                                        :task-id child-task-id
-                                        :runtime-op :fork
-                                        :resource-session-id parent-session-id
-                                        :tool-context {:branch-worker? true
-                                                       :parent-session-id parent-session-id
-                                                       :resource-session-id parent-session-id})
+                                       (if-let [run-task-spec! (:run-task-spec! deps)]
+                                         (run-task-spec! child-task-id
+                                                         :message message*
+                                                         :channel :branch
+                                                         :runtime-op :fork
+                                                         :operation :branch-spawn
+                                                         :resource-session-id parent-session-id
+                                                         :tool-context {:branch-worker? true
+                                                                        :parent-session-id parent-session-id
+                                                                        :resource-session-id parent-session-id})
+                                         ((:process-message deps) child-session-id
+                                          message*
+                                          :channel :branch
+                                          :task-id child-task-id
+                                          :runtime-op :fork
+                                          :resource-session-id parent-session-id
+                                          :tool-context {:branch-worker? true
+                                                         :parent-session-id parent-session-id
+                                                         :resource-session-id parent-session-id}))
                                        (finally
                                          ((:unregister-child-session! deps) parent-session-id child-session-id)
                                          (try

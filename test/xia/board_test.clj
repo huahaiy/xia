@@ -1,6 +1,7 @@
 (ns xia.board-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [xia.board :as board]
+            [xia.db :as db]
             [xia.test-helpers :as th]))
 
 (use-fixtures :each th/with-test-db)
@@ -11,6 +12,9 @@
                                   :priority "high"
                                   :assignee "research"})]
     (is (uuid? (:id card)))
+    (is (= :task (:type (db/get-task (:id card)))))
+    (is (= :task (get-in (db/get-task (:id card)) [:contract :kind])))
+    (is (true? (get-in (db/get-task (:id card)) [:meta :board :visible?])))
     (is (= :open (:status card)))
     (is (= :high (:priority card)))
     (is (= "research" (:assignee card)))

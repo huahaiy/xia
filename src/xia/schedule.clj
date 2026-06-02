@@ -295,18 +295,39 @@
 
 (defn- schedule-task-contract
   [{:keys [id name type prompt tool-id tool-args trusted?]}]
-  (cond-> {:kind :schedule
-           :schedule-id id
-           :schedule-type type
-           :goal (schedule-task-title {:id id
-                                       :name name
-                                       :type type
-                                       :prompt prompt
-                                       :tool-id tool-id})
-           :trusted? (boolean trusted?)}
-    (some? prompt) (assoc :prompt prompt)
-    tool-id (assoc :tool-id tool-id)
-    (some? tool-args) (assoc :tool-args tool-args)))
+  (let [goal (schedule-task-title {:id id
+                                   :name name
+                                   :type type
+                                   :prompt prompt
+                                   :tool-id tool-id})
+        step (case type
+               :tool {:id :run-tool
+                      :kind :tool
+                      :tool tool-id
+                      :args (or tool-args {})}
+               :prompt {:id :run-prompt
+                        :kind :llm
+                        :mode :agent
+                        :prompt prompt}
+               {:id :run
+                :kind :llm
+                :mode :agent
+                :prompt goal})]
+    (cond-> {:kind :task
+             :version 1
+             :goal goal
+             :spec {:kind :task
+                    :version 1
+                    :goal goal
+                    :steps [step]}
+             ;; Compatibility fields retained while schedule consumers move to
+             ;; task trigger metadata and task specs.
+             :schedule-id id
+             :schedule-type type
+             :trusted? (boolean trusted?)}
+      (some? prompt) (assoc :prompt prompt)
+      tool-id (assoc :tool-id tool-id)
+      (some? tool-args) (assoc :tool-args tool-args))))
 
 (defn ensure-schedule-task!
   "Create or reuse the durable task record bound to a schedule."
@@ -316,23 +337,29 @@
         title            (schedule-task-title sched)
         summary          title
         contract         (schedule-task-contract sched)
-        meta             (merge (:meta existing-task)
+        meta             (merge (dissoc (:meta existing-task) :task-spec)
                                 {:schedule-id id
                                  :schedule-type type
-                                 :trusted? (boolean trusted?)})]
+                                 :trusted? (boolean trusted?)
+                                 :trigger {:kind :schedule
+                                           :schedule-id id}
+                                 :execution {:mode (case type
+                                                      :tool :deterministic
+                                                      :prompt :agent
+                                                      :hybrid)}})]
     (if existing-task
       (do
         (db/update-task! existing-task-id
                          (cond-> {:channel :scheduler
-                          :type :schedule
-                          :state :running
-                          :title title
-                          :summary summary
-                          :contract contract
-                          :meta meta
-                          :stop-reason nil
-                          :error nil
-                          :finished-at nil}
+                                  :type :task
+                                  :state :running
+                                  :title title
+                                  :summary summary
+                                  :contract contract
+                                  :meta meta
+                                  :stop-reason nil
+                                  :error nil
+                                  :finished-at nil}
                            session-id (assoc :session-id session-id
                                              :session-role :schedule-run)))
         (bind-task! id existing-task-id)
@@ -340,7 +367,7 @@
       (let [task-id (db/create-task! {:session-id session-id
                                       :session-role :origin
                                       :channel :scheduler
-                                      :type :schedule
+                                      :type :task
                                       :state :running
                                       :title title
                                       :summary summary

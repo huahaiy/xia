@@ -3,7 +3,7 @@
 
    A checkpoint is a restore-safe, host-local staged copy of the live Datalevin
    DB plus required non-secret DB support files. It is intended for control
-   plane upload workflows, not direct user-facing archive export."
+   plane upload tasks, not direct user-facing archive export."
   (:require [clojure.java.io :as io]
             [datalevin.dump :as dump]
             [taoensso.timbre :as log]
