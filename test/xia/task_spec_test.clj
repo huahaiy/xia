@@ -203,6 +203,62 @@
                :context {:source "registry"}}]
              @calls)))))
 
+(deftest task-spec-retries-failed-step-before-continuing
+  (let [attempts (atom 0)
+        task-id  (task-spec/create-task!
+                  {:goal "Retry flaky step"
+                   :steps [{:id :flaky
+                            :kind :custom
+                            :retry {:max-attempts 3}}
+                           {:id :done
+                            :kind :value
+                            :value [:output :flaky :attempt]}]})]
+    (let [result (task-spec/run-task!
+                  task-id
+                  :executors {:custom (fn [_]
+                                        (let [attempt (swap! attempts inc)]
+                                          (if (< attempt 3)
+                                            {:status :failed
+                                             :error (str "failed attempt " attempt)}
+                                            {:status :success
+                                             :output {:attempt attempt}})))})
+          task   (db/get-task task-id)
+          turns  (db/task-turns task-id)
+          items  (mapcat #(db/turn-items (:id %)) turns)
+          retry-items (filter #(= "task-step-retry"
+                                  (get-in % [:data :kind]))
+                              items)]
+      (is (= :completed (:status result)))
+      (is (= 3 @attempts))
+      (is (= 3 (get-in task [:meta :task-spec :outputs :done])))
+      (is (= 3 (get-in task [:meta :task-spec :steps :flaky :attempts])))
+      (is (= 3 (get-in task [:meta :task-spec :steps :flaky :max-attempts])))
+      (is (= 2 (count retry-items)))
+      (is (some #(and (= :task-step (:type %))
+                      (= :success (:status %))
+                      (= 3 (get-in % [:data :attempts])))
+                items)))))
+
+(deftest task-spec-times-out-step-at-runner-level
+  (let [task-id (task-spec/create-task!
+                 {:goal "Timeout slow step"
+                  :steps [{:id :slow
+                           :kind :custom
+                           :timeout-ms 25}]})]
+    (let [result (task-spec/run-task!
+                  task-id
+                  :executors {:custom (fn [_]
+                                        (Thread/sleep 250)
+                                        {:status :success
+                                         :output "too late"})})
+          task   (db/get-task task-id)]
+      (is (= :failed (:status result)))
+      (is (= :failed (:state task)))
+      (is (= 25 (get-in task [:meta :task-spec :steps :slow :timeout-ms])))
+      (is (str/includes? (get-in task [:meta :task-spec :steps :slow :error])
+                         "timed out after 25 ms"))
+      (is (nil? (get-in task [:meta :task-spec :outputs :slow]))))))
+
 (deftest per-run-executor-overrides-registered-executor
   (task-spec/register-executor!
    :custom

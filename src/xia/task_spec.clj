@@ -12,6 +12,9 @@
 (def ^:private task-spec-version 1)
 (def ^:private runtime-key :task-spec)
 (def ^:private default-max-steps 100)
+(def ^:private default-retry-max-attempts 2)
+(def ^:private default-retry-delay-ms 0)
+(def ^:private default-retry-backoff-factor 1.0)
 (def ^:private terminal-step-statuses #{:success :skipped :failed})
 (def ^:private success-step-statuses #{:success})
 (defonce ^:private executor-registry-atom (atom {}))
@@ -1463,7 +1466,15 @@
                                      (contains? result :output)
                                      (assoc :output (:output result))
                                      (:error result)
-                                     (assoc :error (:error result)))))
+                                     (assoc :error (:error result))
+                                     (:attempt result)
+                                     (assoc :attempt (:attempt result))
+                                     (:attempts result)
+                                     (assoc :attempts (:attempts result))
+                                     (:max-attempts result)
+                                     (assoc :max-attempts (:max-attempts result))
+                                     (:timeout-ms result)
+                                     (assoc :timeout-ms (:timeout-ms result)))))
       (contains? result :output)
       (assoc-in [:outputs (:id step)] (:output result)))))
 
@@ -1480,7 +1491,15 @@
      (contains? result :output)
      (assoc-in [:data :output] (:output result))
      (:error result)
-     (assoc-in [:data :error] (:error result)))))
+     (assoc-in [:data :error] (:error result))
+     (:attempt result)
+     (assoc-in [:data :attempt] (:attempt result))
+     (:attempts result)
+     (assoc-in [:data :attempts] (:attempts result))
+     (:max-attempts result)
+     (assoc-in [:data :max-attempts] (:max-attempts result))
+     (:timeout-ms result)
+     (assoc-in [:data :timeout-ms] (:timeout-ms result)))))
 
 (defn- skipped-result
   [step reason]
@@ -1488,7 +1507,161 @@
    :summary (or reason
                 (str "Skipped task step " (name (:id step))))})
 
-(defn- execute-step
+(defn- positive-long-guardrail
+  [field value]
+  (cond
+    (or (nil? value) (false? value))
+    nil
+
+    (integer? value)
+    (when (pos? (long value))
+      (long value))
+
+    (number? value)
+    (let [value* (long value)]
+      (when (pos? value*)
+        value*))
+
+    (string? value)
+    (let [value* (try
+                   (Long/parseLong (str/trim value))
+                   (catch Exception _
+                     nil))]
+      (cond
+        (and value* (pos? value*)) value*
+        (and value* (zero? value*)) nil
+        :else (throw (ex-info (str "Task spec " (name field) " must be a positive integer")
+                              {:type :task-spec/invalid
+                               :field field
+                               :value value}))))
+
+    :else
+    (throw (ex-info (str "Task spec " (name field) " must be a positive integer")
+                    {:type :task-spec/invalid
+                     :field field
+                     :value value}))))
+
+(defn- positive-double-guardrail
+  [field value]
+  (cond
+    (or (nil? value) (false? value))
+    nil
+
+    (number? value)
+    (let [value* (double value)]
+      (when (pos? value*)
+        value*))
+
+    (string? value)
+    (let [value* (try
+                   (Double/parseDouble (str/trim value))
+                   (catch Exception _
+                     nil))]
+      (cond
+        (and value* (pos? value*)) value*
+        (and value* (zero? value*)) nil
+        :else (throw (ex-info (str "Task spec " (name field) " must be a positive number")
+                              {:type :task-spec/invalid
+                               :field field
+                               :value value}))))
+
+    :else
+    (throw (ex-info (str "Task spec " (name field) " must be a positive number")
+                    {:type :task-spec/invalid
+                     :field field
+                     :value value}))))
+
+(defn- step-timeout-ms
+  [state context step]
+  (when (contains? step :timeout-ms)
+    (positive-long-guardrail :timeout-ms
+                             (eval-step-expr state context (:timeout-ms step)))))
+
+(defn- retry-form
+  [state context step]
+  (when (contains? step :retry)
+    (eval-step-expr state context (:retry step))))
+
+(defn- retry-max-attempts
+  [retry*]
+  (cond
+    (or (nil? retry*) (false? retry*))
+    1
+
+    (true? retry*)
+    default-retry-max-attempts
+
+    (integer? retry*)
+    (max 1 (long retry*))
+
+    (number? retry*)
+    (max 1 (long retry*))
+
+    (map? retry*)
+    (if-let [max-attempts (or (map-value retry* :max-attempts)
+                              (map-value retry* :attempts))]
+      (max 1 (or (positive-long-guardrail :retry.max-attempts max-attempts)
+                 1))
+      (if-let [max-retries (or (map-value retry* :max-retries)
+                               (map-value retry* :retries))]
+        (inc (or (positive-long-guardrail :retry.max-retries max-retries)
+                 0))
+        default-retry-max-attempts))
+
+    :else
+    (throw (ex-info "Task spec :retry must be a boolean, number, or map"
+                    {:type :task-spec/invalid
+                     :field :retry
+                     :value retry*}))))
+
+(defn- retry-policy
+  [state context step]
+  (let [retry*       (retry-form state context step)
+        max-attempts (retry-max-attempts retry*)
+        delay-ms     (when (map? retry*)
+                       (or (map-value retry* :delay-ms)
+                           (map-value retry* :initial-delay-ms)))
+        max-delay-ms (when (map? retry*)
+                       (map-value retry* :max-delay-ms))
+        backoff      (when (map? retry*)
+                       (map-value retry* :backoff-factor))]
+    {:enabled? (contains? step :retry)
+     :max-attempts max-attempts
+     :delay-ms (or (positive-long-guardrail :retry.delay-ms delay-ms)
+                   default-retry-delay-ms)
+     :max-delay-ms (positive-long-guardrail :retry.max-delay-ms max-delay-ms)
+     :backoff-factor (or (positive-double-guardrail :retry.backoff-factor backoff)
+                         default-retry-backoff-factor)}))
+
+(defn- retry-delay-ms
+  [policy failed-attempt]
+  (let [base-delay (long (:delay-ms policy 0))
+        backoff    (double (:backoff-factor policy default-retry-backoff-factor))
+        delay      (long (Math/round (* (double base-delay)
+                                        (Math/pow backoff
+                                                  (double (dec (long failed-attempt)))))))]
+    (if-let [max-delay (:max-delay-ms policy)]
+      (min delay (long max-delay))
+      delay)))
+
+(defn- exception-result
+  [step e]
+  (let [data (ex-data e)]
+    (cond-> {:status :failed
+             :error (or (.getMessage e) (str e))
+             :summary (str "Task step " (name (:id step)) " failed")}
+      (contains? data :retryable?) (assoc :retryable? (:retryable? data))
+      (contains? data :type) (assoc :error-type (:type data)))))
+
+(defn- timeout-result
+  [step timeout-ms]
+  {:status :failed
+   :summary (str "Task step " (name (:id step)) " timed out")
+   :error (str "task step " (name (:id step)) " timed out after " timeout-ms " ms")
+   :timeout-ms timeout-ms
+   :retryable? true})
+
+(defn- execute-step-once
   [executors state context task-id turn-id step]
   (if (and (contains? step :when)
            (not (truthy? (eval-step-expr state context (:when step)))))
@@ -1504,6 +1677,88 @@
        :summary (str "Paused before unsupported task step kind "
                      (name (:kind step)))
        :error (str "unsupported task step kind: " (name (:kind step)))})))
+
+(defn- execute-step-attempt
+  [executors state context task-id turn-id step timeout-ms]
+  (if timeout-ms
+    (let [attempt* (future
+                     (try
+                       (execute-step-once executors state context task-id turn-id step)
+                       (catch Exception e
+                         (exception-result step e))))
+          result   (deref attempt* (long timeout-ms) ::timeout)]
+      (if (= ::timeout result)
+        (do
+          (future-cancel attempt*)
+          (timeout-result step timeout-ms))
+        result))
+    (try
+      (execute-step-once executors state context task-id turn-id step)
+      (catch Exception e
+        (exception-result step e)))))
+
+(defn- retryable-result?
+  [result]
+  (and (= :failed (result-status result))
+       (not (false? (:retryable? result)))))
+
+(defn- with-attempt-metadata
+  [result attempt max-attempts timeout-ms]
+  (cond-> (assoc result :attempt attempt)
+    (or (> (long attempt) 1)
+        (> (long max-attempts) 1))
+    (assoc :attempts attempt
+           :max-attempts max-attempts)
+
+    timeout-ms
+    (assoc :timeout-ms timeout-ms)))
+
+(defn- record-step-retry-item!
+  [turn-id step result attempt max-attempts delay-ms]
+  (task-runtime/record-task-item!
+   turn-id
+   {:type :system-note
+    :status :running
+    :summary (str "Retrying task step "
+                  (name (:id step))
+                  " after attempt "
+                  attempt
+                  " failed")
+    :data (cond-> {:kind "task-step-retry"
+                   :step-id (name (:id step))
+                   :step-kind (name (:kind step))
+                   :attempt attempt
+                   :max-attempts max-attempts
+                   :delay-ms delay-ms
+                   :status (name (result-status result))}
+            (:error result) (assoc :error (:error result))
+            (:timeout-ms result) (assoc :timeout-ms (:timeout-ms result)))}))
+
+(defn- execute-step
+  [executors state context task-id turn-id step]
+  (let [timeout-ms* (step-timeout-ms state context step)
+        policy      (retry-policy state context step)
+        max-attempts (long (:max-attempts policy))]
+    (loop [attempt 1]
+      (let [result (with-attempt-metadata
+                     (execute-step-attempt executors
+                                           state
+                                           context
+                                           task-id
+                                           turn-id
+                                           step
+                                           timeout-ms*)
+                     attempt
+                     max-attempts
+                     timeout-ms*)]
+        (if (and (< (long attempt) max-attempts)
+                 (retryable-result? result))
+          (let [delay-ms (retry-delay-ms policy attempt)]
+            (record-step-retry-item! turn-id step result attempt max-attempts delay-ms)
+            (when (pos? (long delay-ms))
+              (Thread/sleep (long delay-ms)))
+            (recur (inc attempt)))
+          result)))))
 
 (defn create-task!
   "Create a durable task from a declarative task spec without starting the LLM execution loop."
