@@ -20,6 +20,15 @@
 
 (use-fixtures :each th/with-test-db with-clear-executors)
 
+(defn- validation-errors-from
+  [f]
+  (try
+    (f)
+    (is false "expected task spec validation to fail")
+    []
+    (catch clojure.lang.ExceptionInfo e
+      (:errors (ex-data e)))))
+
 (deftest task-spec-runs-deterministic-steps-through-task-runtime
   (let [task-id (task-spec/create-task!
                  {:goal "Prepare report"
@@ -110,6 +119,70 @@
                   :kind :value
                   :depends-on :a
                   :value "b"}]}))))
+
+(deftest task-spec-validates-version-and-required-step-fields
+  (let [version-errors (validation-errors-from
+                        #(task-spec/task-contract
+                          {:version 2
+                           :goal "Bad version"
+                           :steps [{:id :run
+                                    :kind :value
+                                    :value "never"}]}))
+        field-errors   (validation-errors-from
+                        #(task-spec/task-contract
+                          {:goal "Missing required fields"
+                           :steps [{:id :render
+                                    :kind :value}
+                                   {:id :check
+                                    :kind :condition}
+                                   {:id :call
+                                    :kind :tool}]}))]
+    (is (= :version (:field (first version-errors))))
+    (is (= #{:value :expr :tool}
+           (set (map :field field-errors))))))
+
+(deftest task-spec-validates-expression-shape-and-step-references
+  (let [errors (validation-errors-from
+                #(task-spec/task-contract
+                  {:goal "Bad expressions"
+                   :steps [{:id :bad-ref
+                            :kind :value
+                            :value [:str [:output :missing]]}
+                           {:id :bad-arity
+                            :kind :condition
+                            :expr [:count]}]}))]
+    (is (some #(= :task-spec/invalid-expression (:type %)) errors))
+    (is (some #(= :missing (:references %)) errors))
+    (is (some #(= :count (:operator %)) errors))))
+
+(deftest task-spec-validates-literal-output-schema-shape
+  (let [errors (validation-errors-from
+                #(task-spec/task-contract
+                  {:goal "Bad schema"
+                   :steps [{:id :draft
+                            :kind :llm
+                            :prompt "Return JSON"
+                            :output-schema {:type :wat
+                                            :required :body
+                                            :properties {:body :string}}}]}))]
+    (is (some #(= :task-spec/invalid-schema (:type %)) errors))
+    (is (some #(= :type (:field %)) errors))
+    (is (some #(= :required (:field %)) errors))
+    (is (some #(= :properties (:field %)) errors))))
+
+(deftest task-spec-validator-reports-advisory-warnings
+  (let [result (task-spec/validate-spec
+                {:goal "Warnings"
+                 :steps [{:id :custom
+                          :kind :custom-worker}
+                         {:id :call
+                          :kind :tool
+                          :tool :definitely-missing-tool}]})]
+    (is (:valid? result))
+    (is (some #(= :task-spec/missing-executor (:type %))
+              (:warnings result)))
+    (is (some #(= :task-spec/missing-tool (:type %))
+              (:warnings result)))))
 
 (deftest task-spec-pauses-at-unsupported-step-and-resumes-with-executor
   (let [task-id (task-spec/create-task!
