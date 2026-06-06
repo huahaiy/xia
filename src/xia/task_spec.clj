@@ -10,6 +10,7 @@
             [xia.tool :as tool]))
 
 (def ^:private task-spec-version 1)
+(def ^:private authoring-contract-version 1)
 (def ^:private runtime-key :task-spec)
 (def ^:private default-max-steps 100)
 (def ^:private default-loop-max-iterations 100)
@@ -295,6 +296,9 @@
    :merge {:min 0}
    :str {:min 0}
    :keyword {:min 1 :max 1}})
+
+(def ^:private planner-expression-operators
+  (set (map name (keys expression-arities))))
 
 (defn- arity-errors
   [step path op arg-count arity]
@@ -1886,6 +1890,335 @@
   (or (get message "content")
       (:content message)
       ""))
+
+(defn- name-value
+  [value]
+  (cond
+    (keyword? value) (name value)
+    (symbol? value) (name value)
+    (string? value) value
+    (some? value) (str value)
+    :else nil))
+
+(defn- planner-tool-entry
+  [tool]
+  (let [tool-id (or (:tool/id tool)
+                    (:id tool)
+                    (normalize-tool-id (get tool "id")))
+        tags    (or (:tool/tags tool)
+                    (:tags tool)
+                    (get tool "tags"))]
+    (cond-> {:id (name-value tool-id)
+             :name (or (:tool/name tool)
+                       (:name tool)
+                       (get tool "name")
+                       (name-value tool-id))
+             :description (or (:tool/description tool)
+                              (:description tool)
+                              (get tool "description")
+                              "")
+             :parameters (or (:tool/parameters tool)
+                             (:parameters tool)
+                             (get tool "parameters")
+                             {"type" "object"
+                              "properties" {}})}
+      (seq tags)
+      (assoc :tags (mapv name-value tags))
+
+      (or (:tool/approval tool) (:approval tool) (get tool "approval"))
+      (assoc :approval (name-value (or (:tool/approval tool)
+                                       (:approval tool)
+                                       (get tool "approval"))))
+
+      (or (:tool/execution-mode tool)
+          (:execution-mode tool)
+          (get tool "execution_mode")
+          (get tool "execution-mode"))
+      (assoc :execution-mode
+             (name-value (or (:tool/execution-mode tool)
+                             (:execution-mode tool)
+                             (get tool "execution_mode")
+                             (get tool "execution-mode")))))))
+
+(defn task-spec-tool-catalog
+  "Return a planner-facing tool catalog.
+
+   With no args, reads currently enabled tools from the database. With a tool
+   collection, normalizes DB-style or plain tool maps into stable JSON-friendly
+   entries: `{:id :name :description :parameters ...}`."
+  ([]
+   (task-spec-tool-catalog (db/list-tools)))
+  ([tools]
+   (->> tools
+        (filter #(not (false? (or (:tool/enabled? %)
+                                  (:enabled? %)
+                                  (:enabled %)
+                                  (get % "enabled")
+                                  true))))
+        (map planner-tool-entry)
+        (filter (comp seq :id))
+        (sort-by :id)
+        vec)))
+
+(defn- planner-path-token
+  [value]
+  (cond
+    (string? value) (keyword value)
+    (keyword? value) value
+    (symbol? value) (keyword (name value))
+    (vector? value) (mapv planner-path-token value)
+    (sequential? value) (mapv planner-path-token value)
+    :else value))
+
+(declare normalize-planner-json-expressions)
+
+(defn- normalize-planner-expression
+  [[op & args :as value]]
+  (let [op* (normalize-kind op)]
+    (if-not (contains? expression-arities op*)
+      (mapv normalize-planner-json-expressions value)
+      (let [args* (case op*
+                    :literal
+                    args
+
+                    :input
+                    (if (seq args)
+                      (cons (planner-path-token (first args)) (rest args))
+                      args)
+
+                    :output
+                    (let [[step-id path & more] args]
+                      (cond-> [(planner-path-token step-id)]
+                        (some? path) (conj (planner-path-token path))
+                        (seq more) (into more)))
+
+                    (:step-status :step-ok? :step-skipped? :step-failed?)
+                    (if (seq args)
+                      (cons (planner-path-token (first args)) (rest args))
+                      args)
+
+                    :get-in
+                    (let [[target path & more] args]
+                      (cond-> [(normalize-planner-json-expressions target)]
+                        (some? path) (conj (planner-path-token path))
+                        (seq more) (into more)))
+
+                    (mapv normalize-planner-json-expressions args))]
+        (into [op*] args*)))))
+
+(defn- normalize-planner-json-expressions
+  [value]
+  (cond
+    (and (vector? value)
+         (seq value)
+         (or (keyword? (first value))
+             (symbol? (first value))
+             (and (string? (first value))
+                  (contains? planner-expression-operators (first value)))))
+    (normalize-planner-expression value)
+
+    (map? value)
+    (into (empty value)
+          (map (fn [[k v]]
+                 [k (normalize-planner-json-expressions v)]))
+          value)
+
+    (vector? value)
+    (mapv normalize-planner-json-expressions value)
+
+    (sequential? value)
+    (mapv normalize-planner-json-expressions value)
+
+    :else
+    value))
+
+(defn- parse-planner-json!
+  [content]
+  (let [candidate (strip-json-fence content)
+        parse*    (fn [text]
+                    (-> text
+                        json/read-json
+                        keywordize-json
+                        normalize-planner-json-expressions))]
+    (try
+      (parse* candidate)
+      (catch Exception e
+        (if-let [extracted (extract-json-candidate candidate)]
+          (try
+            (parse* extracted)
+            (catch Exception e2
+              (throw (ex-info "Task spec planner returned invalid JSON"
+                              {:type :task-spec-authoring/invalid-json
+                               :response-preview (subs candidate
+                                                       0
+                                                       (min 240 (count candidate)))}
+                              e2))))
+          (throw (ex-info "Task spec planner returned invalid JSON"
+                          {:type :task-spec-authoring/invalid-json
+                           :response-preview (subs candidate
+                                                   0
+                                                   (min 240 (count candidate)))}
+                          e)))))))
+
+(defn- planner-response-spec
+  [parsed]
+  (or (map-value parsed :spec)
+      (map-value parsed :task-spec)
+      (map-value parsed :task_spec)
+      parsed))
+
+(def ^:private planner-system-prompt
+  (str "You author Xia declarative task specs. "
+       "Return only valid JSON, no prose or markdown. "
+       "The response must be {\"spec\": taskSpec}. "
+       "Use task spec version 1. "
+       "Use stable kebab-case ids. "
+       "Use only tool ids from the provided tool_catalog. "
+       "Represent expressions as JSON arrays, for example "
+       "[\"input\",\"topic\"] or [\"output\",\"draft\",\"body\"]. "
+       "Prefer explicit value, condition, tool, input, approval, llm, "
+       "subtask, branch, parallel, map, and loop steps. "
+       "Use input steps for missing required user data and approval steps "
+       "before irreversible or externally visible actions."))
+
+(defn- authoring-request
+  [{:keys [operation goal tools existing-spec diagnostics]}]
+  (cond-> {:kind "task-spec-authoring-request"
+           :version authoring-contract-version
+           :operation (name-value operation)
+           :goal goal
+           :tool_catalog tools
+           :rules ["Return {\"spec\": {...}} only."
+                   "Do not invent tool ids."
+                   "Make tool arguments explicit data."
+                   "Reference prior outputs with expression arrays."
+                   "Include output_schema for llm steps when later steps read structured fields."
+                   "Do not include secrets in the spec."]}
+    existing-spec (assoc :existing_spec existing-spec)
+    diagnostics (assoc :diagnostics diagnostics)))
+
+(defn- planner-messages
+  [request]
+  [{"role" "system"
+    "content" planner-system-prompt}
+   {"role" "user"
+    "content" (json-text (authoring-request request))}])
+
+(defn- authoring-llm-opts
+  [opts]
+  (cond-> {}
+    (:provider-id opts) (assoc :provider-id (:provider-id opts))
+    (:workload opts) (assoc :workload (:workload opts))
+    (contains? opts :temperature) (assoc :temperature (:temperature opts))
+    (contains? opts :max-tokens) (assoc :max-tokens (:max-tokens opts))))
+
+(defn- validation-from-parse-error
+  [e]
+  {:valid? false
+   :errors [(validation-error (or (ex-message e)
+                                  "Task spec planner returned invalid JSON")
+                              (merge {:type :task-spec-authoring/invalid-json}
+                                     (ex-data e)))]
+   :warnings []})
+
+(defn- authoring-result
+  [request message content raw-spec validation]
+  (let [valid? (:valid? validation)
+        metadata (select-keys (meta message)
+                              [:llm-call-id :provider-id :model :workload])]
+    (cond-> {:kind :task-spec-authoring-result
+             :version authoring-contract-version
+             :operation (:operation request)
+             :goal (:goal request)
+             :status (if valid? :success :invalid)
+             :raw-response content
+             :validation (dissoc validation :spec)}
+      (seq metadata) (assoc :llm metadata)
+      raw-spec (assoc :raw-spec raw-spec)
+      valid? (assoc :spec (:spec validation)
+                    :contract (task-contract (:spec validation))))))
+
+(defn- request-tools
+  [opts]
+  (task-spec-tool-catalog (or (:tools opts)
+                              (:tool-catalog opts)
+                              (db/list-tools))))
+
+(defn- plan-spec-once!
+  [request opts]
+  (let [request* (assoc request :tools (request-tools opts))
+        messages (planner-messages request*)
+        llm-opts (authoring-llm-opts opts)
+        message  (apply llm/chat-message messages (mapcat identity llm-opts))
+        content  (assistant-content message)]
+    (try
+      (let [parsed     (parse-planner-json! content)
+            raw-spec   (planner-response-spec parsed)
+            validation (validate-spec raw-spec)]
+        (authoring-result request* message content raw-spec validation))
+      (catch clojure.lang.ExceptionInfo e
+        (authoring-result request*
+                          message
+                          content
+                          nil
+                          (validation-from-parse-error e))))))
+
+(defn- diagnostics-map
+  [diagnostics spec]
+  (cond
+    (nil? diagnostics)
+    (dissoc (validate-spec spec) :spec)
+
+    (map? diagnostics)
+    (select-keys diagnostics [:valid? :errors :warnings])
+
+    :else
+    {:valid? false
+     :errors (vec diagnostics)
+     :warnings []}))
+
+(defn repair-spec!
+  "Ask an LLM to repair an existing task spec using validation diagnostics.
+
+   Returns a stable authoring result map:
+   `{:status :success|:invalid :spec ... :contract ... :validation ...}`."
+  [goal spec diagnostics & {:as opts}]
+  (plan-spec-once! {:operation :repair
+                    :goal goal
+                    :existing-spec spec
+                    :diagnostics (diagnostics-map diagnostics spec)}
+                   opts))
+
+(defn author-spec!
+  "Ask an LLM to author a task spec from a user goal and tool catalog.
+
+   Options:
+   - `:tools` / `:tool-catalog`: tool maps to expose to the planner. Defaults to
+     enabled DB tools.
+   - `:repair-attempts`: number of automatic repair passes after invalid output.
+     Defaults to 1.
+   - `:provider-id`, `:workload`, `:temperature`, `:max-tokens`: LLM request
+     options.
+
+   Returns `{:status :success|:invalid :spec ... :contract ... :validation ...}`."
+  [goal & {:keys [repair-attempts] :as opts}]
+  (let [repair-attempts* (long (or repair-attempts 1))]
+    (loop [attempt 0
+           result (plan-spec-once! {:operation :create
+                                    :goal goal}
+                                   opts)]
+      (if (or (= :success (:status result))
+              (>= attempt repair-attempts*))
+        result
+        (recur (inc attempt)
+               (repair-spec! goal
+                             (:raw-spec result)
+                             (:validation result)
+                             :tools (request-tools opts)
+                             :provider-id (:provider-id opts)
+                             :workload (:workload opts)
+                             :temperature (:temperature opts)
+                             :max-tokens (:max-tokens opts)))))))
 
 (defn- short-summary
   [text max-chars]

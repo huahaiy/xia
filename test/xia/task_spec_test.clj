@@ -184,6 +184,64 @@
     (is (some #(= :task-spec/missing-tool (:type %))
               (:warnings result)))))
 
+(deftest task-spec-authoring-produces-valid-spec-from-goal-and-tool-catalog
+  (let [calls (atom [])
+        content "{\"spec\":{\"goal\":\"Summarize the inbox\",\"inputs\":{\"topic\":\"inbox\"},\"steps\":[{\"id\":\"search\",\"kind\":\"tool\",\"tool\":\"email-search\",\"args\":{\"query\":[\"input\",\"topic\"]}},{\"id\":\"done\",\"kind\":\"value\",\"depends-on\":\"search\",\"value\":[\"output\",\"search\",\"content\"]}]}}"]
+    (with-redefs [llm/chat-message
+                  (fn [messages & opts]
+                    (swap! calls conj {:messages messages
+                                       :opts (apply hash-map opts)})
+                    (with-meta {"role" "assistant"
+                                "content" content}
+                      {:provider-id :planner
+                       :workload :task-planning
+                       :llm-call-id (random-uuid)}))]
+      (let [result (task-spec/author-spec!
+                    "Summarize my inbox"
+                    :tools [{:id :email-search
+                             :name "Email search"
+                             :description "Search email"
+                             :parameters {"type" "object"
+                                          "properties" {"query" {"type" "string"}}}}]
+                    :provider-id :planner
+                    :workload :task-planning
+                    :repair-attempts 0)
+            spec   (:spec result)
+            call   (first @calls)
+            prompt (get-in call [:messages 1 "content"])]
+        (is (= :success (:status result)))
+        (is (= :task-spec-authoring-result (:kind result)))
+        (is (= :task (get-in result [:contract :kind])))
+        (is (= [:input :topic]
+               (get-in spec [:steps 0 :args :query])))
+        (is (= [:output :search :content]
+               (get-in spec [:steps 1 :value])))
+        (is (str/includes? prompt "Summarize my inbox"))
+        (is (str/includes? prompt "email-search"))
+        (is (= :planner (get-in call [:opts :provider-id])))
+        (is (= :task-planning (get-in call [:opts :workload])))))))
+
+(deftest task-spec-authoring-repairs-invalid-planner-output
+  (let [responses (atom ["{\"spec\":{\"goal\":\"Bad plan\",\"steps\":[{\"id\":\"render\",\"kind\":\"value\"}]}}"
+                         "{\"spec\":{\"goal\":\"Good plan\",\"steps\":[{\"id\":\"render\",\"kind\":\"value\",\"value\":\"done\"}]}}"])
+        prompts   (atom [])]
+    (with-redefs [llm/chat-message
+                  (fn [messages & _opts]
+                    (swap! prompts conj (get-in messages [1 "content"]))
+                    {"role" "assistant"
+                     "content" (let [content (first @responses)]
+                                 (swap! responses subvec 1)
+                                 content)})]
+      (let [result (task-spec/author-spec!
+                    "Render a value"
+                    :tools []
+                    :repair-attempts 1)]
+        (is (= :success (:status result)))
+        (is (= "done" (get-in result [:spec :steps 0 :value])))
+        (is (= 2 (count @prompts)))
+        (is (str/includes? (second @prompts) "diagnostics"))
+        (is (str/includes? (second @prompts) "requires :value"))))))
+
 (deftest task-spec-pauses-at-unsupported-step-and-resumes-with-executor
   (let [task-id (task-spec/create-task!
                  {:goal "Hybrid task"
