@@ -53,6 +53,64 @@
     (is (some #(= :item.task-step (:type %)) events))
     (is (some #(= :task.completed (:type %)) events))))
 
+(deftest task-spec-runs-ready-dag-steps-before-earlier-blocked-steps
+  (let [task-id (task-spec/create-task!
+                 {:goal "Run DAG out of vector order"
+                  :steps [{:id :join
+                           :kind :value
+                           :depends-on [:left :right]
+                           :value {:body [:str [:output :left] "+"
+                                          [:output :right]]}}
+                          {:id :left
+                           :kind :value
+                           :depends-on :seed
+                           :value [:str [:output :seed] "-left"]}
+                          {:id :done
+                           :kind :value
+                           :depends-on :join
+                           :value [:output :join :body]}
+                          {:id :right
+                           :kind :value
+                           :depends-on :seed
+                           :value [:str [:output :seed] "-right"]}
+                          {:id :seed
+                           :kind :value
+                           :value "root"}]})
+        result  (task-spec/run-task! task-id)
+        task    (db/get-task task-id)
+        items   (filter #(= :task-step (:type %))
+                        (mapcat #(db/turn-items (:id %))
+                                (db/task-turns task-id)))]
+    (is (= :completed (:status result)))
+    (is (= "root-left+root-right"
+           (get-in task [:meta :task-spec :outputs :done])))
+    (is (= ["seed" "left" "right" "join" "done"]
+           (mapv #(get-in % [:data :step-id]) items)))))
+
+(deftest task-spec-validates-dependency-graph
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"unknown step"
+       (task-spec/create-task!
+        {:goal "Bad dependency"
+         :steps [{:id :run
+                  :kind :value
+                  :depends-on :missing
+                  :value "never"}]})))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"cycle"
+       (task-spec/create-task!
+        {:goal "Cyclic dependency"
+         :steps [{:id :a
+                  :kind :value
+                  :depends-on :b
+                  :value "a"}
+                 {:id :b
+                  :kind :value
+                  :depends-on :a
+                  :value "b"}]}))))
+
 (deftest task-spec-pauses-at-unsupported-step-and-resumes-with-executor
   (let [task-id (task-spec/create-task!
                  {:goal "Hybrid task"
@@ -566,6 +624,135 @@
           (is (= :completed (:state child*)))
           (is (= "async findings"
                  (get-in child* [:meta :task-spec :outputs :findings :body]))))))))
+
+(deftest task-spec-parallel-runs-child-specs-and-collects-outputs
+  (let [task-id (task-spec/create-task!
+                 {:goal "Run parallel children"
+                  :inputs {:base "root"}
+                  :steps [{:id :fanout
+                           :kind :parallel
+                           :inputs {:base [:input :base]}
+                           :output-step :done
+                           :branches [{:id :left
+                                       :inputs {:side "L"}
+                                       :spec {:goal "Left child"
+                                              :steps [{:id :done
+                                                       :kind :value
+                                                       :value [:str [:input :base] "-"
+                                                               [:input :side]]}]}}
+                                      {:id :right
+                                       :inputs {:side "R"}
+                                       :spec {:goal "Right child"
+                                              :steps [{:id :done
+                                                       :kind :value
+                                                       :value [:str [:input :base] "-"
+                                                               [:input :side]]}]}}]}
+                          {:id :join
+                           :kind :value
+                           :value [:str [:output :fanout [:outputs :left]]
+                                   "+"
+                                   [:output :fanout [:outputs :right]]]}]})
+        result  (task-spec/run-task! task-id)
+        task    (db/get-task task-id)
+        output  (get-in task [:meta :task-spec :outputs :fanout])]
+    (is (= :completed (:status result)))
+    (is (= "root-L+root-R"
+           (get-in task [:meta :task-spec :outputs :join])))
+    (is (= {:left "root-L"
+            :right "root-R"}
+           (:outputs output)))
+    (is (every? uuid? (map :task-id (vals (:branches output)))))))
+
+(deftest task-spec-map-runs-child-spec-for-each-item
+  (let [task-id (task-spec/create-task!
+                 {:goal "Map items"
+                  :inputs {:items ["a" "b" "c"]}
+                  :steps [{:id :mapped
+                           :kind :map
+                           :items [:input :items]
+                           :as :letter
+                           :index-as :idx
+                           :output-step :done
+                           :spec {:goal "Render item"
+                                  :steps [{:id :done
+                                           :kind :value
+                                           :value [:str [:input :letter] ":"
+                                                   [:input :idx]]}]}}
+                          {:id :joined
+                           :kind :value
+                           :value [:output :mapped :outputs]}]})
+        result  (task-spec/run-task! task-id)
+        task    (db/get-task task-id)
+        output  (get-in task [:meta :task-spec :outputs :mapped])]
+    (is (= :completed (:status result)))
+    (is (= ["a:0" "b:1" "c:2"] (:outputs output)))
+    (is (= ["a:0" "b:1" "c:2"]
+           (get-in task [:meta :task-spec :outputs :joined])))
+    (is (= [0 1 2] (mapv :index (:results output))))
+    (is (every? uuid? (map :task-id (:results output))))))
+
+(deftest task-spec-loop-repeats-child-spec-until-condition
+  (let [task-id (task-spec/create-task!
+                 {:goal "Loop accumulator"
+                  :steps [{:id :repeat
+                           :kind :loop
+                           :initial {:n 0}
+                           :while [:< [:input [:acc :n]] 3]
+                           :max-iterations 10
+                           :output-step :next
+                           :spec {:goal "Increment"
+                                  :steps [{:id :next
+                                           :kind :bump}]}}
+                          {:id :done
+                           :kind :value
+                           :value [:output :repeat [:value :n]]}]})
+        result  (task-spec/run-task!
+                 task-id
+                 :executors {:bump (fn [{:keys [context]}]
+                                     (let [n (long (get-in context [:inputs :acc :n]))]
+                                       {:status :success
+                                        :output {:n (inc n)}}))})
+        task    (db/get-task task-id)
+        output  (get-in task [:meta :task-spec :outputs :repeat])]
+    (is (= :completed (:status result)))
+    (is (= 3 (get-in task [:meta :task-spec :outputs :done])))
+    (is (= {:n 3} (:value output)))
+    (is (= [{:n 1} {:n 2} {:n 3}] (:outputs output)))
+    (is (= :condition (:stopped output)))))
+
+(deftest task-spec-loop-supports-child-directed-break
+  (let [task-id (task-spec/create-task!
+                 {:goal "Loop break"
+                  :steps [{:id :repeat
+                           :kind :loop
+                           :initial {:n 0}
+                           :max-iterations 10
+                           :output-step :next
+                           :spec {:goal "Increment until done"
+                                  :steps [{:id :next
+                                           :kind :maybe-stop}]}}
+                          {:id :done
+                           :kind :value
+                           :value [:output :repeat [:value :n]]}]})
+        result  (task-spec/run-task!
+                 task-id
+                 :executors {:maybe-stop (fn [{:keys [context]}]
+                                           (let [n (long (get-in context [:inputs :acc :n]))]
+                                             {:status :success
+                                              :output (if (>= n 2)
+                                                        {:control :break
+                                                         :value {:n n}}
+                                                        {:control :continue
+                                                         :value {:n (inc n)}})}))})
+        task    (db/get-task task-id)
+        output  (get-in task [:meta :task-spec :outputs :repeat])]
+    (is (= :completed (:status result)))
+    (is (= 2 (get-in task [:meta :task-spec :outputs :done])))
+    (is (= :break (:stopped output)))
+    (is (= {:n 2} (:value output)))
+    (is (= [{:n 1} {:n 2} {:n 2}] (:outputs output)))
+    (is (= [:continue :continue :break]
+           (mapv :control (:iterations output))))))
 
 (deftest task-control-resume-routes-task-spec-through-runner
   (let [session-id (db/create-session! :terminal)

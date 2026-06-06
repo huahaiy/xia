@@ -12,6 +12,7 @@
 (def ^:private task-spec-version 1)
 (def ^:private runtime-key :task-spec)
 (def ^:private default-max-steps 100)
+(def ^:private default-loop-max-iterations 100)
 (def ^:private default-retry-max-attempts 2)
 (def ^:private default-retry-delay-ms 0)
 (def ^:private default-retry-backoff-factor 1.0)
@@ -22,6 +23,7 @@
   [:pause :pause-reason :waiting-for :resume-token :deadline :deadline-at])
 (def ^:private terminal-step-statuses #{:success :skipped :failed})
 (def ^:private success-step-statuses #{:success})
+(def ^:private dependency-satisfied-statuses #{:success :skipped})
 (defonce ^:private executor-registry-atom (atom {}))
 
 (defn- now []
@@ -49,6 +51,27 @@
     (symbol? value) (keyword (name value))
     (string? value) (some-> value str/trim not-empty keyword)
     :else nil))
+
+(defn- normalize-dependency-values
+  [step-id value]
+  (cond
+    (or (nil? value) (false? value))
+    []
+
+    (or (keyword? value)
+        (symbol? value)
+        (string? value))
+    [(normalize-id :depends-on value)]
+
+    (sequential? value)
+    (mapv #(normalize-id :depends-on %) value)
+
+    :else
+    (throw (ex-info "Task spec :depends-on must be a step id or collection of step ids"
+                    {:type :task-spec/invalid
+                     :field :depends-on
+                     :step-id step-id
+                     :value value}))))
 
 (defn- normalize-executor-kind
   [kind]
@@ -106,10 +129,52 @@
                     {:type :task-spec/invalid
                      :step step})))
   (let [id   (normalize-id :step-id (:id step))
-        kind (or (normalize-kind (:kind step)) :value)]
-    (assoc step
-           :id id
-           :kind kind)))
+        kind (or (normalize-kind (:kind step)) :value)
+        deps (normalize-dependency-values
+              id
+              (or (:depends-on step)
+                  (:depends step)
+                  (:dependencies step)))]
+    (cond-> (assoc step
+                   :id id
+                   :kind kind)
+      (seq deps) (assoc :depends-on deps))))
+
+(defn- validate-step-dependencies!
+  [steps]
+  (let [ids      (set (map :id steps))
+        step-map (into {} (map (juxt :id identity)) steps)]
+    (doseq [{:keys [id depends-on]} steps
+            dep-id depends-on]
+      (when (= id dep-id)
+        (throw (ex-info "Task spec step cannot depend on itself"
+                        {:type :task-spec/invalid
+                         :field :depends-on
+                         :step-id id
+                         :depends-on dep-id})))
+      (when-not (contains? ids dep-id)
+        (throw (ex-info "Task spec step depends on an unknown step"
+                        {:type :task-spec/invalid
+                         :field :depends-on
+                         :step-id id
+                         :depends-on dep-id}))))
+    (let [visiting (atom #{})
+          visited  (atom #{})]
+      (letfn [(visit! [path step-id]
+                (when (contains? @visiting step-id)
+                  (throw (ex-info "Task spec dependencies contain a cycle"
+                                  {:type :task-spec/invalid
+                                   :field :depends-on
+                                   :cycle (conj (vec path) step-id)})))
+                (when-not (contains? @visited step-id)
+                  (swap! visiting conj step-id)
+                  (doseq [dep-id (:depends-on (get step-map step-id))]
+                    (visit! (conj (vec path) step-id) dep-id))
+                  (swap! visiting disj step-id)
+                  (swap! visited conj step-id)))]
+        (doseq [{:keys [id]} steps]
+          (visit! [] id)))))
+  nil)
 
 (defn normalize-spec
   "Normalize and validate a declarative task spec."
@@ -129,6 +194,7 @@
                         {:type :task-spec/invalid
                          :field :steps
                          :ids ids}))))
+    (validate-step-dependencies! steps)
     (assoc spec
            :kind :task
            :version (or (:version spec) 1)
@@ -205,6 +271,7 @@
     (get m path)))
 
 (declare eval-expr
+         positive-long-guardrail
          run-task!)
 
 (defn- truthy?
@@ -1405,6 +1472,486 @@
          :summary (str "Paused before starting branch " (name (:id step)))
          :output (async-branch-output child-task-id nil)}))))
 
+(defn- control-key-string
+  [value]
+  (cond
+    (keyword? value) (name value)
+    (symbol? value) (name value)
+    :else (str value)))
+
+(defn- control-task-match?
+  [kind parent-task-id step-id control-key task]
+  (and (= parent-task-id (:parent-id task))
+       (= kind (get-in task [:meta :trigger :kind]))
+       (= step-id (get-in task [:meta :trigger :parent-step-id]))
+       (= (control-key-string control-key)
+          (get-in task [:meta :trigger :control-key]))))
+
+(defn- latest-control-task
+  [kind parent-task-id step-id control-key]
+  (->> (db/list-tasks {:limit 100000})
+       (filter #(control-task-match? kind parent-task-id step-id control-key %))
+       (sort-by #(or (:updated-at %) (:created-at %)) #(compare %2 %1))
+       first))
+
+(defn- control-title
+  [kind step control-key spec]
+  (or (nonblank-string (:title spec))
+      (nonblank-string (:goal spec))
+      (nonblank-string (:title step))
+      (nonblank-string (:goal step))
+      (str (str/capitalize (name kind))
+           " "
+           (name (:id step))
+           "/"
+           (control-key-string control-key))))
+
+(defn- create-control-task!
+  [kind parent-task turn-id step control-key spec]
+  (let [contract (task-contract spec)
+        spec*    (:spec contract)
+        title*   (control-title kind step control-key spec*)]
+    (db/create-task!
+     (cond-> {:session-id (:session-id parent-task)
+              :parent-id (:id parent-task)
+              :channel (or (:channel parent-task) :task-spec)
+              :type :task
+              :state :resumable
+              :title title*
+              :summary title*
+              :contract contract
+              :meta {:trigger {:kind kind
+                               :parent-task-id (:id parent-task)
+                               :parent-turn-id turn-id
+                               :parent-step-id (:id step)
+                               :control-key (control-key-string control-key)}
+                     :execution {:mode (task-execution-mode parent-task)}
+                     runtime-key (initial-task-spec-state spec*)}}
+       (:session-id parent-task) (assoc :session-role kind)))))
+
+(defn- ensure-control-task!
+  [kind parent-task turn-id step control-key spec]
+  (or (some-> (latest-control-task kind (:id parent-task) (:id step) control-key) :id)
+      (create-control-task! kind parent-task turn-id step control-key spec)))
+
+(defn- control-raw-spec
+  [kind step entry]
+  (or (when-let [contract (:contract entry)]
+        (task-spec contract))
+      (:spec entry)
+      (when (:steps entry)
+        entry)
+      (throw (ex-info (str "Task spec " (name kind) " entry requires :spec")
+                      {:type :task-spec/invalid
+                       :step-id (:id step)
+                       :entry entry}))))
+
+(defn- control-spec
+  [kind step entry]
+  (let [spec  (normalize-spec (control-raw-spec kind step entry))
+        goal* (or (nonblank-string (:goal spec))
+                  (nonblank-string (:goal entry))
+                  (nonblank-string (:title entry))
+                  (nonblank-string (:goal step))
+                  (nonblank-string (:title step)))]
+    (cond-> spec
+      goal* (assoc :goal goal*))))
+
+(defn- evaluated-map-field
+  [state context owner field label]
+  (when (contains? owner field)
+    (let [value (eval-step-expr state context (get owner field))]
+      (when-not (or (nil? value) (map? value))
+        (throw (ex-info (str "Task spec " label " must evaluate to a map")
+                        {:type :task-spec/invalid
+                         :field field
+                         :value value})))
+      value)))
+
+(defn- control-inputs
+  [state context step entry extra-inputs]
+  (merge (or (evaluated-map-field state context step :inputs ":inputs") {})
+         (or (evaluated-map-field state context entry :inputs ":inputs") {})
+         extra-inputs))
+
+(defn- control-context
+  [context parent-task-id inputs]
+  (cond-> (assoc context :parent-task-id parent-task-id)
+    (seq inputs) (update :inputs merge inputs)))
+
+(defn- control-output-step
+  [step]
+  (when-let [step-id (or (:output-step step)
+                         (:collect-step step)
+                         (:result-step step))]
+    (normalize-id :output-step step-id)))
+
+(defn- collected-child-output
+  [step child-output]
+  (if-let [step-id (control-output-step step)]
+    (get-in child-output [:outputs step-id])
+    (:outputs child-output)))
+
+(defn- run-control-child!
+  [kind parent-task turn-id state context executors step control-key entry extra-inputs]
+  (let [spec          (control-spec kind step entry)
+        child-task-id (ensure-control-task! kind parent-task turn-id step control-key spec)
+        inputs        (control-inputs state context step entry extra-inputs)
+        child-result  (run-subtask! child-task-id
+                                    (control-context context (:id parent-task) inputs)
+                                    executors
+                                    (or (:max-steps entry)
+                                        (:max-steps step)
+                                        default-max-steps))
+        output        (subtask-output child-task-id child-result)]
+    {:key control-key
+     :status (:status child-result)
+     :result child-result
+     :output output
+     :value (collected-child-output step output)}))
+
+(defn- control-result-status
+  [children]
+  (cond
+    (some #(= :failed (:status %)) children) :failed
+    (some #(= :paused (:status %)) children) :paused
+    (every? #(= :completed (:status %)) children) :success
+    :else :paused))
+
+(defn- control-error
+  [children]
+  (or (some #(get-in % [:result :error]) children)
+      (some #(get-in % [:output :error]) children)))
+
+(defn- parallel-entry
+  [entry]
+  (when-not (map? entry)
+    (throw (ex-info "Task spec parallel entries must be maps"
+                    {:type :task-spec/invalid
+                     :entry entry})))
+  (let [id (normalize-id :parallel-entry-id (:id entry))]
+    (assoc entry :id id)))
+
+(defn- parallel-entries
+  [step]
+  (let [branches (or (:branches step)
+                     (:tasks step)
+                     (:children step))]
+    (cond
+      (map? branches)
+      (mapv (fn [[k v]]
+              (let [id (normalize-id :parallel-entry-id k)]
+                (if (map? v)
+                  (assoc v :id id)
+                  {:id id :spec v})))
+            branches)
+
+      (sequential? branches)
+      (mapv parallel-entry branches)
+
+      :else
+      (throw (ex-info "Task spec parallel step requires :branches"
+                      {:type :task-spec/invalid
+                       :step-id (:id step)})))))
+
+(defn- parallel-executor
+  [{:keys [state context step task-id turn-id executors]}]
+  (let [parent-task (or (db/get-task task-id)
+                        (throw (ex-info "Task spec parallel parent task not found"
+                                        {:type :task-spec/not-found
+                                         :task-id task-id})))
+        entries     (parallel-entries step)
+        children    (->> entries
+                         (mapv (fn [entry]
+                                 (future
+                                   (run-control-child! :parallel
+                                                       parent-task
+                                                       turn-id
+                                                       state
+                                                       context
+                                                       executors
+                                                       step
+                                                       (:id entry)
+                                                       entry
+                                                       {}))))
+                         (mapv deref))
+        branches    (into {}
+                          (map (fn [{:keys [key output]}]
+                                 [key output]))
+                          children)
+        values      (into {}
+                          (map (fn [{:keys [key value]}]
+                                 [key value]))
+                          children)
+        output      {:branches branches
+                     :outputs values}
+        status      (control-result-status children)]
+    (case status
+      :success
+      {:status :success
+       :summary (str "Parallel step " (name (:id step)) " completed")
+       :output output}
+
+      :paused
+      {:status :paused
+       :pause-reason :parallel-paused
+       :waiting-for :children
+       :summary (str "Parallel step " (name (:id step)) " paused")
+       :output output}
+
+      :failed
+      {:status :failed
+       :summary (str "Parallel step " (name (:id step)) " failed")
+       :error (or (control-error children) "parallel child failed")
+       :output output})))
+
+(defn- map-items
+  [state context step]
+  (let [items-expr (or (:items step)
+                       (:collection step)
+                       (:coll step)
+                       (:each step))
+        items      (eval-step-expr state context items-expr)]
+    (when-not (sequential? items)
+      (throw (ex-info "Task spec map :items must evaluate to a sequential collection"
+                      {:type :task-spec/invalid
+                       :step-id (:id step)
+                       :items items})))
+    (vec items)))
+
+(defn- map-item-key
+  [step]
+  (normalize-id :as (or (:as step) :item)))
+
+(defn- map-index-key
+  [step]
+  (normalize-id :index-as (or (:index-as step) :index)))
+
+(defn- map-executor
+  [{:keys [state context step task-id turn-id executors]}]
+  (let [parent-task (or (db/get-task task-id)
+                        (throw (ex-info "Task spec map parent task not found"
+                                        {:type :task-spec/not-found
+                                         :task-id task-id})))
+        spec-entry  {:spec (or (:spec step)
+                               (throw (ex-info "Task spec map step requires :spec"
+                                               {:type :task-spec/invalid
+                                                :step-id (:id step)})))}
+        item-key    (map-item-key step)
+        index-key   (map-index-key step)
+        children    (mapv (fn [idx item]
+                            (let [extra-inputs {item-key item
+                                                index-key idx}]
+                              (assoc (run-control-child! :map
+                                                         parent-task
+                                                         turn-id
+                                                         state
+                                                         context
+                                                         executors
+                                                         step
+                                                         idx
+                                                         spec-entry
+                                                         extra-inputs)
+                                     :index idx
+                                     :item item)))
+                          (range)
+                          (map-items state context step))
+        results     (mapv (fn [{:keys [index item output value status]}]
+                            {:index index
+                             :item item
+                             :status status
+                             :task-id (:task-id output)
+                             :outputs (:outputs output)
+                             :value value})
+                          children)
+        output      {:results results
+                     :outputs (mapv :value children)}
+        status      (control-result-status children)]
+    (case status
+      :success
+      {:status :success
+       :summary (str "Map step " (name (:id step)) " completed")
+       :output output}
+
+      :paused
+      {:status :paused
+       :pause-reason :map-paused
+       :waiting-for :children
+       :summary (str "Map step " (name (:id step)) " paused")
+       :output output}
+
+      :failed
+      {:status :failed
+       :summary (str "Map step " (name (:id step)) " failed")
+       :error (or (control-error children) "map child failed")
+       :output output})))
+
+(defn- loop-max-iterations
+  [state context step]
+  (or (when (contains? step :max-iterations)
+        (positive-long-guardrail :max-iterations
+                                 (eval-step-expr state context (:max-iterations step))))
+      default-loop-max-iterations))
+
+(defn- loop-acc-key
+  [step]
+  (normalize-id :acc-as (or (:acc-as step)
+                            (:accumulator-as step)
+                            :acc)))
+
+(defn- loop-index-key
+  [step]
+  (normalize-id :index-as (or (:index-as step)
+                              (:iteration-as step)
+                              :iteration)))
+
+(defn- loop-inputs
+  [state context step acc iteration]
+  (merge (or (evaluated-map-field state context step :inputs ":inputs") {})
+         {(loop-acc-key step) acc
+          (loop-index-key step) iteration}))
+
+(defn- loop-condition-context
+  [state context step acc iteration]
+  (update context :inputs merge (loop-inputs state context step acc iteration)))
+
+(defn- loop-continue?
+  [state context step acc iteration]
+  (let [context* (loop-condition-context state context step acc iteration)
+        while?   (if (contains? step :while)
+                   (truthy? (eval-step-expr state context* (:while step)))
+                   true)
+        until?   (when (contains? step :until)
+                   (truthy? (eval-step-expr state context* (:until step))))]
+    (and while?
+         (not until?))))
+
+(defn- loop-control
+  [value]
+  (when (map? value)
+    (normalize-kind (or (:control value)
+                        (:loop-control value)))))
+
+(defn- loop-next-value
+  [current-acc value]
+  (if (and (map? value)
+           (loop-control value))
+    (if (contains? value :value)
+      (:value value)
+      current-acc)
+    value))
+
+(defn- loop-child-row
+  [iteration child current-acc]
+  (let [value   (:value child)
+        control (loop-control value)
+        next*   (loop-next-value current-acc value)]
+    (cond-> {:index iteration
+             :status (:status child)
+             :task-id (get-in child [:output :task-id])
+             :outputs (get-in child [:output :outputs])
+             :value next*}
+      control (assoc :control control
+                     :raw-value value))))
+
+(defn- loop-executor
+  [{:keys [state context step task-id turn-id executors]}]
+  (let [parent-task (or (db/get-task task-id)
+                        (throw (ex-info "Task spec loop parent task not found"
+                                        {:type :task-spec/not-found
+                                         :task-id task-id})))
+        spec-entry  {:spec (or (:spec step)
+                               (throw (ex-info "Task spec loop step requires :spec"
+                                               {:type :task-spec/invalid
+                                                :step-id (:id step)})))}
+        max-iterations (loop-max-iterations state context step)
+        initial-acc (when (contains? step :initial)
+                      (eval-step-expr state context (:initial step)))]
+    (loop [iteration 0
+           acc initial-acc
+           children []]
+      (cond
+        (>= (long iteration) (long max-iterations))
+        {:status :success
+         :summary (str "Loop step " (name (:id step)) " reached max iterations")
+         :output {:iterations children
+                  :outputs (mapv :value children)
+                  :value acc
+                  :stopped :max-iterations
+                  :max-iterations max-iterations}}
+
+        (not (loop-continue? state context step acc iteration))
+        {:status :success
+         :summary (str "Loop step " (name (:id step)) " completed")
+         :output {:iterations children
+                  :outputs (mapv :value children)
+                  :value acc
+                  :stopped :condition
+                  :max-iterations max-iterations}}
+
+        :else
+        (let [extra-inputs (loop-inputs state context step acc iteration)
+              child       (assoc (run-control-child! :loop
+                                                     parent-task
+                                                     turn-id
+                                                     state
+                                                     context
+                                                     executors
+                                                     step
+                                                     iteration
+                                                     spec-entry
+                                                     extra-inputs)
+                                 :index iteration)
+              child-row   (loop-child-row iteration child acc)
+              children*   (conj children child-row)
+              control     (:control child-row)]
+          (case (:status child)
+            :completed
+            (case control
+              :break
+              {:status :success
+               :summary (str "Loop step " (name (:id step)) " stopped")
+               :output {:iterations children*
+                        :outputs (mapv :value children*)
+                        :value (:value child-row)
+                        :stopped :break
+                        :current-iteration iteration
+                        :max-iterations max-iterations}}
+
+              (:continue nil)
+              (recur (inc iteration)
+                     (:value child-row)
+                     children*)
+
+              (throw (ex-info "Task spec loop control must be :break or :continue"
+                              {:type :task-spec/invalid
+                               :field :control
+                               :step-id (:id step)
+                               :value control})))
+
+            :paused
+            {:status :paused
+             :pause-reason :loop-paused
+             :waiting-for :children
+             :summary (str "Loop step " (name (:id step)) " paused")
+             :output {:iterations children*
+                      :outputs (mapv :value children*)
+                      :value acc
+                      :current-iteration iteration
+                      :max-iterations max-iterations}}
+
+            :failed
+            {:status :failed
+             :summary (str "Loop step " (name (:id step)) " failed")
+             :error (or (get-in child [:result :error])
+                        (get-in child [:output :error])
+                        "loop child failed")
+             :output {:iterations children*
+                      :outputs (mapv :value children*)
+                      :value acc
+                      :current-iteration iteration
+                      :max-iterations max-iterations}}))))))
+
 (defn- missing-executor
   [kind]
   (fn [_]
@@ -1422,7 +1969,10 @@
    :approval approval-executor
    :llm llm-executor
    :branch branch-executor
-   :subtask subtask-executor})
+   :subtask subtask-executor
+   :parallel parallel-executor
+   :map map-executor
+   :loop loop-executor})
 
 (defn- resolve-executors
   [executors]
@@ -1435,9 +1985,52 @@
   (not (contains? terminal-step-statuses
                   (get-in state [:steps (:id step) :status]))))
 
+(defn- dependency-status
+  [state dep-id]
+  (get-in state [:steps dep-id :status]))
+
+(defn- dependency-satisfied?
+  [state dep-id]
+  (contains? dependency-satisfied-statuses
+             (dependency-status state dep-id)))
+
+(defn- dependencies-satisfied?
+  [state step]
+  (every? #(dependency-satisfied? state %) (:depends-on step)))
+
+(defn- ready-step?
+  [state step]
+  (and (due-step? state step)
+       (dependencies-satisfied? state step)))
+
+(defn- blocked-dependencies
+  [state step]
+  (into []
+        (keep (fn [dep-id]
+                (when-not (dependency-satisfied? state dep-id)
+                  {:step-id dep-id
+                   :status (or (dependency-status state dep-id)
+                               :unknown)})))
+        (:depends-on step)))
+
+(defn- dependency-blocked-result
+  [state spec]
+  (let [blocked (into []
+                      (keep (fn [step]
+                              (when (due-step? state step)
+                                (when-let [deps (seq (blocked-dependencies state step))]
+                                  {:step-id (:id step)
+                                   :blocked-by deps}))))
+                      (:steps spec))]
+    (when (seq blocked)
+      {:status :failed
+       :summary "Task spec dependencies are blocked"
+       :error "task spec has pending steps but no runnable dependency path"
+       :blocked-dependencies blocked})))
+
 (defn- next-step
   [state spec]
-  (first (filter #(due-step? state %) (:steps spec))))
+  (first (filter #(ready-step? state %) (:steps spec))))
 
 (defn- update-step-state
   [state step-id f & args]
@@ -2065,23 +2658,44 @@
                                 {:type :task-spec/invalid-status
                                  :step-id (:id step)
                                  :status status}))))
-            (let [summary "Task spec completed"
-                  state*  (assoc state
-                                 :status :completed
-                                 :current-step-id nil
-                                 :updated-at (now))]
-              (sync-task-state! task-id
-                                (dissoc state* :spec)
-                                {:state :completed
-                                 :summary summary
-                                 :stop-reason nil
-                                 :error nil
-                                 :finished-at (now)})
-              (close-turn! turn-id :completed summary nil)
-              {:status :completed
-               :task-id task-id
-               :turn-id turn-id
-               :summary summary
-               :state (dissoc state* :spec)})))))
+            (if-let [blocked (dependency-blocked-result state spec)]
+              (let [summary (:summary blocked)
+                    state*  (assoc state
+                                   :status :failed
+                                   :blocked-dependencies (:blocked-dependencies blocked)
+                                   :updated-at (now))]
+                (sync-task-state! task-id
+                                  (dissoc state* :spec)
+                                  {:state :failed
+                                   :stop-reason :error
+                                   :summary summary
+                                   :error (:error blocked)
+                                   :finished-at (now)})
+                (close-turn! turn-id :failed summary (:error blocked))
+                {:status :failed
+                 :task-id task-id
+                 :turn-id turn-id
+                 :summary summary
+                 :error (:error blocked)
+                 :blocked-dependencies (:blocked-dependencies blocked)
+                 :state (dissoc state* :spec)})
+              (let [summary "Task spec completed"
+                    state*  (assoc state
+                                   :status :completed
+                                   :current-step-id nil
+                                   :updated-at (now))]
+                (sync-task-state! task-id
+                                  (dissoc state* :spec)
+                                  {:state :completed
+                                   :summary summary
+                                   :stop-reason nil
+                                   :error nil
+                                   :finished-at (now)})
+                (close-turn! turn-id :completed summary nil)
+                {:status :completed
+                 :task-id task-id
+                 :turn-id turn-id
+                 :summary summary
+                 :state (dissoc state* :spec)}))))))
     {:status :not-found
      :error "task not found"}))
