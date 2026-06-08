@@ -8,7 +8,8 @@
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.task-spec :as task-spec]
-            [xia.test-helpers :as th]))
+            [xia.test-helpers :as th]
+            [xia.tool :as tool]))
 
 (defn- with-clear-executors
   [f]
@@ -241,6 +242,99 @@
         (is (= 2 (count @prompts)))
         (is (str/includes? (second @prompts) "diagnostics"))
         (is (str/includes? (second @prompts) "requires :value"))))))
+
+(deftest task-spec-authoring-normalizes-output-schema-alias
+  (let [content "{\"spec\":{\"goal\":\"Draft JSON\",\"steps\":[{\"id\":\"draft\",\"kind\":\"llm\",\"prompt\":\"Return JSON\",\"output_schema\":{\"type\":\"object\",\"required\":[\"body\"],\"properties\":{\"body\":{\"type\":\"string\"}}}}]}}"]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" content})]
+      (let [result (task-spec/author-spec!
+                    "Draft JSON"
+                    :tools []
+                    :repair-attempts 0)
+            schema (get-in result [:spec :steps 0 :output-schema])]
+        (is (= :success (:status result)))
+        (is (= "object" (:type schema)))
+        (is (= ["body"] (:required schema)))
+        (is (nil? (get-in result [:spec :steps 0 :output_schema])))))))
+
+(deftest task-spec-authoring-rejects-tools-outside-catalog
+  (let [content "{\"spec\":{\"goal\":\"Search\",\"steps\":[{\"id\":\"search\",\"kind\":\"tool\",\"tool\":\"not-allowed\",\"args\":{\"query\":\"inbox\"}}]}}"]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" content})]
+      (let [result (task-spec/author-spec!
+                    "Search"
+                    :tools [{:id :email-search
+                             :name "Email search"
+                             :description "Search email"
+                             :parameters {"type" "object"
+                                          "properties" {"query" {"type" "string"}}}}]
+                    :repair-attempts 0)]
+        (is (= :invalid (:status result)))
+        (is (nil? (:spec result)))
+        (is (some #(= :task-spec-authoring/tool-not-in-catalog (:type %))
+                  (get-in result [:validation :errors])))))))
+
+(deftest task-spec-authored-tool-args-use-json-keys-at-execution
+  (let [calls   (atom [])
+        content "{\"spec\":{\"goal\":\"Search\",\"inputs\":{\"topic\":\"inbox\"},\"steps\":[{\"id\":\"search\",\"kind\":\"tool\",\"tool\":\"email-search\",\"args\":{\"query\":[\"input\",\"topic\"],\"max_results\":3,\"filters\":{\"unread_only\":true}}}]}}"]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" content})
+                  tool/execute-tool
+                  (fn [tool-id args _context]
+                    (swap! calls conj {:tool-id tool-id
+                                       :args args})
+                    {:content "ok"})]
+      (let [auth-result (task-spec/author-spec!
+                         "Search"
+                         :tools [{:id :email-search
+                                  :name "Email search"
+                                  :description "Search email"
+                                  :parameters {"type" "object"
+                                               "properties" {"query" {"type" "string"}}}}]
+                         :repair-attempts 0)
+            task-id     (task-spec/create-task! (:spec auth-result))
+            run-result  (task-spec/run-task! task-id)]
+        (is (= :success (:status auth-result)))
+        (is (= :completed (:status run-result)))
+        (is (= [{:tool-id :email-search
+                 :args {"query" "inbox"
+                        "max_results" 3
+                        "filters" {"unread_only" true}}}]
+               @calls))))))
+
+(deftest task-spec-parallel-respects-concurrency-limit
+  (let [active     (atom 0)
+        max-active (atom 0)
+        executor   (fn [_]
+                     (let [current (swap! active inc)]
+                       (swap! max-active max current)
+                       (try
+                         (Thread/sleep 25)
+                         {:status :success
+                          :output "done"}
+                         (finally
+                           (swap! active dec)))))
+        task-id    (task-spec/create-task!
+                    {:goal "Bound parallel work"
+                     :steps [{:id :fanout
+                              :kind :parallel
+                              :concurrency 2
+                              :branches (mapv (fn [idx]
+                                                {:id (keyword (str "b" idx))
+                                                 :spec {:goal (str "Branch " idx)
+                                                        :steps [{:id :run
+                                                                 :kind :custom}]}})
+                                              (range 6))}]})
+        result     (task-spec/run-task! task-id
+                                        :executors {:custom executor})]
+    (is (= :completed (:status result)))
+    (is (<= @max-active 2))))
 
 (deftest task-spec-pauses-at-unsupported-step-and-resumes-with-executor
   (let [task-id (task-spec/create-task!

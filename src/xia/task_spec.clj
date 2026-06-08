@@ -14,6 +14,7 @@
 (def ^:private runtime-key :task-spec)
 (def ^:private default-max-steps 100)
 (def ^:private default-loop-max-iterations 100)
+(def ^:private default-parallel-concurrency 8)
 (def ^:private default-retry-max-attempts 2)
 (def ^:private default-retry-delay-ms 0)
 (def ^:private default-retry-backoff-factor 1.0)
@@ -33,6 +34,21 @@
 (def ^:private branch-modes #{:async :join})
 (def ^:private schema-primitive-types
   #{:object :array :string :number :integer :boolean :null})
+(def ^:private step-field-aliases
+  {:collect_step :collect-step
+   :depends_on :depends-on
+   :index_as :index-as
+   :max_iterations :max-iterations
+   :max_output_tokens :max-output-tokens
+   :max_steps :max-steps
+   :max_tokens :max-tokens
+   :output_schema :output-schema
+   :output_step :output-step
+   :provider_id :provider-id
+   :result_step :result-step
+   :structured_output :structured-output?
+   :timeout_ms :timeout-ms
+   :tool_id :tool-id})
 (defonce ^:private executor-registry-atom (atom {}))
 
 (defn- now []
@@ -137,11 +153,22 @@
     (throw (ex-info "Task spec step must be a map"
                     {:type :task-spec/invalid
                      :step step})))
-  (let [id   (normalize-id :step-id (:id step))
+  (let [step (reduce-kv (fn [step* alias canonical]
+                          (if (contains? step* alias)
+                            (let [alias-value (get step* alias)
+                                  step**      (dissoc step* alias)]
+                              (if (contains? step** canonical)
+                                step**
+                                (assoc step** canonical alias-value)))
+                            step*))
+                        step
+                        step-field-aliases)
+        id   (normalize-id :step-id (:id step))
         kind (or (normalize-kind (:kind step)) :value)
         deps (normalize-dependency-values
               id
               (or (:depends-on step)
+                  (:depends_on step)
                   (:depends step)
                   (:dependencies step)))]
     (cond-> (assoc step
@@ -918,6 +945,15 @@
       :parallel
       (concat
        (step-input-expression-errors step-ids step step (step-path step))
+       (when (contains? step :concurrency)
+         (concat
+          (expression-errors step-ids step
+                             (step-path step :concurrency)
+                             (:concurrency step))
+          (literal-positive-integer-errors step
+                                           :concurrency
+                                           (step-path step :concurrency)
+                                           (:concurrency step))))
        (parallel-branch-errors step-ids step))
 
       :map
@@ -1280,11 +1316,49 @@
     (string? value) (some-> value str/trim not-empty keyword)
     :else nil))
 
+(defn- tool-argument-key
+  [key]
+  (cond
+    (string? key) key
+    (keyword? key) (name key)
+    (symbol? key) (name key)
+    :else (str key)))
+
+(defn- tool-argument-value
+  [value]
+  (cond
+    (map? value)
+    (into {}
+          (map (fn [[k v]]
+                 [(tool-argument-key k) (tool-argument-value v)]))
+          value)
+
+    (vector? value)
+    (mapv tool-argument-value value)
+
+    (sequential? value)
+    (mapv tool-argument-value value)
+
+    :else
+    value))
+
+(defn- tool-arguments
+  [step raw-args]
+  (let [args (or raw-args {})]
+    (when-not (map? args)
+      (throw (ex-info "Task spec tool :args must evaluate to a map"
+                      {:type :task-spec/invalid
+                       :step-id (:id step)
+                       :field :args
+                       :value args})))
+    (tool-argument-value args)))
+
 (defn- tool-executor
   [{:keys [state context step task-id turn-id]}]
   (let [tool-id (or (normalize-tool-id (:tool step))
                     (normalize-tool-id (:tool-id step)))
-        args    (or (eval-step-expr state context (:args step)) {})]
+        args    (tool-arguments step
+                                (eval-step-expr state context (:args step)))]
     (when-not tool-id
       (throw (ex-info "Task spec tool step requires :tool or :tool-id"
                       {:type :task-spec/invalid
@@ -2092,7 +2166,7 @@
                    "Do not invent tool ids."
                    "Make tool arguments explicit data."
                    "Reference prior outputs with expression arrays."
-                   "Include output_schema for llm steps when later steps read structured fields."
+                   "Include output-schema for llm steps when later steps read structured fields."
                    "Do not include secrets in the spec."]}
     existing-spec (assoc :existing_spec existing-spec)
     diagnostics (assoc :diagnostics diagnostics)))
@@ -2120,6 +2194,53 @@
                               (merge {:type :task-spec-authoring/invalid-json}
                                      (ex-data e)))]
    :warnings []})
+
+(defn- catalog-tool-id-set
+  [tools]
+  (into #{}
+        (keep (fn [tool]
+                (normalize-tool-id (or (:id tool)
+                                       (:tool/id tool)
+                                       (get tool "id")))))
+        tools))
+
+(defn- authoring-catalog-errors
+  [request spec]
+  (let [allowed-tool-ids (catalog-tool-id-set (:tools request))]
+    (into []
+          (keep (fn [step]
+                  (when (= :tool (:kind step))
+                    (let [tool-id (normalize-tool-id (or (:tool step)
+                                                         (:tool-id step)))]
+                      (when (and tool-id
+                                 (not (contains? allowed-tool-ids tool-id)))
+                        (validation-error
+                         "Task spec tool is not in the provided tool catalog"
+                         {:type :task-spec-authoring/tool-not-in-catalog
+                          :step-id (:id step)
+                          :field :tool
+                          :path (step-path step :tool)
+                          :tool-id tool-id
+                          :allowed-tool-ids (mapv name
+                                                  (sort-by name
+                                                           allowed-tool-ids))}))))))
+          (:steps spec))))
+
+(defn- add-validation-errors
+  [validation errors]
+  (if (seq errors)
+    (assoc validation
+           :valid? false
+           :errors (into (vec (:errors validation)) errors))
+    validation))
+
+(defn- validate-authored-spec
+  [request raw-spec]
+  (let [validation (validate-spec raw-spec)]
+    (if (:valid? validation)
+      (add-validation-errors validation
+                             (authoring-catalog-errors request (:spec validation)))
+      validation)))
 
 (defn- authoring-result
   [request message content raw-spec validation]
@@ -2154,7 +2275,7 @@
     (try
       (let [parsed     (parse-planner-json! content)
             raw-spec   (planner-response-spec parsed)
-            validation (validate-spec raw-spec)]
+            validation (validate-authored-spec request* raw-spec)]
         (authoring-result request* message content raw-spec validation))
       (catch clojure.lang.ExceptionInfo e
         (authoring-result request*
@@ -2849,6 +2970,35 @@
                       {:type :task-spec/invalid
                        :step-id (:id step)})))))
 
+(defn- parallel-concurrency
+  [state context step]
+  (or (when (contains? step :concurrency)
+        (positive-long-guardrail :concurrency
+                                 (eval-step-expr state context (:concurrency step))))
+      default-parallel-concurrency))
+
+(defn- run-parallel-entries
+  [parent-task turn-id state context executors step entries]
+  (let [concurrency (max 1 (long (parallel-concurrency state context step)))]
+    (->> entries
+         (partition-all concurrency)
+         (mapcat (fn [batch]
+                   (->> batch
+                        (mapv (fn [entry]
+                                (future
+                                  (run-control-child! :parallel
+                                                      parent-task
+                                                      turn-id
+                                                      state
+                                                      context
+                                                      executors
+                                                      step
+                                                      (:id entry)
+                                                      entry
+                                                      {}))))
+                        (mapv deref))))
+         vec)))
+
 (defn- parallel-executor
   [{:keys [state context step task-id turn-id executors]}]
   (let [parent-task (or (db/get-task task-id)
@@ -2856,20 +3006,13 @@
                                         {:type :task-spec/not-found
                                          :task-id task-id})))
         entries     (parallel-entries step)
-        children    (->> entries
-                         (mapv (fn [entry]
-                                 (future
-                                   (run-control-child! :parallel
-                                                       parent-task
-                                                       turn-id
-                                                       state
-                                                       context
-                                                       executors
-                                                       step
-                                                       (:id entry)
-                                                       entry
-                                                       {}))))
-                         (mapv deref))
+        children    (run-parallel-entries parent-task
+                                          turn-id
+                                          state
+                                          context
+                                          executors
+                                          step
+                                          entries)
         branches    (into {}
                           (map (fn [{:keys [key output]}]
                                  [key output]))
