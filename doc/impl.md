@@ -165,8 +165,8 @@ Each ceiling supports `:limits/<scope>-warn-ratio`,
 `:limits/downgrade-provider-id` when the user has not explicitly selected a
 provider.
 
-Future model-routing improvements should extend this namespace instead of
-adding new budget logic to `xia.task-policy`.
+Future model-routing improvements should extend this namespace and expose shared
+policy entry points through `xia.policy`.
 
 ## Runtime Overlay Contract
 
