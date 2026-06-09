@@ -111,6 +111,13 @@
         base
         (assoc base :frames (mapv #(stack-frame-summary opts %) stack*))))))
 
+(defn- executor-details-body
+  [current-tip stack-summary]
+  (when (or current-tip stack-summary)
+    {:autonomous (cond-> {}
+                   current-tip (assoc :current_tip current-tip)
+                   stack-summary (assoc :stack_summary stack-summary))}))
+
 (defn- checkpoint-body
   [opts task]
   (when-let [checkpoint (get-in task [:meta :checkpoint])]
@@ -311,20 +318,34 @@
        vec))
 
 (defn- current-state-body
-  [opts task runtime current-tip checkpoint]
+  [opts task runtime current-tip checkpoint task-spec-progress]
   (let [task-state (or (:state runtime) (:state task))
-        current-focus (or (:current-focus runtime)
+        current-focus (or (:current_focus task-spec-progress)
+                          (:current-focus runtime)
                           (:title current-tip)
                           (:title task))
-        next-step (or (:next-step runtime)
+        next-step (or (:next_step task-spec-progress)
+                      (:next-step runtime)
                       (:next_step current-tip)
                       (:next-step checkpoint))
         boundary-summary (some-> (task-runtime/task-boundary-summary task) :summary)
         resume-hint      (task-runtime/task-resume-hint task)
-        progress-status (or (some-> (:progress-status runtime) keyword->str)
+        progress-status (or (:progress_status task-spec-progress)
+                            (some-> (:progress-status runtime) keyword->str)
                             (:progress_status current-tip)
-                            (some-> (:progress-status checkpoint) keyword->str))]
-    (cond-> {:task_state (keyword->str task-state)}
+                            (some-> (:progress-status checkpoint) keyword->str))
+        spec-fields     (select-keys task-spec-progress
+                                      [:progress_source
+                                       :task_spec_status
+                                       :current_step_id
+                                       :current_step_kind
+                                       :step_count
+                                       :completed_count
+                                       :failed_count
+                                       :pause_reason
+                                       :waiting_for])]
+    (cond-> (merge {:task_state (keyword->str task-state)}
+                   spec-fields)
       (:phase runtime) (assoc :phase (keyword->str (:phase runtime)))
       (:message runtime) (assoc :message (truncate-text* opts (:message runtime) 240))
       current-focus (assoc :current_focus (truncate-text* opts current-focus 180))
@@ -455,6 +476,105 @@
         (assoc :status {:kind (keyword->str (:kind status))
                         :summary (limits/budget-summary status)})))))
 
+(def ^:private completed-step-statuses
+  #{:success :skipped})
+
+(def ^:private active-step-statuses
+  #{:running :paused})
+
+(def ^:private pending-step-statuses
+  #{:pending :ready})
+
+(defn- task-spec-status->progress-status
+  [status]
+  (case status
+    :ready "pending"
+    :running "in-progress"
+    :paused "paused"
+    :failed "failed"
+    :completed "completed"
+    (keyword->str status)))
+
+(defn- ordered-task-spec-steps
+  [task task-spec]
+  (let [step-map (:steps task-spec)
+        spec     (get-in task [:contract :spec])
+        steps    (if-let [spec-steps (seq (:steps spec))]
+                   (mapv (fn [{:keys [id kind] :as spec-step}]
+                           (assoc (merge {:id id
+                                          :kind kind
+                                          :status :pending}
+                                         (get step-map id))
+                                  ::definition spec-step))
+                         spec-steps)
+                   (mapv #(assoc % ::definition nil)
+                         (vals step-map)))]
+    steps))
+
+(defn- step-id->str
+  [step-id]
+  (some-> step-id keyword->str))
+
+(defn- task-spec-step-title
+  [step]
+  (let [definition (::definition step)
+        tool-id    (or (:tool definition)
+                       (:tool-id definition)
+                       (:tool_id definition))]
+    (or (:summary step)
+        (:summary definition)
+        (:title definition)
+        (when tool-id
+          (str "Run " (keyword->str tool-id)))
+        (:prompt definition)
+        (when-let [step-id (step-id->str (:id step))]
+          (str "Step " step-id)))))
+
+(defn- task-spec-current-step
+  [task-spec steps]
+  (let [current-id (:current-step-id task-spec)]
+    (or (some #(when (= current-id (:id %)) %) steps)
+        (some #(when (contains? active-step-statuses (:status %)) %) steps)
+        (some #(when (= :failed (:status %)) %) (reverse steps))
+        (some #(when (contains? pending-step-statuses (:status %)) %) steps)
+        (last steps))))
+
+(defn- task-spec-next-step
+  [current-step steps]
+  (some #(when (and (not= (:id current-step) (:id %))
+                    (contains? pending-step-statuses (:status %)))
+           %)
+        steps))
+
+(defn- task-spec-progress-body
+  [opts task task-spec steps]
+  (when task-spec
+    (let [current-step    (task-spec-current-step task-spec steps)
+          next-step       (task-spec-next-step current-step steps)
+          current-title   (when-let [title (some-> current-step
+                                                   task-spec-step-title)]
+                            (truncate-text* opts title 180))
+          next-title      (when-let [title (some-> next-step
+                                                   task-spec-step-title)]
+                            (truncate-text* opts title 180))
+          current-status  (:status current-step)
+          status          (:status task-spec)]
+      (cond-> {:progress_source "task_spec"
+               :task_spec_status (keyword->str status)
+               :progress_status (or (task-spec-status->progress-status status)
+                                    (some-> current-status keyword->str))
+               :step_count (count steps)
+               :completed_count (count (filter #(contains? completed-step-statuses
+                                                           (:status %))
+                                               steps))
+               :failed_count (count (filter #(= :failed (:status %)) steps))}
+        current-step (assoc :current_step_id (step-id->str (:id current-step)))
+        (:kind current-step) (assoc :current_step_kind (keyword->str (:kind current-step)))
+        current-title (assoc :current_focus current-title)
+        next-title (assoc :next_step next-title)
+        (:pause-reason task-spec) (assoc :pause_reason (keyword->str (:pause-reason task-spec)))
+        (:waiting-for task-spec) (assoc :waiting_for (keyword->str (:waiting-for task-spec)))))))
+
 (defn- task-spec-step-summary
   [step]
   (when (map? step)
@@ -465,13 +585,9 @@
       (:error step) (assoc :error (:error step)))))
 
 (defn- task-spec-body
-  [task]
+  [task steps]
   (when-let [task-spec (get-in task [:meta :task-spec])]
-    (let [step-map (:steps task-spec)
-          spec     (get-in task [:contract :spec])
-          steps    (vec (if-let [spec-steps (seq (:steps spec))]
-                          (keep #(get step-map (:id %)) spec-steps)
-                          (vals step-map)))]
+    (let [steps (or steps (ordered-task-spec-steps task task-spec))]
       (cond-> {:status (keyword->str (:status task-spec))
                :step_count (count steps)
                :completed_count (count (filter #(contains? #{:success :skipped}
@@ -532,8 +648,16 @@
          checkpoint-limit      (if compact? 1 detail-checkpoint-limit)
          activity-limit        (if compact? 1 detail-activity-limit)
          current-tip           (current-tip-body opts autonomy-state)
+         stack-summary*        (stack-summary opts autonomy-state compact?)
          budget                (budget-body task)
-         task-spec             (task-spec-body task)
+         task-spec-state       (get-in task [:meta :task-spec])
+         task-spec-steps       (when task-spec-state
+                                 (ordered-task-spec-steps task task-spec-state))
+         task-spec-progress    (task-spec-progress-body opts
+                                                        task
+                                                        task-spec-state
+                                                        task-spec-steps)
+         task-spec             (task-spec-body task task-spec-steps)
          output                (recent-output opts items output-limit)
          tool-activity         (recent-tool-activity opts items tool-limit)
          policy-decisions      (recent-policy-decisions opts items policy-limit)
@@ -541,10 +665,17 @@
          checkpoints           (recent-checkpoints opts items checkpoint-limit)
          activity              (recent-activity opts items activity-limit)
          operating-envelope    (operating-envelope-body opts task)
+         executor-details      (executor-details-body current-tip stack-summary*)
          base                  (cond-> {:current_tip current-tip
-                                         :stack_summary (stack-summary opts autonomy-state compact?)
+                                         :stack_summary stack-summary*
+                                         :executor_details executor-details
                                          :last_checkpoint (checkpoint-body opts task)
-                                         :current_state (current-state-body opts task runtime current-tip checkpoint)
+                                         :current_state (current-state-body opts
+                                                                            task
+                                                                            runtime
+                                                                            current-tip
+                                                                            checkpoint
+                                                                            task-spec-progress)
                                          :attention (attention-body opts task runtime items budget)
                                          :budget budget
                                          :operating_envelope operating-envelope
