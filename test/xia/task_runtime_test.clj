@@ -4,6 +4,7 @@
             [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.prompt :as prompt]
             [xia.test-helpers :as th]
             [xia.working-memory :as wm]))
 
@@ -13,6 +14,88 @@
   [session-id]
   (some #(when (= session-id (:id %)) %)
         (db/list-sessions {:include-workers? true})))
+
+(deftest branch-tasks-wrapper-runs-through-task-spec-parallel
+  (let [parent-session-id (db/create-session! :terminal)
+        parent-task-id    (db/create-task! {:session-id parent-session-id
+                                            :channel :terminal
+                                            :type :task
+                                            :state :running
+                                            :title "Parent task"
+                                            :summary "Parent task"
+                                            :contract {:kind :task
+                                                       :version 1
+                                                       :goal "Parent task"}})
+        request-counter   (atom 0)
+        runs              (atom [])
+        statuses          (atom [])
+        deps              {:throw-if-runtime-stopping! (fn [_session-id] nil)
+                           :throw-if-cancelled! (fn [_session-id] nil)
+                           :trace-context (fn [context]
+                                            (select-keys context
+                                                         [:request-id
+                                                          :correlation-id]))
+                           :new-request-id (fn []
+                                             (str "branch-request-"
+                                                  (swap! request-counter inc)))
+                           :register-child-session! (fn [_parent _child] nil)
+                           :unregister-child-session! (fn [_parent _child] nil)
+                           :throwable-detail (fn [t] {:message (.getMessage t)})
+                           :report-status! (fn [message & {:as attrs}]
+                                             (swap! statuses conj
+                                                    (assoc attrs :message message)))
+                           :max-branch-tasks (constantly 5)
+                           :max-parallel-branches (constantly 2)
+                           :max-branch-tool-rounds (constantly 3)
+                           :branch-task-timeout-ms (constantly 10000)
+                           :run-task-spec! (fn [child-task-id & {:as opts}]
+                                             (swap! runs conj
+                                                    (assoc opts
+                                                           :task-id child-task-id))
+                                             {:status :completed
+                                              :state {:outputs
+                                                      {:work-on-branch
+                                                       (str "done:"
+                                                            (:message opts))}}})}]
+    (binding [prompt/*interaction-context* {:session-id parent-session-id
+                                            :task-id parent-task-id
+                                            :channel :terminal
+                                            :request-id "parent-request"}]
+      (let [result  (branch/run-branch-tasks
+                     deps
+                     [{:task "Left" :prompt "Collect left"}
+                      {:task "Right" :prompt "Collect right"}]
+                     :objective "Compare sources"
+                     :max-parallel 2
+                     :resource-session-id :resource-session
+                     :tool-context {:source :test})
+            wrappers (filter #(= "Compare sources" (:title %))
+                             (db/list-tasks {:limit 100000}))
+            wrapper  (first wrappers)]
+        (is (= "Completed 2 branch tasks" (:summary result)))
+        (is (= 2 (:branch_count result)))
+        (is (= 2 (:completed_count result)))
+        (is (= 0 (:failed_count result)))
+        (is (every? #(re-find #"^done:You are a temporary branch worker"
+                              (:result %))
+                    (:results result)))
+        (is (= [:parallel]
+               (mapv #(get-in % [:contract :spec :steps 0 :kind])
+                     wrappers)))
+        (is (= 2 (count @runs)))
+        (is (every? #(= :branch (:channel %)) @runs))
+        (is (every? #(= :branch-spawn (:operation %)) @runs))
+        (is (every? #(= :resource-session (:resource-session-id %)) @runs))
+        (is (= [{:phase :branch
+                 :branch-count 2
+                 :parallel true
+                 :message "Running 2 branch tasks"}]
+               @statuses))
+        (is (= :parallel
+               (get-in wrapper [:contract :spec :steps 0 :kind])))
+        (is (= 2
+               (count (get-in wrapper
+                              [:contract :spec :steps 0 :branches]))))))))
 
 (deftest branch-task-uses-shared-worker-lifecycle
   (let [parent-session-id (db/create-session! :terminal)

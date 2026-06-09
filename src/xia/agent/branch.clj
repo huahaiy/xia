@@ -2,12 +2,12 @@
   "Branch-task orchestration for parallel worker sessions."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.async :as async]
             [xia.agent.child-task :as child-task]
             [xia.agent.task-runtime :as task-runtime]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.policy :as task-policy]
+            [xia.task-spec :as task-spec]
             [xia.working-memory :as wm]))
 
 (defn- normalize-branch-task
@@ -174,6 +174,87 @@
                    :error (.getMessage t)
                    :error-detail ((:throwable-detail deps) t)})))))))
 
+(defn- branch-entry-id
+  [idx]
+  (keyword (str "branch-" idx)))
+
+(defn- branch-worker-step
+  [branch-task timeout-ms]
+  (cond-> {:id :run-branch
+           :kind :llm
+           :mode :agent
+           :prompt (:prompt branch-task)
+           :branch-task branch-task}
+    timeout-ms (assoc :timeout-ms timeout-ms)))
+
+(defn- branch-parallel-entry
+  [idx branch-task timeout-ms]
+  {:id (branch-entry-id idx)
+   :spec {:goal (:task branch-task)
+          :steps [(branch-worker-step branch-task timeout-ms)]}})
+
+(defn- branch-parallel-spec
+  [objective branch-tasks max-parallel timeout-ms]
+  {:goal (or (some-> objective str str/trim not-empty)
+             "Run branch tasks")
+   :steps [{:id :run-branches
+            :kind :parallel
+            :concurrency max-parallel
+            :output-step :run-branch
+            :branches (mapv (fn [idx branch-task]
+                               (branch-parallel-entry idx branch-task timeout-ms))
+                             (range)
+                             branch-tasks)}]})
+
+(defn- branch-worker-executor
+  [deps parent-session-id
+   {:keys [channel provider-id resource-session-id objective parent-task-id
+           max-tool-rounds tool-context]}]
+  (fn [{:keys [step]}]
+    (let [branch-task (:branch-task step)
+          result      (run-branch-task* deps
+                                        parent-session-id
+                                        branch-task
+                                        {:channel channel
+                                         :provider-id provider-id
+                                         :resource-session-id resource-session-id
+                                         :parent-task-id parent-task-id
+                                         :objective objective
+                                         :max-tool-rounds max-tool-rounds
+                                         :tool-context tool-context})
+          success?    (= "completed" (:status result))]
+      (cond-> {:status (if success? :success :failed)
+               :summary (or (:summary result)
+                            (str "Branch task " (:status result)))
+               :output result}
+        (not success?)
+        (assoc :error (or (:error result)
+                          (:summary result)
+                          "branch task failed"))))))
+
+(defn- fallback-branch-result
+  [branch-task branch-output]
+  {:task (:task branch-task)
+   :status "failed"
+   :task-id (:task-id branch-output)
+   :error (or (:error branch-output)
+              (:summary branch-output)
+              "branch task failed")})
+
+(defn- branch-results-from-parallel-output
+  [branch-tasks parallel-output]
+  (let [values   (:outputs parallel-output)
+        branches (:branches parallel-output)]
+    (mapv (fn [idx branch-task]
+            (let [entry-id (branch-entry-id idx)
+                  value    (get values entry-id)]
+              (if (map? value)
+                value
+                (fallback-branch-result branch-task
+                                        (get branches entry-id)))))
+          (range)
+          branch-tasks)))
+
 (defn run-branch-tasks
   [deps tasks & {:keys [session-id channel provider-id resource-session-id objective
                         max-parallel max-tool-rounds tool-context]
@@ -192,7 +273,8 @@
         _ ((:throw-if-cancelled! deps) parent-session-id)
         max-tasks ((:max-branch-tasks deps))
         max-parallel* (clojure.core/min (clojure.core/max 1 (long (or max-parallel ((:max-parallel-branches deps)))))
-                                        (clojure.core/max 1 (long max-tasks)))]
+                                        (clojure.core/max 1 (long max-tasks)))
+        timeout-ms ((:branch-task-timeout-ms deps))]
     (when (zero? task-count)
       (throw (ex-info "Branch tasks require at least one task" {})))
     (let [{:keys [allowed? reason] :as decision}
@@ -207,46 +289,40 @@
                             :phase :branch
                             :branch-count task-count
                             :parallel true)
-    (let [batches (partition-all max-parallel* branch-tasks)
-          results (loop [remaining batches
-                         acc []]
-                    (if-let [batch (first remaining)]
-                      (let [futures (mapv (fn [branch-task]
-                                            (async/submit-parallel!
-                                             (str "branch-task:" (or (:task branch-task)
-                                                                     (:prompt branch-task)
-                                                                     "unnamed"))
-                                             #(run-branch-task* deps
-                                                                parent-session-id
-                                                                branch-task
-                                                                {:channel channel*
-                                                                 :provider-id provider-id*
-                                                                 :resource-session-id resource-session-id*
-                                                                 :parent-task-id parent-task-id
-                                                                 :objective objective
-                                                                 :max-tool-rounds (or max-tool-rounds
-                                                                                      ((:max-branch-tool-rounds deps)))
-                                                                 :tool-context tool-context})))
-                                          batch)
-                            batch-results ((:await-futures! deps)
-                                           futures
-                                           ((:branch-task-timeout-ms deps))
-                                           (fn [idx timeout-ms]
-                                             (let [branch-task (nth batch idx)
-                                                   decision (task-policy/branch-task-timeout-policy
-                                                             (:task branch-task)
-                                                             (:prompt branch-task)
-                                                             timeout-ms)]
-                                               (prompt/policy-decision! decision)
-                                               (ex-info (:reason decision)
-                                                        (merge (trace-context deps parent-context)
-                                                               {:type :branch-task-timeout
-                                                                :timeout-ms timeout-ms
-                                                                :task (:task branch-task)
-                                                                :prompt (:prompt branch-task)})))))]
-                        (recur (next remaining)
-                               (into acc batch-results)))
-                      (vec acc)))]
+    (let [task-id (task-spec/create-task!
+                   (branch-parallel-spec objective
+                                         branch-tasks
+                                         max-parallel*
+                                         timeout-ms)
+                   :session-id parent-session-id
+                   :title (or (some-> objective str str/trim not-empty)
+                              "Branch tasks")
+                   :summary (str "Running " task-count " branch task"
+                                 (when (not= 1 task-count) "s")))
+          run-result (task-spec/run-task!
+                      task-id
+                      :operation :branch-spawn
+                      :context {:message objective
+                                :parent-task-id parent-task-id
+                                :resource-session-id resource-session-id*}
+                      :executors {:llm
+                                  (branch-worker-executor
+                                   deps
+                                   parent-session-id
+                                   {:channel channel*
+                                    :provider-id provider-id*
+                                    :resource-session-id resource-session-id*
+                                    :parent-task-id parent-task-id
+                                    :objective objective
+                                    :max-tool-rounds (or max-tool-rounds
+                                                         ((:max-branch-tool-rounds deps)))
+                                    :tool-context tool-context})})
+          parallel-output (or (get-in run-result [:state :outputs :run-branches])
+                              (get-in (db/get-task task-id)
+                                      [:meta :task-spec :outputs :run-branches])
+                              {})
+          results (branch-results-from-parallel-output branch-tasks
+                                                       parallel-output)]
       {:summary (branch-result-summary results)
        :parent_session_id parent-session-id
        :request_id (:request-id parent-context)
