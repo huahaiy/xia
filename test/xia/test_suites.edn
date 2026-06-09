@@ -31,5 +31,6 @@
   xia.task-runtime-test
   xia.tool-smoke-test
   xia.channel.http-test
+  xia.channel.http.session-test
   xia.channel.http-admin-test]
 }

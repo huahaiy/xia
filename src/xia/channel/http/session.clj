@@ -869,221 +869,206 @@
                            {:session_id (str sid)
                             :goal nil})))))))
 
+(defn- interaction-body-key
+  [kind]
+  (case kind
+    :prompt :prompt
+    :approval :approval))
+
+(defn- interaction->body
+  [deps kind interaction]
+  (case kind
+    :prompt (prompt->body* deps interaction)
+    :approval (approval->body* deps interaction)))
+
+(defn- interaction-submit-work-kind
+  [kind]
+  (case kind
+    :prompt :prompt-reply
+    :approval :approval-reply))
+
+(defn- interaction-missing-error
+  [kind]
+  (str "no pending " (name kind)))
+
+(defn- interaction-stale-error
+  [kind]
+  (str "stale " (name kind) " id"))
+
+(defn- session-interaction-target
+  [deps session-id expected-channel & {:keys [resume? require-active?]}]
+  (when (and resume? session-id (= expected-channel :http))
+    (maybe-resume-http-session!* deps session-id expected-channel))
+  (cond
+    (nil? (parse-session-id* deps session-id))
+    {:response (json-response* deps 400 {:error "invalid session id"})}
+
+    (not (session-accessible?* deps session-id expected-channel))
+    {:response (json-response* deps 404 {:error "session not found"})}
+
+    (and require-active? (not (session-active?* deps session-id)))
+    {:response (json-response* deps 409 {:error "session closed"})}
+
+    :else
+    {:selector {:session-id session-id}
+     :touch-session-id session-id}))
+
+(defn- task-interaction-target
+  [deps task-id]
+  (try
+    (let [uuid (java.util.UUID/fromString task-id)
+          task (db/get-task uuid)]
+      (if-not task
+        {:response (json-response* deps 404 {:error "task not found"})}
+        {:selector {:task-id uuid
+                    :session-id (:session-id task)}}))
+    (catch IllegalArgumentException _
+      {:response (json-response* deps 400 {:error "invalid task id"})})))
+
+(defn- render-pending-interaction
+  [deps kind target]
+  (if-let [response (:response target)]
+    response
+    (do
+      (when-let [session-id (:touch-session-id target)]
+        (touch-rest-session!* deps session-id))
+      (let [selector (assoc (:selector target) :kind kind)]
+        (if-let [interaction (bridge/resolve-pending-interaction selector)]
+          (json-response* deps 200
+                          {:pending true
+                           (interaction-body-key kind)
+                           (interaction->body deps kind interaction)})
+          (json-response* deps 200 {:pending false}))))))
+
+(defn- prompt-submission
+  [deps data]
+  (if-not (contains? data "value")
+    {:response (json-response* deps 400 {:error "missing value"})}
+    {:public-id (get data "prompt_id")
+     :value (str (or (get data "value") ""))}))
+
+(defn- approval-submission
+  [deps data]
+  (let [decision (get data "decision")
+        decision* (case decision
+                    "allow" :allow
+                    "deny" :deny
+                    nil)]
+    (if-not decision*
+      {:response (json-response* deps 400 {:error "invalid decision"})}
+      {:public-id (get data "approval_id")
+       :value decision*})))
+
+(defn- interaction-submission
+  [deps kind data]
+  (case kind
+    :prompt (prompt-submission deps data)
+    :approval (approval-submission deps data)))
+
+(defn- submit-interaction-response
+  [deps kind target req]
+  (if-let [response (:response target)]
+    response
+    (let [data (read-body* deps req)
+          {:keys [response public-id value]} (interaction-submission deps kind data)]
+      (cond
+        response
+        response
+
+        (not (runtime-state/accepting-new-work?))
+        (runtime-draining-response deps (interaction-submit-work-kind kind))
+
+        :else
+        (let [{:keys [status]}
+              (bridge/submit-interaction! (assoc (:selector target) :kind kind)
+                                          public-id
+                                          value)]
+          (case status
+            :missing
+            (json-response* deps 404
+                            {:error (interaction-missing-error kind)})
+
+            :stale
+            (json-response* deps 409
+                            {:error (interaction-stale-error kind)})
+
+            (do
+              (when-let [session-id (:touch-session-id target)]
+                (touch-rest-session!* deps session-id))
+              (json-response* deps 200 {:status "recorded"}))))))))
+
+(defn- handle-get-session-interaction
+  [deps session-id expected-channel kind]
+  (render-pending-interaction
+   deps
+   kind
+   (session-interaction-target deps
+                               session-id
+                               expected-channel
+                               :resume? true
+                               :require-active? true)))
+
+(defn- handle-submit-session-interaction
+  [deps session-id req expected-channel kind]
+  (submit-interaction-response
+   deps
+   kind
+   (session-interaction-target deps session-id expected-channel)
+   req))
+
+(defn- handle-get-task-interaction
+  [deps task-id kind]
+  (render-pending-interaction deps kind (task-interaction-target deps task-id)))
+
+(defn- handle-submit-task-interaction
+  [deps task-id req kind]
+  (submit-interaction-response
+   deps
+   kind
+   (task-interaction-target deps task-id)
+   req))
+
 (defn handle-get-approval
   ([deps session-id]
    (handle-get-approval deps session-id nil))
   ([deps session-id expected-channel]
-   (when (and session-id (= expected-channel :http))
-     (maybe-resume-http-session!* deps session-id expected-channel))
-   (cond
-     (nil? (parse-session-id* deps session-id))
-     (json-response* deps 400 {:error "invalid session id"})
-
-     (not (session-accessible?* deps session-id expected-channel))
-     (json-response* deps 404 {:error "session not found"})
-
-     (not (session-active?* deps session-id))
-     (json-response* deps 409 {:error "session closed"})
-
-     :else
-     (do
-       (touch-rest-session!* deps session-id)
-       (if-let [approval (bridge/pending-interaction {:session-id session-id
-                                                      :kind :approval})]
-         (json-response* deps 200 {:pending true
-                                   :approval (approval->body* deps approval)})
-         (json-response* deps 200 {:pending false}))))))
+   (handle-get-session-interaction deps session-id expected-channel :approval)))
 
 (defn handle-get-prompt
   ([deps session-id]
    (handle-get-prompt deps session-id nil))
   ([deps session-id expected-channel]
-   (when (and session-id (= expected-channel :http))
-     (maybe-resume-http-session!* deps session-id expected-channel))
-   (cond
-     (nil? (parse-session-id* deps session-id))
-     (json-response* deps 400 {:error "invalid session id"})
-
-     (not (session-accessible?* deps session-id expected-channel))
-     (json-response* deps 404 {:error "session not found"})
-
-     (not (session-active?* deps session-id))
-     (json-response* deps 409 {:error "session closed"})
-
-     :else
-     (do
-       (touch-rest-session!* deps session-id)
-       (if-let [interaction (bridge/pending-interaction {:session-id session-id
-                                                         :kind :prompt})]
-         (json-response* deps 200 {:pending true
-                                   :prompt (prompt->body* deps interaction)})
-         (json-response* deps 200 {:pending false}))))))
+   (handle-get-session-interaction deps session-id expected-channel :prompt)))
 
 (defn handle-submit-prompt
   ([deps session-id req]
    (handle-submit-prompt deps session-id req nil))
   ([deps session-id req expected-channel]
-   (if-not (parse-session-id* deps session-id)
-     (json-response* deps 400 {:error "invalid session id"})
-     (if-not (session-accessible?* deps session-id expected-channel)
-       (json-response* deps 404 {:error "session not found"})
-       (let [data      (read-body* deps req)
-             prompt-id (get data "prompt_id")
-             has-value? (contains? data "value")
-             value     (get data "value")]
-         (cond
-           (not has-value?)
-           (json-response* deps 400 {:error "missing value"})
-
-           (not (runtime-state/accepting-new-work?))
-           (runtime-draining-response deps :prompt-reply)
-
-           :else
-           (let [{:keys [status]}
-                 (bridge/submit-interaction! {:session-id session-id
-                                              :kind :prompt}
-                                             prompt-id
-                                             (str (or value "")))]
-             (case status
-               :missing (json-response* deps 404 {:error "no pending prompt"})
-               :stale (json-response* deps 409 {:error "stale prompt id"})
-               (do
-                 (touch-rest-session!* deps session-id)
-                 (json-response* deps 200 {:status "recorded"}))))))))))
+   (handle-submit-session-interaction
+    deps session-id req expected-channel :prompt)))
 
 (defn handle-submit-approval
   ([deps session-id req]
    (handle-submit-approval deps session-id req nil))
   ([deps session-id req expected-channel]
-   (if-not (parse-session-id* deps session-id)
-     (json-response* deps 400 {:error "invalid session id"})
-     (if-not (session-accessible?* deps session-id expected-channel)
-       (json-response* deps 404 {:error "session not found"})
-       (let [data        (read-body* deps req)
-             approval-id (get data "approval_id")
-             decision    (get data "decision")
-             decision*   (case decision
-                           "allow" :allow
-                           "deny"  :deny
-                           nil)]
-         (cond
-           (nil? decision*)
-           (json-response* deps 400 {:error "invalid decision"})
-
-           (not (runtime-state/accepting-new-work?))
-           (runtime-draining-response deps :approval-reply)
-
-           :else
-           (let [{:keys [status]}
-                 (bridge/submit-interaction! {:session-id session-id
-                                              :kind :approval}
-                                             approval-id
-                                             decision*)]
-             (case status
-               :missing (json-response* deps 404 {:error "no pending approval"})
-               :stale (json-response* deps 409 {:error "stale approval id"})
-               (do
-                 (touch-rest-session!* deps session-id)
-                 (json-response* deps 200 {:status "recorded"}))))))))))
+   (handle-submit-session-interaction
+    deps session-id req expected-channel :approval)))
 
 (defn handle-get-task-prompt
   [deps task-id]
-  (try
-    (let [uuid (java.util.UUID/fromString task-id)
-          task (db/get-task uuid)]
-      (if-not task
-        (json-response* deps 404 {:error "task not found"})
-        (if-let [interaction (bridge/resolve-pending-interaction {:task-id uuid
-                                                                  :session-id (:session-id task)
-                                                                  :kind :prompt})]
-          (json-response* deps 200 {:pending true
-                                    :prompt (prompt->body* deps interaction)})
-          (json-response* deps 200 {:pending false}))))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (handle-get-task-interaction deps task-id :prompt))
 
 (defn handle-submit-task-prompt
   [deps task-id req]
-  (try
-    (let [uuid (java.util.UUID/fromString task-id)
-          task (db/get-task uuid)]
-      (if-not task
-        (json-response* deps 404 {:error "task not found"})
-        (let [data      (read-body* deps req)
-              prompt-id (get data "prompt_id")
-              has-value? (contains? data "value")
-              value     (get data "value")]
-          (cond
-            (not has-value?)
-            (json-response* deps 400 {:error "missing value"})
-
-            (not (runtime-state/accepting-new-work?))
-            (runtime-draining-response deps :prompt-reply)
-
-            :else
-            (let [{:keys [status]}
-                  (bridge/submit-interaction! {:task-id uuid
-                                               :session-id (:session-id task)
-                                               :kind :prompt}
-                                              prompt-id
-                                              (str (or value "")))]
-              (case status
-                :missing (json-response* deps 404 {:error "no pending prompt"})
-                :stale (json-response* deps 409 {:error "stale prompt id"})
-                (json-response* deps 200 {:status "recorded"})))))))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (handle-submit-task-interaction deps task-id req :prompt))
 
 (defn handle-get-task-approval
   [deps task-id]
-  (try
-    (let [uuid (java.util.UUID/fromString task-id)
-          task (db/get-task uuid)]
-      (if-not task
-        (json-response* deps 404 {:error "task not found"})
-        (if-let [interaction (bridge/resolve-pending-interaction {:task-id uuid
-                                                                  :session-id (:session-id task)
-                                                                  :kind :approval})]
-          (json-response* deps 200 {:pending true
-                                    :approval (approval->body* deps interaction)})
-          (json-response* deps 200 {:pending false}))))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (handle-get-task-interaction deps task-id :approval))
 
 (defn handle-submit-task-approval
   [deps task-id req]
-  (try
-    (let [uuid (java.util.UUID/fromString task-id)
-          task (db/get-task uuid)]
-      (if-not task
-        (json-response* deps 404 {:error "task not found"})
-        (let [data        (read-body* deps req)
-              approval-id (get data "approval_id")
-              decision    (get data "decision")
-              decision*   (case decision
-                            "allow" :allow
-                            "deny"  :deny
-                            nil)]
-          (cond
-            (nil? decision*)
-            (json-response* deps 400 {:error "invalid decision"})
-
-            (not (runtime-state/accepting-new-work?))
-            (runtime-draining-response deps :approval-reply)
-
-            :else
-            (let [{:keys [status]}
-                  (bridge/submit-interaction! {:task-id uuid
-                                               :session-id (:session-id task)
-                                               :kind :approval}
-                                              approval-id
-                                              decision*)]
-              (case status
-                :missing (json-response* deps 404 {:error "no pending approval"})
-                :stale (json-response* deps 409 {:error "stale approval id"})
-                (json-response* deps 200 {:status "recorded"})))))))
-    (catch IllegalArgumentException _
-      (json-response* deps 400 {:error "invalid task id"}))))
+  (handle-submit-task-interaction deps task-id req :approval))
 
 (defn handle-session-messages
   ([deps session-id]
