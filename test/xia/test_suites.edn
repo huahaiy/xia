@@ -28,6 +28,7 @@
   xia.summarizer-test
   xia.system-test
   xia.task-spec-test
+  xia.task-runtime-test
   xia.tool-smoke-test
   xia.channel.http-test
   xia.channel.http-admin-test]

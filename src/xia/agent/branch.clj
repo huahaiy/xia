@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.async :as async]
+            [xia.agent.child-task :as child-task]
             [xia.agent.task-runtime :as task-runtime]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -83,131 +84,95 @@
                                                          branch-request-id)})
                        (:request-id parent-trace)
                        (assoc :parent-request-id (:request-id parent-trace)))
-        child-session-id (db/create-session! :branch
-                                             {:parent-session-id parent-session-id
-                                              :worker? true
-                                              :active? false
-                                              :label task})
-        child-task-id (db/create-task! {:session-id child-session-id
-                                        :parent-id parent-task-id
-                                        :channel :branch
-                                        :type :task
-                                        :state :running
-                                        :title task
-                                        :summary task
-                                        :contract {:kind :task
-                                                   :version 1
-                                                   :goal task
-                                                   :prompt prompt
-                                                   :objective objective
-                                                   :parent-task-id parent-task-id
-                                                   :spec {:kind :task
-                                                          :version 1
-                                                          :goal task
-                                                          :steps [{:id :work-on-branch
-                                                                   :kind :llm
-                                                                   :mode :agent
-                                                                   :prompt (branch-task-prompt branch-task objective)}]}}
-                                        :meta {:trigger {:kind :branch
-                                                         :parent-task-id parent-task-id}
-                                               :execution {:mode :agent}
-                                               :branch-worker true
-                                               :parent-session-id parent-session-id
-                                               :resource-session-id (or resource-session-id
-                                                                        parent-session-id)
-                                               :objective objective}
-                                        :started-at (java.util.Date.)})]
+        prompt* (branch-task-prompt branch-task objective)
+        resource-session-id* (or resource-session-id parent-session-id)
+        worker (child-task/create-branch-worker!
+                {:parent-session-id parent-session-id
+                 :parent-task-id parent-task-id
+                 :title task
+                 :summary task
+                 :prompt prompt
+                 :work-prompt prompt*
+                 :objective objective
+                 :resource-session-id resource-session-id*
+                 :session-active? false
+                 :state :running
+                 :meta {:branch-worker true
+                        :parent-session-id parent-session-id
+                        :resource-session-id resource-session-id*
+                        :objective objective}})
+        child-session-id (:session-id worker)
+        child-task-id (:task-id worker)
+        log-context (merge {:task task
+                            :session-id child-session-id
+                            :parent-session-id parent-session-id}
+                           branch-trace)]
     (when-let [parent-task (some-> parent-task-id db/get-task)]
       (task-runtime/attach-child-task-to-parent! parent-task child-task-id task))
-    ((:register-child-session! deps) parent-session-id child-session-id)
-    (try
-      ((:throw-if-runtime-stopping! deps) child-session-id)
-      ((:throw-if-cancelled! deps) child-session-id)
-      (wm/create-wm! child-session-id)
-      (let [prompt* (branch-task-prompt branch-task objective)
-            tool-context* (merge {:branch-worker? true
-                                  :parent-session-id parent-session-id
-                                  :resource-session-id (or resource-session-id
-                                                           parent-session-id)}
-                                 branch-trace
-                                 tool-context)
-            run-result (if-let [run-task-spec! (:run-task-spec! deps)]
-                         (run-task-spec! child-task-id
-                                         :message prompt*
-                                         :channel :branch
-                                         :runtime-op :start
-                                         :operation :branch-spawn
-                                         :provider-id provider-id
-                                         :resource-session-id (or resource-session-id
-                                                                  parent-session-id)
-                                         :max-tool-rounds max-tool-rounds
-                                         :tool-context tool-context*)
-                         ((:process-message deps) child-session-id
-                          prompt*
-                          :channel :branch
-                          :task-id child-task-id
-                          :runtime-op :start
-                          :provider-id provider-id
-                          :resource-session-id (or resource-session-id
-                                                   parent-session-id)
-                          :max-tool-rounds max-tool-rounds
-                          :tool-context tool-context*))
-            result (or (get-in run-result [:state :outputs :work-on-branch])
-                       run-result)
-            wm-context (wm/wm->context child-session-id)]
-        (merge branch-trace
-               {:task task
-                :status (if (or (not (map? run-result))
-                                (= :completed (:status run-result)))
-                          "completed"
-                          "failed")
-                :task-id child-task-id
-                :session-id child-session-id
-                :topics (:topics wm-context)
-                :result result}
-               (when (and (map? run-result)
-                          (not= :completed (:status run-result)))
-                 {:error (or (:error run-result)
-                             (:summary run-result))})))
-      (catch Throwable t
-        (log/error t "Branch task failed"
-                   (merge {:task task
-                           :session-id child-session-id
-                           :parent-session-id parent-session-id}
-                          branch-trace))
-        (merge branch-trace
-               {:task task
-                :status "failed"
-                :task-id child-task-id
-                :session-id child-session-id
-                :error (.getMessage t)
-                :error-detail ((:throwable-detail deps) t)}))
-      (finally
-        ((:unregister-child-session! deps) parent-session-id child-session-id)
-        (try
-          (db/set-session-active! child-session-id false)
-          (catch Throwable t
-            (log/warn t "Failed to deactivate branch worker session"
-                      (merge {:task task
-                              :session-id child-session-id
-                              :parent-session-id parent-session-id}
-                             branch-trace))))
-        (try
-          (wm/clear-autonomy-state! child-session-id)
-          (catch Throwable t
-            (log/warn t "Failed to clear branch worker autonomy state"
-                      (merge {:task task
-                              :session-id child-session-id
-                              :parent-session-id parent-session-id}
-                             branch-trace))))
-        (try
-          (wm/clear-wm! child-session-id)
-          (catch Throwable t
-            (log/warn t "Failed to clear branch worker working memory"
-                      (merge {:task task
-                              :session-id child-session-id
-                              :parent-session-id parent-session-id}
-                             branch-trace))))))))
+    (child-task/with-registered-worker-session!
+     {:deps deps
+      :parent-session-id parent-session-id
+      :child-session-id child-session-id
+      :log-context log-context
+      :deactivate-message "Failed to deactivate branch worker session"
+      :clear-autonomy-message "Failed to clear branch worker autonomy state"
+      :clear-memory-message "Failed to clear branch worker working memory"
+      :clear-autonomy? true}
+     (fn []
+       (try
+         ((:throw-if-runtime-stopping! deps) child-session-id)
+         ((:throw-if-cancelled! deps) child-session-id)
+         (wm/create-wm! child-session-id)
+         (let [tool-context* (child-task/branch-worker-tool-context
+                              parent-session-id
+                              resource-session-id*
+                              branch-trace
+                              tool-context)
+               run-result (if-let [run-task-spec! (:run-task-spec! deps)]
+                            (run-task-spec! child-task-id
+                                            :message prompt*
+                                            :channel :branch
+                                            :runtime-op :start
+                                            :operation :branch-spawn
+                                            :provider-id provider-id
+                                            :resource-session-id resource-session-id*
+                                            :max-tool-rounds max-tool-rounds
+                                            :tool-context tool-context*)
+                            ((:process-message deps) child-session-id
+                             prompt*
+                             :channel :branch
+                             :task-id child-task-id
+                             :runtime-op :start
+                             :provider-id provider-id
+                             :resource-session-id resource-session-id*
+                             :max-tool-rounds max-tool-rounds
+                             :tool-context tool-context*))
+               result (or (get-in run-result [:state :outputs :work-on-branch])
+                          run-result)
+               wm-context (wm/wm->context child-session-id)]
+           (merge branch-trace
+                  {:task task
+                   :status (if (or (not (map? run-result))
+                                   (= :completed (:status run-result)))
+                             "completed"
+                             "failed")
+                   :task-id child-task-id
+                   :session-id child-session-id
+                   :topics (:topics wm-context)
+                   :result result}
+                  (when (and (map? run-result)
+                             (not= :completed (:status run-result)))
+                    {:error (or (:error run-result)
+                                (:summary run-result))})))
+         (catch Throwable t
+           (log/error t "Branch task failed" log-context)
+           (merge branch-trace
+                  {:task task
+                   :status "failed"
+                   :task-id child-task-id
+                   :session-id child-session-id
+                   :error (.getMessage t)
+                   :error-detail ((:throwable-detail deps) t)})))))))
 
 (defn run-branch-tasks
   [deps tasks & {:keys [session-id channel provider-id resource-session-id objective

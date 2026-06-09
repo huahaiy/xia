@@ -1,5 +1,6 @@
 (ns xia.schedule-test
   (:require [clojure.test :refer :all]
+            [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.schedule :as schedule]
@@ -417,6 +418,39 @@
     (is (some #(= :task-step (:type %)) items))
     (is (some #(= :tool-call (:type %)) items))
     (is (some #(= :tool-result (:type %)) items))))
+
+(deftest prompt-schedule-runs-through-task-spec-runner
+  (let [calls (atom [])]
+    (schedule/create-schedule!
+      {:id :prompt-runner
+       :spec {:minute #{0} :hour #{9}}
+       :type :prompt
+       :prompt "Summarize the dashboard"})
+    (with-redefs [bridge/send-message!
+                  (fn [session-id message & {:as opts}]
+                    (swap! calls conj {:session-id session-id
+                                       :message message
+                                       :opts opts})
+                    "dashboard summarized")]
+      (let [sched   (schedule/get-schedule :prompt-runner)
+            _       (scheduler/run-prompt-schedule! sched)
+            task-id (schedule/schedule-task-id :prompt-runner)
+            task    (db/get-task task-id)
+            items   (mapcat #(db/turn-items (:id %))
+                             (db/task-turns task-id))
+            run     (first (schedule/schedule-history :prompt-runner))
+            call    (first @calls)]
+        (is (= :completed (:state task)))
+        (is (= :completed (get-in task [:meta :task-spec :status])))
+        (is (= :success (:status run)))
+        (is (= "dashboard summarized" (:result run)))
+        (is (= task-id (get-in run [:meta :task-id])))
+        (is (map? (get-in run [:meta :llm-budget])))
+        (is (= 1 (count @calls)))
+        (is (= "Summarize the dashboard" (:message call)))
+        (is (= :scheduler (get-in call [:opts :channel])))
+        (is (= task-id (get-in call [:opts :task-id])))
+        (is (some #(= :task-step (:type %)) items))))))
 
 (deftest task-state-builds-recovery-context
   (schedule/create-schedule!

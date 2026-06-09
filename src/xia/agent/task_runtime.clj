@@ -2,6 +2,7 @@
   "Task runtime persistence and control operations."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.agent.child-task :as child-task]
             [xia.autonomous :as autonomous]
             [xia.async :as async]
             [xia.db :as db]
@@ -1550,75 +1551,52 @@
         (runtime-draining-result task-id parent-session-id)
 
         :else
-        (let [child-session-id (db/create-session! :branch
-                                                   {:parent-session-id parent-session-id
-                                                    :worker? true
-                                                    :label title})
-              child-task-id    (db/create-task! {:session-id child-session-id
-                                                 :parent-id task-id
-                                                 :channel :branch
-                                                 :type :task
-                                                 :state :running
-                                                 :title title
-                                                 :summary title
-                                                 :contract {:kind :task
-                                                            :version 1
-                                                            :goal title
-                                                            :spec {:kind :task
-                                                                   :version 1
-                                                                   :goal title
-                                                                   :steps [{:id :work-on-branch
-                                                                            :kind :llm
-                                                                            :mode :agent
-                                                                            :prompt message*}]}}
-                                                 :meta {:trigger {:kind :branch
-                                                                  :parent-task-id task-id}
-                                                        :execution {:mode :agent}}
-                                                 :started-at (java.util.Date.)})
+        (let [worker       (child-task/create-branch-worker!
+                            {:parent-session-id parent-session-id
+                             :parent-task-id task-id
+                             :title title
+                             :summary title
+                             :work-prompt message*
+                             :state :running
+                             :contract (child-task/branch-worker-contract
+                                        {:title title
+                                         :work-prompt message*})})
+              child-session-id (:session-id worker)
+              child-task-id    (:task-id worker)
+              log-context      {:task-id child-task-id
+                                :session-id child-session-id
+                                :parent-task-id task-id
+                                :parent-session-id parent-session-id}
+              tool-context     (child-task/branch-worker-tool-context
+                                parent-session-id
+                                parent-session-id)
               _                (attach-child-task-to-parent! task child-task-id title)
               submit-fork!     (fn []
                                  (async/submit-background!
                                   (str "task-fork:" child-task-id)
-                                  #(do
-                                     ((:register-child-session! deps) parent-session-id child-session-id)
-                                     (try
-                                       (if-let [run-task-spec! (:run-task-spec! deps)]
-                                         (run-task-spec! child-task-id
-                                                         :message message*
-                                                         :channel :branch
-                                                         :runtime-op :fork
-                                                         :operation :branch-spawn
-                                                         :resource-session-id parent-session-id
-                                                         :tool-context {:branch-worker? true
-                                                                        :parent-session-id parent-session-id
-                                                                        :resource-session-id parent-session-id})
-                                         ((:process-message deps) child-session-id
-                                          message*
-                                          :channel :branch
-                                          :task-id child-task-id
-                                          :runtime-op :fork
-                                          :resource-session-id parent-session-id
-                                          :tool-context {:branch-worker? true
-                                                         :parent-session-id parent-session-id
-                                                         :resource-session-id parent-session-id}))
-                                       (finally
-                                         ((:unregister-child-session! deps) parent-session-id child-session-id)
-                                         (try
-                                           (db/set-session-active! child-session-id false)
-                                           (catch Throwable t
-                                             (log/warn t "Failed to deactivate forked task session"
-                                                       {:task-id child-task-id
-                                                        :session-id child-session-id
-                                                        :parent-task-id task-id
-                                                        :parent-session-id parent-session-id})))
-                                         (try
-                                           (wm/clear-wm! child-session-id)
-                                           (catch Throwable t
-                                             (log/warn t "Failed to clear forked task working memory"
-                                                       {:task-id child-task-id
-                                                        :session-id child-session-id
-                                                        :parent-task-id task-id
-                                                        :parent-session-id parent-session-id}))))))))]
+                                  #(child-task/with-registered-worker-session!
+                                    {:deps deps
+                                     :parent-session-id parent-session-id
+                                     :child-session-id child-session-id
+                                     :log-context log-context
+                                     :deactivate-message "Failed to deactivate forked task session"
+                                     :clear-memory-message "Failed to clear forked task working memory"}
+                                    (fn []
+                                      (if-let [run-task-spec! (:run-task-spec! deps)]
+                                        (run-task-spec! child-task-id
+                                                        :message message*
+                                                        :channel :branch
+                                                        :runtime-op :fork
+                                                        :operation :branch-spawn
+                                                        :resource-session-id parent-session-id
+                                                        :tool-context tool-context)
+                                        ((:process-message deps) child-session-id
+                                         message*
+                                         :channel :branch
+                                         :task-id child-task-id
+                                         :runtime-op :fork
+                                         :resource-session-id parent-session-id
+                                         :tool-context tool-context))))))]
           (record-task-control-turn! task-id
                                      :fork
                                      (str "Forked child task: " title))
@@ -1633,14 +1611,10 @@
                                 :summary "Fork worker unavailable"
                                 :error "fork worker unavailable"
                                 :finished-at (java.util.Date.)})
-              (try
-                (db/set-session-active! child-session-id false)
-                (catch Throwable t
-                  (log/warn t "Failed to deactivate forked task session after worker rejection"
-                            {:task-id child-task-id
-                             :session-id child-session-id
-                             :parent-task-id task-id
-                             :parent-session-id parent-session-id})))
+              (child-task/deactivate-worker-session!
+               child-session-id
+               "Failed to deactivate forked task session after worker rejection"
+               log-context)
               {:status :unavailable
                :task-id child-task-id
                :session-id child-session-id
