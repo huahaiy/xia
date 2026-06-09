@@ -1,7 +1,8 @@
 (ns xia.db.catalog
   "Catalog and registry persistence helpers for skills, credentials, services, tools,
    managed child instances, and OAuth accounts."
-  (:require [clojure.string :as str])
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str])
   (:import [java.net URI]
            [java.util Date]))
 
@@ -945,11 +946,40 @@
   (when (some? handler-var)
     (str handler-var)))
 
+(defn- tool-output-storage-value
+  [value]
+  (when (some? value)
+    (pr-str value)))
+
+(defn- read-tool-output-storage-value
+  [value]
+  (if (string? value)
+    (try
+      (edn/read-string value)
+      (catch Exception _
+        value))
+    value))
+
+(defn- hydrate-tool-output-metadata
+  [tool]
+  (cond-> tool
+    (contains? tool :tool/output-schema)
+    (update :tool/output-schema read-tool-output-storage-value)
+
+    (contains? tool :tool/outputs)
+    (update :tool/outputs read-tool-output-storage-value)
+
+    (contains? tool :tool/output-examples)
+    (update :tool/output-examples read-tool-output-storage-value)))
+
 (defn install-tool!
   [deps
-   {:keys [id name description tags parameters handler handler-var approval execution-mode enabled? installed-at]}]
-  (let [existing     (when id (get-tool deps id))
-        handler-var* (tool-handler-var-value handler-var)]
+   {:keys [id name description tags parameters handler handler-var approval execution-mode enabled? installed-at
+           output-schema output_schema outputs output-examples output_examples]}]
+  (let [existing         (when id (get-tool deps id))
+        handler-var*     (tool-handler-var-value handler-var)
+        output-schema*   (or output-schema output_schema)
+        output-examples* (or output-examples output_examples)]
     (transact!*
       deps
       [(cond-> {:tool/id           id
@@ -983,18 +1013,27 @@
                                        (:tool/installed-at existing)
                                        (java.util.Date.))}
          (some? execution-mode)
-         (assoc :tool/execution-mode execution-mode))])))
+         (assoc :tool/execution-mode execution-mode)
+
+         (some? output-schema*)
+         (assoc :tool/output-schema (tool-output-storage-value output-schema*))
+
+         (some? outputs)
+         (assoc :tool/outputs (tool-output-storage-value outputs))
+
+         (some? output-examples*)
+         (assoc :tool/output-examples (tool-output-storage-value output-examples*)))])))
 
 (defn get-tool
   [deps tool-id]
   (let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :tool/id ?id]] tool-id))]
     (when eid
-      (raw-entity* deps eid))))
+      (hydrate-tool-output-metadata (raw-entity* deps eid)))))
 
 (defn list-tools
   [deps]
   (let [eids (q* deps '[:find ?e :where [?e :tool/id _]])]
-    (mapv #(raw-entity* deps (first %)) eids)))
+    (mapv #(hydrate-tool-output-metadata (raw-entity* deps (first %))) eids)))
 
 (defn enable-tool!
   [deps tool-id enabled?]

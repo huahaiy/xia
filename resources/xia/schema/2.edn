@@ -117,6 +117,9 @@
  :message/workload #:db{:valueType :db.type/keyword},
  :task.turn/operation #:db{:valueType :db.type/keyword},
  :tool/parameters #:db{:valueType :db.type/idoc, :domain "tool-parameters"},
+ :tool/output-schema #:db{:valueType :db.type/string},
+ :tool/outputs #:db{:valueType :db.type/string},
+ :tool/output-examples #:db{:valueType :db.type/string},
  :schedule-run/schedule-id #:db{:valueType :db.type/keyword},
  :kg.edge/source #:db{:valueType :db.type/ref},
  :local.doc.chunk/summary

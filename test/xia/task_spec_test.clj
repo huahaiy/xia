@@ -1,5 +1,6 @@
 (ns xia.task-spec-test
-  (:require [clojure.string :as str]
+  (:require [charred.api :as json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.agent.task-runtime :as task-runtime]
             [xia.async :as async]
@@ -29,6 +30,23 @@
     []
     (catch clojure.lang.ExceptionInfo e
       (:errors (ex-data e)))))
+
+(defn- author-spec-result-for
+  [goal spec & {:as opts}]
+  (let [content (json/write-json-str {:spec spec})]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" content})]
+      (task-spec/author-spec!
+       goal
+       :tools (or (:tools opts)
+                  [{:id :allowed-tool
+                    :name "Allowed tool"
+                    :description "Allowed test tool"
+                    :parameters {"type" "object"
+                                 "properties" {}}}])
+       :repair-attempts 0))))
 
 (deftest task-spec-runs-deterministic-steps-through-task-runtime
   (let [task-id (task-spec/create-task!
@@ -278,6 +296,68 @@
         (is (some #(= :task-spec-authoring/tool-not-in-catalog (:type %))
                   (get-in result [:validation :errors])))))))
 
+(deftest task-spec-authoring-rejects-nested-tools-outside-catalog
+  (let [content "{\"spec\":{\"goal\":\"Fan out\",\"steps\":[{\"id\":\"fanout\",\"kind\":\"parallel\",\"branches\":[{\"id\":\"branch\",\"spec\":{\"goal\":\"Bad branch\",\"steps\":[{\"id\":\"call\",\"kind\":\"tool\",\"tool\":\"not-allowed\",\"args\":{}}]}}]}]}}"]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" content})]
+      (let [result (task-spec/author-spec!
+                    "Fan out"
+                    :tools [{:id :email-search
+                             :name "Email search"
+                             :description "Search email"
+                             :parameters {"type" "object"
+                                          "properties" {"query" {"type" "string"}}}}]
+                    :repair-attempts 0)
+            errors (get-in result [:validation :errors])]
+        (is (= :invalid (:status result)))
+        (is (some #(= :task-spec-authoring/tool-not-in-catalog (:type %))
+                  errors))
+        (is (some #(= [:steps :fanout :branches 0 :spec :steps :call :tool]
+                      (:path %))
+                  errors))))))
+
+(deftest task-spec-authoring-rejects-out-of-catalog-tools-in-nested-control-specs
+  (let [bad-child {:goal "Bad child"
+                   :steps [{:id "call"
+                            :kind "tool"
+                            :tool "not-allowed"
+                            :args {}}]}
+        cases     [{:label "subtask"
+                    :step {:id "nested"
+                           :kind "subtask"
+                           :spec bad-child}}
+                   {:label "branch"
+                    :step {:id "nested"
+                           :kind "branch"
+                           :mode "join"
+                           :spec bad-child}}
+                   {:label "parallel map branch"
+                    :step {:id "nested"
+                           :kind "parallel"
+                           :branches {"left" bad-child}}}
+                   {:label "map"
+                    :step {:id "nested"
+                           :kind "map"
+                           :items []
+                           :spec bad-child}}
+                   {:label "loop"
+                    :step {:id "nested"
+                           :kind "loop"
+                           :max-iterations 1
+                           :spec bad-child}}]]
+    (doseq [{:keys [label step]} cases]
+      (let [result (author-spec-result-for
+                    label
+                    {:goal label
+                     :steps [step]})
+            errors (get-in result [:validation :errors])]
+        (is (= :invalid (:status result)) label)
+        (is (some #(= :task-spec-authoring/tool-not-in-catalog (:type %))
+                  errors)
+            label)))))
+
 (deftest task-spec-authored-tool-args-use-json-keys-at-execution
   (let [calls   (atom [])
         content "{\"spec\":{\"goal\":\"Search\",\"inputs\":{\"topic\":\"inbox\"},\"steps\":[{\"id\":\"search\",\"kind\":\"tool\",\"tool\":\"email-search\",\"args\":{\"query\":[\"input\",\"topic\"],\"max_results\":3,\"filters\":{\"unread_only\":true}}}]}}"]
@@ -307,6 +387,109 @@
                         "max_results" 3
                         "filters" {"unread_only" true}}}]
                @calls))))))
+
+(deftest task-spec-authored-output-paths-read-string-keyed-tool-results
+  (let [content "{\"spec\":{\"goal\":\"Read string keyed output\",\"steps\":[{\"id\":\"call\",\"kind\":\"tool\",\"tool\":\"custom-tool\",\"args\":{}},{\"id\":\"from-output\",\"kind\":\"value\",\"depends-on\":\"call\",\"value\":[\"output\",\"call\",[\"content\",\"body\"]]},{\"id\":\"from-get-in\",\"kind\":\"value\",\"depends-on\":\"call\",\"value\":[\"get-in\",[\"output\",\"call\"],[\"content\",\"body\"]]}]}}"]
+    (with-redefs [llm/chat-message
+                  (fn [_messages & _opts]
+                    {"role" "assistant"
+                     "content" content})
+                  tool/execute-tool
+                  (fn [_tool-id _args _context]
+                    {"content" {"body" "ok"}})]
+      (let [auth-result (task-spec/author-spec!
+                         "Read string keyed output"
+                         :tools [{:id :custom-tool
+                                  :name "custom-tool"
+                                  :description "Custom tool"
+                                  :parameters {"type" "object"
+                                               "properties" {}}
+                                  :output-schema {"type" "object"
+                                                  "properties" {"content" {"type" "object"}}}}]
+                         :repair-attempts 0)
+            task-id     (task-spec/create-task! (:spec auth-result))
+            run-result  (task-spec/run-task! task-id)
+            task        (db/get-task task-id)]
+        (is (= :success (:status auth-result)))
+        (is (= :completed (:status run-result)))
+        (is (= "ok"
+               (get-in task [:meta :task-spec :outputs :from-output])))
+        (is (= "ok"
+               (get-in task [:meta :task-spec :outputs :from-get-in])))))))
+
+(deftest task-spec-get-treats-vector-key-as-a-single-map-key
+  (let [task-id (task-spec/create-task!
+                 {:goal "Get vector key"
+                  :steps [{:id :read
+                           :kind :value
+                           :value [:get [:input :m] [:a :b] :missing]}]})
+        result  (task-spec/run-task! task-id
+                                     :context {:inputs {:m {[:a :b] 1}}})
+        task    (db/get-task task-id)]
+    (is (= :completed (:status result)))
+    (is (= 1
+           (get-in task [:meta :task-spec :outputs :read])))))
+
+(deftest task-spec-tool-catalog-includes-output-contracts
+  (let [catalog (task-spec/task-spec-tool-catalog
+                 [{:id :custom-tool
+                   :name "custom-tool"
+                   :description "Custom tool"
+                   :parameters {"type" "object"
+                                "properties" {}}
+                   :output_schema {"type" "object"
+                                   "properties" {"content" {"type" "string"}}}
+                   :outputs {"content" "Primary text output"}
+                   :output_examples [{"content" "example"}]}])
+        entry   (first catalog)]
+    (is (= {"type" "object"
+            "properties" {"content" {"type" "string"}}}
+           (:output-schema entry)))
+    (is (= {"content" "Primary text output"}
+           (:outputs entry)))
+    (is (= [{"content" "example"}]
+           (:output-examples entry)))))
+
+(deftest task-spec-tool-catalog-includes-db-backed-output-contracts
+  (db/install-tool! {:id :stored-tool
+                     :name "stored-tool"
+                     :description "Stored tool"
+                     :parameters {"type" "object"
+                                  "properties" {}}
+                     :output-schema {"type" "object"
+                                     "properties" {"content" {"type" "string"}}}
+                     :outputs {"content" "Primary text output"}
+                     :output-examples [{"content" "example"}]})
+  (let [entry (first (filter #(= "stored-tool" (:id %))
+                             (task-spec/task-spec-tool-catalog)))]
+    (is (= {"type" "object"
+            "properties" {"content" {"type" "string"}}}
+           (:output-schema entry)))
+    (is (= {"content" "Primary text output"}
+           (:outputs entry)))
+    (is (= [{"content" "example"}]
+           (:output-examples entry)))))
+
+(deftest task-spec-tool-catalog-includes-imported-output-contracts
+  (tool/import-tool! {:id :imported-tool
+                      :name "imported-tool"
+                      :description "Imported tool"
+                      :parameters {"type" "object"
+                                   "properties" {}}
+                      :handler "(fn [_] {\"content\" \"ok\"})"
+                      :output_schema {"type" "object"
+                                      "properties" {"content" {"type" "string"}}}
+                      :outputs {"content" "Primary text output"}
+                      :output_examples [{"content" "example"}]})
+  (let [entry (first (filter #(= "imported-tool" (:id %))
+                             (task-spec/task-spec-tool-catalog)))]
+    (is (= {"type" "object"
+            "properties" {"content" {"type" "string"}}}
+           (:output-schema entry)))
+    (is (= {"content" "Primary text output"}
+           (:outputs entry)))
+    (is (= [{"content" "example"}]
+           (:output-examples entry)))))
 
 (deftest task-spec-parallel-respects-concurrency-limit
   (let [active     (atom 0)

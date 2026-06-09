@@ -805,27 +805,27 @@
                             "Task spec parallel step requires :branches")]
 
       (map? branches)
-      (into []
-            (mapcat (fn [[branch-id entry]]
-                      (let [entry* (if (map? entry)
-                                     (assoc entry :id (normalize-id :parallel-entry-id branch-id))
-                                     {:id (normalize-id :parallel-entry-id branch-id)
-                                      :spec entry})
-                            path   (step-path step :branches branch-id)]
-                        (vec
-                         (concat
-                          (step-input-expression-errors step-ids step entry* path)
-                          (if (or (contains? entry* :contract)
-                                  (contains? entry* :spec)
-                                  (contains? entry* :steps))
-                            (nested-owner-spec-errors step entry* path)
-                            [(validation-error
-                              "Task spec parallel entry requires :spec"
-                              {:type :task-spec/invalid
-                               :step-id (:id step)
-                               :field :spec
-                               :path path})])))))
-            branches)
+      (vec
+       (mapcat (fn [[branch-id entry]]
+                 (let [entry* (if (map? entry)
+                                (assoc entry :id (normalize-id :parallel-entry-id branch-id))
+                                {:id (normalize-id :parallel-entry-id branch-id)
+                                 :spec entry})
+                       path   (step-path step :branches branch-id)]
+                   (vec
+                    (concat
+                     (step-input-expression-errors step-ids step entry* path)
+                     (if (or (contains? entry* :contract)
+                             (contains? entry* :spec)
+                             (contains? entry* :steps))
+                       (nested-owner-spec-errors step entry* path)
+                       [(validation-error
+                         "Task spec parallel entry requires :spec"
+                         {:type :task-spec/invalid
+                          :step-id (:id step)
+                          :field :spec
+                          :path path})])))))
+               (seq branches)))
 
       (sequential? branches)
       (into []
@@ -866,7 +866,7 @@
                           :step-id (:id step)
                           :field :branches
                           :path (step-path step :branches)
-                          :value branches})]))))
+                          :value branches})])))
 
 (defn- step-kind-errors
   [step-ids step]
@@ -1166,11 +1166,57 @@
      (assoc attrs :meta (merge-task-meta task task-spec-state*))))
   task-spec-state*)
 
+(def ^:private path-missing
+  (Object.))
+
+(defn- path-key-candidates
+  [key]
+  (let [key-name (when (or (keyword? key)
+                           (symbol? key)
+                           (string? key))
+                   (name key))]
+    (distinct
+     (remove nil?
+             [key
+              key-name
+              (when key-name (keyword key-name))]))))
+
+(defn- path-step-value
+  [value key]
+  (cond
+    (map? value)
+    (reduce (fn [_ candidate]
+              (if (contains? value candidate)
+                (reduced (get value candidate))
+                path-missing))
+            path-missing
+            (path-key-candidates key))
+
+    (associative? value)
+    (if (contains? value key)
+      (get value key)
+      path-missing)
+
+    :else
+    path-missing))
+
+(defn- path-resolve
+  [m path]
+  (let [path* (if (sequential? path) path [path])
+        result (reduce (fn [value key]
+                         (let [value* (path-step-value value key)]
+                           (if (identical? path-missing value*)
+                             (reduced path-missing)
+                             value*)))
+                       m
+                       path*)]
+    result))
+
 (defn- path-value
   [m path]
-  (if (sequential? path)
-    (get-in m (vec path))
-    (get m path)))
+  (let [result (path-resolve m path)]
+    (when-not (identical? path-missing result)
+      result)))
 
 (declare eval-expr
          positive-long-guardrail
@@ -1211,12 +1257,12 @@
       :step-failed? (= :failed
                        (get-in env [:steps (normalize-id :step-id (first args)) :status]))
       :get (let [[target key default] args
-                 target* (eval-expr env target)]
-             (if (and (associative? target*)
-                      (contains? target* key))
-               (get target* key)
-               default))
-      :get-in (get-in (eval-expr env (first args)) (vec (second args)))
+                 target* (eval-expr env target)
+                 value   (path-step-value target* key)]
+             (if (identical? path-missing value)
+               default
+               value))
+      :get-in (path-value (eval-expr env (first args)) (second args))
       :count (count (eval-expr env (first args)))
       := (apply = (map #(eval-expr env %) args))
       :not= (not (apply = (map #(eval-expr env %) args)))
@@ -1974,6 +2020,13 @@
     (some? value) (str value)
     :else nil))
 
+(defn- first-present-value
+  [m fields]
+  (some (fn [field]
+          (when (contains? m field)
+            (get m field)))
+        fields))
+
 (defn- planner-tool-entry
   [tool]
   (let [tool-id (or (:tool/id tool)
@@ -1981,7 +2034,18 @@
                     (normalize-tool-id (get tool "id")))
         tags    (or (:tool/tags tool)
                     (:tags tool)
-                    (get tool "tags"))]
+                    (get tool "tags"))
+        output-schema (first-present-value
+                       tool
+                       [:tool/output-schema :output-schema :output_schema
+                        "output-schema" "output_schema"])
+        outputs (first-present-value
+                 tool
+                 [:tool/outputs :outputs "outputs"])
+        output-examples (first-present-value
+                         tool
+                         [:tool/output-examples :output-examples :output_examples
+                          "output-examples" "output_examples"])]
     (cond-> {:id (name-value tool-id)
              :name (or (:tool/name tool)
                        (:name tool)
@@ -1998,6 +2062,15 @@
                               "properties" {}})}
       (seq tags)
       (assoc :tags (mapv name-value tags))
+
+      output-schema
+      (assoc :output-schema output-schema)
+
+      outputs
+      (assoc :outputs outputs)
+
+      output-examples
+      (assoc :output-examples output-examples)
 
       (or (:tool/approval tool) (:approval tool) (get tool "approval"))
       (assoc :approval (name-value (or (:tool/approval tool)
@@ -2019,7 +2092,9 @@
 
    With no args, reads currently enabled tools from the database. With a tool
    collection, normalizes DB-style or plain tool maps into stable JSON-friendly
-   entries: `{:id :name :description :parameters ...}`."
+   entries: `{:id :name :description :parameters ...}`. Optional output
+   metadata is exposed as `:output-schema`, `:outputs`, and
+   `:output-examples`."
   ([]
    (task-spec-tool-catalog (db/list-tools)))
   ([tools]
@@ -2204,27 +2279,113 @@
                                        (get tool "id")))))
         tools))
 
+(declare authoring-catalog-errors-for-spec)
+
+(defn- nested-authoring-spec-candidates
+  [owner path]
+  (cond
+    (contains? owner :contract)
+    (when-let [spec (task-spec (:contract owner))]
+      [{:spec spec
+        :path (conj path :contract :spec)}])
+
+    (contains? owner :spec)
+    [{:spec (:spec owner)
+      :path (conj path :spec)}]
+
+    (contains? owner :steps)
+    [{:spec owner
+      :path path}]
+
+    :else
+    []))
+
+(defn- parallel-authoring-spec-candidates
+  [step step-path*]
+  (let [branches (or (:branches step)
+                     (:tasks step)
+                     (:children step))]
+    (cond
+      (map? branches)
+      (vec
+       (mapcat (fn [[branch-id entry]]
+                 (let [path (conj step-path* :branches branch-id)]
+                   (if (map? entry)
+                     (nested-authoring-spec-candidates entry path)
+                     [{:spec entry
+                       :path (conj path :spec)}])))
+               (seq branches)))
+
+      (sequential? branches)
+      (into []
+            (mapcat (fn [[idx entry]]
+                      (nested-authoring-spec-candidates entry
+                                                        (conj step-path*
+                                                              :branches
+                                                              idx))))
+            (map-indexed vector branches))
+
+      :else
+      [])))
+
+(defn- nested-step-authoring-spec-candidates
+  [step step-path*]
+  (case (:kind step)
+    (:subtask :branch)
+    (nested-authoring-spec-candidates step step-path*)
+
+    :parallel
+    (parallel-authoring-spec-candidates step step-path*)
+
+    (:map :loop)
+    (nested-authoring-spec-candidates {:spec (:spec step)}
+                                      step-path*)
+
+    []))
+
+(defn- tool-not-in-catalog-error
+  [allowed-tool-ids path step tool-id]
+  (validation-error
+   "Task spec tool is not in the provided tool catalog"
+   {:type :task-spec-authoring/tool-not-in-catalog
+    :step-id (:id step)
+    :field :tool
+    :path (conj path :tool)
+    :tool-id tool-id
+    :allowed-tool-ids (mapv name
+                            (sort-by name
+                                     allowed-tool-ids))}))
+
+(defn- authoring-catalog-errors-for-step
+  [allowed-tool-ids path step]
+  (vec
+   (concat
+    (when (= :tool (:kind step))
+      (let [tool-id (normalize-tool-id (or (:tool step)
+                                           (:tool-id step)))]
+        (when (and tool-id
+                   (not (contains? allowed-tool-ids tool-id)))
+          [(tool-not-in-catalog-error allowed-tool-ids path step tool-id)])))
+    (mapcat (fn [{:keys [spec path]}]
+              (authoring-catalog-errors-for-spec allowed-tool-ids
+                                                 (normalize-spec spec)
+                                                 path))
+            (nested-step-authoring-spec-candidates step path)))))
+
+(defn- authoring-catalog-errors-for-spec
+  [allowed-tool-ids spec path]
+  (into []
+        (mapcat (fn [step]
+                  (authoring-catalog-errors-for-step allowed-tool-ids
+                                                     (conj path :steps (:id step))
+                                                     step)))
+        (:steps spec)))
+
 (defn- authoring-catalog-errors
   [request spec]
-  (let [allowed-tool-ids (catalog-tool-id-set (:tools request))]
-    (into []
-          (keep (fn [step]
-                  (when (= :tool (:kind step))
-                    (let [tool-id (normalize-tool-id (or (:tool step)
-                                                         (:tool-id step)))]
-                      (when (and tool-id
-                                 (not (contains? allowed-tool-ids tool-id)))
-                        (validation-error
-                         "Task spec tool is not in the provided tool catalog"
-                         {:type :task-spec-authoring/tool-not-in-catalog
-                          :step-id (:id step)
-                          :field :tool
-                          :path (step-path step :tool)
-                          :tool-id tool-id
-                          :allowed-tool-ids (mapv name
-                                                  (sort-by name
-                                                           allowed-tool-ids))}))))))
-          (:steps spec))))
+  (authoring-catalog-errors-for-spec (catalog-tool-id-set (:tools request))
+                                     spec
+                                     []))
 
 (defn- add-validation-errors
   [validation errors]

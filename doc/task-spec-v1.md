@@ -766,8 +766,9 @@ Both functions return:
 `author-spec!` asks an LLM to produce `{"spec": ...}` from a user goal and a
 tool catalog. If the first response fails validation, it may run repair passes
 using the validation diagnostics. `repair-spec!` performs one explicit repair
-pass for an existing spec. Tool ids in authored specs must come from the
-provided catalog; out-of-catalog tool ids are authoring errors.
+pass for an existing spec. Tool ids in authored specs, including nested
+subtask/branch/parallel/map/loop specs, must come from the provided catalog;
+out-of-catalog tool ids are authoring errors.
 
 Planner JSON uses normal JSON objects and arrays. Since JSON has no keywords,
 expression arrays may use string operators:
@@ -789,11 +790,16 @@ Planner JSON should use canonical task-spec field names such as
 `output-schema`, `depends-on`, and `tool-id`. Common snake_case step aliases
 such as `output_schema`, `depends_on`, and `tool_id` are accepted and normalized
 away before validation. Tool `args` remain JSON-style argument objects at
-execution time, so tool handlers receive string-keyed maps.
+execution time, so tool handlers receive string-keyed maps. Output path lookup
+is tolerant of string-keyed and keyword-keyed maps, so
+`["output", "search", "content"]` can read either `"content"` or `:content`.
 
 `task-spec-tool-catalog` returns JSON-friendly tool entries with stable
 `:id`, `:name`, `:description`, `:parameters`, and optional policy metadata.
-The planner must not invent tool ids outside that catalog.
+When tool maps provide output metadata, the catalog also includes
+`:output-schema`, `:outputs`, and `:output-examples` so planners can reference
+tool results deliberately. The planner must not invent tool ids outside that
+catalog.
 
 ## Examples
 

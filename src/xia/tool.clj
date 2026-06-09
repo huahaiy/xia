@@ -397,48 +397,79 @@
 ;; Tool import
 ;; ---------------------------------------------------------------------------
 
+(defn- tool-output-schema
+  [tool-def]
+  (or (:output-schema tool-def)
+      (:output_schema tool-def)))
+
+(defn- tool-output-examples
+  [tool-def]
+  (or (:output-examples tool-def)
+      (:output_examples tool-def)))
+
 (defn import-tool!
   "Import a tool from an EDN definition map. Installs in DB and loads it."
   [tool-def]
-  (let [{:keys [id name description tags parameters handler handler-var approval execution-mode]} tool-def]
+  (let [{:keys [id name description tags parameters handler handler-var approval execution-mode outputs]} tool-def
+        output-schema*   (tool-output-schema tool-def)
+        output-examples* (tool-output-examples tool-def)]
     (when-not id
       (throw (ex-info "Tool definition must have an :id" {:def tool-def})))
-    (db/install-tool! {:id          id
-                       :name        (or name (clojure.core/name id))
-                       :description (or description "")
-                       :tags        (or tags #{})
-                       :parameters  (or parameters {})
-                       :handler     (or (normalize-handler handler) "")
-                       :handler-var (normalize-handler-var-string handler-var)
-                       :approval    (cond
-                                      (keyword? approval) approval
-                                      (string? approval) (keyword approval)
-                                      :else :auto)
-                       :execution-mode (cond
-                                         (keyword? execution-mode) execution-mode
-                                         (string? execution-mode) (keyword execution-mode)
-                                         :else nil)})
+    (db/install-tool! (cond-> {:id          id
+                               :name        (or name (clojure.core/name id))
+                               :description (or description "")
+                               :tags        (or tags #{})
+                               :parameters  (or parameters {})
+                               :handler     (or (normalize-handler handler) "")
+                               :handler-var (normalize-handler-var-string handler-var)
+                               :approval    (cond
+                                              (keyword? approval) approval
+                                              (string? approval) (keyword approval)
+                                              :else :auto)
+                               :execution-mode (cond
+                                                 (keyword? execution-mode) execution-mode
+                                                 (string? execution-mode) (keyword execution-mode)
+                                                 :else nil)}
+                        (some? output-schema*)
+                        (assoc :output-schema output-schema*)
+
+                        (some? outputs)
+                        (assoc :outputs outputs)
+
+                        (some? output-examples*)
+                        (assoc :output-examples output-examples*)))
     (load-tool! id)
     (log/info "Imported tool:" (or name (clojure.core/name id)))
     tool-def))
 
 (defn- bundled-tool-install-map
-  [{:keys [id name description tags parameters handler handler-var approval execution-mode]}]
-  {:id          id
-   :name        (or name (clojure.core/name id))
-   :description (or description "")
-   :tags        (or tags #{})
-   :parameters  (or parameters {})
-   :handler     (or (normalize-handler handler) "")
-   :handler-var (normalize-handler-var-string handler-var)
-   :approval    (cond
-                  (keyword? approval) approval
-                  (string? approval) (keyword approval)
-                  :else :auto)
-   :execution-mode (cond
-                     (keyword? execution-mode) execution-mode
-                     (string? execution-mode) (keyword execution-mode)
-                     :else nil)})
+  [{:keys [id name description tags parameters handler handler-var approval execution-mode outputs]
+    :as tool-def}]
+  (let [output-schema*   (tool-output-schema tool-def)
+        output-examples* (tool-output-examples tool-def)]
+    (cond-> {:id          id
+             :name        (or name (clojure.core/name id))
+             :description (or description "")
+             :tags        (or tags #{})
+             :parameters  (or parameters {})
+             :handler     (or (normalize-handler handler) "")
+             :handler-var (normalize-handler-var-string handler-var)
+             :approval    (cond
+                            (keyword? approval) approval
+                            (string? approval) (keyword approval)
+                            :else :auto)
+             :execution-mode (cond
+                               (keyword? execution-mode) execution-mode
+                               (string? execution-mode) (keyword execution-mode)
+                               :else nil)}
+      (some? output-schema*)
+      (assoc :output-schema output-schema*)
+
+      (some? outputs)
+      (assoc :outputs outputs)
+
+      (some? output-examples*)
+      (assoc :output-examples output-examples*))))
 
 (defn- installed-tool-install-map
   [tool]
@@ -450,12 +481,18 @@
    :handler        (:tool/handler tool)
    :handler-var    (:tool/handler-var tool)
    :approval       (:tool/approval tool)
-   :execution-mode (:tool/execution-mode tool)})
+   :execution-mode (:tool/execution-mode tool)
+   :output-schema  (:tool/output-schema tool)
+   :outputs        (:tool/outputs tool)
+   :output-examples (:tool/output-examples tool)})
 
 (defn- bundled-tool-refresh-needed?
   [installed desired]
   (let [keys* (cond-> [:name :description :tags :parameters :handler :handler-var :approval]
-                (some? (:execution-mode desired)) (conj :execution-mode))]
+                (some? (:execution-mode desired)) (conj :execution-mode)
+                (contains? desired :output-schema) (conj :output-schema)
+                (contains? desired :outputs) (conj :outputs)
+                (contains? desired :output-examples) (conj :output-examples))]
     (some (fn [k]
             (not= (get installed k) (get desired k)))
           keys*)))
