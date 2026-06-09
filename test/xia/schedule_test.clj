@@ -1,5 +1,6 @@
 (ns xia.schedule-test
   (:require [clojure.test :refer :all]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -455,18 +456,19 @@
 (deftest task-state-builds-recovery-context
   (schedule/create-schedule!
     {:id :recoverable :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Check the dashboard"})
-  (schedule/save-task-checkpoint!
-    :recoverable
-    {:phase :tool
-     :round 1
-     :summary "Opened the dashboard and attempted the primary action."
-     :tool-ids ["browser-open" "browser-click"]
-     :progress-status :resumable
-     :stack [{:title "Check the dashboard" :progress-status :in-progress}
-             {:title "Resume alternate path" :progress-status :resumable}]
-     :agenda [{:item "Open dashboard" :status :completed}
-              {:item "Resume alternate path" :status :resumable}
-              {:item "Investigate new branch" :status :diverged}]})
+  (let [task-id (schedule/ensure-schedule-task! (schedule/get-schedule :recoverable))]
+    (task-runtime/save-task-checkpoint!
+     task-id
+     {:phase :tool
+      :round 1
+      :summary "Opened the dashboard and attempted the primary action."
+      :tool-ids ["browser-open" "browser-click"]
+      :progress-status :resumable
+      :stack [{:title "Check the dashboard" :progress-status :in-progress}
+              {:title "Resume alternate path" :progress-status :resumable}]
+      :agenda [{:item "Open dashboard" :status :completed}
+               {:item "Resume alternate path" :status :resumable}
+               {:item "Investigate new branch" :status :diverged}]}))
   (let [state (schedule/record-task-failure! :recoverable "No element matches selector #submit")
         prompt (schedule/augment-prompt-with-recovery-context :recoverable "Check the dashboard")]
     (is (= :backoff (:status state)))
@@ -482,10 +484,9 @@
     (is (re-find #"Recovery context from previous scheduled attempts" prompt))
     (is (re-find #"browser-query-elements" prompt))
     (is (re-find #"Opened the dashboard and attempted the primary action" prompt))
-    (is (re-find #"Last progress status: resumable" prompt))
-    (is (re-find #"Last execution stack: \[in-progress\] Check the dashboard > \[resumable\] Resume alternate path" prompt))
-    (is (re-find #"\[resumable\] Resume alternate path" prompt))
-    (is (re-find #"\[diverged\] Investigate new branch" prompt))))
+    (is (re-find #"Last checkpoint \[tool\]" prompt))
+    (is (re-find #"Agenda: Open dashboard; Resume alternate path; Investigate new branch" prompt))
+    (is (re-find #"Stack depth: 2" prompt))))
 
 (deftest repeated-identical-failures-pause-schedule
   (db/set-config! :schedule/pause-after-repeated-failures 2)
@@ -509,11 +510,13 @@
     (schedule/create-schedule!
       {:id :resume-me :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Continue the task"})
     (wm/create-wm! session-id)
-    (schedule/save-task-checkpoint!
-      :resume-me
-      {:phase :tool
-       :summary "Reached the target site and opened the work queue."
-       :session-id session-id})
+    (let [task-id (schedule/ensure-schedule-task! (schedule/get-schedule :resume-me)
+                                                  :session-id session-id)]
+      (task-runtime/save-task-checkpoint!
+       task-id
+       {:phase :tool
+        :summary "Reached the target site and opened the work queue."
+        :session-id session-id}))
     (schedule/record-task-failure! :resume-me "Timed out waiting for dashboard")
     (is (= session-id
            (schedule/resumable-session-id :resume-me)))
@@ -531,7 +534,7 @@
     (is (= :success (:status state)))
     (is (= :complete (:phase state)))
     (is (= 0 (:consecutive-failures state)))
-    (is (= "Recovered after reloading the page." (:last-success-summary state)))
+    (is (nil? (:last-success-summary state)))
     (is (nil? (:last-policy state)))
     (is (nil? (:backoff-until state)))))
 

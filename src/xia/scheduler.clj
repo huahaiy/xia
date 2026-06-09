@@ -302,10 +302,10 @@
      :audit-log audit-log
      :hook-context context
      :run-context context
-     :checkpoint {:phase :tool
-                  :summary (str "Running scheduled tool " (name tool-id) ".")
-                  :tool-id tool-id
-                  :task-id task-id}
+     :start-state {:phase :tool
+                   :summary (str "Running scheduled tool " (name tool-id) ".")
+                   :tool-id tool-id
+                   :task-id task-id}
      :summary-fallback-fn (fn [_] (str (name tool-id) " completed"))
      :success-summary-fn (fn [_ _ summary] summary)
      :meta-fn (fn [] {:task-id task-id})}))
@@ -346,13 +346,13 @@
                     (when resumed-session-id
                       (bridge/resume-session! session-id
                                               :expected-channel :scheduler)))
-     :checkpoint {:phase :planning
-                  :summary (if resumed-session-id
-                             "Resumed a scheduled prompt run from the last checkpoint."
-                             "Started a scheduled prompt run.")
-                  :resumed? (boolean resumed-session-id)
-                  :session-id session-id
-                  :task-id task-id}
+     :start-state {:phase :planning
+                   :summary (if resumed-session-id
+                              "Resumed a scheduled prompt run from the bound task state."
+                              "Started a scheduled prompt run.")
+                   :resumed? (boolean resumed-session-id)
+                   :session-id session-id
+                   :task-id task-id}
      :summary-fallback-fn (fn [run-result] (:summary run-result))
      :success-summary-fn (fn [run-result output _summary]
                            (or output (:summary run-result)))
@@ -386,8 +386,8 @@
     (try
       (when-let [before-run! (:before-run! plan)]
         (before-run!))
-      (when-let [checkpoint (:checkpoint plan)]
-        (schedule/save-task-checkpoint! (:schedule-id plan) checkpoint))
+      (when-let [start-state (:start-state plan)]
+        (schedule/record-task-start! (:schedule-id plan) start-state))
       (schedule-run-hook! :start plan {:started-at (:started plan)})
       (let [result (apply task-spec/run-task!
                           (:task-id plan)

@@ -546,16 +546,7 @@
                                                   "Checkpoint")
                                      :data checkpoint*})
     (task-runtime/save-task-checkpoint! (:task-id execution-context)
-                                        checkpoint*))
-  (when-let [schedule-id (:schedule-id execution-context)]
-    (try
-      (schedule/save-task-checkpoint! schedule-id
-                                      (merge (trace-context execution-context)
-                                             checkpoint))
-      (catch Exception e
-        (log/warn e "Failed to persist schedule checkpoint"
-                  (merge {:schedule-id schedule-id}
-                         (trace-context execution-context)))))))
+                                        checkpoint*)))
 
 (defn- task-runtime-callbacks
   [runtime-task]

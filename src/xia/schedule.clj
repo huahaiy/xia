@@ -14,6 +14,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [xia.agent.task-runtime :as task-runtime]
             [xia.cron :as cron]
             [xia.db :as db]
             [xia.prompt :as prompt]
@@ -62,21 +63,6 @@
   [value]
   (some-> value str str/trim not-empty))
 
-(defn- checkpoint-doc
-  [checkpoint]
-  (when (map? checkpoint)
-    (cond-> (reduce-kv (fn [acc k v]
-                         (assoc acc k
-                                (cond
-                                  (string? v) (truncate-string v 500)
-                                  (and (sequential? v) (not (map? v)))
-                                  (vec (map #(if (string? %) (truncate-string % 120) %) (take 10 v)))
-                                  :else v)))
-                       {}
-                       checkpoint)
-      (:summary checkpoint)
-      (update :summary truncate-string 500))))
-
 (defn- read-checkpoint-doc
   [value]
   (when (map? value)
@@ -100,54 +86,6 @@
     (cond-> value
       (string? (:decision-type value)) (update :decision-type keyword)
       (string? (:mode value)) (update :mode keyword))))
-
-(defn- checkpoint-progress-status-line
-  [checkpoint]
-  (when-let [status (:progress-status checkpoint)]
-    (str "- Last progress status: "
-         (if (keyword? status) (name status) (str status)))))
-
-(defn- checkpoint-agenda-line
-  [checkpoint]
-  (when-let [agenda (seq (:agenda checkpoint))]
-    (let [items (->> agenda
-                     (keep (fn [entry]
-                             (when (map? entry)
-                               (let [item   (some-> (or (:item entry)
-                                                        (get entry "item"))
-                                                    str
-                                                    str/trim
-                                                    not-empty)
-                                     status (or (:status entry)
-                                                (get entry "status"))]
-                                 (when item
-                                   (str "[" (if (keyword? status) (name status) (str status))
-                                        "] "
-                                        item))))))
-                     (take 5)
-                     vec)]
-      (when (seq items)
-        (str "- Last agenda: " (str/join " | " items))))))
-
-(defn- checkpoint-stack-line
-  [checkpoint]
-  (when-let [stack (seq (:stack checkpoint))]
-    (let [items (->> stack
-                     (keep (fn [entry]
-                             (when (map? entry)
-                               (let [title  (some-> (:title entry)
-                                                    str
-                                                    str/trim
-                                                    not-empty)
-                                     status (:progress-status entry)]
-                                 (when title
-                                   (str "[" (if (keyword? status) (name status) (str status))
-                                        "] "
-                                        title))))))
-                     (take 6)
-                     vec)]
-      (when (seq items)
-        (str "- Last execution stack: " (str/join " > " items))))))
 
 (defn- normalize-failure-signature
   [error]
@@ -253,24 +191,79 @@
                                          nil))
     :else                            nil))
 
+(def ^:private obsolete-schedule-execution-attrs
+  [:schedule.state/checkpoint
+   :schedule.state/checkpoint-at
+   :schedule.state/last-success-summary
+   :schedule.state/last-recovery-hint])
+
+(defn- attr-retractions
+  [state-eid attrs]
+  (when state-eid
+    (let [entity (db/entity state-eid)]
+      (keep (fn [attr]
+              (when-let [value (get entity attr)]
+                [:db/retract state-eid attr value]))
+            attrs))))
+
+(defn- retract-state-attrs
+  [tx state-eid attrs]
+  (into tx (attr-retractions state-eid attrs)))
+
+(defn- schedule-task
+  [task-id]
+  (some-> task-id db/get-task))
+
+(defn- task-checkpoint
+  [task fallback]
+  (or (some-> task task-runtime/task-checkpoint)
+      fallback))
+
+(defn- task-checkpoint-at
+  [task fallback]
+  (or (some-> task task-runtime/task-checkpoint-at)
+      fallback))
+
+(defn- task-session-id
+  [task checkpoint]
+  (or (normalize-session-id (:session-id task))
+      (normalize-session-id (:session-id checkpoint))))
+
+(defn- session-present?
+  [session-id]
+  (boolean
+   (and session-id
+        (ffirst (db/q '[:find ?e :in $ ?sid
+                        :where [?e :session/id ?sid]]
+                      session-id)))))
+
 (defn task-state
   "Return durable execution state for a schedule, if any."
   [schedule-id]
   (when-let [eid (schedule-state-eid schedule-id)]
-    (let [e (db/entity eid)]
+    (let [e                  (db/entity eid)
+          task-id            (:schedule.state/task-id e)
+          task               (schedule-task task-id)
+          stored-checkpoint  (read-checkpoint-doc (:schedule.state/checkpoint e))
+          checkpoint         (task-checkpoint task stored-checkpoint)
+          checkpoint-at      (task-checkpoint-at task
+                                                 (:schedule.state/checkpoint-at e))
+          last-error         (:schedule.state/last-error e)
+          recovery-hint      (when (seq last-error)
+                               (recovery-hint last-error))]
       {:schedule-id           (:schedule.state/schedule-id e)
        :status                (:schedule.state/status e)
        :phase                 (:schedule.state/phase e)
-       :task-id               (:schedule.state/task-id e)
-       :checkpoint            (read-checkpoint-doc (:schedule.state/checkpoint e))
+       :task-id               task-id
+       :checkpoint            checkpoint
        :last-policy           (read-policy-doc (:schedule.state/last-policy e))
-       :checkpoint-at         (:schedule.state/checkpoint-at e)
+       :checkpoint-at         checkpoint-at
        :last-success-at       (:schedule.state/last-success-at e)
        :last-success-summary  (:schedule.state/last-success-summary e)
        :last-failure-at       (:schedule.state/last-failure-at e)
-       :last-error            (:schedule.state/last-error e)
+       :last-error            last-error
        :last-failure-signature (:schedule.state/last-failure-signature e)
-       :last-recovery-hint    (:schedule.state/last-recovery-hint e)
+       :last-recovery-hint    recovery-hint
        :consecutive-failures  (or (:schedule.state/consecutive-failures e) 0)
        :backoff-until         (:schedule.state/backoff-until e)})))
 
@@ -389,57 +382,64 @@
   "Return the session id that should be reused for a recovering scheduled prompt,
    or nil if the task should start fresh."
   [schedule-id]
-  (let [{:keys [status checkpoint]} (task-state schedule-id)
-        session-id (normalize-session-id (:session-id checkpoint))]
+  (let [{:keys [status task-id checkpoint]} (task-state schedule-id)
+        task       (schedule-task task-id)
+        session-id (task-session-id task checkpoint)]
     (when (and (#{:running :backoff :paused} status)
                session-id
-               (ffirst (db/q '[:find ?e :in $ ?sid
-                               :where [?e :session/id ?sid]]
-                             session-id))
+               (session-present? session-id)
                (wm/get-wm session-id))
       session-id)))
 
-(defn save-task-checkpoint!
-  "Persist a lightweight checkpoint for a scheduled task run."
-  [schedule-id checkpoint]
-  (let [now            (java.util.Date.)
-        state-eid      (schedule-state-eid schedule-id)
-        checkpoint-doc (checkpoint-doc checkpoint)
-        task-id        (or (:task-id checkpoint)
-                           (:task-id (task-state schedule-id)))]
+(defn record-task-start!
+  "Mark a scheduled task run as active without duplicating task checkpoint data."
+  [schedule-id start-state]
+  (let [start-state (if (map? start-state) start-state {})
+        state       (task-state schedule-id)
+        state-eid   (schedule-state-eid schedule-id)
+        task-id     (or (:task-id start-state) (:task-id state))]
     (db/transact!
-      (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
-                        :schedule.state/status      :running
-                        :schedule.state/checkpoint-at now}
-                 task-id (assoc :schedule.state/task-id task-id)
-                 (:phase checkpoint) (assoc :schedule.state/phase (:phase checkpoint))
-                 checkpoint-doc (assoc :schedule.state/checkpoint checkpoint-doc))]
-        state-eid
-        (conj [:db/retract state-eid :schedule.state/backoff-until])
-        state-eid
-        (conj [:db/retract state-eid :schedule.state/last-policy])))
+      (retract-state-attrs
+       [(cond-> {:schedule.state/schedule-id schedule-id
+                 :schedule.state/status :running}
+          task-id (assoc :schedule.state/task-id task-id)
+          (:phase start-state) (assoc :schedule.state/phase (:phase start-state)))]
+       state-eid
+       (into [:schedule.state/backoff-until
+              :schedule.state/last-policy]
+             obsolete-schedule-execution-attrs)))
+    (task-state schedule-id)))
+
+(defn save-task-checkpoint!
+  "Compatibility shim: store checkpoint data on the bound task, not schedule state."
+  [schedule-id checkpoint]
+  (let [checkpoint (if (map? checkpoint) checkpoint {})
+        state      (task-state schedule-id)
+        task-id    (or (:task-id checkpoint) (:task-id state))]
+    (when task-id
+      (task-runtime/save-task-checkpoint! task-id
+                                          (assoc checkpoint :task-id task-id)))
+    (record-task-start! schedule-id (assoc checkpoint :task-id task-id))
     (task-state schedule-id)))
 
 (defn record-task-success!
   "Mark a schedule task run as successful and clear failure state."
-  [schedule-id result-summary]
+  [schedule-id _result-summary]
   (let [now       (java.util.Date.)
-        state     (task-state schedule-id)
         state-eid (schedule-state-eid schedule-id)]
     (db/transact!
-      (cond-> [{:schedule.state/schedule-id schedule-id
-                :schedule.state/status :success
-                :schedule.state/phase :complete
-                :schedule.state/last-success-at now
-                :schedule.state/last-success-summary (truncate-string result-summary 1000)
-                :schedule.state/consecutive-failures 0
-                :schedule.state/last-error ""
-                :schedule.state/last-failure-signature ""
-                :schedule.state/last-recovery-hint ""}]
-        state-eid
-        (conj [:db/retract state-eid :schedule.state/backoff-until])
-        state-eid
-        (conj [:db/retract state-eid :schedule.state/last-policy])))
+      (retract-state-attrs
+       [{:schedule.state/schedule-id schedule-id
+         :schedule.state/status :success
+         :schedule.state/phase :complete
+         :schedule.state/last-success-at now
+         :schedule.state/consecutive-failures 0
+         :schedule.state/last-error ""
+         :schedule.state/last-failure-signature ""}]
+       state-eid
+       (into [:schedule.state/backoff-until
+              :schedule.state/last-policy]
+             obsolete-schedule-execution-attrs)))
     (task-state schedule-id)))
 
 (defn record-task-failure!
@@ -452,70 +452,72 @@
                                 "Unknown scheduled task failure")
         signature           (normalize-failure-signature error-message)
         same-failure?       (= signature (:last-failure-signature state))
-        hint                (recovery-hint error-message)
         {:keys [mode consecutive-failures backoff-until] :as policy}
         (task-policy/schedule-failure-policy {:same-failure? same-failure?
                                               :previous-failures (:consecutive-failures state)
                                               :now now})
         paused?             (= :pause mode)]
     (db/transact!
-      (cond-> [(cond-> {:schedule.state/schedule-id schedule-id
-                        :schedule.state/status (if paused? :paused :backoff)
-                        :schedule.state/phase :error
-                        :schedule.state/last-failure-at now
-                        :schedule.state/last-error error-message
-                        :schedule.state/last-failure-signature signature
-                        :schedule.state/last-recovery-hint hint
-                        :schedule.state/last-policy (policy-doc policy)
-                        :schedule.state/consecutive-failures consecutive-failures}
-                 backoff-until (assoc :schedule.state/backoff-until backoff-until))
-               (cond-> {:schedule/id schedule-id}
-                 paused? (assoc :schedule/enabled? false)
-                 backoff-until (assoc :schedule/next-run backoff-until))]
+      (cond-> (retract-state-attrs
+               [(cond-> {:schedule.state/schedule-id schedule-id
+                         :schedule.state/status (if paused? :paused :backoff)
+                         :schedule.state/phase :error
+                         :schedule.state/last-failure-at now
+                         :schedule.state/last-error error-message
+                         :schedule.state/last-failure-signature signature
+                         :schedule.state/last-policy (policy-doc policy)
+                         :schedule.state/consecutive-failures consecutive-failures}
+                  backoff-until (assoc :schedule.state/backoff-until backoff-until))
+                (cond-> {:schedule/id schedule-id}
+                  paused? (assoc :schedule/enabled? false)
+                  backoff-until (assoc :schedule/next-run backoff-until))]
+               state-eid
+               obsolete-schedule-execution-attrs)
         (and paused? state-eid)
-        (conj [:db/retract state-eid :schedule.state/backoff-until])))
+        (into (attr-retractions state-eid [:schedule.state/backoff-until]))))
     (task-state schedule-id)))
+
+(defn- recovery-source
+  [task checkpoint checkpoint-at]
+  (or task
+      (when checkpoint
+        {:meta (cond-> {:checkpoint checkpoint}
+                 checkpoint-at (assoc :checkpoint-at checkpoint-at))})))
+
+(defn- task-recovery-lines
+  [task checkpoint checkpoint-at]
+  (some-> (recovery-source task checkpoint checkpoint-at)
+          task-runtime/task-recovery-brief
+          str/split-lines
+          seq))
 
 (defn recovery-brief
   "Return a compact recovery summary for the next scheduled prompt attempt."
   [schedule-id]
   (when-let [{:keys [consecutive-failures last-failure-at last-error
-                     last-recovery-hint checkpoint]} (task-state schedule-id)]
-    (when (pos? (long (or consecutive-failures 0)))
-      (str/join
-        "\n"
-        (cond-> ["Recovery context from previous scheduled attempts:"
-                 (str "- Consecutive failures: " consecutive-failures)]
-          last-failure-at
-          (conj (str "- Last failure at: " last-failure-at))
+                     last-recovery-hint checkpoint checkpoint-at task-id]}
+             (task-state schedule-id)]
+    (let [task  (schedule-task task-id)
+          lines (task-recovery-lines task checkpoint checkpoint-at)]
+      (when (pos? (long (or consecutive-failures 0)))
+        (str/join
+         "\n"
+         (cond-> ["Recovery context from previous scheduled attempts:"
+                  (str "- Consecutive failures: " consecutive-failures)]
+           last-failure-at
+           (conj (str "- Last failure at: " last-failure-at))
 
-          (seq last-error)
-          (conj (str "- Last error: " last-error))
+           (seq last-error)
+           (conj (str "- Last error: " last-error))
 
-          (seq last-recovery-hint)
-          (conj (str "- Recovery hint: " last-recovery-hint))
+           (seq last-recovery-hint)
+           (conj (str "- Recovery hint: " last-recovery-hint))
 
-          (seq (:summary checkpoint))
-          (conj (str "- Last checkpoint"
-                     (when-let [phase (:phase checkpoint)]
-                       (str " (" (name phase)
-                            (when-let [round (:round checkpoint)]
-                              (str ", round " round))
-                            ")"))
-                     ": "
-                     (:summary checkpoint)))
+           (seq lines)
+           (into lines)
 
-          (checkpoint-progress-status-line checkpoint)
-          (conj (checkpoint-progress-status-line checkpoint))
-
-          (checkpoint-agenda-line checkpoint)
-          (conj (checkpoint-agenda-line checkpoint))
-
-          (checkpoint-stack-line checkpoint)
-          (conj (checkpoint-stack-line checkpoint))
-
-          (normalize-session-id (:session-id checkpoint))
-          (conj "- Resume the existing scheduled session instead of starting over from the beginning."))))))
+           (resumable-session-id schedule-id)
+           (conj "- Resume the existing scheduled session instead of starting over from the beginning.")))))))
 
 (defn augment-prompt-with-recovery-context
   "Inject prior failure/checkpoint context into a scheduled prompt."
