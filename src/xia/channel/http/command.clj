@@ -2,28 +2,13 @@
   "Machine command-channel HTTP handlers."
   (:require [taoensso.timbre :as log]
             [xia.bridge :as bridge]
+            [xia.channel.http.common :as http-common]
             [xia.checkpoint :as checkpoint]
             [xia.mcp :as mcp]
             [xia.runtime-health :as runtime-health]
             [xia.runtime-state :as runtime-state]
             [xia.snapshot :as snapshot]
             [xia.wake-projection :as wake-projection]))
-
-(defn- json-response*
-  [deps status body]
-  ((:json-response deps) status body))
-
-(defn- read-body*
-  [deps req]
-  ((:read-body deps) req))
-
-(defn- instant->str*
-  [deps value]
-  ((:instant->str deps) value))
-
-(defn- nonblank-str*
-  [deps value]
-  ((:nonblank-str deps) value))
 
 (defn idle-body
   [deps]
@@ -32,7 +17,7 @@
         memory-consolidation (bridge/memory-consolidation-summary)]
     {:phase (some-> phase name)
      :draining draining?
-     :drain_requested_at (instant->str* deps drain-requested-at)
+     :drain_requested_at (http-common/instant->str deps drain-requested-at)
      :accepting_new_work accepting-new-work?
      :idle idle?
      :shutdown_allowed shutdown-allowed?
@@ -65,59 +50,59 @@
               (handler)
               (catch Throwable e
                 (log/error e "Command shutdown handler failed"))))
-          (json-response* deps 202 {:status "stopping"}))
-        (json-response* deps 409
+          (http-common/json-response deps 202 {:status "stopping"}))
+        (http-common/json-response deps 409
                         (assoc (idle-body deps)
                                :error "runtime must be draining and idle before shutdown"))))
-    (json-response* deps 503 {:error "shutdown control unavailable"})))
+    (http-common/json-response deps 503 {:error "shutdown control unavailable"})))
 
 (defn handle-runtime-status
   [deps _req]
-  (json-response* deps 200 (idle-body deps)))
+  (http-common/json-response deps 200 (idle-body deps)))
 
 (defn handle-runtime-drain
   [deps _req]
   (runtime-state/request-drain!)
-  (json-response* deps 200 (idle-body deps)))
+  (http-common/json-response deps 200 (idle-body deps)))
 
 (defn handle-runtime-undrain
   [deps _req]
   (runtime-state/clear-drain!)
-  (json-response* deps 200 (idle-body deps)))
+  (http-common/json-response deps 200 (idle-body deps)))
 
 (defn handle-wake-projection
   [deps _req]
   (let [projection (wake-projection/current-snapshot)]
-    (cond-> (json-response* deps 200 projection)
+    (cond-> (http-common/json-response deps 200 projection)
       (:projection_seq projection)
       (assoc-in [:headers "ETag"] (str "\"" (:projection_seq projection) "\"")))))
 
 (defn handle-mcp
   [deps req]
-  (let [request  (or (read-body* deps req) {})
+  (let [request  (or (http-common/read-body deps req) {})
         response (mcp/handle-json-rpc
                   request
                   {:request-id  (str (random-uuid))
                    :remote-addr (:remote-addr req)})]
     (if response
-      (json-response* deps 200 response)
-      (json-response* deps 202 {:ok true}))))
+      (http-common/json-response deps 200 response)
+      (http-common/json-response deps 202 {:ok true}))))
 
 (defn handle-create-checkpoint
   [deps req]
-  (let [body         (or (read-body* deps req) {})
-        staging-root (nonblank-str* deps (get body "staging_root"))
+  (let [body         (or (http-common/read-body deps req) {})
+        staging-root (http-common/nonblank-str deps (get body "staging_root"))
         checkpoint*  (checkpoint/submit-online-checkpoint!
                        (cond-> {}
                          staging-root
                          (assoc :staging-root staging-root)))]
-    (json-response* deps 202 checkpoint*)))
+    (http-common/json-response deps 202 checkpoint*)))
 
 (defn handle-get-checkpoint
   [deps checkpoint-id]
   (if-let [status (checkpoint/checkpoint-status checkpoint-id)]
-    (json-response* deps 200 status)
-    (json-response* deps 404 {:error "checkpoint not found"})))
+    (http-common/json-response deps 200 status)
+    (http-common/json-response deps 404 {:error "checkpoint not found"})))
 
 (defn- snapshot-body
   [snapshot*]
@@ -133,18 +118,18 @@
 
 (defn handle-list-snapshots
   [deps _req]
-  (json-response* deps 200
+  (http-common/json-response deps 200
                   {:snapshots (mapv snapshot-body
                                      (snapshot/list-snapshots))}))
 
 (defn handle-create-snapshot
   [deps req]
-  (let [body               (or (read-body* deps req) {})
-        label              (nonblank-str* deps (get body "label"))
-        snapshot-root      (nonblank-str* deps (get body "snapshot_root"))
+  (let [body               (or (http-common/read-body deps req) {})
+        label              (http-common/nonblank-str deps (get body "label"))
+        snapshot-root      (http-common/nonblank-str deps (get body "snapshot_root"))
         include-workspace? (not= false (get body "include_workspace"))
         snapshot*          (snapshot/create-snapshot!
                             :label label
                             :snapshot-root snapshot-root
                             :include-workspace? include-workspace?)]
-    (json-response* deps 201 (snapshot-body snapshot*))))
+    (http-common/json-response deps 201 (snapshot-body snapshot*))))

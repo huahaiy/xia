@@ -9,6 +9,9 @@
             [xia.channel.http.admin.instances :as admin-instances]
             [xia.channel.http.admin.providers :as admin-providers]
             [xia.channel.http.admin.schedules :as admin-schedules]
+            [xia.channel.http.common :as http-common]
+            [xia.channel.http.request :as http-request]
+            [xia.channel.http.value :as http-value]
             [xia.channel.messaging :as messaging]
             [xia.config :as config]
             [xia.context :as context]
@@ -41,30 +44,6 @@
 (def ^:private oauth-account-connection-modes #{:oauth-flow :manual-token})
 (def ^:private ms-per-day (* 24 60 60 1000))
 
-(defn- json-response*
-  [deps status body]
-  ((:json-response deps) status body))
-
-(defn- exception-response*
-  [deps throwable]
-  ((:exception-response deps) throwable))
-
-(defn- instant->str*
-  [deps value]
-  ((:instant->str deps) value))
-
-(defn- read-body*
-  [deps req]
-  ((:read-body deps) req))
-
-(defn- request-base-url*
-  [deps req]
-  ((:request-base-url deps) req))
-
-(defn- truncate-text*
-  [deps value limit]
-  ((:truncate-text deps) value limit))
-
 (defn- db-migration->admin-body
   [{:keys [from-version to-version description applied-at]}]
   (cond-> {:from_version from-version
@@ -79,12 +58,6 @@
    :headers {"Content-Type" "text/html; charset=utf-8"}
    :body    body})
 
-(defn- nonblank-str
-  [value]
-  (let [s (some-> value str str/trim)]
-    (when (seq s)
-      s)))
-
 (defn- days->ms
   [days]
   (when-some [days* (some-> days long)]
@@ -98,47 +71,6 @@
       (str/replace ">" "&gt;")
       (str/replace "\"" "&quot;")
       (str/replace "'" "&#39;")))
-
-(defn- parse-query-string
-  [query-string]
-  (into {}
-        (keep (fn [part]
-                (let [[^String k ^String v] (str/split (str part) #"=" 2)]
-                  (when (seq k)
-                    [(java.net.URLDecoder/decode k "UTF-8")
-                     (some-> v ^String (java.net.URLDecoder/decode "UTF-8"))]))))
-        (str/split (or query-string "") #"&")))
-
-(defn- parse-keyword-id
-  [value field-name]
-  (let [id-str (nonblank-str value)]
-    (cond
-      (nil? id-str)
-      (throw (ex-info (str "missing '" field-name "' field") {:field field-name}))
-
-      (re-find #"\s" id-str)
-      (throw (ex-info (str "'" field-name "' must not contain whitespace")
-                      {:field field-name
-                       :value value}))
-
-      :else
-      (keyword id-str))))
-
-(defn- parse-optional-positive-long
-  [value field-name]
-  (let [text (nonblank-str value)]
-    (when text
-      (try
-        (let [parsed (Long/parseLong text)]
-          (when-not (pos? parsed)
-            (throw (ex-info (str "'" field-name "' must be a positive integer")
-                            {:field field-name
-                             :value value})))
-          parsed)
-        (catch NumberFormatException _
-          (throw (ex-info (str "'" field-name "' must be a positive integer")
-                          {:field field-name
-                           :value value})))))))
 
 (defn- parse-iso-instant
   [value field]
@@ -160,7 +92,7 @@
 
 (defn- normalize-base-url
   [value]
-  (some-> value nonblank-str (str/replace #"/+$" "")))
+  (some-> value http-value/nonblank-str (str/replace #"/+$" "")))
 
 (defn- normalize-id-segment
   [value]
@@ -184,14 +116,14 @@
 
 (defn- infer-site-id
   [data]
-  (let [name-text  (nonblank-str (get data "name"))
-        login-url  (nonblank-str (get data "login_url"))
+  (let [name-text  (http-value/nonblank-str (get data "name"))
+        login-url  (http-value/nonblank-str (get data "login_url"))
         url-base   (when login-url
                      (try
                        (let [uri  (URI. login-url)
                              host (some-> (.getHost uri)
                                           (str/replace #"^www\." ""))
-                             path (some-> (.getPath uri) nonblank-str)]
+                             path (some-> (.getPath uri) http-value/nonblank-str)]
                          (normalize-id-segment
                            (str/join "-" (filter some? [host path]))))
                        (catch Exception _
@@ -204,7 +136,7 @@
 
 (defn- infer-skill-id
   [data]
-  (let [name-text (nonblank-str (get data "name"))
+  (let [name-text (http-value/nonblank-str (get data "name"))
         base      (or (normalize-id-segment name-text)
                       "skill")
         used-ids  (map :skill/id (db/list-skills))]
@@ -223,8 +155,8 @@
                            {:id (some-> id name)
                             :event (some-> event name)})
                          (:hooks manifest))
-     :installed_at (instant->str* deps (:plugin/installed-at plugin))
-     :updated_at   (instant->str* deps (:plugin/updated-at plugin))}))
+     :installed_at (http-common/instant->str deps (:plugin/installed-at plugin))
+     :updated_at   (http-common/instant->str deps (:plugin/updated-at plugin))}))
 
 (defn- parse-skill-tags
   [value]
@@ -233,14 +165,14 @@
                 (sequential? value) value
                 :else nil)]
     (->> parts
-         (map nonblank-str)
+         (map http-value/nonblank-str)
          (keep normalize-id-segment)
          (map keyword)
          set)))
 
 (defn- parse-extra-fields
   [value]
-  (let [text (nonblank-str value)]
+  (let [text (http-value/nonblank-str value)]
     (when text
       (try
         (json/write-json-str (json/read-json text))
@@ -250,7 +182,7 @@
 
 (defn- parse-json-object-string
   [value field-name]
-  (let [text (nonblank-str value)]
+  (let [text (http-value/nonblank-str value)]
     (when text
       (try
         (let [parsed (json/read-json text)]
@@ -279,7 +211,7 @@
 
 (defn- parse-auth-type
   [value]
-  (let [auth-type (some-> value nonblank-str keyword)]
+  (let [auth-type (some-> value http-value/nonblank-str keyword)]
     (when-not (contains? service-auth-types auth-type)
       (throw (ex-info "invalid auth_type"
                       {:field "auth_type"
@@ -288,7 +220,7 @@
 
 (defn- parse-optional-service-email-backend
   [value]
-  (when-let [backend (some-> value nonblank-str keyword)]
+  (when-let [backend (some-> value http-value/nonblank-str keyword)]
     (when-not (contains? service-email-backends backend)
       (throw (ex-info "invalid email_backend"
                       {:field "email_backend"
@@ -297,7 +229,7 @@
 
 (defn- parse-optional-mail-security
   [value field]
-  (when-let [security (some-> value nonblank-str keyword)]
+  (when-let [security (some-> value http-value/nonblank-str keyword)]
     (when-not (contains? mail-security-modes security)
       (throw (ex-info (str "invalid " field)
                       {:field field
@@ -344,7 +276,7 @@
 
 (defn- secret-resolution->admin-body
   [resolution]
-  (config-resolution->admin-body resolution #(boolean (nonblank-str %))))
+  (config-resolution->admin-body resolution #(boolean (http-value/nonblank-str %))))
 
 (defn- provider->admin-body
   [provider]
@@ -473,12 +405,12 @@
      :interval_hours    (:interval_hours settings)
      :retain_count      (:retain_count settings)
      :running           (boolean (:running settings))
-     :started_at        (instant->str* deps (:started_at settings))
-     :last_attempt_at   (instant->str* deps (:last_attempt_at settings))
-     :last_success_at   (instant->str* deps (:last_success_at settings))
+     :started_at        (http-common/instant->str deps (:started_at settings))
+     :last_attempt_at   (http-common/instant->str deps (:last_attempt_at settings))
+     :last_success_at   (http-common/instant->str deps (:last_success_at settings))
      :last_archive_path (:last_archive_path settings)
      :last_error        (:last_error settings)
-     :next_due_at       (instant->str* deps (:next_due_at settings))
+     :next_due_at       (http-common/instant->str deps (:next_due_at settings))
      :sources           {:enabled (some-> (get-in resolutions [:enabled :source]) name)
                          :directory (some-> (get-in resolutions [:directory :source]) name)
                          :interval_hours (some-> (get-in resolutions [:interval-hours :source]) name)
@@ -582,7 +514,7 @@
      :trash_folder                     (:service/trash-folder service)
      :oauth_account                    (some-> (:service/oauth-account service) name)
      :oauth_account_name               (:oauth.account/name oauth-account)
-     :oauth_account_connected          (boolean (nonblank-str (:oauth.account/access-token oauth-account)))
+     :oauth_account_connected          (boolean (http-value/nonblank-str (:oauth.account/access-token oauth-account)))
      :oauth_account_autonomous_approved (boolean (and oauth-account
                                                      (autonomous/oauth-account-autonomous-approved? oauth-account)))
      :rate_limit_per_minute            (:service/rate-limit-per-minute service)
@@ -590,7 +522,7 @@
      :effective_rate_limit_per_minute  (service-proxy/effective-rate-limit-per-minute service)
      :autonomous_approved              (boolean (autonomous/service-autonomous-approved? service))
      :enabled                          (boolean (:service/enabled? service))
-     :auth_key_configured              (boolean (nonblank-str (:service/auth-key service)))}))
+     :auth_key_configured              (boolean (http-value/nonblank-str (:service/auth-key service)))}))
 
 (defn- managed-instance->admin-body
   [deps instance]
@@ -611,14 +543,14 @@
    :redirect_uri             (:oauth.account/redirect-uri account)
    :auth_params              (:oauth.account/auth-params account)
    :token_params             (:oauth.account/token-params account)
-   :client_secret_configured (boolean (nonblank-str (:oauth.account/client-secret account)))
-   :access_token_configured  (boolean (nonblank-str (:oauth.account/access-token account)))
-   :refresh_token_configured (boolean (nonblank-str (:oauth.account/refresh-token account)))
+   :client_secret_configured (boolean (http-value/nonblank-str (:oauth.account/client-secret account)))
+   :access_token_configured  (boolean (http-value/nonblank-str (:oauth.account/access-token account)))
+   :refresh_token_configured (boolean (http-value/nonblank-str (:oauth.account/refresh-token account)))
    :token_type               (:oauth.account/token-type account)
    :autonomous_approved      (boolean (autonomous/oauth-account-autonomous-approved? account))
-   :connected                (boolean (nonblank-str (:oauth.account/access-token account)))
-   :expires_at               (instant->str* deps (:oauth.account/expires-at account))
-   :connected_at             (instant->str* deps (:oauth.account/connected-at account))})
+   :connected                (boolean (http-value/nonblank-str (:oauth.account/access-token account)))
+   :expires_at               (http-common/instant->str deps (:oauth.account/expires-at account))
+   :connected_at             (http-common/instant->str deps (:oauth.account/connected-at account))})
 
 (defn- oauth-template->admin-body
   [template]
@@ -639,10 +571,10 @@
   [account]
   (when-let [template-id (:oauth.account/provider-template account)]
     (when-let [template (oauth-template/get-template template-id)]
-      (let [service-id   (some-> (:service-id template) nonblank-str keyword)
-            service-name (or (nonblank-str (:service-name template))
-                             (nonblank-str (:name template)))
-            api-base-url (nonblank-str (:api-base-url template))]
+      (let [service-id   (some-> (:service-id template) http-value/nonblank-str keyword)
+            service-name (or (http-value/nonblank-str (:service-name template))
+                             (http-value/nonblank-str (:name template)))
+            api-base-url (http-value/nonblank-str (:api-base-url template))]
         (when (and service-id api-base-url)
           {:id       service-id
            :name     (or service-name (name service-id))
@@ -695,7 +627,7 @@
     (when-let [{:keys [id name base-url]} (oauth-account-template-service-spec account)]
     (let [existing (db/get-service id)]
       (db/save-service! {:id            id
-                         :name          (or (some-> (:service/name existing) nonblank-str)
+                         :name          (or (some-> (:service/name existing) http-value/nonblank-str)
                                             name)
                          :base-url      base-url
                          :auth-type     :oauth-account
@@ -710,7 +642,7 @@
       (when (and service
                  (= :oauth-account (:service/auth-type service))
                  (= (:oauth.account/id account) (:service/oauth-account service))
-                 (= base-url (nonblank-str (:service/base-url service))))
+                 (= base-url (http-value/nonblank-str (:service/base-url service))))
         service))))
 
 (defn- site->admin-body
@@ -725,8 +657,8 @@
    :form_selector       (:site-cred/form-selector site)
    :extra_fields        (:site-cred/extra-fields site)
    :autonomous_approved (boolean (autonomous/site-autonomous-approved? site))
-   :username_configured (boolean (nonblank-str (:site-cred/username site)))
-   :password_configured (boolean (nonblank-str (:site-cred/password site)))})
+   :username_configured (boolean (http-value/nonblank-str (:site-cred/username site)))
+   :password_configured (boolean (http-value/nonblank-str (:site-cred/password site)))})
 
 (defn- schedule->admin-body
   [deps sched]
@@ -762,15 +694,15 @@
    :trust_note            (:skill/trust-note skill)
    :lifecycle             (some-> (:skill/lifecycle skill) name)
    :lifecycle_reason      (:skill/lifecycle-reason skill)
-   :installed_at          (instant->str* deps (:skill/installed-at skill))
-   :updated_at            (instant->str* deps (:skill/updated-at skill))
-   :archived_at           (instant->str* deps (:skill/archived-at skill))
+   :installed_at          (http-common/instant->str deps (:skill/installed-at skill))
+   :updated_at            (http-common/instant->str deps (:skill/updated-at skill))
+   :archived_at           (http-common/instant->str deps (:skill/archived-at skill))
    :selected_count        (long (or (:skill/selected-count skill) 0))
    :injected_count        (long (or (:skill/injected-count skill) 0))
    :viewed_count          (long (or (:skill/viewed-count skill) 0))
    :patched_count         (long (or (:skill/patched-count skill) 0))
-   :last_used_at          (instant->str* deps (:skill/last-used-at skill))
-   :last_update_check_at  (instant->str* deps (:skill/last-update-check-at skill))
+   :last_used_at          (http-common/instant->str deps (:skill/last-used-at skill))
+   :last_update_check_at  (http-common/instant->str deps (:skill/last-update-check-at skill))
    :last_update_status    (some-> (:skill/last-update-status skill) name)
    :last_update_source_sha256 (:skill/last-update-source-sha256 skill)
    :import_warnings       (->> (or (:skill/import-warnings skill) [])
@@ -785,7 +717,7 @@
 
 (defn- parse-optional-bounded-double
   [value field-name]
-  (let [text (nonblank-str value)]
+  (let [text (http-value/nonblank-str value)]
     (when text
       (try
         (let [parsed (Double/parseDouble text)]
@@ -801,7 +733,7 @@
 
 (defn- parse-summary-backend
   [value field-name]
-  (let [backend (some-> value nonblank-str keyword)]
+  (let [backend (some-> value http-value/nonblank-str keyword)]
     (when backend
       (when-not (contains? #{:local :external} backend)
         (throw (ex-info (str "'" field-name "' must be one of: local, external")
@@ -811,7 +743,7 @@
 
 (defn- parse-optional-provider-id
   [value field-name]
-  (when-let [provider-id-str (nonblank-str value)]
+  (when-let [provider-id-str (http-value/nonblank-str value)]
     (let [provider-id (keyword provider-id-str)]
       (when-not (db/get-provider provider-id)
         (throw (ex-info (str "'" field-name "' must reference an existing provider")
@@ -848,17 +780,17 @@
 (defn handle-reload-runtime-overlay
   [deps req]
   (try
-    (let [data         (or (read-body* deps req) {})
-          overlay-path (or (nonblank-str (get data "overlay_path"))
-                           (nonblank-str (get data :overlay_path)))]
+    (let [data         (or (http-common/read-body deps req) {})
+          overlay-path (or (http-value/nonblank-str (get data "overlay_path"))
+                           (http-value/nonblank-str (get data :overlay_path)))]
       (if overlay-path
         (runtime-overlay/reload! overlay-path)
         (runtime-overlay/reload!))
-      (json-response* deps 200
+      (http-common/json-response deps 200
                       {:status "reloaded"
                        :runtime_overlay (runtime-overlay/admin-summary)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-admin-config
   [deps _req]
@@ -866,7 +798,7 @@
         setup-required? (or (empty? providers)
                             (nil? (db/get-default-provider)))
         storage-layout  (paths/storage-layout (db/current-db-path))]
-    (json-response*
+    (http-common/json-response
       deps
       200
       {:setup_required setup-required?
@@ -959,15 +891,15 @@
 (defn handle-save-memory-retention
   [deps req]
   (try
-    (let [data                 (or (read-body* deps req) {})
+    (let [data                 (or (http-common/read-body deps req) {})
           full-resolution-days (when (contains? data "full_resolution_days")
-                                 (parse-optional-positive-long (get data "full_resolution_days")
+                                 (http-value/parse-optional-positive-long (get data "full_resolution_days")
                                                                "full_resolution_days"))
           decay-half-life-days (when (contains? data "decay_half_life_days")
-                                 (parse-optional-positive-long (get data "decay_half_life_days")
+                                 (http-value/parse-optional-positive-long (get data "decay_half_life_days")
                                                                "decay_half_life_days"))
           retained-count       (when (contains? data "retained_count")
-                                 (parse-optional-positive-long (get data "retained_count")
+                                 (http-value/parse-optional-positive-long (get data "retained_count")
                                                                "retained_count"))]
       (when (contains? data "full_resolution_days")
         (save-config-override! :memory/episode-full-resolution-ms
@@ -978,29 +910,29 @@
       (when (contains? data "retained_count")
         (save-config-override! :memory/episode-retained-decayed-count
                                retained-count))
-      (json-response* deps 200 {:memory_retention (memory-retention->admin-body deps)}))
+      (http-common/json-response deps 200 {:memory_retention (memory-retention->admin-body deps)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-web-search
   [deps req]
   (try
-    (let [data (or (read-body* deps req) {})]
+    (let [data (or (http-common/read-body deps req) {})]
       (save-config-override! :web/search-backend
-                             (nonblank-str (get data "backend")))
+                             (http-value/nonblank-str (get data "backend")))
       (save-config-override! :web/search-brave-api-key
-                             (nonblank-str (get data "brave_api_key")))
+                             (http-value/nonblank-str (get data "brave_api_key")))
       (save-config-override! :web/search-searxng-url
-                             (nonblank-str (get data "searxng_url")))
-      (json-response* deps 200
+                             (http-value/nonblank-str (get data "searxng_url")))
+      (http-common/json-response deps 200
                       {:web_search (web-search->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-identity
   [deps req]
   (try
-    (let [data (or (read-body* deps req) {})]
+    (let [data (or (http-common/read-body deps req) {})]
       (doseq [[json-key soul-key] [["name" :name]
                                    ["role" :role]
                                    ["description" :description]
@@ -1012,7 +944,7 @@
         (when (contains? data "controller_enabled")
           (instance-supervisor/set-instance-management-enabled!
             (true? (get data "controller_enabled"))))
-        (json-response*
+        (http-common/json-response
           deps
           200
           {:identity {:name        (:name soul "Xia")
@@ -1022,17 +954,17 @@
                       :guidelines  (:guidelines soul "")}
            :capabilities (instance-supervisor/capabilities)})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-conversation-context
   [deps req]
   (try
-    (let [data                         (or (read-body* deps req) {})
+    (let [data                         (or (http-common/read-body deps req) {})
           recent-history-message-limit (when (contains? data "recent_history_message_limit")
-                                         (parse-optional-positive-long (get data "recent_history_message_limit")
+                                         (http-value/parse-optional-positive-long (get data "recent_history_message_limit")
                                                                        "recent_history_message_limit"))
           history-budget               (when (contains? data "history_budget")
-                                         (parse-optional-positive-long (get data "history_budget")
+                                         (http-value/parse-optional-positive-long (get data "history_budget")
                                                                        "history_budget"))]
       (when (contains? data "recent_history_message_limit")
         (save-config-override! :context/recent-history-message-limit
@@ -1040,28 +972,28 @@
       (when (contains? data "history_budget")
         (save-config-override! :context/history-budget
                                history-budget))
-      (json-response* deps 200 {:conversation_context (conversation-context->admin-body)}))
+      (http-common/json-response deps 200 {:conversation_context (conversation-context->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-knowledge-decay
   [deps req]
   (try
-    (let [data                      (or (read-body* deps req) {})
+    (let [data                      (or (http-common/read-body deps req) {})
           grace-period-days         (when (contains? data "grace_period_days")
-                                      (parse-optional-positive-long (get data "grace_period_days")
+                                      (http-value/parse-optional-positive-long (get data "grace_period_days")
                                                                     "grace_period_days"))
           half-life-days            (when (contains? data "half_life_days")
-                                      (parse-optional-positive-long (get data "half_life_days")
+                                      (http-value/parse-optional-positive-long (get data "half_life_days")
                                                                     "half_life_days"))
           min-confidence            (when (contains? data "min_confidence")
                                       (parse-optional-bounded-double (get data "min_confidence")
                                                                      "min_confidence"))
           maintenance-interval-days (when (contains? data "maintenance_interval_days")
-                                      (parse-optional-positive-long (get data "maintenance_interval_days")
+                                      (http-value/parse-optional-positive-long (get data "maintenance_interval_days")
                                                                     "maintenance_interval_days"))
           archive-after-bottom-days (when (contains? data "archive_after_bottom_days")
-                                      (parse-optional-positive-long (get data "archive_after_bottom_days")
+                                      (http-value/parse-optional-positive-long (get data "archive_after_bottom_days")
                                                                     "archive_after_bottom_days"))]
       (when (contains? data "grace_period_days")
         (save-config-override! :memory/knowledge-decay-grace-period-ms
@@ -1078,14 +1010,14 @@
       (when (contains? data "archive_after_bottom_days")
         (save-config-override! :memory/knowledge-decay-archive-after-bottom-ms
                                (days->ms archive-after-bottom-days)))
-      (json-response* deps 200 {:knowledge_decay (knowledge-decay->admin-body)}))
+      (http-common/json-response deps 200 {:knowledge_decay (knowledge-decay->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-local-doc-summarization
   [deps req]
   (try
-    (let [data                     (or (read-body* deps req) {})
+    (let [data                     (or (http-common/read-body deps req) {})
           enabled?                 (when (contains? data "model_summaries_enabled")
                                      (true? (get data "model_summaries_enabled")))
           backend                  (when (contains? data "model_summary_backend")
@@ -1095,10 +1027,10 @@
                                      (parse-optional-provider-id (get data "model_summary_provider_id")
                                                                  "model_summary_provider_id"))
           chunk-summary-max-tokens (when (contains? data "chunk_summary_max_tokens")
-                                     (parse-optional-positive-long (get data "chunk_summary_max_tokens")
+                                     (http-value/parse-optional-positive-long (get data "chunk_summary_max_tokens")
                                                                    "chunk_summary_max_tokens"))
           doc-summary-max-tokens   (when (contains? data "doc_summary_max_tokens")
-                                     (parse-optional-positive-long (get data "doc_summary_max_tokens")
+                                     (http-value/parse-optional-positive-long (get data "doc_summary_max_tokens")
                                                                    "doc_summary_max_tokens"))
           effective-provider-id    (when (= backend :external) provider-id)]
       (when (contains? data "model_summaries_enabled")
@@ -1115,14 +1047,14 @@
       (when (contains? data "doc_summary_max_tokens")
         (save-config-override! :local-doc/doc-summary-max-tokens
                                doc-summary-max-tokens))
-      (json-response* deps 200 {:local_doc_summarization (local-doc-summarization->admin-body)}))
+      (http-common/json-response deps 200 {:local_doc_summarization (local-doc-summarization->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-local-doc-ocr
   [deps req]
   (try
-    (let [data          (or (read-body* deps req) {})
+    (let [data          (or (http-common/read-body deps req) {})
           enabled?      (when (contains? data "enabled")
                           (true? (get data "enabled")))
           model-backend (when (contains? data "model_backend")
@@ -1132,10 +1064,10 @@
                           (parse-optional-provider-id (get data "external_provider_id")
                                                       "external_provider_id"))
           timeout-ms    (when (contains? data "timeout_ms")
-                          (parse-optional-positive-long (get data "timeout_ms")
+                          (http-value/parse-optional-positive-long (get data "timeout_ms")
                                                         "timeout_ms"))
           max-tokens    (when (contains? data "max_tokens")
-                          (parse-optional-positive-long (get data "max_tokens")
+                          (http-value/parse-optional-positive-long (get data "max_tokens")
                                                         "max_tokens"))
           _             (when (and provider-id
                                    (not (llm/vision-capable? provider-id)))
@@ -1154,23 +1086,23 @@
         (save-config-override! :local-doc/ocr-timeout-ms timeout-ms))
       (when (contains? data "max_tokens")
         (save-config-override! :local-doc/ocr-max-tokens max-tokens))
-      (json-response* deps 200 {:local_doc_ocr (local-doc-ocr->admin-body)}))
+      (http-common/json-response deps 200 {:local_doc_ocr (local-doc-ocr->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-database-backup
   [deps req]
   (try
-    (let [data           (or (read-body* deps req) {})
+    (let [data           (or (http-common/read-body deps req) {})
           enabled?       (when (contains? data "enabled")
                            (true? (get data "enabled")))
           directory      (when (contains? data "directory")
-                           (nonblank-str (get data "directory")))
+                           (http-value/nonblank-str (get data "directory")))
           interval-hours (when (contains? data "interval_hours")
-                           (parse-optional-positive-long (get data "interval_hours")
+                           (http-value/parse-optional-positive-long (get data "interval_hours")
                                                          "interval_hours"))
           retain-count   (when (contains? data "retain_count")
-                           (parse-optional-positive-long (get data "retain_count")
+                           (http-value/parse-optional-positive-long (get data "retain_count")
                                                          "retain_count"))]
       (when (contains? data "enabled")
         (save-config-override! :backup/enabled? enabled?))
@@ -1180,14 +1112,14 @@
         (save-config-override! :backup/interval-hours interval-hours))
       (when (contains? data "retain_count")
         (save-config-override! :backup/retain-count retain-count))
-      (json-response* deps 200 {:database_backup (database-backup->admin-body deps)}))
+      (http-common/json-response deps 200 {:database_backup (database-backup->admin-body deps)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-messaging
   [deps req]
   (try
-    (let [data  (or (read-body* deps req) {})
+    (let [data  (or (http-common/read-body deps req) {})
           saved (messaging/save-admin-config!
                  {:slack (when (contains? data "slack")
                            {:enabled (get-in data ["slack" "enabled"])
@@ -1200,49 +1132,49 @@
                   :imessage (when (contains? data "imessage")
                               {:enabled (get-in data ["imessage" "enabled"])
                                :poll-interval-ms (get-in data ["imessage" "poll_interval_ms"])})})]
-      (json-response* deps 200 {:messaging_channels saved}))
+      (http-common/json-response deps 200 {:messaging_channels saved}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))
+      (http-common/exception-response deps e))
     (catch Exception e
-      (json-response* deps 500 {:error (or (.getMessage e)
+      (http-common/json-response deps 500 {:error (or (.getMessage e)
                                            "failed to save messaging settings")}))))
 
 (defn handle-save-service
   [deps req]
   (try
-    (let [data                   (or (read-body* deps req) {})
-          service-id             (parse-keyword-id (get data "id") "id")
+    (let [data                   (or (http-common/read-body deps req) {})
+          service-id             (http-value/parse-keyword-id (get data "id") "id")
           existing               (db/get-service service-id)
-          base-url               (nonblank-str (get data "base_url"))
+          base-url               (http-value/nonblank-str (get data "base_url"))
           smtp-url               (if (contains? data "smtp_url")
-                                   (nonblank-str (get data "smtp_url"))
+                                   (http-value/nonblank-str (get data "smtp_url"))
                                    (:service/smtp-url existing))
-          name                   (or (nonblank-str (get data "name"))
+          name                   (or (http-value/nonblank-str (get data "name"))
                                      (name service-id))
           auth-type              (parse-auth-type (get data "auth_type"))
           email-backend          (if (contains? data "email_backend")
                                    (parse-optional-service-email-backend (get data "email_backend"))
                                    (:service/email-backend existing))
-          entered-auth-key       (nonblank-str (get data "auth_key"))
-          auth-username          (or (nonblank-str (get data "auth_username"))
+          entered-auth-key       (http-value/nonblank-str (get data "auth_key"))
+          auth-username          (or (http-value/nonblank-str (get data "auth_username"))
                                      (:service/auth-username existing))
-          email-address          (or (nonblank-str (get data "email_address"))
+          email-address          (or (http-value/nonblank-str (get data "email_address"))
                                      (:service/email-address existing))
           imap-security          (or (parse-optional-mail-security (get data "imap_security") "imap_security")
                                      (:service/imap-security existing))
           smtp-security          (or (parse-optional-mail-security (get data "smtp_security") "smtp_security")
                                      (:service/smtp-security existing))
-          inbox-folder           (or (nonblank-str (get data "inbox_folder"))
+          inbox-folder           (or (http-value/nonblank-str (get data "inbox_folder"))
                                      (:service/inbox-folder existing))
-          drafts-folder          (or (nonblank-str (get data "drafts_folder"))
+          drafts-folder          (or (http-value/nonblank-str (get data "drafts_folder"))
                                      (:service/drafts-folder existing))
-          sent-folder            (or (nonblank-str (get data "sent_folder"))
+          sent-folder            (or (http-value/nonblank-str (get data "sent_folder"))
                                      (:service/sent-folder existing))
-          archive-folder         (or (nonblank-str (get data "archive_folder"))
+          archive-folder         (or (http-value/nonblank-str (get data "archive_folder"))
                                      (:service/archive-folder existing))
-          trash-folder           (or (nonblank-str (get data "trash_folder"))
+          trash-folder           (or (http-value/nonblank-str (get data "trash_folder"))
                                      (:service/trash-folder existing))
-          rate-limit-per-minute  (parse-optional-positive-long (get data "rate_limit_per_minute")
+          rate-limit-per-minute  (http-value/parse-optional-positive-long (get data "rate_limit_per_minute")
                                                                "rate_limit_per_minute")
           allow-private-network? (when (contains? data "allow_private_network")
                                    (true? (get data "allow_private_network")))
@@ -1252,7 +1184,7 @@
                                    (true? (get data "enabled"))
                                    true)
           oauth-account-id       (when (= :oauth-account auth-type)
-                                   (let [value (or (nonblank-str (get data "oauth_account"))
+                                   (let [value (or (http-value/nonblank-str (get data "oauth_account"))
                                                    (some-> (:service/oauth-account existing) name))]
                                      (when-not value
                                        (throw (ex-info "oauth_account is required for oauth-account auth_type"
@@ -1263,7 +1195,7 @@
                                                          {:field "oauth_account"
                                                           :value value})))
                                        account-id)))
-          entered-header         (nonblank-str (get data "auth_header"))
+          entered-header         (http-value/nonblank-str (get data "auth_header"))
           auth-header            (when (#{:api-key-header :query-param} auth-type)
                                    (or entered-header
                                        (:service/auth-header existing)))
@@ -1299,20 +1231,20 @@
                          :allow-private-network? allow-private-network?
                          :autonomous-approved?   autonomous-approved?
                          :enabled?               enabled?})
-      (json-response* deps 200 {:service (service->admin-body (db/get-service service-id))}))
+      (http-common/json-response deps 200 {:service (service->admin-body (db/get-service service-id))}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-oauth-account
   [deps req]
   (try
-    (let [data                  (or (read-body* deps req) {})
-          account-id            (parse-keyword-id (get data "id") "id")
+    (let [data                  (or (http-common/read-body deps req) {})
+          account-id            (http-value/parse-keyword-id (get data "id") "id")
           existing              (db/get-oauth-account account-id)
-          name                  (or (nonblank-str (get data "name"))
+          name                  (or (http-value/nonblank-str (get data "name"))
                                     (name account-id))
           connection-mode       (let [parsed (if (contains? data "connection_mode")
-                                               (some-> (get data "connection_mode") nonblank-str keyword)
+                                               (some-> (get data "connection_mode") http-value/nonblank-str keyword)
                                                (when existing
                                                  (oauth-account-connection-mode existing)))]
                                   (when (and parsed
@@ -1321,31 +1253,31 @@
                                                     {:field "connection_mode"
                                                      :value (name parsed)})))
                                   (or parsed :oauth-flow))
-          authorize-url         (nonblank-str (get data "authorize_url"))
-          token-url             (nonblank-str (get data "token_url"))
-          client-id             (nonblank-str (get data "client_id"))
-          client-secret         (or (nonblank-str (get data "client_secret"))
+          authorize-url         (http-value/nonblank-str (get data "authorize_url"))
+          token-url             (http-value/nonblank-str (get data "token_url"))
+          client-id             (http-value/nonblank-str (get data "client_id"))
+          client-secret         (or (http-value/nonblank-str (get data "client_secret"))
                                     (:oauth.account/client-secret existing)
                                     "")
-          access-token          (or (nonblank-str (get data "access_token"))
+          access-token          (or (http-value/nonblank-str (get data "access_token"))
                                     (:oauth.account/access-token existing))
-          refresh-token         (or (nonblank-str (get data "refresh_token"))
+          refresh-token         (or (http-value/nonblank-str (get data "refresh_token"))
                                     (:oauth.account/refresh-token existing))
-          token-type            (or (nonblank-str (get data "token_type"))
+          token-type            (or (http-value/nonblank-str (get data "token_type"))
                                     (:oauth.account/token-type existing)
                                     "Bearer")
           expires-at            (if (contains? data "expires_at")
                                   (parse-iso-instant (get data "expires_at") "expires_at")
                                   (:oauth.account/expires-at existing))
           connected-at          (cond
-                                  (nonblank-str (get data "access_token")) (Date.)
+                                  (http-value/nonblank-str (get data "access_token")) (Date.)
                                   access-token (:oauth.account/connected-at existing)
                                   :else nil)
           provider-template-id  (if (contains? data "provider_template")
-                                  (some-> (get data "provider_template") nonblank-str keyword)
+                                  (some-> (get data "provider_template") http-value/nonblank-str keyword)
                                   (:oauth.account/provider-template existing))
-          scopes                (or (nonblank-str (get data "scopes")) "")
-          redirect-uri          (nonblank-str (get data "redirect_uri"))
+          scopes                (or (http-value/nonblank-str (get data "scopes")) "")
+          redirect-uri          (http-value/nonblank-str (get data "redirect_uri"))
           auth-params           (parse-json-object-string (get data "auth_params") "auth_params")
           token-params          (parse-json-object-string (get data "token_params") "token_params")
           autonomous-approved?  (let [requested (when (contains? data "autonomous_approved")
@@ -1392,14 +1324,14 @@
                                :connected-at          connected-at})
       (let [saved-account (db/get-oauth-account account-id)]
         (sync-template-service-for-oauth-account! saved-account)
-        (json-response* deps 200 {:oauth_account (oauth-account->admin-body deps saved-account)})))
+        (http-common/json-response deps 200 {:oauth_account (oauth-account->admin-body deps saved-account)})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-delete-oauth-account
   [deps account-id]
   (try
-    (let [oauth-id             (parse-keyword-id account-id "oauth_account_id")
+    (let [oauth-id             (http-value/parse-keyword-id account-id "oauth_account_id")
           account              (db/get-oauth-account oauth-id)
           linked-providers     (into []
                                      (filter #(= oauth-id (:llm.provider/oauth-account %)))
@@ -1415,35 +1347,35 @@
                                        (:service/id (first linked-services))))]
       (cond
         (nil? account)
-        (json-response* deps 404 {:error "oauth account not found"})
+        (http-common/json-response deps 404 {:error "oauth account not found"})
 
         auto-managed-only?
         (do
           (db/remove-service! (:service/id auto-managed-service))
           (db/remove-oauth-account! oauth-id)
-          (json-response* deps 200 {:status "deleted"
+          (http-common/json-response deps 200 {:status "deleted"
                                     :oauth_account_id (name oauth-id)}))
 
         (or (seq linked-providers) (seq linked-services))
-        (json-response* deps 409 {:error "oauth account is still referenced by a provider or service"})
+        (http-common/json-response deps 409 {:error "oauth account is still referenced by a provider or service"})
 
         :else
         (do
           (db/remove-oauth-account! oauth-id)
-          (json-response* deps 200 {:status "deleted"
+          (http-common/json-response deps 200 {:status "deleted"
                                     :oauth_account_id (name oauth-id)}))))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-start-oauth-connect
   [deps account-id req]
   (try
-    (let [oauth-id     (parse-keyword-id account-id "oauth_account_id")
+    (let [oauth-id     (http-value/parse-keyword-id account-id "oauth_account_id")
           account      (or (db/get-oauth-account oauth-id)
                            (throw (ex-info "unknown oauth_account"
                                            {:field "oauth_account_id"
                                             :value (name oauth-id)})))
-          callback-url (str (or (request-base-url* deps req)
+          callback-url (str (or (http-common/request-base-url deps req)
                                 (throw (ex-info "cannot determine callback base URL"
                                                 {:field "host"})))
                             "/oauth/callback")
@@ -1451,34 +1383,34 @@
                          (throw (ex-info "manual-token connections do not support Connect Now"
                                          {:field "connection_mode"})))
           started      (oauth/start-authorization! oauth-id callback-url)]
-      (json-response* deps 200 {:oauth_account_id   (name oauth-id)
+      (http-common/json-response deps 200 {:oauth_account_id   (name oauth-id)
                                 :authorization_url (:authorization-url started)
                                 :redirect_uri      (:redirect-uri started)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-refresh-oauth-account
   [deps account-id]
   (try
-    (let [oauth-id          (parse-keyword-id account-id "oauth_account_id")
+    (let [oauth-id          (http-value/parse-keyword-id account-id "oauth_account_id")
           current-account   (or (db/get-oauth-account oauth-id)
                                 (throw (ex-info "unknown oauth_account"
                                                 {:field "oauth_account_id"
                                                  :value (name oauth-id)})))
-          _                 (when-not (nonblank-str (:oauth.account/refresh-token current-account))
+          _                 (when-not (http-value/nonblank-str (:oauth.account/refresh-token current-account))
                               (throw (ex-info "refresh token is not configured for this connection"
                                               {:field "refresh_token"})))
           _                 (when (= :manual-token (oauth-account-connection-mode current-account))
                               (throw (ex-info "manual-token connections do not support Refresh"
                                               {:field "connection_mode"})))
           refreshed-account (oauth/refresh-account! oauth-id)]
-      (json-response* deps 200 {:oauth_account (oauth-account->admin-body deps refreshed-account)}))
+      (http-common/json-response deps 200 {:oauth_account (oauth-account->admin-body deps refreshed-account)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-oauth-callback
   [deps req]
-  (let [params             (parse-query-string (:query-string req))
+  (let [params             (http-request/parse-query-string (:query-string req))
         state              (get params "state")
         pending-account-id (some-> (and (seq state) (oauth/callback-account-id state)) name)
         code               (get params "code")
@@ -1520,25 +1452,25 @@
 (defn handle-save-site
   [deps req]
   (try
-    (let [data                 (or (read-body* deps req) {})
-          site-id              (if-let [id-text (nonblank-str (get data "id"))]
-                                 (parse-keyword-id id-text "id")
+    (let [data                 (or (http-common/read-body deps req) {})
+          site-id              (if-let [id-text (http-value/nonblank-str (get data "id"))]
+                                 (http-value/parse-keyword-id id-text "id")
                                  (infer-site-id data))
           existing             (db/get-site-cred site-id)
-          login-url            (nonblank-str (get data "login_url"))
-          name                 (or (nonblank-str (get data "name"))
+          login-url            (http-value/nonblank-str (get data "login_url"))
+          name                 (or (http-value/nonblank-str (get data "name"))
                                    (name site-id))
-          username-field       (or (nonblank-str (get data "username_field"))
+          username-field       (or (http-value/nonblank-str (get data "username_field"))
                                    "username")
-          password-field       (or (nonblank-str (get data "password_field"))
+          password-field       (or (http-value/nonblank-str (get data "password_field"))
                                    "password")
-          username             (or (nonblank-str (get data "username"))
+          username             (or (http-value/nonblank-str (get data "username"))
                                    (:site-cred/username existing)
                                    "")
-          password             (or (nonblank-str (get data "password"))
+          password             (or (http-value/nonblank-str (get data "password"))
                                    (:site-cred/password existing)
                                    "")
-          form-selector        (nonblank-str (get data "form_selector"))
+          form-selector        (http-value/nonblank-str (get data "form_selector"))
           extra-fields         (parse-extra-fields (get data "extra_fields"))
           autonomous-approved? (when (contains? data "autonomous_approved")
                                  (true? (get data "autonomous_approved")))]
@@ -1554,22 +1486,22 @@
                            :form-selector          form-selector
                            :extra-fields           extra-fields
                            :autonomous-approved?   autonomous-approved?})
-      (json-response* deps 200 {:site (site->admin-body (db/get-site-cred site-id))}))
+      (http-common/json-response deps 200 {:site (site->admin-body (db/get-site-cred site-id))}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-delete-site
   [deps site-id]
   (try
-    (let [site-key (parse-keyword-id site-id "site_id")]
+    (let [site-key (http-value/parse-keyword-id site-id "site_id")]
       (if (db/get-site-cred site-key)
         (do
           (db/remove-site-cred! site-key)
-          (json-response* deps 200 {:status "deleted"
+          (http-common/json-response deps 200 {:status "deleted"
                                     :site_id (name site-key)}))
-        (json-response* deps 404 {:error "site credential not found"})))
+        (http-common/json-response deps 404 {:error "site credential not found"})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (def handle-save-schedule admin-schedules/handle-save-schedule)
 
@@ -1582,22 +1514,22 @@
 (defn handle-save-skill
   [deps req]
   (try
-    (let [data        (or (read-body* deps req) {})
-          skill-id    (if-let [id-text (nonblank-str (get data "id"))]
-                        (parse-keyword-id id-text "id")
+    (let [data        (or (http-common/read-body deps req) {})
+          skill-id    (if-let [id-text (http-value/nonblank-str (get data "id"))]
+                        (http-value/parse-keyword-id id-text "id")
                         (infer-skill-id data))
           existing    (db/get-skill skill-id)
-          skill-name  (or (nonblank-str (get data "name"))
+          skill-name  (or (http-value/nonblank-str (get data "name"))
                           (:skill/name existing)
                           (name skill-id))
           description (if (contains? data "description")
-                        (or (nonblank-str (get data "description")) "")
+                        (or (http-value/nonblank-str (get data "description")) "")
                         (:skill/description existing))
           content     (if (contains? data "content")
                         (str (or (get data "content") ""))
                         (or (:skill/content existing) ""))
           version     (if (contains? data "version")
-                        (nonblank-str (get data "version"))
+                        (http-value/nonblank-str (get data "version"))
                         (:skill/version existing))
           enabled?    (if (contains? data "enabled")
                         (true? (get data "enabled"))
@@ -1613,35 +1545,35 @@
                                           :version     version
                                           :tags        tags
                                           :enabled?    enabled?})]
-      (json-response* deps 200 {:skill (skill->detail-body deps saved)}))
+      (http-common/json-response deps 200 {:skill (skill->detail-body deps saved)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-get-skill
   [deps skill-id]
   (try
-    (let [skill-key (parse-keyword-id skill-id "skill_id")
+    (let [skill-key (http-value/parse-keyword-id skill-id "skill_id")
           saved     (db/get-skill skill-key)]
       (if saved
         (do
           (skill/record-usage! skill-key :viewed)
-          (json-response* deps 200 {:skill (skill->detail-body deps (db/get-skill skill-key))}))
-        (json-response* deps 404 {:error "skill not found"})))
+          (http-common/json-response deps 200 {:skill (skill->detail-body deps (db/get-skill skill-key))}))
+        (http-common/json-response deps 404 {:error "skill not found"})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-delete-skill
   [deps skill-id]
   (try
-    (let [skill-key (parse-keyword-id skill-id "skill_id")]
+    (let [skill-key (http-value/parse-keyword-id skill-id "skill_id")]
       (if (db/get-skill skill-key)
         (do
           (db/remove-skill! skill-key)
-          (json-response* deps 200 {:status "deleted"
+          (http-common/json-response deps 200 {:status "deleted"
                                     :skill_id (name skill-key)}))
-        (json-response* deps 404 {:error "skill not found"})))
+        (http-common/json-response deps 404 {:error "skill not found"})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn- skill-update-check->body
   [result]
@@ -1658,26 +1590,26 @@
 (defn handle-check-skill-update
   [deps skill-id]
   (try
-    (let [skill-key (parse-keyword-id skill-id "skill_id")
+    (let [skill-key (http-value/parse-keyword-id skill-id "skill_id")
           saved     (db/get-skill skill-key)]
       (if-not saved
-        (json-response* deps 404 {:error "skill not found"})
+        (http-common/json-response deps 404 {:error "skill not found"})
         (let [result (if (:skill/imported-from-openclaw? saved)
                        (openclaw-skill/check-openclaw-update! saved)
                        (skill/check-import-update! skill-key))]
-          (json-response* deps 200 {:update (skill-update-check->body result)
+          (http-common/json-response deps 200 {:update (skill-update-check->body result)
                                     :skill (skill->body deps (db/get-skill skill-key))}))))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn- curator-skill-summary->body
   [deps summary]
-  (update summary :last_used_at #(instant->str* deps %)))
+  (update summary :last_used_at #(http-common/instant->str deps %)))
 
 (defn handle-curate-skills
   [deps req]
   (try
-    (let [data (or (read-body* deps req) {})
+    (let [data (or (http-common/read-body deps req) {})
           stale-days (if-let [value (get data "stale_days")]
                        (Long/parseLong (str value))
                        skill/default-stale-days)
@@ -1686,21 +1618,21 @@
                                     true)
           report (skill/curate-skills! {:stale-days stale-days
                                         :archive-agent-authored? archive-agent-authored?})]
-      (json-response* deps 200
+      (http-common/json-response deps 200
                       {:curator {:stale (mapv #(curator-skill-summary->body deps %) (:stale report))
                                  :archived (mapv #(curator-skill-summary->body deps %) (:archived report))
                                  :suggestions (:suggestions report)}
                        :skills (mapv #(skill->body deps %) (db/list-skills))}))
     (catch NumberFormatException _
-      (json-response* deps 400 {:error "stale_days must be an integer"}))
+      (http-common/json-response deps 400 {:error "stale_days must be an integer"}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-import-openclaw-skill
   [deps req]
   (try
-    (let [data    (or (read-body* deps req) {})
-          source  (nonblank-str (get data "source"))
+    (let [data    (or (http-common/read-body deps req) {})
+          source  (http-value/nonblank-str (get data "source"))
           strict? (if (contains? data "strict")
                     (true? (get data "strict"))
                     true)]
@@ -1708,7 +1640,7 @@
         (throw (ex-info "missing 'source' field" {:field "source"})))
       (let [report (openclaw-skill/import-openclaw-source! source :strict? strict?)
             skill  (db/get-skill (:skill-id report))]
-        (json-response*
+        (http-common/json-response
           deps
           200
           {:import {:status         (some-> (:status report) name)
@@ -1731,42 +1663,42 @@
                                      :name   (get-in report [:source :name])}}
            :skill  (skill->body deps skill)})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-save-plugin
   [deps req]
   (try
-    (let [data     (or (read-body* deps req) {})
+    (let [data     (or (http-common/read-body deps req) {})
           manifest (or (get data "manifest")
                        (get data :manifest)
                        data)
           saved    (plugin/install-plugin! manifest)]
-      (json-response* deps 200
+      (http-common/json-response deps 200
                       {:status "saved"
                        :plugin (plugin->admin-body deps saved)
                        :plugins (->> (db/list-plugins)
                                      (into [] (map #(plugin->admin-body deps %)))
                                      sort-by-name)}))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-enable-plugin
   [deps plugin-id enabled?]
   (try
-    (let [plugin-id* (parse-keyword-id plugin-id "plugin_id")
+    (let [plugin-id* (http-value/parse-keyword-id plugin-id "plugin_id")
           existing   (db/get-plugin plugin-id*)]
       (if existing
         (let [saved (plugin/enable-plugin! plugin-id* enabled?)]
-        (json-response* deps 200
+        (http-common/json-response deps 200
                         {:status (if enabled? "enabled" "disabled")
                          :plugin (plugin->admin-body deps saved)
                          :plugins (->> (db/list-plugins)
                                        (into [] (map #(plugin->admin-body deps %)))
                                        sort-by-name)}))
-        (json-response* deps 404 {:error "plugin not found"})))
+        (http-common/json-response deps 404 {:error "plugin not found"})))
     (catch clojure.lang.ExceptionInfo e
-      (exception-response* deps e))))
+      (http-common/exception-response deps e))))
 
 (defn handle-skills
   [deps _req]
-  (json-response* deps 200 {:skills (mapv #(skill->body deps %) (db/list-skills))}))
+  (http-common/json-response deps 200 {:skills (mapv #(skill->body deps %) (db/list-skills))}))

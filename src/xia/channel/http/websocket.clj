@@ -4,13 +4,10 @@
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [taoensso.timbre :as log]
-            [xia.bridge :as bridge]))
+            [xia.bridge :as bridge]
+            [xia.channel.http.common :as http-common]))
 
 (def ^:private receive-retry-delay-ms 5000)
-
-(defn- throwable-message*
-  [deps throwable]
-  ((:throwable-message deps) throwable))
 
 (defn- clear-receive-failure!
   [deps session-id]
@@ -55,7 +52,7 @@
         retry-not-before-ms (+ (System/currentTimeMillis)
                                receive-retry-delay-ms)
         failure             {:session-id          sid-str
-                             :error               (or (some-> (throwable-message* deps e)
+                             :error               (or (some-> (http-common/throwable-message deps e)
                                                               str/trim
                                                               not-empty)
                                                       "WebSocket request failed")
@@ -113,7 +110,7 @@
              (let [data (try
                           (json/read-json msg)
                           (catch Exception e
-                            (send-error! ch (throwable-message* deps e))
+                            (send-error! ch (http-common/throwable-message deps e))
                             ::invalid-message))]
                (when-not (= ::invalid-message data)
                  (try

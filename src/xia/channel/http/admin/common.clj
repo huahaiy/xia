@@ -1,33 +1,33 @@
 (ns xia.channel.http.admin.common
   "Shared helpers for admin HTTP handlers."
   (:require [charred.api :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [xia.channel.http.common :as http-common]
+            [xia.channel.http.value :as http-value]))
 
 (defn json-response
   [deps status body]
-  ((:json-response deps) status body))
+  (http-common/json-response deps status body))
 
 (defn exception-response
   [deps throwable]
-  ((:exception-response deps) throwable))
+  (http-common/exception-response deps throwable))
 
 (defn instant->str
   [deps value]
-  ((:instant->str deps) value))
+  (http-common/instant->str deps value))
 
 (defn read-body
   [deps req]
-  ((:read-body deps) req))
+  (http-common/read-body deps req))
 
 (defn truncate-text
   [deps value limit]
-  ((:truncate-text deps) value limit))
+  (http-common/truncate-text deps value limit))
 
 (defn nonblank-str
   [value]
-  (let [s (some-> value str str/trim)]
-    (when (seq s)
-      s)))
+  (http-value/nonblank-str value))
 
 (defn normalize-base-url
   [value]
@@ -55,34 +55,11 @@
 
 (defn parse-keyword-id
   [value field-name]
-  (let [id-str (nonblank-str value)]
-    (cond
-      (nil? id-str)
-      (throw (ex-info (str "missing '" field-name "' field") {:field field-name}))
-
-      (re-find #"\s" id-str)
-      (throw (ex-info (str "'" field-name "' must not contain whitespace")
-                      {:field field-name
-                       :value value}))
-
-      :else
-      (keyword id-str))))
+  (http-value/parse-keyword-id value field-name))
 
 (defn parse-optional-positive-long
   [value field-name]
-  (let [text (nonblank-str value)]
-    (when text
-      (try
-        (let [parsed (Long/parseLong text)]
-          (when-not (pos? parsed)
-            (throw (ex-info (str "'" field-name "' must be a positive integer")
-                            {:field field-name
-                             :value value})))
-          parsed)
-        (catch NumberFormatException _
-          (throw (ex-info (str "'" field-name "' must be a positive integer")
-                          {:field field-name
-                           :value value})))))))
+  (http-value/parse-optional-positive-long value field-name))
 
 (defn parse-json-object-string
   [value field-name]
