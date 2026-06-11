@@ -63,11 +63,6 @@
   [value]
   (some-> value str str/trim not-empty))
 
-(defn- read-checkpoint-doc
-  [value]
-  (when (map? value)
-    value))
-
 (defn- policy-doc
   [policy]
   (when (map? policy)
@@ -214,16 +209,6 @@
   [task-id]
   (some-> task-id db/get-task))
 
-(defn- task-checkpoint
-  [task fallback]
-  (or (some-> task task-runtime/task-checkpoint)
-      fallback))
-
-(defn- task-checkpoint-at
-  [task fallback]
-  (or (some-> task task-runtime/task-checkpoint-at)
-      fallback))
-
 (defn- task-session-id
   [task checkpoint]
   (or (normalize-session-id (:session-id task))
@@ -244,10 +229,8 @@
     (let [e                  (db/entity eid)
           task-id            (:schedule.state/task-id e)
           task               (schedule-task task-id)
-          stored-checkpoint  (read-checkpoint-doc (:schedule.state/checkpoint e))
-          checkpoint         (task-checkpoint task stored-checkpoint)
-          checkpoint-at      (task-checkpoint-at task
-                                                 (:schedule.state/checkpoint-at e))
+          checkpoint         (some-> task task-runtime/task-checkpoint)
+          checkpoint-at      (some-> task task-runtime/task-checkpoint-at)
           last-error         (:schedule.state/last-error e)
           recovery-hint      (when (seq last-error)
                                (recovery-hint last-error))]
@@ -259,7 +242,6 @@
        :last-policy           (read-policy-doc (:schedule.state/last-policy e))
        :checkpoint-at         checkpoint-at
        :last-success-at       (:schedule.state/last-success-at e)
-       :last-success-summary  (:schedule.state/last-success-summary e)
        :last-failure-at       (:schedule.state/last-failure-at e)
        :last-error            last-error
        :last-failure-signature (:schedule.state/last-failure-signature e)
@@ -408,18 +390,6 @@
        (into [:schedule.state/backoff-until
               :schedule.state/last-policy]
              obsolete-schedule-execution-attrs)))
-    (task-state schedule-id)))
-
-(defn save-task-checkpoint!
-  "Compatibility shim: store checkpoint data on the bound task, not schedule state."
-  [schedule-id checkpoint]
-  (let [checkpoint (if (map? checkpoint) checkpoint {})
-        state      (task-state schedule-id)
-        task-id    (or (:task-id checkpoint) (:task-id state))]
-    (when task-id
-      (task-runtime/save-task-checkpoint! task-id
-                                          (assoc checkpoint :task-id task-id)))
-    (record-task-start! schedule-id (assoc checkpoint :task-id task-id))
     (task-state schedule-id)))
 
 (defn record-task-success!

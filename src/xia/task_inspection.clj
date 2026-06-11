@@ -666,9 +666,7 @@
          activity              (recent-activity opts items activity-limit)
          operating-envelope    (operating-envelope-body opts task)
          executor-details      (executor-details-body current-tip stack-summary*)
-         base                  (cond-> {:current_tip current-tip
-                                         :stack_summary stack-summary*
-                                         :executor_details executor-details
+         base                  (cond-> {:executor_details executor-details
                                          :last_checkpoint (checkpoint-body opts task)
                                          :current_state (current-state-body opts
                                                                             task

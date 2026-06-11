@@ -65,5 +65,7 @@
     (is (= "Autonomous tip"
            (get-in inspection [:executor_details :autonomous :current_tip :title])))
     (is (= "Autonomous tip"
-           (get-in inspection [:stack_summary :tip_title])))
+           (get-in inspection [:executor_details :autonomous :stack_summary :tip_title])))
+    (is (not (contains? inspection :current_tip)))
+    (is (not (contains? inspection :stack_summary)))
     (is (= "running" (get-in inspection [:task_spec :status])))))

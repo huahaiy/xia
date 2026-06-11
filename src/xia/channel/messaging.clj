@@ -489,12 +489,16 @@
   ([session-id compact?]
    (bridge/current-task-context session-id compact?)))
 
+(defn- autonomous-executor-details
+  [inspection]
+  (or (get-in inspection [:executor_details :autonomous]) {}))
+
 (defn- task-status-text
   [session-id]
   (if-let [{:keys [task inspection]} (current-task-context session-id true)]
     (let [inspection     inspection
           current-state  (or (:current_state inspection) {})
-          current-tip    (or (:current_tip inspection) {})
+          current-tip    (or (:current_tip (autonomous-executor-details inspection)) {})
           attention      (or (:attention inspection) {})
           last-activity  (or (:last_activity inspection)
                              (:last_output inspection)
@@ -592,7 +596,7 @@
   [session-id]
   (if-let [{:keys [task inspection]} (current-task-context session-id false)]
     (let [current-state (or (:current_state inspection) {})
-          current-tip   (or (:current_tip inspection) {})
+          current-tip   (or (:current_tip (autonomous-executor-details inspection)) {})
           latest-output (or (first (:recent_output inspection))
                             (:last_output inspection))
           recent        (or (:last_activity inspection)

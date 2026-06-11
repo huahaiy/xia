@@ -20,6 +20,13 @@
                   [?e :schedule/reserved-next-run ?next]]
                 schedule-id)))
 
+(defn- schedule-state-entity
+  [schedule-id]
+  (when-let [eid (ffirst (db/q '[:find ?e :in $ ?sid
+                                  :where [?e :schedule.state/schedule-id ?sid]]
+                                schedule-id))]
+    (into {} (db/entity eid))))
+
 ;; ---------------------------------------------------------------------------
 ;; Create
 ;; ---------------------------------------------------------------------------
@@ -487,6 +494,32 @@
     (is (re-find #"Last checkpoint \[tool\]" prompt))
     (is (re-find #"Agenda: Open dashboard; Resume alternate path; Investigate new branch" prompt))
     (is (re-find #"Stack depth: 2" prompt))))
+
+(deftest task-state-ignores-legacy-schedule-checkpoint-fields
+  (schedule/create-schedule!
+    {:id :legacy-checkpoint
+     :spec {:minute #{0} :hour #{9}}
+     :type :prompt
+     :prompt "Continue the old run"})
+  (let [legacy-at (java.util.Date.)]
+    (db/transact! [{:schedule.state/schedule-id :legacy-checkpoint
+                    :schedule.state/status :backoff
+                    :schedule.state/checkpoint {:summary "Legacy schedule checkpoint"}
+                    :schedule.state/checkpoint-at legacy-at
+                    :schedule.state/last-success-summary "Legacy success"
+                    :schedule.state/last-recovery-hint "Legacy recovery"}])
+    (let [state (schedule/task-state :legacy-checkpoint)]
+      (is (= :backoff (:status state)))
+      (is (nil? (:checkpoint state)))
+      (is (nil? (:checkpoint-at state)))
+      (is (nil? (:last-success-summary state)))
+      (is (nil? (:last-recovery-hint state)))))
+  (schedule/record-task-start! :legacy-checkpoint {})
+  (let [state-record (schedule-state-entity :legacy-checkpoint)]
+    (is (not (contains? state-record :schedule.state/checkpoint)))
+    (is (not (contains? state-record :schedule.state/checkpoint-at)))
+    (is (not (contains? state-record :schedule.state/last-success-summary)))
+    (is (not (contains? state-record :schedule.state/last-recovery-hint)))))
 
 (deftest repeated-identical-failures-pause-schedule
   (db/set-config! :schedule/pause-after-repeated-failures 2)

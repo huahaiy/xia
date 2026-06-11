@@ -705,11 +705,15 @@ function currentTaskInspection() {
   return asObject(state.currentTask && state.currentTask.inspection);
 }
 
+function currentTaskAutonomousDetails(inspection) {
+  return asObject(asObject(asObject(inspection).executor_details).autonomous);
+}
+
 function currentTaskStateView() {
   const task = asObject(state.currentTask);
   const inspection = currentTaskInspection();
   const currentState = asObject(inspection.current_state);
-  const currentTip = asObject(inspection.current_tip);
+  const currentTip = asObject(currentTaskAutonomousDetails(inspection).current_tip);
   const runtime = normalizeTaskRuntimeStatus(task.runtime);
   const live = state.liveStatus;
   const stackDepth = live && typeof live.stack_depth === 'number'
@@ -789,7 +793,7 @@ function currentTaskActivityView() {
 
 function currentTaskAgendaView() {
   const inspection = currentTaskInspection();
-  const tip = asObject(inspection.current_tip);
+  const tip = asObject(currentTaskAutonomousDetails(inspection).current_tip);
   return asArray(tip.agenda).slice(0, 6);
 }
 
