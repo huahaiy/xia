@@ -16,9 +16,11 @@
             [xia.audit :as audit]
             [xia.autonomous :as autonomous]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.permission :as permission]
             [xia.pipeline :as pipeline]
             [xia.plugin :as plugin]
+            [xia.policy :as task-policy]
             [xia.prompt :as prompt]
             [xia.sci-env :as sci-env]
             [xia.working-memory :as wm]))
@@ -497,13 +499,25 @@
             (not= (get installed k) (get desired k)))
           keys*)))
 
+(defn- tool-policy-env
+  []
+  {:vision-capable? llm/vision-capable?
+   :autonomous-run? autonomous/autonomous-run?
+   :trusted? autonomous/trusted?
+   :scope-available? autonomous/scope-available?})
+
 (defn- tool-description-for-llm
   [tool context]
-  (permission/tool-description-for-llm tool context approval-note))
+  (task-policy/tool-description-for-llm tool
+                                        context
+                                        approval-note
+                                        (tool-policy-env)))
 
 (defn- tool-visible?
   [tool context]
-  (permission/tool-visible? tool context))
+  (task-policy/tool-visible? tool
+                             context
+                             (tool-policy-env)))
 
 (defn- execution-mode
   [tool]
@@ -519,7 +533,7 @@
    tool calls in the same model round."
   [tool-id]
   (when-let [{:keys [tool]} (get @(registry) tool-id)]
-    (let [{:keys [policy]} (permission/tool-approval-policy tool)]
+    (let [{:keys [policy]} (task-policy/tool-approval-policy tool)]
       (and (= :auto policy)
            (= :parallel-safe (execution-mode tool))))))
 
@@ -527,7 +541,9 @@
   "Return the restart-risk policy decision for a loaded tool."
   [tool-id]
   (if-let [{:keys [tool]} (get @(registry) tool-id)]
-    (permission/tool-restart-risk-policy tool)
+    (task-policy/tool-restart-risk-policy
+     tool
+     (task-policy/tool-approval-policy tool))
     {:decision-type :tool-restart-risk-policy
      :tool-id tool-id
      :tool-name (name tool-id)

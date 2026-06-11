@@ -1,6 +1,7 @@
 (ns xia.permission-test
   (:require [clojure.test :refer :all]
             [xia.db :as db]
+            [xia.llm :as llm]
             [xia.permission :as permission]
             [xia.prompt :as prompt]
             [xia.test-helpers :refer [with-test-db]]))
@@ -115,5 +116,50 @@
             :mode :channel-blocked}
            (select-keys decision [:allowed? :policy :mode])))
     (is (= "interactive login is only available in terminal sessions"
+           (:error decision)))
+    (is (zero? @calls))))
+
+(deftest vision-blocking-happens-before-approval-callback
+  (let [session-id (db/create-session! :terminal)
+        calls      (atom 0)
+        context    {:channel :terminal
+                    :session-id session-id
+                    :assistant-provider-id :text-only
+                    :permission/approval-callback
+                    (fn [_]
+                      (swap! calls inc)
+                      true)}
+        tool       (assoc (test-tool :session)
+                          :tool/id :vision-tool
+                          :tool/tags [:vision])
+        decision   (binding [prompt/*interaction-context* context]
+                     (with-redefs [llm/vision-capable? (constantly false)]
+                       (permission/authorize-tool! tool {} context)))]
+    (is (= {:allowed? false
+            :policy :vision
+            :mode :vision-blocked}
+           (select-keys decision [:allowed? :policy :mode])))
+    (is (= "requires a vision-capable model"
+           (:error decision)))
+    (is (zero? @calls))))
+
+(deftest branch-worker-blocking-happens-before-approval-callback
+  (let [session-id (db/create-session! :terminal)
+        calls      (atom 0)
+        context    {:channel :terminal
+                    :session-id session-id
+                    :branch-worker? true
+                    :permission/approval-callback
+                    (fn [_]
+                      (swap! calls inc)
+                      true)}
+        tool       (test-tool :session)
+        decision   (binding [prompt/*interaction-context* context]
+                     (permission/authorize-tool! tool {} context))]
+    (is (= {:allowed? false
+            :policy :branch
+            :mode :branch-blocked}
+           (select-keys decision [:allowed? :policy :mode])))
+    (is (= "tool guarded-tool is not available to branch workers"
            (:error decision)))
     (is (zero? @calls))))

@@ -160,6 +160,59 @@
                                        "xia.schedule/resume-schedule!"
                                        "xia.schedule/remove-schedule!"]})
 
+(defn tool-id
+  [tool]
+  (or (:tool/id tool) (:id tool)))
+
+(defn tool-name
+  [tool]
+  (or (:tool/name tool)
+      (:name tool)
+      (some-> (tool-id tool) name)
+      "unknown-tool"))
+
+(defn tool-description
+  [tool]
+  (or (:tool/description tool)
+      (:description tool)))
+
+(defn tool-channel-compatible?
+  [tool context]
+  (case (tool-id tool)
+    :browser-login-interactive
+    (= :terminal (or (:channel context) :terminal))
+    true))
+
+(defn tool-channel-block-message
+  [tool]
+  (case (tool-id tool)
+    :browser-login-interactive "interactive login is only available in terminal sessions"
+    (str "tool " (name (tool-id tool)) " is not available on this channel")))
+
+(defn- tool-requires-vision?
+  [tool]
+  (contains? (set (:tool/tags tool)) :vision))
+
+(defn- vision-capable-provider?
+  [policy-env provider]
+  (when-let [vision-capable? (:vision-capable? policy-env)]
+    (boolean (vision-capable? provider))))
+
+(defn tool-vision-compatible?
+  ([tool context]
+   (tool-vision-compatible? tool context {}))
+  ([tool context policy-env]
+   (boolean
+    (or (not (tool-requires-vision? tool))
+        (and (nil? (:assistant-provider context))
+             (nil? (:assistant-provider-id context)))
+        (vision-capable-provider? policy-env (:assistant-provider context))
+        (vision-capable-provider? policy-env (:assistant-provider-id context))))))
+
+(defn tool-vision-block-message
+  [_tool]
+  "requires a vision-capable model")
+
 (defn tool-sci-eval-timeout-ms
   []
   (cfg/positive-long :tool/sci-eval-timeout-ms
@@ -268,11 +321,11 @@
 
       (empty? scopes)
       (str "trusted autonomous execution is not allowed for tool "
-           (name (:tool/id tool)))
+           (name (tool-id tool)))
 
       (some (complement autonomous-supported-scope?) scopes)
       (str "trusted autonomous execution is not allowed for tool "
-           (name (:tool/id tool)))
+           (name (tool-id tool)))
 
       (= unavailable [:service])
       "no approved services are available for autonomous execution"
@@ -285,20 +338,123 @@
 
       :else
       (str "trusted autonomous execution is not allowed for tool "
-           (name (:tool/id tool))))))
+           (name (tool-id tool))))))
 
 (defn branch-worker-tool-allowed?
   [tool approval-decision]
   (and (= :auto (:policy approval-decision))
        (not (contains? branch-worker-blocked-tool-ids
-                       (:tool/id tool)))))
+                       (tool-id tool)))))
+
+(defn- context-autonomous-run?
+  [context policy-env]
+  (if-let [autonomous-run? (:autonomous-run? policy-env)]
+    (boolean (autonomous-run? context))
+    (true? (:autonomous-run? context))))
+
+(defn- context-trusted?
+  [context policy-env]
+  (if-let [trusted? (:trusted? policy-env)]
+    (boolean (trusted? context))
+    (and (context-autonomous-run? context policy-env)
+         (true? (:approval-bypass? context)))))
+
+(defn- context-scope-available?
+  [policy-env]
+  (or (:scope-available? policy-env)
+      (constantly false)))
+
+(defn tool-autonomous-allowed?
+  ([tool context]
+   (tool-autonomous-allowed? tool context {}))
+  ([tool context policy-env]
+   (autonomous-tool-allowed? tool
+                             (context-trusted? context policy-env)
+                             (context-scope-available? policy-env))))
+
+(defn tool-autonomous-block-message
+  ([tool context]
+   (tool-autonomous-block-message tool context {}))
+  ([tool context policy-env]
+   (autonomous-tool-block-message tool
+                                  (context-trusted? context policy-env)
+                                  (context-scope-available? policy-env))))
+
+(defn tool-execution-policy-context
+  ([tool context]
+   (tool-execution-policy-context tool context {}))
+  ([tool context policy-env]
+   (let [id                (tool-id tool)
+         approval-decision (tool-approval-policy tool)
+         branch-worker?    (:branch-worker? context)]
+     {:tool-id id
+      :tool-name (tool-name tool)
+      :channel-compatible? (tool-channel-compatible? tool context)
+      :channel-error (tool-channel-block-message tool)
+      :vision-compatible? (tool-vision-compatible? tool context policy-env)
+      :vision-error (tool-vision-block-message tool)
+      :branch-worker? branch-worker?
+      :branch-allowed? (branch-worker-tool-allowed? tool approval-decision)
+      :branch-error (str "tool " (name id)
+                         " is not available to branch workers")
+      :approval-policy-decision approval-decision})))
+
+(defn tool-visible?
+  ([tool context]
+   (tool-visible? tool context {}))
+  ([tool context policy-env]
+   (let [{:keys [channel-compatible?
+                 vision-compatible?
+                 branch-worker?
+                 branch-allowed?
+                 approval-policy-decision]}
+         (tool-execution-policy-context tool context policy-env)
+         {:keys [policy]} approval-policy-decision]
+     (and channel-compatible?
+          vision-compatible?
+          (cond
+            branch-worker? branch-allowed?
+            (context-autonomous-run? context policy-env)
+            (or (= :auto policy)
+                (tool-autonomous-allowed? tool context policy-env))
+            :else true)))))
+
+(defn tool-description-for-llm
+  ([tool context approval-note]
+   (tool-description-for-llm tool context approval-note {}))
+  ([tool context approval-note policy-env]
+   (let [{:keys [policy]} (tool-approval-policy tool)
+         desc             (tool-description tool)]
+     (if (or (= :auto policy)
+             (tool-autonomous-allowed? tool context policy-env))
+       desc
+       (str desc approval-note)))))
+
+(defn tool-autonomous-approval-decision
+  ([tool approval-decision context]
+   (tool-autonomous-approval-decision tool approval-decision context {}))
+  ([tool approval-decision context policy-env]
+   (let [{:keys [policy reason]} approval-decision
+         autonomous?       (context-autonomous-run? context policy-env)
+         autonomous-allowed? (tool-autonomous-allowed? tool context policy-env)]
+     (cond
+       autonomous-allowed?
+       {:allowed? true
+        :policy   policy
+        :mode     :autonomous-bypass
+        :reason   reason}
+
+       (and autonomous? (not= :auto policy))
+       {:allowed? false
+        :policy   policy
+        :mode     :autonomous-blocked
+        :reason   reason
+        :error    (tool-autonomous-block-message tool context policy-env)}))))
 
 (defn tool-restart-risk-policy
   [tool approval-decision]
-  (let [tool-id (:tool/id tool)
-        tool-name (or (:tool/name tool)
-                      (some-> tool-id name)
-                      "unknown-tool")
+  (let [tool-id (tool-id tool)
+        tool-name (tool-name tool)
         tool-tags (set (:tool/tags tool))
         approval-policy (:policy approval-decision)
         handler (tool-handler-match-text tool)
@@ -384,3 +540,18 @@
      :allowed? true
      :policy :auto
      :mode :not-required}))
+
+(defn tool-preflight-decision
+  ([tool context]
+   (tool-preflight-decision tool context {}))
+  ([tool context policy-env]
+   (tool-execution-decision
+    (tool-execution-policy-context tool context policy-env))))
+
+(defn tool-execution-decision-for-approval
+  ([tool context approval-decision]
+   (tool-execution-decision-for-approval tool context approval-decision {}))
+  ([tool context approval-decision policy-env]
+   (tool-execution-decision
+    (assoc (tool-execution-policy-context tool context policy-env)
+           :approval-decision approval-decision))))

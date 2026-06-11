@@ -68,96 +68,22 @@
 
 (defn- tool-id
   [tool]
-  (or (:tool/id tool) (:id tool)))
+  (task-policy/tool-id tool))
 
 (defn- tool-name
   [tool]
-  (or (:tool/name tool)
-      (:name tool)
-      (some-> (tool-id tool) name)
-      "unknown-tool"))
+  (task-policy/tool-name tool))
 
 (defn- tool-description
   [tool]
-  (or (:tool/description tool)
-      (:description tool)))
+  (task-policy/tool-description tool))
 
-(defn tool-channel-compatible?
-  [tool context]
-  (case (tool-id tool)
-    :browser-login-interactive
-    (= :terminal (or (:channel context) :terminal))
-    true))
-
-(defn tool-channel-block-message
-  [tool]
-  (case (tool-id tool)
-    :browser-login-interactive "interactive login is only available in terminal sessions"
-    (str "tool " (name (tool-id tool)) " is not available on this channel")))
-
-(defn- tool-requires-vision?
-  [tool]
-  (contains? (set (:tool/tags tool)) :vision))
-
-(defn tool-vision-compatible?
-  [tool context]
-  (or (not (tool-requires-vision? tool))
-      (and (nil? (:assistant-provider context))
-           (nil? (:assistant-provider-id context)))
-      (llm/vision-capable? (:assistant-provider context))
-      (llm/vision-capable? (:assistant-provider-id context))))
-
-(defn tool-vision-block-message
-  [_tool]
-  "requires a vision-capable model")
-
-(defn autonomous-run?
-  [context]
-  (autonomous/autonomous-run? context))
-
-(defn autonomous-tool-allowed?
-  [tool context]
-  (task-policy/autonomous-tool-allowed? tool
-                                        (autonomous/trusted? context)
-                                        autonomous/scope-available?))
-
-(defn autonomous-block-message
-  [tool context]
-  (task-policy/autonomous-tool-block-message tool
-                                             (autonomous/trusted? context)
-                                             autonomous/scope-available?))
-
-(defn tool-visible?
-  [tool context]
-  (let [channel-compatible? (tool-channel-compatible? tool context)
-        vision-compatible?  (tool-vision-compatible? tool context)
-        approval-decision   (tool-approval-policy tool)
-        {:keys [policy]}    approval-decision
-        branch-worker?      (:branch-worker? context)
-        branch-allowed?     (task-policy/branch-worker-tool-allowed?
-                             tool
-                             approval-decision)]
-    (and channel-compatible?
-         vision-compatible?
-         (cond
-           branch-worker? branch-allowed?
-           (autonomous-run? context)
-           (or (= :auto policy)
-               (autonomous-tool-allowed? tool context))
-           :else true))))
-
-(defn tool-description-for-llm
-  [tool context approval-note]
-  (let [{:keys [policy]} (tool-approval-policy tool)
-        desc             (tool-description tool)]
-    (if (or (= :auto policy)
-            (autonomous-tool-allowed? tool context))
-      desc
-      (str desc approval-note))))
-
-(defn tool-restart-risk-policy
-  [tool]
-  (task-policy/tool-restart-risk-policy tool (tool-approval-policy tool)))
+(defn- tool-policy-env
+  []
+  {:vision-capable? llm/vision-capable?
+   :autonomous-run? autonomous/autonomous-run?
+   :trusted? autonomous/trusted?
+   :scope-available? autonomous/scope-available?})
 
 (defn- approved-for-session?
   [session-id grant-key]
@@ -250,8 +176,7 @@
         name*             (tool-name tool)
         session-id        (:session-id context)
         grant-key         (session-grant-key tool)
-        autonomous?       (autonomous-run? context)
-        bypass?           (autonomous-tool-allowed? tool context)
+        policy-env        (tool-policy-env)
         request           (permission-request tool arguments approval-decision)]
     (letfn [(record-decision [decision]
               (prompt/policy-decision! (assoc decision
@@ -286,65 +211,33 @@
                    :reason   reason
                    :error    (.getMessage e)})))]
       (record-decision
-       (cond
-         bypass?
-         {:allowed? true
-          :policy   policy
-          :mode     :autonomous-bypass
-          :reason   reason}
-
-         (and autonomous? (not= :auto policy))
-         {:allowed? false
-          :policy   policy
-          :mode     :autonomous-blocked
-          :reason   reason
-          :error    (autonomous-block-message tool context)}
-
-         :else
-         (case policy
-           :auto
-           {:allowed? true
-            :policy   policy
-            :mode     :not-required
-            :reason   reason}
-
-           :session
-           (if (and session-id (approved-for-session? session-id grant-key))
+       (or (task-policy/tool-autonomous-approval-decision
+            tool
+            approval-decision
+            context
+            policy-env)
+           (case policy
+             :auto
              {:allowed? true
               :policy   policy
-              :mode     :session-cached
+              :mode     :not-required
               :reason   reason}
-             (interactive-decision))
 
-           :always
-           (interactive-decision)
+             :session
+             (if (and session-id (approved-for-session? session-id grant-key))
+               {:allowed? true
+                :policy   policy
+                :mode     :session-cached
+                :reason   reason}
+               (interactive-decision))
 
-           {:allowed? true
-            :policy   policy
-            :mode     :not-required
-            :reason   reason}))))))
+             :always
+             (interactive-decision)
 
-(defn- execution-decision-context
-  [tool context]
-  (let [id                (tool-id tool)
-        name*             (tool-name tool)
-        channel-blocked?  (not (tool-channel-compatible? tool context))
-        vision-compatible? (tool-vision-compatible? tool context)
-        approval-decision (tool-approval-policy tool)
-        branch-worker?    (:branch-worker? context)
-        branch-allowed?   (task-policy/branch-worker-tool-allowed?
-                           tool
-                           approval-decision)]
-    {:tool-id id
-     :tool-name name*
-     :channel-compatible? (not channel-blocked?)
-     :channel-error (tool-channel-block-message tool)
-     :vision-compatible? vision-compatible?
-     :vision-error (tool-vision-block-message tool)
-     :branch-worker? branch-worker?
-     :branch-allowed? branch-allowed?
-     :branch-error (str "tool " (name id)
-                        " is not available to branch workers")}))
+             {:allowed? true
+              :policy   policy
+              :mode     :not-required
+              :reason   reason}))))))
 
 (defn authorize-tool!
   "Return the execution decision for a tool invocation and emit policy events.
@@ -353,14 +246,19 @@
    checks static execution constraints, approval policy, session grants, and
    autonomous bypass rules before a tool handler can run."
   [tool arguments context]
-  (let [decision-context  (execution-decision-context tool context)
-        preflight        (task-policy/tool-execution-decision decision-context)
+  (let [policy-env        (tool-policy-env)
+        preflight        (task-policy/tool-preflight-decision
+                          tool
+                          context
+                          policy-env)
         approval-decision (when (:allowed? preflight)
                             (approval-decision! tool arguments context))
         execution-decision (if approval-decision
-                             (task-policy/tool-execution-decision
-                              (assoc decision-context
-                                     :approval-decision approval-decision))
+                             (task-policy/tool-execution-decision-for-approval
+                              tool
+                              context
+                              approval-decision
+                              policy-env)
                              preflight)]
     (prompt/policy-decision! execution-decision)
     execution-decision))
