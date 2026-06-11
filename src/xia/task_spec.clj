@@ -2,8 +2,8 @@
   "Declarative task specs on top of the durable task runtime."
   (:require [charred.api :as json]
             [clojure.string :as str]
+            [xia.agent.child-task-orchestration :as child-orch]
             [xia.agent.task-runtime :as task-runtime]
-            [xia.async :as async]
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
@@ -2662,118 +2662,57 @@
                        :step-id (:id step)
                        :mode mode})))))
 
-(defn- subtask-child-id
-  [state step]
-  (or (get-in state [:steps (:id step) :output :task-id])
-      (get-in state [:steps (:id step) :output "task-id"])
-      (get-in state [:steps (:id step) :subtask-task-id])))
-
-(defn- subtask-task-match?
-  [parent-task-id step-id task]
-  (and (= parent-task-id (:parent-id task))
-       (= :subtask (get-in task [:meta :trigger :kind]))
-       (= step-id (get-in task [:meta :trigger :parent-step-id]))))
-
-(defn- branch-task-match?
-  [parent-task-id step-id task]
-  (and (= parent-task-id (:parent-id task))
-       (= :branch (get-in task [:meta :trigger :kind]))
-       (= step-id (get-in task [:meta :trigger :parent-step-id]))))
-
-(defn- latest-subtask-task
-  [parent-task-id step-id]
-  (->> (db/list-tasks {:limit 100000})
-       (filter #(subtask-task-match? parent-task-id step-id %))
-       (sort-by #(or (:updated-at %) (:created-at %)) #(compare %2 %1))
-       first))
-
-(defn- latest-branch-task
-  [parent-task-id step-id]
-  (->> (db/list-tasks {:limit 100000})
-       (filter #(branch-task-match? parent-task-id step-id %))
-       (sort-by #(or (:updated-at %) (:created-at %)) #(compare %2 %1))
-       first))
-
 (defn- create-subtask-task!
   [parent-task turn-id step spec]
   (let [contract (task-contract spec)
         spec*    (:spec contract)
         title*   (subtask-title step spec*)]
-    (db/create-task!
-     (cond-> {:session-id (:session-id parent-task)
-              :parent-id (:id parent-task)
-              :channel (or (:channel parent-task) :task-spec)
-              :type :task
-              :state :resumable
-              :title title*
-              :summary title*
-              :contract contract
-              :meta {:trigger {:kind :subtask
-                               :parent-task-id (:id parent-task)
-                               :parent-turn-id turn-id
-                               :parent-step-id (:id step)}
-                     :execution {:mode (task-execution-mode parent-task)}
-                     runtime-key (initial-task-spec-state spec*)}}
-       (:session-id parent-task) (assoc :session-role :subtask)))))
-
-(defn- create-branch-session!
-  [parent-task step]
-  (when-let [parent-session-id (:session-id parent-task)]
-    (db/create-session! :branch
-                        {:parent-session-id parent-session-id
-                         :worker? true
-                         :active? false
-                         :label (or (nonblank-string (:title step))
-                                    (nonblank-string (:task step))
-                                    (nonblank-string (:goal step))
-                                    (str "Branch " (name (:id step))))})))
+    (child-orch/create-task-spec-child!
+     {:kind :subtask
+      :parent-task parent-task
+      :turn-id turn-id
+      :step-id (:id step)
+      :session-id (:session-id parent-task)
+      :session-role (when (:session-id parent-task) :subtask)
+      :title title*
+      :contract contract
+      :runtime-key runtime-key
+      :runtime-state (initial-task-spec-state spec*)
+      :execution-mode (task-execution-mode parent-task)})))
 
 (defn- create-branch-task!
   [parent-task turn-id step spec]
-  (let [contract         (task-contract spec)
-        spec*            (:spec contract)
-        title*           (branch-title step spec*)
-        child-session-id (create-branch-session! parent-task step)
-        parent-session-id (:session-id parent-task)
-        branch-meta      (cond-> {:trigger {:kind :branch
-                                            :parent-task-id (:id parent-task)
-                                            :parent-turn-id turn-id
-                                            :parent-step-id (:id step)}
-                                  :execution {:mode :agent}
-                                  :branch-worker true
-                                  runtime-key (initial-task-spec-state spec*)}
-                           parent-session-id
-                           (assoc :parent-session-id parent-session-id
-                                  :resource-session-id parent-session-id))
-        task-id          (db/create-task!
-                          (cond-> {:session-id child-session-id
-                                   :parent-id (:id parent-task)
-                                   :channel :branch
-                                   :type :task
-                                   :state :resumable
-                                   :title title*
-                                   :summary title*
-                                   :contract contract
-                                   :meta branch-meta}
-                            child-session-id (assoc :session-role :branch)))]
-    (task-runtime/attach-child-task-to-parent! parent-task task-id title*)
-    task-id))
+  (let [contract (task-contract spec)
+        spec*    (:spec contract)
+        title*   (branch-title step spec*)]
+    (child-orch/create-task-spec-branch!
+     {:parent-task parent-task
+      :turn-id turn-id
+      :step-id (:id step)
+      :title title*
+      :contract contract
+      :runtime-key runtime-key
+      :runtime-state (initial-task-spec-state spec*)})))
 
 (defn- ensure-subtask-task!
   [parent-task turn-id state step spec]
-  (let [child-id (subtask-child-id state step)]
-    (or (when child-id
-          (some-> child-id db/get-task :id))
-        (some-> (latest-subtask-task (:id parent-task) (:id step)) :id)
-        (create-subtask-task! parent-task turn-id step spec))))
+  (child-orch/ensure-triggered-child!
+   {:parent-task parent-task
+    :turn-id turn-id
+    :state state
+    :step-id (:id step)
+    :kind :subtask
+    :create! #(create-subtask-task! parent-task turn-id step spec)}))
 
 (defn- ensure-branch-task!
   [parent-task turn-id state step spec]
-  (let [child-id (subtask-child-id state step)]
-    (or (when child-id
-          (some-> child-id db/get-task :id))
-        (some-> (latest-branch-task (:id parent-task) (:id step)) :id)
-        (create-branch-task! parent-task turn-id step spec))))
+  (child-orch/ensure-triggered-child!
+   {:parent-task parent-task
+    :turn-id turn-id
+    :state state
+    :step-id (:id step)
+    :kind :branch
+    :create! #(create-branch-task! parent-task turn-id step spec)}))
 
 (defn- subtask-step-inputs
   [state context step]
@@ -2811,27 +2750,18 @@
 
 (defn- task-spec-outputs
   [task-or-state]
-  (or (:outputs task-or-state)
-      (get-in task-or-state [:meta runtime-key :outputs])
-      {}))
+  (child-orch/task-spec-outputs runtime-key task-or-state))
 
 (defn- subtask-output
   [child-task-id child-result]
-  (let [child-task (db/get-task child-task-id)]
-    (cond-> {:task-id child-task-id
-             :status (:status child-result)
-             :outputs (task-spec-outputs (or (:state child-result)
-                                             child-task))}
-      (:summary child-result) (assoc :summary (:summary child-result))
-      (:turn-id child-result) (assoc :turn-id (:turn-id child-result))
-      (:error child-result) (assoc :error (:error child-result)))))
+  (child-orch/child-output runtime-key child-task-id child-result))
 
 (defn- completed-subtask-result
   [child-task-id child-task]
-  {:status :completed
-   :task-id child-task-id
-   :summary (or (:summary child-task) "Subtask completed")
-   :state (get-in child-task [:meta runtime-key])})
+  (child-orch/completed-child-result runtime-key
+                                     child-task-id
+                                     child-task
+                                     "Subtask completed"))
 
 (defn- run-subtask!
   [child-task-id context executors max-steps]
@@ -2846,41 +2776,10 @@
 
 (defn- child-result->step-result
   [kind child-task-id child-result]
-  (let [output  (subtask-output child-task-id child-result)
-        summary (or (:summary child-result)
-                    (str (case kind
-                           :branch "Branch"
-                           "Subtask")
-                         " "
-                         (name (:status child-result))))]
-    (case (:status child-result)
-      :completed
-      {:status :success
-       :summary summary
-       :output output}
-
-      :paused
-      {:status :paused
-       :pause-reason (case kind
-                       :branch :branch-paused
-                       :subtask-paused)
-       :summary summary
-       :output output}
-
-      :failed
-      {:status :failed
-       :summary summary
-       :error (or (:error child-result)
-                  (get-in output [:error])
-                  (str (name kind) " failed"))
-       :output output}
-
-      {:status :paused
-       :pause-reason (case kind
-                       :branch :branch-pending
-                       :subtask-pending)
-       :summary summary
-       :output output})))
+  (child-orch/child-result->step-result runtime-key
+                                        kind
+                                        child-task-id
+                                        child-result))
 
 (defn- subtask-executor
   [{:keys [state context step task-id turn-id executors]}]
@@ -2898,28 +2797,18 @@
 
 (defn- async-branch-output
   [child-task-id future]
-  (let [child-task (db/get-task child-task-id)]
-    (cond-> {:task-id child-task-id
-             :status :running
-             :async true
-             :outputs (task-spec-outputs child-task)}
-      (:session-id child-task) (assoc :session-id (:session-id child-task))
-      future (assoc :submitted true))))
+  (child-orch/async-child-output runtime-key child-task-id future))
 
 (defn- start-branch-background!
   [child-task-id context executors max-steps]
-  (async/submit-background!
-   (str "task-spec-branch:" child-task-id)
-   (fn []
-     (try
-       (run-task! child-task-id
-                  :context context
-                  :executors executors
-                  :max-steps max-steps
-                  :operation :branch-spawn)
-       (finally
-         (when-let [session-id (:session-id (db/get-task child-task-id))]
-           (db/set-session-active! session-id false)))))))
+  (child-orch/start-async-child!
+   {:label (str "task-spec-branch:" child-task-id)
+    :child-task-id child-task-id
+    :context context
+    :executors executors
+    :max-steps max-steps
+    :run-task! run-task!
+    :operation :branch-spawn}))
 
 (defn- branch-executor
   [{:keys [state context step task-id turn-id executors]}]
@@ -2951,25 +2840,7 @@
 
 (defn- control-key-string
   [value]
-  (cond
-    (keyword? value) (name value)
-    (symbol? value) (name value)
-    :else (str value)))
-
-(defn- control-task-match?
-  [kind parent-task-id step-id control-key task]
-  (and (= parent-task-id (:parent-id task))
-       (= kind (get-in task [:meta :trigger :kind]))
-       (= step-id (get-in task [:meta :trigger :parent-step-id]))
-       (= (control-key-string control-key)
-          (get-in task [:meta :trigger :control-key]))))
-
-(defn- latest-control-task
-  [kind parent-task-id step-id control-key]
-  (->> (db/list-tasks {:limit 100000})
-       (filter #(control-task-match? kind parent-task-id step-id control-key %))
-       (sort-by #(or (:updated-at %) (:created-at %)) #(compare %2 %1))
-       first))
+  (child-orch/control-key-string value))
 
 (defn- control-title
   [kind step control-key spec]
@@ -2988,28 +2859,29 @@
   (let [contract (task-contract spec)
         spec*    (:spec contract)
         title*   (control-title kind step control-key spec*)]
-    (db/create-task!
-     (cond-> {:session-id (:session-id parent-task)
-              :parent-id (:id parent-task)
-              :channel (or (:channel parent-task) :task-spec)
-              :type :task
-              :state :resumable
-              :title title*
-              :summary title*
-              :contract contract
-              :meta {:trigger {:kind kind
-                               :parent-task-id (:id parent-task)
-                               :parent-turn-id turn-id
-                               :parent-step-id (:id step)
-                               :control-key (control-key-string control-key)}
-                     :execution {:mode (task-execution-mode parent-task)}
-                     runtime-key (initial-task-spec-state spec*)}}
-       (:session-id parent-task) (assoc :session-role kind)))))
+    (child-orch/create-task-spec-child!
+     {:kind kind
+      :parent-task parent-task
+      :turn-id turn-id
+      :step-id (:id step)
+      :control-key control-key
+      :session-id (:session-id parent-task)
+      :session-role (when (:session-id parent-task) kind)
+      :title title*
+      :contract contract
+      :runtime-key runtime-key
+      :runtime-state (initial-task-spec-state spec*)
+      :execution-mode (task-execution-mode parent-task)})))
 
 (defn- ensure-control-task!
   [kind parent-task turn-id step control-key spec]
-  (or (some-> (latest-control-task kind (:id parent-task) (:id step) control-key) :id)
-      (create-control-task! kind parent-task turn-id step control-key spec)))
+  (child-orch/ensure-triggered-child!
+   {:parent-task parent-task
+    :turn-id turn-id
+    :step-id (:id step)
+    :kind kind
+    :control-key control-key
+    :create! #(create-control-task! kind parent-task turn-id step control-key spec)}))
 
 (defn- control-raw-spec
   [kind step entry]

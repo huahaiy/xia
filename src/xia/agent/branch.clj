@@ -2,8 +2,7 @@
   "Branch-task orchestration for parallel worker sessions."
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.agent.child-task :as child-task]
-            [xia.agent.task-runtime :as task-runtime]
+            [xia.agent.child-task-orchestration :as child-orch]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.policy :as task-policy]
@@ -86,9 +85,10 @@
                        (assoc :parent-request-id (:request-id parent-trace)))
         prompt* (branch-task-prompt branch-task objective)
         resource-session-id* (or resource-session-id parent-session-id)
-        worker (child-task/create-branch-worker!
+        worker (child-orch/create-branch-worker!
                 {:parent-session-id parent-session-id
                  :parent-task-id parent-task-id
+                 :parent-task (some-> parent-task-id db/get-task)
                  :title task
                  :summary task
                  :prompt prompt
@@ -107,9 +107,7 @@
                             :session-id child-session-id
                             :parent-session-id parent-session-id}
                            branch-trace)]
-    (when-let [parent-task (some-> parent-task-id db/get-task)]
-      (task-runtime/attach-child-task-to-parent! parent-task child-task-id task))
-    (child-task/with-registered-worker-session!
+    (child-orch/with-worker-session!
      {:deps deps
       :parent-session-id parent-session-id
       :child-session-id child-session-id
@@ -123,7 +121,7 @@
          ((:throw-if-runtime-stopping! deps) child-session-id)
          ((:throw-if-cancelled! deps) child-session-id)
          (wm/create-wm! child-session-id)
-         (let [tool-context* (child-task/branch-worker-tool-context
+         (let [tool-context* (child-orch/branch-worker-tool-context
                               parent-session-id
                               resource-session-id*
                               branch-trace
@@ -147,32 +145,24 @@
                              :resource-session-id resource-session-id*
                              :max-tool-rounds max-tool-rounds
                              :tool-context tool-context*))
-               result (or (get-in run-result [:state :outputs :work-on-branch])
-                          run-result)
                wm-context (wm/wm->context child-session-id)]
-           (merge branch-trace
-                  {:task task
-                   :status (if (or (not (map? run-result))
-                                   (= :completed (:status run-result)))
-                             "completed"
-                             "failed")
-                   :task-id child-task-id
-                   :session-id child-session-id
-                   :topics (:topics wm-context)
-                   :result result}
-                  (when (and (map? run-result)
-                             (not= :completed (:status run-result)))
-                    {:error (or (:error run-result)
-                                (:summary run-result))})))
+           (child-orch/normalize-branch-worker-result
+            {:trace branch-trace
+             :task task
+             :child-task-id child-task-id
+             :child-session-id child-session-id
+             :run-result run-result
+             :topics (:topics wm-context)}))
          (catch Throwable t
            (log/error t "Branch task failed" log-context)
-           (merge branch-trace
-                  {:task task
-                   :status "failed"
-                   :task-id child-task-id
-                   :session-id child-session-id
-                   :error (.getMessage t)
-                   :error-detail ((:throwable-detail deps) t)})))))))
+           (child-orch/normalize-branch-worker-result
+            {:trace branch-trace
+             :task task
+             :child-task-id child-task-id
+             :child-session-id child-session-id
+             :run-result {:status :failed}
+             :error (.getMessage t)
+             :error-detail ((:throwable-detail deps) t)})))))))
 
 (defn- branch-entry-id
   [idx]
