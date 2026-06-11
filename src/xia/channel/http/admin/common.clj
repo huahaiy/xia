@@ -21,6 +21,10 @@
   [deps req]
   (http-common/read-body deps req))
 
+(defn request-base-url
+  [deps req]
+  (http-common/request-base-url deps req))
+
 (defn truncate-text
   [deps value limit]
   (http-common/truncate-text deps value limit))
