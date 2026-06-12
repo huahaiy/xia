@@ -9,6 +9,7 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http-client]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-state :as runtime-state]
             [xia.task-event :as task-event])
   (:import [java.nio.charset StandardCharsets]
@@ -43,6 +44,7 @@
   (str (System/getProperty "user.home") "/Library/Messages/chat.db"))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/messaging)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -53,7 +55,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -1093,18 +1096,19 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
 (defn clear-runtime!
   []
-  (when (maybe-current-runtime)
+  (when-let [runtime (maybe-current-runtime)]
     (clear-channel-adapters!)
     (reset-runtime!)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn- start-imessage-poller!
@@ -1114,9 +1118,10 @@
              (mac-os?)
              (.exists (java.io.File. ^String imessage-chat-db-path)))
     (reset! (imessage-last-rowid-atom) (or (current-imessage-max-rowid) 0))
-    (let [exec (Executors/newSingleThreadScheduledExecutor)]
+    (let [exec (Executors/newSingleThreadScheduledExecutor)
+          poll-fn (runtime-context/convey-bindings poll-imessage-once!)]
       (.scheduleWithFixedDelay exec
-                               ^Runnable poll-imessage-once!
+                               ^Runnable poll-fn
                                (long (imessage-poll-interval-ms))
                                (long (imessage-poll-interval-ms))
                                TimeUnit/MILLISECONDS)
@@ -1125,14 +1130,18 @@
 
 (defn start!
   []
-  (clear-channel-adapters!)
-  (reset-runtime!)
-  (doseq [channel [:slack :telegram :imessage]]
-    (bridge/register-channel-adapter! channel
-                                      {:prompt messaging-prompt
-                                       :approval messaging-approval
-                                       :runtime-event messaging-runtime-event}))
-  (start-imessage-poller!))
+  (let [runtime (current-runtime)]
+    (runtime-context/with-runtime-context
+      (:runtime-context runtime)
+      #(do
+         (clear-channel-adapters!)
+         (reset-runtime!)
+         (doseq [channel [:slack :telegram :imessage]]
+           (bridge/register-channel-adapter! channel
+                                             {:prompt messaging-prompt
+                                              :approval messaging-approval
+                                              :runtime-event messaging-runtime-event}))
+         (start-imessage-poller!)))))
 
 (defn stop!
   []

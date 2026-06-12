@@ -7,6 +7,7 @@
    (approve! ...) which delegates to the current channel handler."
   (:require [clojure.string :as str]
             [xia.audit :as audit]
+            [xia.runtime-context :as runtime-context]
             [xia.task-event :as task-event]))
 
 ;; ---------------------------------------------------------------------------
@@ -14,6 +15,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/prompt-runtime)
 
 (declare clear-runtime!)
 
@@ -30,7 +32,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -718,9 +721,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -737,5 +740,6 @@
             {:by-id {}
              :by-session {}
              :by-task {}})
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)

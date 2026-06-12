@@ -10,7 +10,8 @@
             [xia.async :as async]
             [xia.crypto :as crypto]
             [xia.db :as db]
-            [xia.paths :as paths])
+            [xia.paths :as paths]
+            [xia.runtime-context :as runtime-context])
   (:import [java.io File FileInputStream FileOutputStream]
            [java.nio.file Files Path Paths]
            [java.nio.file.attribute FileAttribute]
@@ -24,6 +25,7 @@
 (def ^:private included-support-file-names #{"master.salt"})
 (def ^:private excluded-support-file-names #{"master.key" "master.passphrase"})
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/checkpoint-runtime)
 (declare clear-runtime!)
 
 (defn- checkpoint-state-template
@@ -39,7 +41,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -198,17 +201,18 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
 (defn clear-runtime!
   []
-  (when (maybe-current-runtime)
+  (when-let [runtime (maybe-current-runtime)]
     (reset-runtime!)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn prepare-shutdown!

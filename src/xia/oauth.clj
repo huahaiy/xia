@@ -6,7 +6,8 @@
             [xia.autonomous :as autonomous]
             [xia.db :as db]
             [xia.http-client :as http]
-            [xia.prompt :as prompt])
+            [xia.prompt :as prompt]
+            [xia.runtime-context :as runtime-context])
   (:import [java.net URI URLDecoder URLEncoder]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest SecureRandom]
@@ -14,6 +15,7 @@
            [java.util Base64 Date]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/oauth-runtime)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -24,7 +26,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -46,9 +49,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -57,7 +60,8 @@
   (when-let [runtime (maybe-current-runtime)]
     (reset! (:pending-authorizations-atom runtime) {})
     (reset! (:last-proactive-refresh-at-ms-atom runtime) 0)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn reset-runtime!

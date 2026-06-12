@@ -24,6 +24,7 @@
             [xia.limits :as limits]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.policy :as task-policy]
@@ -32,6 +33,7 @@
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/agent-runtime)
 (def ^:dynamic *turn-limit-state* nil)
 
 (declare clear-runtime!)
@@ -43,7 +45,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -232,9 +235,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (fact-review/install-runtime! (:fact-review-runtime runtime))
   (reset! installed-runtime-atom runtime)
   runtime)
@@ -244,7 +247,8 @@
   (fact-review/clear-runtime!)
   (when-let [runtime (maybe-current-runtime)]
     (run-state/clear-runtime-state! runtime)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn session-cancelled?

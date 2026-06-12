@@ -2,12 +2,14 @@
   "Background fact-utility review queue and scheduler."
   (:require [taoensso.timbre :as log]
             [xia.async :as async]
+            [xia.runtime-context :as runtime-context]
             [xia.working-memory :as wm]))
 
 (def ^:private default-fact-utility-review-debounce-ms 2000)
 (def ^:private fact-utility-review-batch-size 20)
 (def ^:private fact-utility-review-max-pending 120)
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/fact-review-runtime)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -16,7 +18,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -35,17 +38,18 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
 (defn clear-runtime!
   []
-  (when (maybe-current-runtime)
+  (when-let [runtime (maybe-current-runtime)]
     (reset-runtime!)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn- fact-utility-observations

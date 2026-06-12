@@ -1,8 +1,10 @@
 (ns xia.retrieval-state
   "Tracks retrieval-relevant datastore mutations so the agent can refresh
-   working memory only when search-visible state actually changed.")
+   working memory only when search-visible state actually changed."
+  (:require [xia.runtime-context :as runtime-context]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/retrieval-runtime)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -13,7 +15,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -27,9 +30,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -39,7 +42,8 @@
     (reset! (:retrieval-state-atom runtime)
             {:knowledge-epoch 0
              :local-doc-epochs {}})
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn reset-runtime!

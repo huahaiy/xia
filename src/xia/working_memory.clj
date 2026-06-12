@@ -20,7 +20,8 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
-            [xia.memory :as memory]))
+            [xia.memory :as memory]
+            [xia.runtime-context :as runtime-context]))
 
 ;; ============================================================================
 ;; State
@@ -36,6 +37,7 @@
 
 (def ^:private session-op-lock-count 512)
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/working-memory-runtime)
 
 (declare get-wm warm-start! snapshot! snapshot-interval-ms snapshot-debounce-ms
          reset-runtime! prepare-shutdown!)
@@ -57,7 +59,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -1441,12 +1444,14 @@ Rules:
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (prepare-shutdown!)
-      (clear-wm!)))
+      (runtime-context/without-runtime-context
+        #(do
+           (prepare-shutdown!)
+           (clear-wm!)))))
   (reset! installed-runtime-atom runtime)
-  (reset-runtime!)
+  (runtime-context/without-runtime-context reset-runtime!)
   runtime)
 
 (defn reset-runtime!
@@ -1481,5 +1486,6 @@ Rules:
   (when-let [runtime (maybe-current-runtime)]
     (prepare-shutdown!)
     (reset! (:wm-state-atom runtime) {})
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)

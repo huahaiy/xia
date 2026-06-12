@@ -14,6 +14,7 @@
             [xia.hippocampus :as hippo]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.runtime-context :as runtime-context]
             [xia.session-lifecycle :as session-life]
             [xia.task-event :as task-event]
             [xia.task-inspection :as task-inspection]
@@ -22,6 +23,7 @@
 
 (def ^:private max-live-task-runtime-events 200)
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/bridge-runtime)
 
 (defn make-runtime
   []
@@ -40,7 +42,8 @@
 
 (defn- current-runtime
   []
-  (or @installed-runtime-atom
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom
       (throw (ex-info "Bridge runtime is not installed"
                       {:component :xia/bridge-runtime}))))
 

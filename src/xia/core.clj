@@ -14,6 +14,7 @@
             [xia.logging :as logging]
             [xia.pack :as pack]
             [xia.snapshot :as snapshot]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-state :as runtime-state]
             [xia.system]
             [xia.channel.terminal :as terminal]
@@ -211,11 +212,21 @@
   []
   (get-in @runtime-system-atom [:system :xia/http-runtime :runtime]))
 
+(defn- current-runtime-context
+  []
+  (or (:runtime-context @runtime-system-atom)
+      (get-in @runtime-system-atom [:system :xia/runtime-support])))
+
+(defn- with-current-runtime-context
+  [f]
+  (runtime-context/with-runtime-context (current-runtime-context) f))
+
 (defn- with-current-http-runtime
   [f]
-  (if-let [runtime (current-http-runtime)]
-    (http/with-runtime runtime f)
-    (f)))
+  (with-current-runtime-context
+    #(if-let [runtime (current-http-runtime)]
+       (http/with-runtime runtime f)
+       (f))))
 
 (defn- current-http-port
   []
@@ -333,10 +344,12 @@
       :web-runtime (ig/ref :xia/web-runtime)}
 
      :xia/sci-runtime
-     {:db (ig/ref :xia/db)}
+     {:db (ig/ref :xia/db)
+      :runtime-support (ig/ref :xia/runtime-support)}
 
      :xia/instance-supervisor
      {:db (ig/ref :xia/db)
+      :runtime-support (ig/ref :xia/runtime-support)
       :enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
       :command instance-command}
 
@@ -356,10 +369,12 @@
 
      :xia/tool-runtime
      {:identity (ig/ref :xia/identity)
-      :sci-runtime (ig/ref :xia/sci-runtime)}
+      :sci-runtime (ig/ref :xia/sci-runtime)
+      :runtime-support (ig/ref :xia/runtime-support)}
 
      :xia/scheduler
-     {:tool-runtime (ig/ref :xia/tool-runtime)}
+     {:tool-runtime (ig/ref :xia/tool-runtime)
+      :runtime-support (ig/ref :xia/runtime-support)}
 
      :xia/messaging
      {:runtime-support (ig/ref :xia/runtime-support)}
@@ -386,22 +401,26 @@
      (throw (ex-info "Xia runtime is already running"
                      {:root-keys (:root-keys @runtime-system-atom)
                       :db (get-in @runtime-system-atom [:options :db])})))
-   (let [config  (system-config options)
-         system  (ig/init config root-keys)
-         state   {:config config
-                  :system system
-                  :root-keys (vec root-keys)
-                  :options options}]
+   (let [config           (system-config options)
+         system           (ig/init config root-keys)
+         runtime-context* (runtime-context/make system)
+         state            {:config config
+                           :system system
+                           :runtime-context runtime-context*
+                           :root-keys (vec root-keys)
+                           :options options}]
      (reset! runtime-system-atom state)
      system)))
 
 (defn- halt-runtime!
   []
-  (when-let [{:keys [system]} @runtime-system-atom]
-    (try
-      (ig/halt! system)
-      (finally
-        (reset! runtime-system-atom nil)))))
+  (when-let [{:keys [system runtime-context]} @runtime-system-atom]
+    (runtime-context/with-runtime-context
+      runtime-context
+      #(try
+         (ig/halt! system)
+         (finally
+           (reset! runtime-system-atom nil))))))
 
 (defn- register-http-runtime-controls!
   [options root-keys]
@@ -429,13 +448,15 @@
         port*    (or port (:port options*))]
     (try
       (initialize-runtime! options* server-runtime-root-keys)
-      (runtime-state/mark-starting!)
-      (register-http-runtime-controls! options* server-runtime-root-keys)
-      (runtime-state/mark-running!)
-      (let [options** (assoc options* :port (or (current-http-port) port*))]
-        (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
-        (println (str "open " (local-ui-url (:bind options**) (:port options**))))
-        options**)
+      (with-current-runtime-context
+        #(do
+           (runtime-state/mark-starting!)
+           (register-http-runtime-controls! options* server-runtime-root-keys)
+           (runtime-state/mark-running!)
+           (let [options** (assoc options* :port (or (current-http-port) port*))]
+             (println (str "Xia server running on " (:bind options**) ":" (:port options**)))
+             (println (str "open " (local-ui-url (:bind options**) (:port options**))))
+             options**)))
       (catch Throwable t
         (try
           (halt-runtime!)
@@ -447,17 +468,18 @@
 (defn stop-runtime!
   "Stop Xia runtime components that were started in the current process."
   [options]
-  (let [options* (apply-run-defaults options)
-        phase    (runtime-state/phase)
-        event    {:at       (java.time.Instant/now)
-                  :phase    phase
-                  :db-path  (:db options*)
-                  :callsite (capture-callsite-summary "stop-runtime! callsite")}]
-    (reset! last-stop-event-atom event)
-    (log/info "stop-runtime! invoked"
-              "phase" (name phase)
-              "db" (:db options*))
-    ((make-cleanup options*))))
+  (with-current-runtime-context
+    #(let [options* (apply-run-defaults options)
+           phase    (runtime-state/phase)
+           event    {:at       (java.time.Instant/now)
+                     :phase    phase
+                     :db-path  (:db options*)
+                     :callsite (capture-callsite-summary "stop-runtime! callsite")}]
+       (reset! last-stop-event-atom event)
+       (log/info "stop-runtime! invoked"
+                 "phase" (name phase)
+                 "db" (:db options*))
+       ((make-cleanup options*)))))
 
 (defn- start!
   [options]
@@ -468,25 +490,28 @@
                         "both" server-runtime-root-keys
                         base-runtime-root-keys)]
         (initialize-runtime! options* root-keys)
-        (runtime-state/mark-starting!)
-        (register-http-runtime-controls! options* root-keys))
+        (with-current-runtime-context
+          #(do
+             (runtime-state/mark-starting!)
+             (register-http-runtime-controls! options* root-keys))))
 
       ;; Start channels based on mode
-      (case (:mode options*)
-        "server"   (do (runtime-state/mark-running!)
-                       (let [port* (or (current-http-port) (:port options*))]
-                         (println (str "Xia server running on " (:bind options*) ":" port*))
-                         (println (str "open " (local-ui-url (:bind options*) port*))))
-                       @(promise))
-        "both"     (do (runtime-state/mark-running!)
-                       (let [port* (or (current-http-port) (:port options*))]
-                         (println (str "Xia server running on " (:bind options*) ":" port*))
-                         (println (str "open " (local-ui-url (:bind options*) port*))))
-                       (terminal/start!))
-        ;; default: terminal fallback for unexpected modes
-        (do
-          (runtime-state/mark-running!)
-          (terminal/start!)))
+      (with-current-runtime-context
+        #(case (:mode options*)
+           "server"   (do (runtime-state/mark-running!)
+                          (let [port* (or (current-http-port) (:port options*))]
+                            (println (str "Xia server running on " (:bind options*) ":" port*))
+                            (println (str "open " (local-ui-url (:bind options*) port*))))
+                          @(promise))
+           "both"     (do (runtime-state/mark-running!)
+                          (let [port* (or (current-http-port) (:port options*))]
+                            (println (str "Xia server running on " (:bind options*) ":" port*))
+                            (println (str "open " (local-ui-url (:bind options*) port*))))
+                          (terminal/start!))
+           ;; default: terminal fallback for unexpected modes
+           (do
+             (runtime-state/mark-running!)
+             (terminal/start!))))
       (catch Throwable t
         (try
           (halt-runtime!)
@@ -530,20 +555,22 @@
   (let [ran? (atom false)]
     (fn []
       (when (compare-and-set! ran? false true)
-        (runtime-state/mark-stopping!)
-        (try
-        (try
-          (http/clear-command-shutdown-handler!)
-          (halt-runtime!)
-          (catch Exception e
-            (log/error e "Failed to halt Xia runtime during shutdown")))
-          (try
-            (save-archive! options)
-            (catch Exception e
-              (log/error e "Failed to save archive during shutdown")
-              (println (str "Archive save failed: " (.getMessage e)))))
-          (finally
-            (runtime-state/mark-stopped!)))))))
+        (with-current-runtime-context
+          #(do
+             (runtime-state/mark-stopping!)
+             (try
+               (try
+                 (http/clear-command-shutdown-handler!)
+                 (halt-runtime!)
+                 (catch Exception e
+                   (log/error e "Failed to halt Xia runtime during shutdown")))
+               (try
+                 (save-archive! options)
+                 (catch Exception e
+                   (log/error e "Failed to save archive during shutdown")
+                   (println (str "Archive save failed: " (.getMessage e)))))
+               (finally
+                 (runtime-state/mark-stopped!)))))))))
 
 (defn- register-shutdown-hook!
   [cleanup]

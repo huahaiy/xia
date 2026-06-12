@@ -17,6 +17,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.memory :as memory]
+            [xia.runtime-context :as runtime-context]
             [xia.util :as util]))
 
 ;; ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ Rules:
    :stats (runtime-stats-template)})
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/hippocampus-runtime)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -97,7 +99,8 @@ Rules:
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -713,17 +716,18 @@ Rules:
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
 (defn clear-runtime!
   []
-  (when (maybe-current-runtime)
+  (when-let [runtime (maybe-current-runtime)]
     (reset-runtime!)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn prepare-shutdown!

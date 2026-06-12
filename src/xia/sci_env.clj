@@ -34,6 +34,7 @@
             [xia.service :as service]
             [xia.skill :as skill]
             [xia.policy :as task-policy]
+            [xia.runtime-context :as runtime-context]
             [xia.web :as web]
             [xia.workspace :as workspace]
             [xia.working-memory :as wm])
@@ -46,6 +47,7 @@
 
 (def ^:dynamic *sci-timeout-state* nil)
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/sci-runtime)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -57,7 +59,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -590,11 +593,11 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
-  (reset-runtime!)
+  (runtime-context/without-runtime-context reset-runtime!)
   runtime)
 
 (defn- sci-worker-thread
@@ -651,9 +654,10 @@
 
 (defn clear-runtime!
   []
-  (when (maybe-current-runtime)
+  (when-let [runtime (maybe-current-runtime)]
     (prepare-shutdown!)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn- call-with-timeout

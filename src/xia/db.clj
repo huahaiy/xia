@@ -15,6 +15,7 @@
             [xia.db.session :as db-session]
             [xia.db.task :as db-task]
             [xia.paths :as paths]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.sensitive :as sensitive])
@@ -50,6 +51,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/db)
 
 (declare clear-runtime!)
 
@@ -65,7 +67,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -582,9 +585,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -687,7 +690,8 @@
     (doseq [state-atom [(:last-connect-event-atom runtime)
                         (:last-close-event-atom runtime)]]
       (reset! state-atom nil))
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 ;; ---------------------------------------------------------------------------

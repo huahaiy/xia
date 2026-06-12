@@ -1,12 +1,14 @@
 (ns xia.async
   "Shared bounded executors for internal Xia async work."
   (:require [taoensso.timbre :as log]
-            [xia.policy :as task-policy])
+            [xia.policy :as task-policy]
+            [xia.runtime-context :as runtime-context])
   (:import [java.util.concurrent Callable ExecutorService LinkedBlockingQueue
             RejectedExecutionException RejectedExecutionHandler ThreadFactory
             ThreadPoolExecutor TimeUnit]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/async-runtime)
 (def ^:private default-shutdown-await-ms 10000)
 
 (declare clear-runtime!)
@@ -20,7 +22,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -120,9 +123,7 @@
 
 (defn- convey-bindings
   [f]
-  (let [bindings (get-thread-bindings)]
-    (fn []
-      (with-bindings* bindings f))))
+  (runtime-context/convey-bindings f))
 
 (defn submit!
   ([kind f]
@@ -224,9 +225,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! (:accepting-atom runtime) true)
   (reset! installed-runtime-atom runtime)
   runtime)
@@ -242,5 +243,6 @@
       (reset! (:executors-atom runtime) {})
       (reset! (:accepting-atom runtime) true)
       (reset! (:thread-counter runtime) 0)
-      (reset! installed-runtime-atom nil)))
+      (when (identical? runtime @installed-runtime-atom)
+        (reset! installed-runtime-atom nil))))
   nil)

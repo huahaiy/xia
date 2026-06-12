@@ -20,6 +20,7 @@
             [xia.paths :as paths]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.sci-env :as sci-env]
@@ -73,9 +74,14 @@
 (defmethod ig/init-key :xia/db
   [_ {:keys [db-path connect-options]}]
   (ensure-db-dir! db-path)
-  (db/install-runtime! (db/make-runtime))
-  (db/connect! db-path connect-options)
-  {:db-path db-path})
+  (let [runtime (db/install-runtime! (db/make-runtime))
+        runtime-context (runtime-context/make {:xia/db {:runtime runtime}})]
+    (runtime-context/with-runtime-context
+      runtime-context
+      #(db/connect! db-path connect-options))
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db-path db-path}))
 
 (defmethod ig/halt-key! :xia/db
   [_ _]
@@ -158,11 +164,17 @@
 
 (defmethod ig/init-key :xia/agent-runtime
   [_ {:keys [db async-runtime]}]
-  (let [runtime   (agent/install-runtime! (agent/make-runtime))
-        recovered (agent/recover-runtime-tasks!)]
+  (let [runtime         (agent/install-runtime! (agent/make-runtime))
+        runtime-context (runtime-context/make {:xia/db db
+                                               :xia/async-runtime async-runtime
+                                               :xia/agent-runtime {:runtime runtime}})
+        recovered       (runtime-context/with-runtime-context
+                          runtime-context
+                          agent/recover-runtime-tasks!)]
     (when (seq recovered)
       (log/info "Recovered" (count recovered) "interrupted tasks after runtime restart"))
     {:runtime runtime
+     :runtime-context runtime-context
      :db db
      :async-runtime async-runtime
      :recovered recovered}))
@@ -244,23 +256,24 @@
              working-memory-runtime bridge-runtime hippocampus-runtime
              checkpoint-runtime llm-runtime local-ocr-runtime
              service-runtime web-runtime]}]
-  {:db db
-   :overlay overlay
-   :runtime-state-runtime runtime-state-runtime
-   :retrieval-runtime retrieval-runtime
-   :oauth-runtime oauth-runtime
-   :browser-runtime browser-runtime
-   :async-runtime async-runtime
-   :prompt-runtime prompt-runtime
-   :agent-runtime agent-runtime
-   :working-memory-runtime working-memory-runtime
-   :bridge-runtime bridge-runtime
-   :hippocampus-runtime hippocampus-runtime
-   :checkpoint-runtime checkpoint-runtime
-   :llm-runtime llm-runtime
-   :local-ocr-runtime local-ocr-runtime
-   :service-runtime service-runtime
-   :web-runtime web-runtime})
+  (runtime-context/make
+    {:xia/db db
+     :xia/runtime-overlay overlay
+     :xia/runtime-state-runtime runtime-state-runtime
+     :xia/retrieval-runtime retrieval-runtime
+     :xia/oauth-runtime oauth-runtime
+     :xia/browser-runtime browser-runtime
+     :xia/async-runtime async-runtime
+     :xia/prompt-runtime prompt-runtime
+     :xia/agent-runtime agent-runtime
+     :xia/working-memory-runtime working-memory-runtime
+     :xia/bridge-runtime bridge-runtime
+     :xia/hippocampus-runtime hippocampus-runtime
+     :xia/checkpoint-runtime checkpoint-runtime
+     :xia/llm-runtime llm-runtime
+     :xia/local-ocr-runtime local-ocr-runtime
+     :xia/service-runtime service-runtime
+     :xia/web-runtime web-runtime}))
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
@@ -268,9 +281,14 @@
 
 (defmethod ig/init-key :xia/http-runtime
   [_ {:keys [runtime-support]}]
-  (let [runtime (http/make-runtime)]
+  (let [runtime (http/make-runtime)
+        runtime-context (runtime-context/assoc-component runtime-support
+                                                         :xia/http-runtime
+                                                         {:runtime runtime})
+        runtime (assoc runtime :runtime-context runtime-context)]
     (http/install-runtime! runtime)
     {:runtime runtime
+     :runtime-context runtime-context
      :runtime-support runtime-support}))
 
 (defmethod ig/halt-key! :xia/http-runtime
@@ -280,22 +298,37 @@
     (http/clear-runtime!)))
 
 (defmethod ig/init-key :xia/sci-runtime
-  [_ {:keys [db]}]
-  {:runtime (sci-env/install-runtime! (sci-env/make-runtime))
-   :db db})
+  [_ {:keys [db runtime-support]}]
+  (let [runtime (sci-env/make-runtime)
+        runtime-context (runtime-context/assoc-component runtime-support
+                                                         :xia/sci-runtime
+                                                         {:runtime runtime})
+        runtime (assoc runtime :runtime-context runtime-context)]
+    {:runtime (sci-env/install-runtime! runtime)
+     :runtime-context runtime-context
+     :db db}))
 
 (defmethod ig/halt-key! :xia/sci-runtime
   [_ _]
   (sci-env/clear-runtime!))
 
 (defmethod ig/init-key :xia/instance-supervisor
-  [_ {:keys [db enabled? command]}]
-  (instance-supervisor/install-runtime! (instance-supervisor/make-runtime))
-  (instance-supervisor/configure! {:enabled? enabled?
-                                   :command command})
-  {:db db
-   :enabled? enabled?
-   :command command})
+  [_ {:keys [db runtime-support enabled? command]}]
+  (let [runtime (instance-supervisor/make-runtime)
+        runtime-context (runtime-context/assoc-component runtime-support
+                                                         :xia/instance-supervisor
+                                                         {:runtime runtime})
+        runtime (assoc runtime :runtime-context runtime-context)]
+    (instance-supervisor/install-runtime! runtime)
+    (runtime-context/with-runtime-context
+      runtime-context
+      #(instance-supervisor/configure! {:enabled? enabled?
+                                        :command command}))
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db db
+     :enabled? enabled?
+     :command command}))
 
 (defmethod ig/halt-key! :xia/instance-supervisor
   [_ _]
@@ -304,26 +337,29 @@
 (defmethod ig/init-key :xia/bootstrap
   [_ {:keys [db overlay runtime-support instance-supervisor db-path instance template-instance
              mode crypto-opts]}]
-  (maybe-seed-instance-template! {:db-path db-path
-                                  :instance instance
-                                  :template-instance template-instance
-                                  :crypto-opts crypto-opts})
-  (instance-supervisor/record-parent-link-from-env!)
-  (log/info "Xia instance" instance)
-  (log/info "Database opened at" db-path)
-  (log/info "Support directory" (paths/support-dir-path db-path))
-  (log/info "Master key source" (pr-str (crypto/current-key-source)))
-  (when (setup/needs-setup?)
-    (if (= "terminal" mode)
-      (setup/run-setup!)
-      (log/info "Skipping interactive first-run setup in"
-                mode
-                "mode; complete provider onboarding in the local web UI.")))
-  {:db db
-   :overlay overlay
-   :runtime-support runtime-support
-   :instance-supervisor instance-supervisor
-   :instance instance})
+  (runtime-context/with-runtime-context
+    runtime-support
+    #(do
+       (maybe-seed-instance-template! {:db-path db-path
+                                       :instance instance
+                                       :template-instance template-instance
+                                       :crypto-opts crypto-opts})
+       (instance-supervisor/record-parent-link-from-env!)
+       (log/info "Xia instance" instance)
+       (log/info "Database opened at" db-path)
+       (log/info "Support directory" (paths/support-dir-path db-path))
+       (log/info "Master key source" (pr-str (crypto/current-key-source)))
+       (when (setup/needs-setup?)
+         (if (= "terminal" mode)
+           (setup/run-setup!)
+           (log/info "Skipping interactive first-run setup in"
+                     mode
+                     "mode; complete provider onboarding in the local web UI.")))
+       {:db db
+        :overlay overlay
+        :runtime-support runtime-support
+        :instance-supervisor instance-supervisor
+        :instance instance})))
 
 (defmethod ig/halt-key! :xia/bootstrap
   [_ _]
@@ -331,7 +367,8 @@
 
 (defmethod ig/init-key :xia/identity
   [_ {:keys [bootstrap]}]
-  (identity/init-identity!)
+  (runtime-context/with-runtime-context (:runtime-support bootstrap)
+                                       identity/init-identity!)
   {:bootstrap bootstrap})
 
 (defmethod ig/halt-key! :xia/identity
@@ -339,15 +376,24 @@
   nil)
 
 (defmethod ig/init-key :xia/tool-runtime
-  [_ {:keys [identity sci-runtime]}]
-  (let [runtime       (tool/install-runtime! (tool/make-runtime))
-        bundled-count (tool/ensure-bundled-tools!)]
+  [_ {:keys [identity sci-runtime runtime-support]}]
+  (let [runtime       (tool/make-runtime)
+        runtime-context (-> runtime-support
+                            (runtime-context/assoc-component :xia/sci-runtime sci-runtime)
+                            (runtime-context/assoc-component :xia/tool-runtime {:runtime runtime}))
+        runtime       (tool/install-runtime! (assoc runtime :runtime-context runtime-context))
+        bundled-count (runtime-context/with-runtime-context
+                        runtime-context
+                        tool/ensure-bundled-tools!)]
     (when (pos? (long bundled-count))
       (log/info "Installed" bundled-count "bundled tools"))
-    (tool/load-all-tools!)
-    (log/info "Loaded" (count (tool/registered-tools)) "tools,"
-              (count (skill/all-enabled-skills)) "skills")
+    (runtime-context/with-runtime-context runtime-context tool/load-all-tools!)
+    (runtime-context/with-runtime-context
+      runtime-context
+      #(log/info "Loaded" (count (tool/registered-tools)) "tools,"
+                 (count (skill/all-enabled-skills)) "skills"))
     {:runtime runtime
+     :runtime-context runtime-context
      :identity identity
      :sci-runtime sci-runtime}))
 
@@ -356,10 +402,18 @@
   (tool/clear-runtime!))
 
 (defmethod ig/init-key :xia/scheduler
-  [_ {:keys [tool-runtime]}]
-  (scheduler/install-runtime! (scheduler/make-runtime))
-  (scheduler/start!)
-  {:tool-runtime tool-runtime})
+  [_ {:keys [tool-runtime runtime-support]}]
+  (let [runtime (scheduler/make-runtime)
+        runtime-context (-> runtime-support
+                            (runtime-context/assoc-component :xia/tool-runtime tool-runtime)
+                            (runtime-context/assoc-component :xia/scheduler {:runtime runtime}))
+        runtime (assoc runtime :runtime-context runtime-context)]
+    (scheduler/install-runtime! runtime)
+    (runtime-context/with-runtime-context runtime-context scheduler/start!)
+    {:runtime runtime
+     :runtime-context runtime-context
+     :runtime-support runtime-support
+     :tool-runtime tool-runtime}))
 
 (defmethod ig/halt-key! :xia/scheduler
   [_ _]
@@ -368,9 +422,16 @@
 
 (defmethod ig/init-key :xia/messaging
   [_ {:keys [runtime-support]}]
-  (messaging/install-runtime! (messaging/make-runtime))
-  (messaging/start!)
-  {:runtime-support runtime-support})
+  (let [runtime (messaging/make-runtime)
+        runtime-context (runtime-context/assoc-component runtime-support
+                                                         :xia/messaging
+                                                         {:runtime runtime})
+        runtime (assoc runtime :runtime-context runtime-context)]
+    (messaging/install-runtime! runtime)
+    (runtime-context/with-runtime-context runtime-context messaging/start!)
+    {:runtime runtime
+     :runtime-context runtime-context
+     :runtime-support runtime-support}))
 
 (defmethod ig/halt-key! :xia/messaging
   [_ _]

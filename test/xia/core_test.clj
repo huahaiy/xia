@@ -16,6 +16,7 @@
             [xia.paths :as paths]
             [xia.pack :as pack]
             [xia.retrieval-state :as retrieval-state]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.sci-env :as sci-env]
@@ -208,7 +209,14 @@
             :tool/load
             :scheduler/start
             [:http/start "0.0.0.0" 4011 {:web-dev? true}]]
-           @calls))))
+           @calls))
+    (let [ctx ((var-get #'xia.core/current-runtime-context))]
+      (is (some? (runtime-context/runtime ctx :xia/db)))
+      (is (some? (runtime-context/runtime ctx :xia/http-runtime)))
+      (is (some? (runtime-context/runtime ctx :xia/scheduler)))
+      ((var-get #'xia.core/with-current-runtime-context)
+       #(is (identical? (runtime-context/runtime ctx :xia/http-runtime)
+                        (runtime-context/runtime :xia/http-runtime)))))))
 
 (deftest start-server-runtime-disables-host-instance-management-when-env-is-false
   (let [calls   (atom [])

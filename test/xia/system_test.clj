@@ -1,6 +1,7 @@
 (ns xia.system-test
   (:require [clojure.test :refer [deftest is]]
             [integrant.core :as ig]
+            [xia.runtime-context :as runtime-context]
             [xia.system]
             [xia.working-memory])
   (:import [java.util.concurrent CountDownLatch TimeUnit]))
@@ -19,6 +20,59 @@
                                                    (swap! calls conj :hippo-clear))]
       (ig/halt-key! :xia/runtime-support nil))
     (is (= [] @calls))))
+
+(deftest runtime-support-exposes-explicit-runtime-context
+  (let [db-runtime    {:runtime-name :db}
+        async-runtime {:runtime-name :async}
+        support       (ig/init-key
+                        :xia/runtime-support
+                        {:db {:runtime db-runtime
+                              :db-path "test.db"}
+                         :overlay {:snapshot-id 1}
+                         :async-runtime {:runtime async-runtime}})]
+    (is (= db-runtime
+           (runtime-context/runtime support :xia/db)))
+    (is (= async-runtime
+           (runtime-context/runtime support :xia/async-runtime)))
+    (is (= {:runtime async-runtime}
+           (runtime-context/component support :xia/async-runtime)))))
+
+(deftest async-runtime-prefers-bound-runtime-context
+  (xia.async/clear-runtime!)
+  (let [installed-runtime (xia.async/install-runtime! (xia.async/make-runtime))
+        scoped-runtime    (xia.async/make-runtime)
+        context           (runtime-context/make
+                            {:xia/async-runtime {:runtime scoped-runtime}})]
+    (try
+      (runtime-context/with-runtime-context
+        context
+        #(let [future (xia.async/submit-background! "scoped-runtime-test" (fn [] :scoped))]
+           (is (= :scoped (deref future 1000 ::timeout)))
+           (is (contains? @(:executors-atom scoped-runtime) :background))
+           (is (empty? @(:executors-atom installed-runtime)))))
+      (finally
+        (runtime-context/with-runtime-context context #(xia.async/clear-runtime!))
+        (xia.async/clear-runtime!)))))
+
+(deftest scheduler-init-binds-runtime-context-while-starting
+  (let [tool-runtime {:runtime {:runtime-name :tool}}
+        support      (runtime-context/make {:xia/tool-runtime tool-runtime})
+        observed     (atom nil)]
+    (with-redefs [xia.scheduler/make-runtime (fn [] {:runtime-name :scheduler})
+                  xia.scheduler/install-runtime! identity
+                  xia.scheduler/start! (fn []
+                                         (reset! observed
+                                                 {:scheduler-runtime (runtime-context/runtime :xia/scheduler)
+                                                  :tool-runtime      (runtime-context/runtime :xia/tool-runtime)}))]
+      (let [component (ig/init-key :xia/scheduler {:tool-runtime tool-runtime
+                                                   :runtime-support support})]
+        (is (= :scheduler
+               (:runtime-name (:runtime component))))
+        (is (= :scheduler
+               (:runtime-name (:scheduler-runtime @observed))))
+        (is (= (:runtime tool-runtime)
+               (:tool-runtime @observed)))
+        (is (some? (:runtime-context (:runtime component))))))))
 
 (deftest runtime-components-own-shutdown-work
   (let [calls (atom [])]

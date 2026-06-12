@@ -1,7 +1,9 @@
 (ns xia.runtime-state
-  "Tracks coarse runtime lifecycle state for user-facing diagnostics.")
+  "Tracks coarse runtime lifecycle state for user-facing diagnostics."
+  (:require [xia.runtime-context :as runtime-context]))
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/runtime-state-runtime)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -11,7 +13,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn installed?
   []
@@ -41,9 +44,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -52,7 +55,8 @@
   (when-let [runtime (maybe-current-runtime)]
     (reset! (:phase-atom runtime) :stopped)
     (reset! (:drain-state-atom runtime) nil)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn phase

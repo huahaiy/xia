@@ -21,6 +21,7 @@
             [xia.channel.http.websocket :as http-websocket]
             [xia.channel.http.workspace :as http-workspace]
             [xia.channel.messaging :as messaging]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-state :as runtime-state]
             [xia.session-lifecycle :as session-life])
   (:import [java.net BindException]
@@ -35,6 +36,7 @@
 
 (defonce ^:private installed-runtime-atom (atom nil))
 (def ^:dynamic ^:private *runtime* nil)
+(def ^:private runtime-context-key :xia/http-runtime)
 
 (def ^:private session-finalize-lock-count session-life/default-finalize-lock-count)
 (def ^:private http-port-search-limit 100)
@@ -65,7 +67,9 @@
 
 (defn- maybe-current-runtime
   []
-  (or *runtime* @installed-runtime-atom))
+  (or *runtime*
+      (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -78,8 +82,10 @@
    This lets Integrant own runtime maps while legacy helpers still resolve the
    current runtime through one compatibility point."
   [runtime f]
-  (binding [*runtime* runtime]
-    (f)))
+  (let [context (or (:runtime-context runtime)
+                    (runtime-context/current))]
+    (binding [*runtime* runtime]
+      (runtime-context/with-runtime-context context f))))
 
 (defn- server-atom
   []

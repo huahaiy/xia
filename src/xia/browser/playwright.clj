@@ -8,6 +8,7 @@
             [xia.browser.query :as browser.query]
             [xia.config :as cfg]
             [xia.policy :as task-policy]
+            [xia.runtime-context :as runtime-context]
             [xia.web :as web])
   (:import [com.microsoft.playwright Playwright Browser BrowserContext Locator Page Route
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
@@ -28,6 +29,7 @@
 (def ^:private session-snapshot-lock-count 256)
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/browser-runtime)
 (declare clear-runtime!)
 
 (defn- empty-runtime-state
@@ -51,7 +53,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -1375,9 +1378,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -1387,7 +1390,8 @@
     (stop-runtime!)
     (.clear ^ConcurrentHashMap (:sessions runtime))
     (reset! (:runtime-atom runtime) (empty-runtime-state))
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn reset-runtime!

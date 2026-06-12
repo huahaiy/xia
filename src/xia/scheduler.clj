@@ -14,6 +14,7 @@
             [xia.limits :as limits]
             [xia.oauth :as oauth]
             [xia.plugin :as plugin]
+            [xia.runtime-context :as runtime-context]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
             [xia.policy :as task-policy]
@@ -25,6 +26,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/scheduler)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -39,7 +41,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -102,13 +105,14 @@
 
 (defn- submit-work!
   [kind f]
-  (let [^ExecutorService exec (ensure-work-executor!)]
+  (let [^ExecutorService exec (ensure-work-executor!)
+        task-fn (runtime-context/convey-bindings f)]
     (try
       (.submit exec
                ^Runnable
                (fn []
                  (try
-                   (f)
+                   (task-fn)
                    (catch Throwable t
                      (log/error t "Scheduler work item failed:" kind)))))
       true
@@ -503,14 +507,19 @@
 (defn start!
   "Start the background scheduler. Ticks every 60 seconds."
   []
-  (when @(tick-executor-atom)
-    (log/warn "Scheduler already running"))
-  (when-not @(tick-executor-atom)
-    (let [^ScheduledExecutorService exec (Executors/newSingleThreadScheduledExecutor)]
-      (ensure-work-executor!)
-      (.scheduleAtFixedRate exec ^Runnable tick! 60 60 TimeUnit/SECONDS)
-      (reset! (tick-executor-atom) exec)
-      (log/info "Scheduler started (60s interval)"))))
+  (let [runtime (current-runtime)]
+    (runtime-context/with-runtime-context
+      (:runtime-context runtime)
+      #(do
+         (when @(tick-executor-atom)
+           (log/warn "Scheduler already running"))
+         (when-not @(tick-executor-atom)
+           (let [^ScheduledExecutorService exec (Executors/newSingleThreadScheduledExecutor)
+                 tick-fn (runtime-context/convey-bindings tick!)]
+             (ensure-work-executor!)
+             (.scheduleAtFixedRate exec ^Runnable tick-fn 60 60 TimeUnit/SECONDS)
+             (reset! (tick-executor-atom) exec)
+             (log/info "Scheduler started (60s interval)")))))))
 
 (defn stop!
   "Stop the background scheduler gracefully."
@@ -537,9 +546,9 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
@@ -555,7 +564,8 @@
     (reset! (:maintenance-running?-atom runtime) false)
     (reset! (:last-maintenance-at-atom runtime) nil)
     (reset! (:thread-counter-atom runtime) 0)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
 
 (defn running?

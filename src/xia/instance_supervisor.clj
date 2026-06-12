@@ -11,7 +11,8 @@
             [xia.db :as db]
             [xia.http-client :as http-client]
             [xia.paths :as paths]
-            [xia.runtime :as runtime])
+            [xia.runtime :as runtime]
+            [xia.runtime-context :as runtime-context])
   (:import [java.io File IOException]
            [java.lang ProcessBuilder$Redirect ProcessHandle]
            [java.net ServerSocket]
@@ -31,6 +32,7 @@
 (def ^:private parent-instance-env "XIA_PARENT_INSTANCE_ID")
 
 (defonce ^:private installed-runtime-atom (atom nil))
+(def ^:private runtime-context-key :xia/instance-supervisor)
 (declare clear-runtime!)
 
 (defn make-runtime
@@ -41,7 +43,8 @@
 
 (defn- maybe-current-runtime
   []
-  @installed-runtime-atom)
+  (or (runtime-context/runtime runtime-context-key)
+      @installed-runtime-atom))
 
 (defn- current-runtime
   []
@@ -668,15 +671,16 @@
 
 (defn install-runtime!
   [runtime]
-  (when-let [current (maybe-current-runtime)]
+  (when-let [current @installed-runtime-atom]
     (when-not (identical? current runtime)
-      (clear-runtime!)))
+      (runtime-context/without-runtime-context clear-runtime!)))
   (reset! installed-runtime-atom runtime)
   runtime)
 
 (defn clear-runtime!
   []
-  (when (maybe-current-runtime)
+  (when-let [runtime (maybe-current-runtime)]
     (reset-runtime!)
-    (reset! installed-runtime-atom nil))
+    (when (identical? runtime @installed-runtime-atom)
+      (reset! installed-runtime-atom nil)))
   nil)
