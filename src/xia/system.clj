@@ -71,6 +71,10 @@
       (log/info "Skipping template seed for Xia instance" instance
                 "because initial settings already exist"))))
 
+(defn- with-component-runtime-context
+  [component f]
+  (runtime-context/with-runtime-context (:runtime-context component) f))
+
 (defmethod ig/init-key :xia/db
   [_ {:keys [db-path connect-options]}]
   (ensure-db-dir! db-path)
@@ -84,9 +88,12 @@
      :db-path db-path}))
 
 (defmethod ig/halt-key! :xia/db
-  [_ _]
-  (db/close!)
-  (db/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (db/close!)
+       (db/clear-runtime!))))
 
 (defmethod ig/init-key :xia/runtime-overlay
   [_ {:keys [overlay-path]}]
@@ -100,67 +107,101 @@
 
 (defmethod ig/init-key :xia/runtime-state-runtime
   [_ _]
-  {:runtime (runtime-state/install-runtime! (runtime-state/make-runtime))})
+  (let [runtime (runtime-state/install-runtime! (runtime-state/make-runtime))
+        runtime-context (runtime-context/make {:xia/runtime-state-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/runtime-state-runtime
-  [_ _]
-  (runtime-state/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component runtime-state/clear-runtime!))
 
 (defmethod ig/init-key :xia/retrieval-runtime
   [_ _]
-  {:runtime (retrieval-state/install-runtime! (retrieval-state/make-runtime))})
+  (let [runtime (retrieval-state/install-runtime! (retrieval-state/make-runtime))
+        runtime-context (runtime-context/make {:xia/retrieval-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/retrieval-runtime
-  [_ _]
-  (retrieval-state/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component retrieval-state/clear-runtime!))
 
 (defmethod ig/init-key :xia/oauth-runtime
   [_ _]
-  {:runtime (oauth/install-runtime! (oauth/make-runtime))})
+  (let [runtime (oauth/install-runtime! (oauth/make-runtime))
+        runtime-context (runtime-context/make {:xia/oauth-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/oauth-runtime
-  [_ _]
-  (oauth/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component oauth/clear-runtime!))
 
 (defmethod ig/init-key :xia/browser-runtime
   [_ {:keys [db]}]
-  {:runtime (playwright/install-runtime! (playwright/make-runtime))
-   :db db})
+  (let [runtime (playwright/install-runtime! (playwright/make-runtime))
+        runtime-context (runtime-context/make {:xia/db db
+                                               :xia/browser-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db db}))
 
 (defmethod ig/halt-key! :xia/browser-runtime
-  [_ _]
-  (browser/release-all-sessions!)
-  (playwright/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (browser/release-all-sessions!)
+       (playwright/clear-runtime!))))
 
 (defmethod ig/init-key :xia/working-memory-runtime
   [_ {:keys [async-runtime]}]
-  {:runtime (wm/install-runtime! (wm/make-runtime))})
+  (let [runtime (wm/install-runtime! (wm/make-runtime))
+        runtime-context (runtime-context/make {:xia/async-runtime async-runtime
+                                               :xia/working-memory-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/working-memory-runtime
-  [_ _]
-  (wm/prepare-shutdown!)
-  (wm/snapshot-all!)
-  (wm/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (wm/prepare-shutdown!)
+       (wm/snapshot-all!)
+       (wm/clear-runtime!))))
 
 (defmethod ig/init-key :xia/async-runtime
   [_ {:keys [db]}]
-  {:runtime (async/install-runtime! (async/make-runtime))
-   :db db})
+  (let [runtime (async/install-runtime! (async/make-runtime))
+        runtime-context (runtime-context/make {:xia/db db
+                                               :xia/async-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db db}))
 
 (defmethod ig/halt-key! :xia/async-runtime
-  [_ _]
-  (async/prepare-shutdown!)
-  (async/await-background-tasks!)
-  (async/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (async/prepare-shutdown!)
+       (async/await-background-tasks!)
+       (async/clear-runtime!))))
 
 (defmethod ig/init-key :xia/prompt-runtime
   [_ {:keys [async-runtime]}]
-  {:runtime (prompt/install-runtime! (prompt/make-runtime))
-   :async-runtime async-runtime})
+  (let [runtime (prompt/install-runtime! (prompt/make-runtime))
+        runtime-context (runtime-context/make {:xia/async-runtime async-runtime
+                                               :xia/prompt-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context
+     :async-runtime async-runtime}))
 
 (defmethod ig/halt-key! :xia/prompt-runtime
-  [_ _]
-  (prompt/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component prompt/clear-runtime!))
 
 (defmethod ig/init-key :xia/agent-runtime
   [_ {:keys [db async-runtime]}]
@@ -180,75 +221,111 @@
      :recovered recovered}))
 
 (defmethod ig/halt-key! :xia/agent-runtime
-  [_ _]
-  (agent/cancel-all-sessions! "runtime stopping")
-  (agent/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (agent/cancel-all-sessions! "runtime stopping")
+       (agent/clear-runtime!))))
 
 (defmethod ig/init-key :xia/bridge-runtime
   [_ _]
-  {:runtime (bridge/install-runtime! (bridge/make-runtime))})
+  (let [runtime (bridge/install-runtime! (bridge/make-runtime))
+        runtime-context (runtime-context/make {:xia/bridge-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/bridge-runtime
-  [_ {:keys [runtime]}]
-  (if runtime
-    (bridge/clear-runtime! runtime)
-    (bridge/clear-runtime!)))
+  [_ {:keys [runtime] :as component}]
+  (with-component-runtime-context
+    component
+    #(if runtime
+       (bridge/clear-runtime! runtime)
+       (bridge/clear-runtime!))))
 
 (defmethod ig/init-key :xia/hippocampus-runtime
   [_ {:keys [db llm-runtime]}]
-  {:runtime (hippo/install-runtime! (hippo/make-runtime))
-   :db db
-   :llm-runtime llm-runtime})
+  (let [runtime (hippo/install-runtime! (hippo/make-runtime))
+        runtime-context (runtime-context/make {:xia/db db
+                                               :xia/llm-runtime llm-runtime
+                                               :xia/hippocampus-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db db
+     :llm-runtime llm-runtime}))
 
 (defmethod ig/halt-key! :xia/hippocampus-runtime
-  [_ _]
-  (hippo/prepare-shutdown!)
-  (hippo/await-background-tasks!)
-  (hippo/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (hippo/prepare-shutdown!)
+       (hippo/await-background-tasks!)
+       (hippo/clear-runtime!))))
 
 (defmethod ig/init-key :xia/checkpoint-runtime
   [_ {:keys [db]}]
-  {:runtime (checkpoint/install-runtime! (checkpoint/make-runtime))
-   :db db})
+  (let [runtime (checkpoint/install-runtime! (checkpoint/make-runtime))
+        runtime-context (runtime-context/make {:xia/db db
+                                               :xia/checkpoint-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db db}))
 
 (defmethod ig/halt-key! :xia/checkpoint-runtime
-  [_ _]
-  (checkpoint/prepare-shutdown!)
-  (checkpoint/await-background-tasks!)
-  (checkpoint/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (checkpoint/prepare-shutdown!)
+       (checkpoint/await-background-tasks!)
+       (checkpoint/clear-runtime!))))
 
 (defmethod ig/init-key :xia/llm-runtime
   [_ {:keys [db]}]
-  {:runtime (llm/install-runtime! (llm/make-runtime))
-   :db db})
+  (let [runtime (llm/install-runtime! (llm/make-runtime))
+        runtime-context (runtime-context/make {:xia/db db
+                                               :xia/llm-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context
+     :db db}))
 
 (defmethod ig/halt-key! :xia/llm-runtime
-  [_ _]
-  (llm/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component llm/clear-runtime!))
 
 (defmethod ig/init-key :xia/local-ocr-runtime
   [_ _]
-  {:runtime (local-ocr/install-runtime! (local-ocr/make-runtime))})
+  (let [runtime (local-ocr/install-runtime! (local-ocr/make-runtime))
+        runtime-context (runtime-context/make {:xia/local-ocr-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/local-ocr-runtime
-  [_ _]
-  (local-ocr/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component local-ocr/clear-runtime!))
 
 (defmethod ig/init-key :xia/service-runtime
   [_ _]
-  {:runtime (service/install-runtime! (service/make-runtime))})
+  (let [runtime (service/install-runtime! (service/make-runtime))
+        runtime-context (runtime-context/make {:xia/service-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/service-runtime
-  [_ _]
-  (service/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component service/clear-runtime!))
 
 (defmethod ig/init-key :xia/web-runtime
   [_ _]
-  {:runtime (web/install-runtime! (web/make-runtime))})
+  (let [runtime (web/install-runtime! (web/make-runtime))
+        runtime-context (runtime-context/make {:xia/web-runtime {:runtime runtime}})]
+    {:runtime runtime
+     :runtime-context runtime-context}))
 
 (defmethod ig/halt-key! :xia/web-runtime
-  [_ _]
-  (web/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component web/clear-runtime!))
 
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay runtime-state-runtime retrieval-runtime oauth-runtime
@@ -292,10 +369,12 @@
      :runtime-support runtime-support}))
 
 (defmethod ig/halt-key! :xia/http-runtime
-  [_ {:keys [runtime]}]
-  (if runtime
-    (http/clear-runtime! runtime)
-    (http/clear-runtime!)))
+  [_ {:keys [runtime] :as component}]
+  (with-component-runtime-context
+    component
+    #(if runtime
+       (http/clear-runtime! runtime)
+       (http/clear-runtime!))))
 
 (defmethod ig/init-key :xia/sci-runtime
   [_ {:keys [db runtime-support]}]
@@ -309,8 +388,8 @@
      :db db}))
 
 (defmethod ig/halt-key! :xia/sci-runtime
-  [_ _]
-  (sci-env/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component sci-env/clear-runtime!))
 
 (defmethod ig/init-key :xia/instance-supervisor
   [_ {:keys [db runtime-support enabled? command]}]
@@ -331,8 +410,8 @@
      :command command}))
 
 (defmethod ig/halt-key! :xia/instance-supervisor
-  [_ _]
-  (instance-supervisor/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component instance-supervisor/clear-runtime!))
 
 (defmethod ig/init-key :xia/bootstrap
   [_ {:keys [db overlay runtime-support instance-supervisor db-path instance template-instance
@@ -398,8 +477,8 @@
      :sci-runtime sci-runtime}))
 
 (defmethod ig/halt-key! :xia/tool-runtime
-  [_ _]
-  (tool/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component tool/clear-runtime!))
 
 (defmethod ig/init-key :xia/scheduler
   [_ {:keys [tool-runtime runtime-support]}]
@@ -416,9 +495,12 @@
      :tool-runtime tool-runtime}))
 
 (defmethod ig/halt-key! :xia/scheduler
-  [_ _]
-  (scheduler/stop!)
-  (scheduler/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (scheduler/stop!)
+       (scheduler/clear-runtime!))))
 
 (defmethod ig/init-key :xia/messaging
   [_ {:keys [runtime-support]}]
@@ -434,8 +516,8 @@
      :runtime-support runtime-support}))
 
 (defmethod ig/halt-key! :xia/messaging
-  [_ _]
-  (messaging/clear-runtime!))
+  [_ component]
+  (with-component-runtime-context component messaging/clear-runtime!))
 
 (defmethod ig/init-key :xia/http
   [_ {:keys [http-runtime scheduler messaging bind-host port web-dev?]}]
@@ -445,13 +527,16 @@
          (http/start! bind-host port {:web-dev? (true? web-dev?)})
          {:http-runtime http-runtime
           :runtime runtime
+          :runtime-context (:runtime-context http-runtime)
           :scheduler scheduler
           :messaging messaging
           :bind-host bind-host
           :port (or (http/current-port) port)}))))
 
 (defmethod ig/halt-key! :xia/http
-  [_ {:keys [runtime]}]
-  (if runtime
-    (http/stop! runtime)
-    (http/stop!)))
+  [_ {:keys [runtime] :as component}]
+  (with-component-runtime-context
+    component
+    #(if runtime
+       (http/stop! runtime)
+       (http/stop!))))

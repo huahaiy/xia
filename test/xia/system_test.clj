@@ -74,6 +74,22 @@
                (:tool-runtime @observed)))
         (is (some? (:runtime-context (:runtime component))))))))
 
+(deftest scheduler-halt-binds-component-runtime-context
+  (let [runtime  {:runtime-name :scheduler}
+        context  (runtime-context/make {:xia/scheduler {:runtime runtime}})
+        observed (atom [])]
+    (with-redefs [xia.scheduler/stop! (fn []
+                                        (swap! observed conj
+                                               [:stop (runtime-context/runtime :xia/scheduler)]))
+                  xia.scheduler/clear-runtime! (fn []
+                                                 (swap! observed conj
+                                                        [:clear (runtime-context/runtime :xia/scheduler)]))]
+      (ig/halt-key! :xia/scheduler {:runtime runtime
+                                     :runtime-context context}))
+    (is (= [[:stop runtime]
+            [:clear runtime]]
+           @observed))))
+
 (deftest runtime-components-own-shutdown-work
   (let [calls (atom [])]
     (with-redefs [xia.agent/cancel-all-sessions! (fn [reason]
