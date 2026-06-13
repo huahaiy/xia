@@ -7,6 +7,7 @@
             [datalevin.llm :as llm]
             [taoensso.timbre :as timbre]
             [xia.agent :as agent]
+            [xia.agent.fact-review :as fact-review]
             [xia.async :as async]
             [xia.bridge :as bridge]
             [xia.browser.playwright :as playwright]
@@ -19,6 +20,7 @@
             [xia.llm :as xia-llm]
             [xia.local-ocr :as local-ocr]
             [xia.oauth :as oauth]
+            [xia.permission :as permission]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-context :as runtime-context]
@@ -312,6 +314,8 @@
     (http/clear-runtime!)
     (bridge/clear-runtime!)
     (agent/clear-runtime!)
+    (fact-review/clear-runtime!)
+    (permission/clear-runtime!)
     (prompt/clear-runtime!)
     (async/clear-runtime!)
     (wm/clear-runtime!)
@@ -322,11 +326,13 @@
           browser-runtime       (playwright/make-runtime)
           async-runtime         (async/make-runtime)
           prompt-runtime        (prompt/make-runtime)
+          fact-review-runtime   (fact-review/make-runtime)
           agent-runtime         (agent/make-runtime)
           bridge-runtime        (bridge/make-runtime)
           http-runtime          (http/make-runtime)
           instance-runtime      (instance-supervisor/make-runtime)
           sci-runtime           (sci-env/make-runtime)
+          permission-runtime    (permission/make-runtime)
           tool-runtime          (tool/make-runtime)
           scheduler-runtime     (scheduler/make-runtime)
           wm-runtime            (wm/make-runtime)
@@ -345,11 +351,13 @@
                                    :xia/browser-runtime       {:runtime browser-runtime}
                                    :xia/async-runtime         {:runtime async-runtime}
                                    :xia/prompt-runtime        {:runtime prompt-runtime}
+                                   :xia/fact-review-runtime   {:runtime fact-review-runtime}
                                    :xia/agent-runtime         {:runtime agent-runtime}
                                    :xia/bridge-runtime        {:runtime bridge-runtime}
                                    :xia/http-runtime          {:runtime http-runtime}
                                    :xia/instance-supervisor   {:runtime instance-runtime}
                                    :xia/sci-runtime           {:runtime sci-runtime}
+                                   :xia/permission-runtime    {:runtime permission-runtime}
                                    :xia/tool-runtime          {:runtime tool-runtime}
                                    :xia/scheduler             {:runtime scheduler-runtime}
                                    :xia/working-memory-runtime {:runtime wm-runtime}
@@ -393,6 +401,8 @@
              (http/clear-runtime!)
              (bridge/clear-runtime!)
              (agent/clear-runtime!)
+             (fact-review/clear-runtime!)
+             (permission/clear-runtime!)
              (prompt/clear-runtime!)
              (async/clear-runtime!)
              (wm/clear-runtime!)

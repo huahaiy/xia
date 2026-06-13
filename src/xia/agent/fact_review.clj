@@ -22,7 +22,7 @@
   []
   (or (maybe-current-runtime)
       (throw (ex-info "Fact review runtime is not installed"
-                      {:component :xia/agent-runtime}))))
+                      {:component :xia/fact-review-runtime}))))
 
 (defn- fact-utility-review-state
   []

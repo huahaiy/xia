@@ -37,8 +37,7 @@
 
 (defn make-runtime
   []
-  (assoc (run-state/make-runtime)
-         :fact-review-runtime (fact-review/make-runtime)))
+  (run-state/make-runtime))
 
 (defn- maybe-current-runtime
   []
@@ -231,7 +230,6 @@
 
 (defn clear-runtime!
   []
-  (fact-review/clear-runtime!)
   (when-let [runtime (maybe-current-runtime)]
     (run-state/clear-runtime-state! runtime))
   nil)

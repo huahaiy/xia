@@ -297,13 +297,17 @@
      :xia/prompt-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
 
+     :xia/fact-review-runtime
+     {}
+
      :xia/agent-runtime
      {:db (ig/ref :xia/db)
       :async-runtime (ig/ref :xia/async-runtime)
       :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)
       :prompt-runtime (ig/ref :xia/prompt-runtime)
       :working-memory-runtime (ig/ref :xia/working-memory-runtime)
-      :llm-runtime (ig/ref :xia/llm-runtime)}
+      :llm-runtime (ig/ref :xia/llm-runtime)
+      :fact-review-runtime (ig/ref :xia/fact-review-runtime)}
 
      :xia/working-memory-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
@@ -330,6 +334,9 @@
      :xia/web-runtime
      {}
 
+     :xia/permission-runtime
+     {}
+
      :xia/runtime-support
      {:db (ig/ref :xia/db)
       :overlay (ig/ref :xia/runtime-overlay)
@@ -339,6 +346,7 @@
       :browser-runtime (ig/ref :xia/browser-runtime)
       :async-runtime (ig/ref :xia/async-runtime)
       :prompt-runtime (ig/ref :xia/prompt-runtime)
+      :fact-review-runtime (ig/ref :xia/fact-review-runtime)
       :agent-runtime (ig/ref :xia/agent-runtime)
       :working-memory-runtime (ig/ref :xia/working-memory-runtime)
       :bridge-runtime (ig/ref :xia/bridge-runtime)
@@ -347,7 +355,8 @@
       :llm-runtime (ig/ref :xia/llm-runtime)
       :local-ocr-runtime (ig/ref :xia/local-ocr-runtime)
       :service-runtime (ig/ref :xia/service-runtime)
-      :web-runtime (ig/ref :xia/web-runtime)}
+      :web-runtime (ig/ref :xia/web-runtime)
+      :permission-runtime (ig/ref :xia/permission-runtime)}
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)
@@ -381,7 +390,8 @@
       :db (ig/ref :xia/db)
       :llm-runtime (ig/ref :xia/llm-runtime)
       :prompt-runtime (ig/ref :xia/prompt-runtime)
-      :working-memory-runtime (ig/ref :xia/working-memory-runtime)}
+      :working-memory-runtime (ig/ref :xia/working-memory-runtime)
+      :permission-runtime (ig/ref :xia/permission-runtime)}
 
      :xia/scheduler
      {:tool-runtime (ig/ref :xia/tool-runtime)

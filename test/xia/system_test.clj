@@ -92,14 +92,14 @@
         (runtime-context/with-runtime-context context #(xia.async/clear-runtime!))))))
 
 (deftest agent-init-binds-direct-runtime-dependencies-for-recovery
-  (let [agent-runtime {:runtime-name :agent
-                       :fact-review-runtime {:runtime-name :fact-review}}
+  (let [agent-runtime {:runtime-name :agent}
         db {:runtime {:runtime-name :db}}
         async-runtime {:runtime {:runtime-name :async}}
         runtime-state-runtime {:runtime {:runtime-name :runtime-state}}
         prompt-runtime {:runtime {:runtime-name :prompt}}
         working-memory-runtime {:runtime {:runtime-name :working-memory}}
         llm-runtime {:runtime {:runtime-name :llm}}
+        fact-review-runtime {:runtime {:runtime-name :fact-review}}
         observed (atom nil)]
     (with-redefs [xia.agent/make-runtime (fn [] agent-runtime)
                   xia.agent/recover-runtime-tasks! (fn []
@@ -119,11 +119,12 @@
                                     :runtime-state-runtime runtime-state-runtime
                                     :prompt-runtime prompt-runtime
                                     :working-memory-runtime working-memory-runtime
-                                    :llm-runtime llm-runtime})]
+                                    :llm-runtime llm-runtime
+                                    :fact-review-runtime fact-review-runtime})]
         (is (= agent-runtime
                (dissoc (:runtime component) :runtime-context)))
         (is (= {:agent agent-runtime
-                :fact-review (:fact-review-runtime agent-runtime)
+                :fact-review (:runtime fact-review-runtime)
                 :db (:runtime db)
                 :async (:runtime async-runtime)
                 :runtime-state (:runtime runtime-state-runtime)
@@ -209,14 +210,14 @@
                (:async-runtime @observed)))))))
 
 (deftest tool-init-binds-direct-runtime-dependencies
-  (let [tool-runtime {:registry (atom {})
-                      :permission-runtime {:runtime-name :permission}}
+  (let [tool-runtime {:registry (atom {})}
         db {:runtime {:runtime-name :db}}
         sci-runtime {:runtime {:runtime-name :sci}}
         instance-supervisor {:runtime {:runtime-name :instance-supervisor}}
         llm-runtime {:runtime {:runtime-name :llm}}
         prompt-runtime {:runtime {:runtime-name :prompt}}
         working-memory-runtime {:runtime {:runtime-name :working-memory}}
+        permission-runtime {:runtime {:runtime-name :permission}}
         support (runtime-context/make {})
         observed (atom [])]
     (with-redefs [xia.tool/make-runtime (fn [] tool-runtime)
@@ -242,7 +243,8 @@
                                     :db db
                                     :llm-runtime llm-runtime
                                     :prompt-runtime prompt-runtime
-                                    :working-memory-runtime working-memory-runtime})]
+                                    :working-memory-runtime working-memory-runtime
+                                    :permission-runtime permission-runtime})]
         (is (= tool-runtime
                (dissoc (:runtime component) :runtime-context)))
         (is (= [[:ensure {:db (:runtime db)
@@ -251,7 +253,7 @@
                           :llm (:runtime llm-runtime)
                           :prompt (:runtime prompt-runtime)
                           :working-memory (:runtime working-memory-runtime)
-                          :permission (:permission-runtime tool-runtime)}]
+                          :permission (:runtime permission-runtime)}]
                 :load]
                @observed))
         (is (= (:runtime db)
@@ -311,6 +313,7 @@
             (let [db-component            {:runtime {:runtime-name :db}}
                   async-component         {:runtime {:runtime-name :async}}
                   runtime-state-component {:runtime {:runtime-name :runtime-state}}
+                  fact-review-component   {:runtime {:runtime-name :fact-review}}
                   bridge-component        {:runtime {:runtime-name :bridge}}
                   oauth-component         {:runtime {:runtime-name :oauth}}
                   llm-component           {:runtime {:runtime-name :llm}}
@@ -318,10 +321,13 @@
                   wm-component            {:runtime {:runtime-name :working-memory}}
                   sci-component           {:runtime {:runtime-name :sci}}
                   instance-component      {:runtime {:runtime-name :instance-supervisor}}
+                  permission-component    {:runtime {:runtime-name :permission}}
                   tool-component          {:runtime {:runtime-name :tool}}
                   runtime-support  (runtime-context/make
                                       {:xia/db db-component
                                        :xia/async-runtime async-component
+                                       :xia/fact-review-runtime fact-review-component
+                                       :xia/permission-runtime permission-component
                                        :xia/tool-runtime tool-component})]
               [[:xia/db {:db-path "/tmp/xia-system-test.db"
                          :connect-options {}}]
@@ -335,7 +341,9 @@
                                      :runtime-state-runtime runtime-state-component
                                      :prompt-runtime prompt-component
                                      :working-memory-runtime wm-component
-                                     :llm-runtime llm-component}]
+                                     :llm-runtime llm-component
+                                     :fact-review-runtime fact-review-component}]
+               [:xia/fact-review-runtime nil]
                [:xia/working-memory-runtime {:async-runtime async-component}]
                [:xia/prompt-runtime {:async-runtime async-component}]
                [:xia/bridge-runtime nil]
@@ -348,7 +356,9 @@
                                     :db db-component
                                     :llm-runtime llm-component
                                     :prompt-runtime prompt-component
-                                    :working-memory-runtime wm-component}]
+                                    :working-memory-runtime wm-component
+                                    :permission-runtime permission-component}]
+               [:xia/permission-runtime nil]
                [:xia/instance-supervisor {:db db-component
                                            :runtime-support runtime-support
                                            :enabled? false}]
@@ -498,6 +508,8 @@
                                                    0)
                   xia.agent/clear-runtime! (fn []
                                              (swap! calls conj :agent-clear))
+                  xia.agent.fact-review/clear-runtime! (fn []
+                                                         (swap! calls conj :fact-review-clear))
                   xia.browser/release-all-sessions! (fn []
                                                      (swap! calls conj :browser-release-all)
                                                      nil)
@@ -538,8 +550,11 @@
                   xia.instance-supervisor/clear-runtime! (fn []
                                                            (swap! calls conj :instance-supervisor-clear))
                   xia.tool/clear-runtime! (fn []
-                                            (swap! calls conj :tool-clear))]
+                                            (swap! calls conj :tool-clear))
+                  xia.permission/clear-runtime! (fn []
+                                                  (swap! calls conj :permission-clear))]
       (ig/halt-key! :xia/agent-runtime nil)
+      (ig/halt-key! :xia/fact-review-runtime nil)
       (ig/halt-key! :xia/browser-runtime nil)
       (ig/halt-key! :xia/async-runtime nil)
       (ig/halt-key! :xia/hippocampus-runtime nil)
@@ -550,9 +565,11 @@
       (ig/halt-key! :xia/web-runtime nil)
       (ig/halt-key! :xia/sci-runtime nil)
       (ig/halt-key! :xia/instance-supervisor nil)
-      (ig/halt-key! :xia/tool-runtime nil))
+      (ig/halt-key! :xia/tool-runtime nil)
+      (ig/halt-key! :xia/permission-runtime nil))
     (is (= [[:cancel-all "runtime stopping"]
             :agent-clear
+            :fact-review-clear
             :browser-release-all
             :playwright-clear
             :async-prepare
@@ -570,7 +587,8 @@
             :web-clear
             :sci-clear
             :instance-supervisor-clear
-            :tool-clear]
+            :tool-clear
+            :permission-clear]
            @calls))))
 
 (deftest async-runtime-shutdown-drains-accepted-work-and-rejects-new-work

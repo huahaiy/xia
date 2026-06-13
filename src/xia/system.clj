@@ -4,6 +4,7 @@
             [integrant.core :as ig]
             [taoensso.timbre :as log]
             [xia.agent :as agent]
+            [xia.agent.fact-review :as fact-review]
             [xia.async :as async]
             [xia.browser :as browser]
             [xia.bridge :as bridge]
@@ -18,6 +19,7 @@
             [xia.local-ocr :as local-ocr]
             [xia.oauth :as oauth]
             [xia.paths :as paths]
+            [xia.permission :as permission]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-context :as runtime-context]
@@ -203,9 +205,18 @@
   [_ component]
   (with-component-runtime-context component prompt/clear-runtime!))
 
+(defmethod ig/init-key :xia/fact-review-runtime
+  [_ _]
+  (standalone-runtime-component :xia/fact-review-runtime
+                                (fact-review/make-runtime)))
+
+(defmethod ig/halt-key! :xia/fact-review-runtime
+  [_ component]
+  (with-component-runtime-context component fact-review/clear-runtime!))
+
 (defmethod ig/init-key :xia/agent-runtime
   [_ {:keys [db async-runtime runtime-state-runtime prompt-runtime working-memory-runtime
-             llm-runtime]}]
+             llm-runtime fact-review-runtime]}]
   (let [runtime         (agent/make-runtime)
         runtime-context (runtime-context/make {:xia/db db
                                                :xia/async-runtime async-runtime
@@ -213,6 +224,7 @@
                                                :xia/prompt-runtime prompt-runtime
                                                :xia/working-memory-runtime working-memory-runtime
                                                :xia/llm-runtime llm-runtime
+                                               :xia/fact-review-runtime fact-review-runtime
                                                :xia/agent-runtime {:runtime runtime}})
         recovered       (runtime-context/with-runtime-context
                           runtime-context
@@ -227,6 +239,7 @@
      :prompt-runtime prompt-runtime
      :working-memory-runtime working-memory-runtime
      :llm-runtime llm-runtime
+     :fact-review-runtime fact-review-runtime
      :recovered recovered}))
 
 (defmethod ig/halt-key! :xia/agent-runtime
@@ -328,12 +341,21 @@
   [_ component]
   (with-component-runtime-context component web/clear-runtime!))
 
+(defmethod ig/init-key :xia/permission-runtime
+  [_ _]
+  (standalone-runtime-component :xia/permission-runtime
+                                (permission/make-runtime)))
+
+(defmethod ig/halt-key! :xia/permission-runtime
+  [_ component]
+  (with-component-runtime-context component permission/clear-runtime!))
+
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay runtime-state-runtime retrieval-runtime oauth-runtime
              browser-runtime async-runtime prompt-runtime agent-runtime
              working-memory-runtime bridge-runtime hippocampus-runtime
              checkpoint-runtime llm-runtime local-ocr-runtime
-             service-runtime web-runtime]}]
+             service-runtime web-runtime fact-review-runtime permission-runtime]}]
   (runtime-context/make
     {:xia/db db
      :xia/runtime-overlay overlay
@@ -343,6 +365,7 @@
      :xia/browser-runtime browser-runtime
      :xia/async-runtime async-runtime
      :xia/prompt-runtime prompt-runtime
+     :xia/fact-review-runtime fact-review-runtime
      :xia/agent-runtime agent-runtime
      :xia/working-memory-runtime working-memory-runtime
      :xia/bridge-runtime bridge-runtime
@@ -351,7 +374,8 @@
      :xia/llm-runtime llm-runtime
      :xia/local-ocr-runtime local-ocr-runtime
      :xia/service-runtime service-runtime
-     :xia/web-runtime web-runtime}))
+     :xia/web-runtime web-runtime
+     :xia/permission-runtime permission-runtime}))
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
@@ -460,7 +484,7 @@
 
 (defmethod ig/init-key :xia/tool-runtime
   [_ {:keys [identity sci-runtime runtime-support instance-supervisor db llm-runtime
-             prompt-runtime working-memory-runtime]}]
+             prompt-runtime working-memory-runtime permission-runtime]}]
   (let [runtime       (tool/make-runtime)
         runtime-context (-> runtime-support
                             (runtime-context/assoc-component :xia/sci-runtime sci-runtime)
@@ -469,6 +493,7 @@
                             (runtime-context/assoc-component :xia/llm-runtime llm-runtime)
                             (runtime-context/assoc-component :xia/prompt-runtime prompt-runtime)
                             (runtime-context/assoc-component :xia/working-memory-runtime working-memory-runtime)
+                            (runtime-context/assoc-component :xia/permission-runtime permission-runtime)
                             (runtime-context/assoc-component :xia/tool-runtime {:runtime runtime}))
         runtime       (assoc runtime :runtime-context runtime-context)
         bundled-count (runtime-context/with-runtime-context
@@ -489,7 +514,8 @@
      :db db
      :llm-runtime llm-runtime
      :prompt-runtime prompt-runtime
-     :working-memory-runtime working-memory-runtime}))
+     :working-memory-runtime working-memory-runtime
+     :permission-runtime permission-runtime}))
 
 (defmethod ig/halt-key! :xia/tool-runtime
   [_ component]

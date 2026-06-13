@@ -34,8 +34,7 @@
 
 (defn make-runtime
   []
-  {:registry (atom {})
-   :permission-runtime (permission/make-runtime)})
+  {:registry (atom {})})
 
 (defn- maybe-current-runtime
   []
@@ -289,14 +288,12 @@
 (defn reset-runtime!
   "Clear runtime-only tool state so a fresh load can rebuild handlers."
   []
-  (reset! (registry) {})
-  (permission/reset-runtime!))
+  (reset! (registry) {}))
 
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (reset-runtime!)
-    (permission/clear-runtime!))
+    (reset-runtime!))
   nil)
 
 (defn clear-session-approvals!

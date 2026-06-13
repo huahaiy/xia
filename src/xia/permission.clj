@@ -25,7 +25,7 @@
   []
   (or (maybe-current-runtime)
       (throw (ex-info "Permission runtime is not installed"
-                      {:component :xia/tool-runtime}))))
+                      {:component :xia/permission-runtime}))))
 
 (defn- session-grants
   []
