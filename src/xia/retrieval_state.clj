@@ -3,9 +3,7 @@
    working memory only when search-visible state actually changed."
   (:require [xia.runtime-context :as runtime-context]))
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/retrieval-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -15,8 +13,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -28,22 +25,12 @@
   []
   (:retrieval-state-atom (current-runtime)))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
     (reset! (:retrieval-state-atom runtime)
             {:knowledge-epoch 0
-             :local-doc-epochs {}})
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+             :local-doc-epochs {}}))
   nil)
 
 (defn reset-runtime!

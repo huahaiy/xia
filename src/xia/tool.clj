@@ -30,9 +30,7 @@
 ;; Tool registry (runtime — compiled handlers)
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/tool-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -41,8 +39,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -295,21 +292,10 @@
   (reset! (registry) {})
   (permission/reset-runtime!))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (permission/install-runtime! (:permission-runtime runtime))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
     (reset-runtime!)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil))
     (permission/clear-runtime!))
   nil)
 

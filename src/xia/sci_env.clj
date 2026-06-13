@@ -46,9 +46,7 @@
 (def ^:private reader-eof (Object.))
 
 (def ^:dynamic *sci-timeout-state* nil)
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/sci-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -59,8 +57,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -591,15 +588,6 @@
   (reset! (current-ctx-atom) (make-ctx))
   nil)
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  (runtime-context/without-runtime-context reset-runtime!)
-  runtime)
-
 (defn- sci-worker-thread
   [worker-id stage timeout-ms f result*]
   (let [runner (bound-fn*
@@ -655,9 +643,7 @@
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (prepare-shutdown!)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (prepare-shutdown!))
   nil)
 
 (defn- call-with-timeout

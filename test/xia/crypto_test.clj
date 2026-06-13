@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [xia.crypto :as crypto]
             [xia.db :as db]
+            [xia.runtime-context :as runtime-context]
             [xia.test-helpers :as th])
   (:import [java.nio.file Files LinkOption Paths]
            [java.nio.file.attribute FileAttribute PosixFilePermissions]))
@@ -105,13 +106,17 @@
   (let [db-path (temp-db-path)]
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
       #(do
-         (db/install-runtime! (db/make-runtime))
-         (try
-           (db/connect! db-path (th/test-connect-options
-                                  {:passphrase-provider (constantly "db-passphrase")}))
-           (is (= :prompt-passphrase (:source (crypto/current-key-source))))
-           (finally
-             (db/clear-runtime!)))))))
+         (let [context (runtime-context/make
+                         {:xia/db {:runtime (db/make-runtime)}})]
+           (try
+             (runtime-context/with-runtime-context
+               context
+               (fn []
+                 (db/connect! db-path (th/test-connect-options
+                                        {:passphrase-provider (constantly "db-passphrase")}))
+                 (is (= :prompt-passphrase (:source (crypto/current-key-source))))))
+             (finally
+               (runtime-context/with-runtime-context context db/clear-runtime!))))))))
 
 (deftest configure-accepts-explicit-key-file
   (let [db-path  (temp-db-path)

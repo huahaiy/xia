@@ -214,8 +214,10 @@
 
 (defn- current-runtime-context
   []
-  (or (:runtime-context @runtime-system-atom)
-      (get-in @runtime-system-atom [:system :xia/runtime-support])))
+  (let [system-context (or (:runtime-context @runtime-system-atom)
+                           (get-in @runtime-system-atom [:system :xia/runtime-support]))
+        bound-context  (runtime-context/current)]
+    (runtime-context/merge-contexts bound-context system-context)))
 
 (defn- with-current-runtime-context
   [f]
@@ -297,7 +299,11 @@
 
      :xia/agent-runtime
      {:db (ig/ref :xia/db)
-      :async-runtime (ig/ref :xia/async-runtime)}
+      :async-runtime (ig/ref :xia/async-runtime)
+      :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)
+      :prompt-runtime (ig/ref :xia/prompt-runtime)
+      :working-memory-runtime (ig/ref :xia/working-memory-runtime)
+      :llm-runtime (ig/ref :xia/llm-runtime)}
 
      :xia/working-memory-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
@@ -370,14 +376,28 @@
      :xia/tool-runtime
      {:identity (ig/ref :xia/identity)
       :sci-runtime (ig/ref :xia/sci-runtime)
-      :runtime-support (ig/ref :xia/runtime-support)}
+      :runtime-support (ig/ref :xia/runtime-support)
+      :instance-supervisor (ig/ref :xia/instance-supervisor)
+      :db (ig/ref :xia/db)
+      :llm-runtime (ig/ref :xia/llm-runtime)
+      :prompt-runtime (ig/ref :xia/prompt-runtime)
+      :working-memory-runtime (ig/ref :xia/working-memory-runtime)}
 
      :xia/scheduler
      {:tool-runtime (ig/ref :xia/tool-runtime)
-      :runtime-support (ig/ref :xia/runtime-support)}
+      :runtime-support (ig/ref :xia/runtime-support)
+      :instance-supervisor (ig/ref :xia/instance-supervisor)
+      :bridge-runtime (ig/ref :xia/bridge-runtime)
+      :oauth-runtime (ig/ref :xia/oauth-runtime)
+      :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)}
 
      :xia/messaging
-     {:runtime-support (ig/ref :xia/runtime-support)}
+     {:runtime-support (ig/ref :xia/runtime-support)
+      :instance-supervisor (ig/ref :xia/instance-supervisor)
+      :db (ig/ref :xia/db)
+      :bridge-runtime (ig/ref :xia/bridge-runtime)
+      :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)
+      :async-runtime (ig/ref :xia/async-runtime)}
 
      :xia/http-runtime
      {:runtime-support (ig/ref :xia/runtime-support)}
@@ -386,6 +406,10 @@
      {:http-runtime (ig/ref :xia/http-runtime)
       :scheduler (ig/ref :xia/scheduler)
       :messaging (ig/ref :xia/messaging)
+      :instance-supervisor (ig/ref :xia/instance-supervisor)
+      :db (ig/ref :xia/db)
+      :bridge-runtime (ig/ref :xia/bridge-runtime)
+      :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)
       :bind-host bind
       :port port
       :web-dev? web-dev}

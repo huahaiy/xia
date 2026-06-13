@@ -28,9 +28,7 @@
 (def ^:private action-settle-ms 1200)
 (def ^:private session-snapshot-lock-count 256)
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/browser-runtime)
-(declare clear-runtime!)
 
 (defn- empty-runtime-state
   []
@@ -53,8 +51,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -1376,22 +1373,12 @@
   [ops]
   (->PlaywrightBackend ops))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
     (stop-runtime!)
     (.clear ^ConcurrentHashMap (:sessions runtime))
-    (reset! (:runtime-atom runtime) (empty-runtime-state))
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset! (:runtime-atom runtime) (empty-runtime-state)))
   nil)
 
 (defn reset-runtime!

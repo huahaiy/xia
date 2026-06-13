@@ -32,11 +32,8 @@
             [xia.working-memory :as wm])
   (:import [java.util.concurrent Future TimeUnit TimeoutException]))
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/agent-runtime)
 (def ^:dynamic *turn-limit-state* nil)
-
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -45,8 +42,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -233,22 +229,11 @@
   []
   (run-state/runtime-activity (current-runtime)))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (fact-review/install-runtime! (:fact-review-runtime runtime))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (fact-review/clear-runtime!)
   (when-let [runtime (maybe-current-runtime)]
-    (run-state/clear-runtime-state! runtime)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (run-state/clear-runtime-state! runtime))
   nil)
 
 (defn session-cancelled?

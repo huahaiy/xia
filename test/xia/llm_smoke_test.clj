@@ -1,15 +1,17 @@
 (ns xia.llm-smoke-test
   (:require [clojure.test :refer :all]
-            [xia.llm :as llm]))
+            [xia.llm :as llm]
+            [xia.runtime-context :as runtime-context]))
 
 (use-fixtures :each
   (fn [f]
     (llm/clear-runtime!)
-    (llm/install-runtime! (llm/make-runtime))
-    (try
-      (f)
-      (finally
-        (llm/clear-runtime!)))))
+    (let [context (runtime-context/make
+                    {:xia/llm-runtime {:runtime (llm/make-runtime)}})]
+      (try
+        (runtime-context/with-runtime-context context f)
+        (finally
+          (runtime-context/with-runtime-context context llm/clear-runtime!))))))
 
 (deftest provider-access-mode-normalizes-runtime-model
   (is (= :api

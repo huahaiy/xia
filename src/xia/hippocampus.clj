@@ -86,9 +86,7 @@ Rules:
    :tasks #{}
    :stats (runtime-stats-template)})
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/hippocampus-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -99,8 +97,7 @@ Rules:
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -714,20 +711,10 @@ Rules:
     (reset! (background-consolidation-state-atom)
             (background-consolidation-state-template))))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (reset-runtime!)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset-runtime!))
   nil)
 
 (defn prepare-shutdown!

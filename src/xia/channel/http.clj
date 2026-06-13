@@ -34,13 +34,12 @@
 ;; State
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:dynamic ^:private *runtime* nil)
 (def ^:private runtime-context-key :xia/http-runtime)
 
 (def ^:private session-finalize-lock-count session-life/default-finalize-lock-count)
 (def ^:private http-port-search-limit 100)
-(declare install-runtime! clear-runtime!)
+(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -68,8 +67,7 @@
 (defn- maybe-current-runtime
   []
   (or *runtime*
-      (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+      (runtime-context/runtime runtime-context-key)))
 
 (defn- current-runtime
   []
@@ -82,8 +80,9 @@
    This lets Integrant own runtime maps while legacy helpers still resolve the
    current runtime through one compatibility point."
   [runtime f]
-  (let [context (or (:runtime-context runtime)
-                    (runtime-context/current))]
+  (let [context (runtime-context/merge-contexts
+                  (runtime-context/current)
+                  (:runtime-context runtime))]
     (binding [*runtime* runtime]
       (runtime-context/with-runtime-context context f))))
 
@@ -1053,14 +1052,6 @@
         (reset! (server-atom) nil)
         (log/info "Server stopped")))))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (clear-runtime! current)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   ([]
    (when-let [runtime (maybe-current-runtime)]
@@ -1090,7 +1081,5 @@
           (reset-runtime-command-auth! runtime)
           (reset-runtime-managed-proxy-auth! runtime)
           (reset! (:rest-session-finalizer-executor-atom runtime) nil)
-          (reset! (:rest-session-finalizers-atom runtime) {})))
-     (when (identical? runtime @installed-runtime-atom)
-       (reset! installed-runtime-atom nil)))
+          (reset! (:rest-session-finalizers-atom runtime) {}))))
    nil))

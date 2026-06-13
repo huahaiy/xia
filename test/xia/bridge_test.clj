@@ -7,6 +7,7 @@
             [xia.db :as db]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
+            [xia.runtime-context :as runtime-context]
             [xia.session-lifecycle :as session-life]
             [xia.task-event :as task-event]
             [xia.task-inspection :as task-inspection]
@@ -377,21 +378,27 @@
     (bridge/unregister-task-runtime-event-subscriber! store task-id "subscriber-1")
     (is (empty? @subscribers-atom))))
 
-(deftest bridge-runtime-owns-default-task-runtime-event-store
-  (let [runtime (bridge/install-runtime! (bridge/make-runtime))]
+(deftest bridge-runtime-context-owns-default-task-runtime-event-store
+  (let [runtime (bridge/make-runtime)
+        context (runtime-context/assoc-component
+                  (runtime-context/current)
+                  :xia/bridge-runtime
+                  {:runtime runtime})]
     (try
-      (let [store (bridge/runtime-event-store)
-            task-id (random-uuid)
-            event (bridge/handle-task-runtime-event!
-                   store
-                   {:type :task.status
-                    :task-id task-id
-                    :summary "working"
-                    :data {:state :running}})]
-        (is (= [event]
-               (:events (bridge/task-runtime-events-after store task-id 0))))
-        (is (= event
-               (bridge/latest-task-runtime-status-event store task-id))))
+      (runtime-context/with-runtime-context
+        context
+        #(let [store (bridge/runtime-event-store)
+               task-id (random-uuid)
+               event (bridge/handle-task-runtime-event!
+                      store
+                      {:type :task.status
+                       :task-id task-id
+                       :summary "working"
+                       :data {:state :running}})]
+           (is (= [event]
+                  (:events (bridge/task-runtime-events-after store task-id 0))))
+           (is (= event
+                  (bridge/latest-task-runtime-status-event store task-id)))))
       (finally
         (bridge/clear-runtime! runtime)))))
 

@@ -57,9 +57,7 @@
     :label "Fact Utility"
     :description "Post-response rating of which retrieved facts were useful."
     :async? true}])
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/llm-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -73,8 +71,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -136,21 +133,11 @@
   (reset-runtime-state!)
   (llm-routing/reset-runtime! (async-log-lock) (async-log-state)))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   "Fully clear in-memory LLM runtime state."
   []
   (when-let [runtime (maybe-current-runtime)]
-    (reset-runtime!)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset-runtime!))
   nil)
 
 (defn prepare-shutdown!

@@ -50,10 +50,7 @@
 ;; Connection management
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/db)
-
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -67,8 +64,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -583,14 +579,6 @@
   []
   (some-> (maybe-conn-atom) deref some?))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn- not-connected-ex?
   [ex]
   (and (instance? clojure.lang.ExceptionInfo ex)
@@ -689,9 +677,7 @@
     (close!)
     (doseq [state-atom [(:last-connect-event-atom runtime)
                         (:last-close-event-atom runtime)]]
-      (reset! state-atom nil))
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+      (reset! state-atom nil)))
   nil)
 
 ;; ---------------------------------------------------------------------------

@@ -25,9 +25,7 @@
 ;; State
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/scheduler)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -41,8 +39,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -544,14 +541,6 @@
   (reset! (last-maintenance-at-atom) nil)
   nil)
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
@@ -563,9 +552,7 @@
     (reset! (:running-schedules-atom runtime) #{})
     (reset! (:maintenance-running?-atom runtime) false)
     (reset! (:last-maintenance-at-atom runtime) nil)
-    (reset! (:thread-counter-atom runtime) 0)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset! (:thread-counter-atom runtime) 0))
   nil)
 
 (defn running?

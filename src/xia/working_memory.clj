@@ -36,7 +36,6 @@
 (def ^:dynamic *suppress-snapshot-scheduling?* false)
 
 (def ^:private session-op-lock-count 512)
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/working-memory-runtime)
 
 (declare get-wm warm-start! snapshot! snapshot-interval-ms snapshot-debounce-ms
@@ -59,8 +58,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -1442,18 +1440,6 @@ Rules:
         (when continue?
           (recur))))))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context
-        #(do
-           (prepare-shutdown!)
-           (clear-wm!)))))
-  (reset! installed-runtime-atom runtime)
-  (runtime-context/without-runtime-context reset-runtime!)
-  runtime)
-
 (defn reset-runtime!
   []
   (locking (runtime-lock)
@@ -1485,7 +1471,5 @@ Rules:
   []
   (when-let [runtime (maybe-current-runtime)]
     (prepare-shutdown!)
-    (reset! (:wm-state-atom runtime) {})
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset! (:wm-state-atom runtime) {}))
   nil)

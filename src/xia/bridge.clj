@@ -22,7 +22,6 @@
   (:import [java.util Date]))
 
 (def ^:private max-live-task-runtime-events 200)
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/bridge-runtime)
 
 (defn make-runtime
@@ -30,34 +29,25 @@
   {:task-runtime-events-atom (atom {})
    :task-runtime-stream-subscribers-atom (atom {})})
 
-(declare clear-runtime!)
-
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (clear-runtime! current)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
+(defn- maybe-current-runtime
+  []
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom
+  (or (maybe-current-runtime)
       (throw (ex-info "Bridge runtime is not installed"
                       {:component :xia/bridge-runtime}))))
 
 (defn clear-runtime!
   ([]
-   (when-let [runtime @installed-runtime-atom]
+   (when-let [runtime (maybe-current-runtime)]
      (clear-runtime! runtime))
    nil)
   ([runtime]
    (when runtime
      (reset! (:task-runtime-events-atom runtime) {})
-     (reset! (:task-runtime-stream-subscribers-atom runtime) {})
-     (when (identical? runtime @installed-runtime-atom)
-       (reset! installed-runtime-atom nil)))
+     (reset! (:task-runtime-stream-subscribers-atom runtime) {}))
    nil))
 
 (defn register-channel-adapter!

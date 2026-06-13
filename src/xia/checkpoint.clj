@@ -24,9 +24,7 @@
 (def ^:private checkpoint-ready-name "checkpoint.ready")
 (def ^:private included-support-file-names #{"master.salt"})
 (def ^:private excluded-support-file-names #{"master.key" "master.passphrase"})
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/checkpoint-runtime)
-(declare clear-runtime!)
 
 (defn- checkpoint-state-template
   []
@@ -41,8 +39,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -199,20 +196,10 @@
   (locking (checkpoint-lock)
     (reset! (checkpoint-state-atom) (checkpoint-state-template))))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (reset-runtime!)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset-runtime!))
   nil)
 
 (defn prepare-shutdown!

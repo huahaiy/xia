@@ -61,9 +61,7 @@
 ;; Rate limiting — simple per-domain token bucket
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/web-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -72,8 +70,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -98,20 +95,10 @@
   (.set (rate-limit-cleanup) 0)
   nil)
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (reset-runtime!)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset-runtime!))
   nil)
 
 (defn- check-rate-limit!

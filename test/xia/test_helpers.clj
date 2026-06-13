@@ -316,28 +316,28 @@
     (async/clear-runtime!)
     (wm/clear-runtime!)
     (db/clear-runtime!)
-    (let [runtime-state-runtime (runtime-state/install-runtime! (runtime-state/make-runtime))
-          retrieval-runtime     (retrieval-state/install-runtime! (retrieval-state/make-runtime))
-          oauth-runtime         (oauth/install-runtime! (oauth/make-runtime))
-          browser-runtime       (playwright/install-runtime! (playwright/make-runtime))
-          async-runtime         (async/install-runtime! (async/make-runtime))
-          prompt-runtime        (prompt/install-runtime! (prompt/make-runtime))
-          agent-runtime         (agent/install-runtime! (agent/make-runtime))
-          bridge-runtime        (bridge/install-runtime! (bridge/make-runtime))
-          http-runtime          (http/install-runtime! (http/make-runtime))
-          instance-runtime      (instance-supervisor/install-runtime! (instance-supervisor/make-runtime))
-          sci-runtime           (sci-env/install-runtime! (sci-env/make-runtime))
-          tool-runtime          (tool/install-runtime! (tool/make-runtime))
-          scheduler-runtime     (scheduler/install-runtime! (scheduler/make-runtime))
-          wm-runtime            (wm/install-runtime! (wm/make-runtime))
-          llm-runtime           (xia-llm/install-runtime! (xia-llm/make-runtime))
-          checkpoint-runtime    (checkpoint/install-runtime! (checkpoint/make-runtime))
-          hippocampus-runtime   (hippo/install-runtime! (hippo/make-runtime))
-          local-ocr-runtime     (local-ocr/install-runtime! (local-ocr/make-runtime))
-          service-runtime       (service/install-runtime! (service/make-runtime))
-          web-runtime           (web/install-runtime! (web/make-runtime))
-          messaging-runtime     (messaging/install-runtime! (messaging/make-runtime))
-          db-runtime            (db/install-runtime! (db/make-runtime))
+    (let [runtime-state-runtime (runtime-state/make-runtime)
+          retrieval-runtime     (retrieval-state/make-runtime)
+          oauth-runtime         (oauth/make-runtime)
+          browser-runtime       (playwright/make-runtime)
+          async-runtime         (async/make-runtime)
+          prompt-runtime        (prompt/make-runtime)
+          agent-runtime         (agent/make-runtime)
+          bridge-runtime        (bridge/make-runtime)
+          http-runtime          (http/make-runtime)
+          instance-runtime      (instance-supervisor/make-runtime)
+          sci-runtime           (sci-env/make-runtime)
+          tool-runtime          (tool/make-runtime)
+          scheduler-runtime     (scheduler/make-runtime)
+          wm-runtime            (wm/make-runtime)
+          llm-runtime           (xia-llm/make-runtime)
+          checkpoint-runtime    (checkpoint/make-runtime)
+          hippocampus-runtime   (hippo/make-runtime)
+          local-ocr-runtime     (local-ocr/make-runtime)
+          service-runtime       (service/make-runtime)
+          web-runtime           (web/make-runtime)
+          messaging-runtime     (messaging/make-runtime)
+          db-runtime            (db/make-runtime)
           context               (runtime-context/make
                                   {:xia/runtime-state-runtime {:runtime runtime-state-runtime}
                                    :xia/retrieval-runtime     {:runtime retrieval-runtime}
@@ -363,8 +363,11 @@
                                    :xia/db                    {:runtime db-runtime}})]
       (runtime-context/with-runtime-context
         context
-        #(db/connect! path (test-connect-options
-                            {:passphrase-provider (constantly "xia-test-passphrase")})))
+        #(do
+           (sci-env/reset-runtime!)
+           (wm/reset-runtime!)
+           (db/connect! path (test-connect-options
+                              {:passphrase-provider (constantly "xia-test-passphrase")}))))
       (try
         (runtime-context/with-runtime-context context f)
       (finally

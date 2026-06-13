@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.db :as db]
             [xia.paths :as paths]
+            [xia.runtime-context :as runtime-context]
             [xia.snapshot :as snapshot]
             [xia.test-helpers :as th])
   (:import [java.nio.file Files]
@@ -27,13 +28,17 @@
 (use-fixtures :each
   (fn [f]
     (db/clear-runtime!)
-    (db/install-runtime! (db/make-runtime))
-    (try
-      (f)
-      (finally
-        (when (db/connected?)
-          (db/close!))
-        (db/clear-runtime!)))))
+    (let [context (runtime-context/make
+                    {:xia/db {:runtime (db/make-runtime)}})]
+      (try
+        (runtime-context/with-runtime-context context f)
+        (finally
+          (runtime-context/with-runtime-context
+            context
+            #(do
+               (when (db/connected?)
+                 (db/close!))
+               (db/clear-runtime!))))))))
 
 (deftest safety-snapshot-restores-db-and-shared-workspace
   (let [root           (temp-dir)

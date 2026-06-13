@@ -80,6 +80,13 @@
       (update context** :runtimes into runtimes)
       context**)))
 
+(defn merge-contexts
+  "Merge runtime contexts from left to right. Later contexts win for duplicate keys."
+  [& contexts]
+  (when-let [contexts* (seq (remove nil? contexts))]
+    {:components (apply merge (map :components contexts*))
+     :runtimes   (apply merge (map :runtimes contexts*))}))
+
 (defn with-runtime-context
   [context f]
   (if context

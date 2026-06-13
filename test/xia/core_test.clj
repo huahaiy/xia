@@ -33,7 +33,7 @@
   (str (Files/createTempDirectory "xia-core-test"
          (into-array FileAttribute []))))
 
-(defn- reset-core-runtime!
+(defn- clear-core-runtime!
   []
   (reset! (var-get #'xia.core/runtime-system-atom) nil)
   (bridge/clear-runtime!)
@@ -55,18 +55,25 @@
   (service/clear-runtime!)
   (web/clear-runtime!)
   (xia.channel.http/clear-command-shutdown-handler!)
-  (runtime-overlay/clear!)
-  (xia.db/install-runtime! (xia.db/make-runtime))
-  (runtime-state/install-runtime! (runtime-state/make-runtime))
-  (runtime-state/mark-stopped!))
+  (runtime-overlay/clear!))
+
+(defn- make-core-test-context!
+  []
+  (clear-core-runtime!)
+  (let [context (runtime-context/make
+                  {:xia/db {:runtime (xia.db/make-runtime)}
+                   :xia/runtime-state-runtime {:runtime (runtime-state/make-runtime)}})]
+    (runtime-context/with-runtime-context context runtime-state/mark-stopped!)
+    context))
 
 (use-fixtures :each
   (fn [f]
-    (reset-core-runtime!)
-    (try
-      (f)
-      (finally
-        (reset-core-runtime!)))))
+    (let [context (make-core-test-context!)]
+      (try
+        (runtime-context/with-runtime-context context f)
+        (finally
+          (runtime-context/with-runtime-context context clear-core-runtime!)
+          (clear-core-runtime!))))))
 
 (defn- encode-key [byte-value]
   (.encodeToString (Base64/getEncoder)

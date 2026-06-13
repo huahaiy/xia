@@ -14,9 +14,7 @@
            [java.time Instant]
            [java.util Base64 Date]))
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/oauth-runtime)
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -26,8 +24,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -47,21 +44,11 @@
   []
   (:last-proactive-refresh-at-ms-atom (current-runtime)))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
     (reset! (:pending-authorizations-atom runtime) {})
-    (reset! (:last-proactive-refresh-at-ms-atom runtime) 0)
-    (when (identical? runtime @installed-runtime-atom)
-      (reset! installed-runtime-atom nil)))
+    (reset! (:last-proactive-refresh-at-ms-atom runtime) 0))
   nil)
 
 (defn reset-runtime!

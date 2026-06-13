@@ -7,11 +7,8 @@
             RejectedExecutionException RejectedExecutionHandler ThreadFactory
             ThreadPoolExecutor TimeUnit]))
 
-(defonce ^:private installed-runtime-atom (atom nil))
 (def ^:private runtime-context-key :xia/async-runtime)
 (def ^:private default-shutdown-await-ms 10000)
-
-(declare clear-runtime!)
 
 (defn make-runtime
   []
@@ -22,8 +19,7 @@
 
 (defn- maybe-current-runtime
   []
-  (or (runtime-context/runtime runtime-context-key)
-      @installed-runtime-atom))
+  (runtime-context/runtime runtime-context-key))
 
 (defn- current-runtime
   []
@@ -223,15 +219,6 @@
          (every? true? results)))
      true)))
 
-(defn install-runtime!
-  [runtime]
-  (when-let [current @installed-runtime-atom]
-    (when-not (identical? current runtime)
-      (runtime-context/without-runtime-context clear-runtime!)))
-  (reset! (:accepting-atom runtime) true)
-  (reset! installed-runtime-atom runtime)
-  runtime)
-
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
@@ -242,7 +229,5 @@
         (await-executor! kind exec 25))
       (reset! (:executors-atom runtime) {})
       (reset! (:accepting-atom runtime) true)
-      (reset! (:thread-counter runtime) 0)
-      (when (identical? runtime @installed-runtime-atom)
-        (reset! installed-runtime-atom nil))))
+      (reset! (:thread-counter runtime) 0)))
   nil)
