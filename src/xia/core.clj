@@ -360,18 +360,29 @@
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)
-      :runtime-support (ig/ref :xia/runtime-support)}
+      :async-runtime (ig/ref :xia/async-runtime)
+      :runtime-state-runtime (ig/ref :xia/runtime-state-runtime)
+      :retrieval-runtime (ig/ref :xia/retrieval-runtime)
+      :oauth-runtime (ig/ref :xia/oauth-runtime)
+      :browser-runtime (ig/ref :xia/browser-runtime)
+      :prompt-runtime (ig/ref :xia/prompt-runtime)
+      :fact-review-runtime (ig/ref :xia/fact-review-runtime)
+      :agent-runtime (ig/ref :xia/agent-runtime)
+      :working-memory-runtime (ig/ref :xia/working-memory-runtime)
+      :llm-runtime (ig/ref :xia/llm-runtime)
+      :local-ocr-runtime (ig/ref :xia/local-ocr-runtime)
+      :service-runtime (ig/ref :xia/service-runtime)
+      :web-runtime (ig/ref :xia/web-runtime)
+      :instance-supervisor (ig/ref :xia/instance-supervisor)}
 
      :xia/instance-supervisor
      {:db (ig/ref :xia/db)
-      :runtime-support (ig/ref :xia/runtime-support)
       :enabled? (not (falsy-env-value? "XIA_ALLOW_INSTANCE_MANAGEMENT"))
       :command instance-command}
 
      :xia/bootstrap
      {:db (ig/ref :xia/db)
       :overlay (ig/ref :xia/runtime-overlay)
-      :runtime-support (ig/ref :xia/runtime-support)
       :instance-supervisor (ig/ref :xia/instance-supervisor)
       :db-path db
       :instance instance
@@ -385,7 +396,6 @@
      :xia/tool-runtime
      {:identity (ig/ref :xia/identity)
       :sci-runtime (ig/ref :xia/sci-runtime)
-      :runtime-support (ig/ref :xia/runtime-support)
       :instance-supervisor (ig/ref :xia/instance-supervisor)
       :db (ig/ref :xia/db)
       :llm-runtime (ig/ref :xia/llm-runtime)

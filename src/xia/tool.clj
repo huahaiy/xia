@@ -34,7 +34,8 @@
 
 (defn make-runtime
   []
-  {:registry (atom {})})
+  {:registry (atom {})
+   :callbacks-atom (atom {})})
 
 (defn- maybe-current-runtime
   []
@@ -49,6 +50,10 @@
 (defn- registry
   []
   (:registry (current-runtime)))
+
+(defn- callbacks
+  []
+  (:callbacks-atom (current-runtime)))
 
 (def ^:private bundled-tool-resources
   ["tools/web-search.edn"
@@ -293,7 +298,8 @@
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (reset-runtime!))
+    (reset-runtime!)
+    (reset! (callbacks) {}))
   nil)
 
 (defn clear-session-approvals!
@@ -671,6 +677,8 @@
                  :tool-call-id (:tool-call-id context)
                  :data         entry})))
 
+(declare execute-pipeline-tool)
+
 (defn- invoke-handler
   [handler-kind handler arguments]
   (case handler-kind
@@ -692,6 +700,7 @@
                                        :tool-name tool-name)]
             (binding [prompt/*interaction-context* handler-context
                       pipeline/*tool-context*      handler-context
+                      pipeline/*tool-invoker*      execute-pipeline-tool
                       wm/*session-id*              (or (:resource-session-id context)
                                                        (:session-id context))]
               (let [{:keys [allowed? error policy mode] :as execution-decision}

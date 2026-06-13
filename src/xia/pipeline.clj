@@ -10,6 +10,7 @@
 (def ^:private reader-eof (Object.))
 
 (def ^:dynamic *tool-context* {})
+(def ^:dynamic *tool-invoker* nil)
 (def ^:dynamic *timeout-state* nil)
 
 (def allowed-tool-ids
@@ -426,12 +427,12 @@
                        :arguments-class (some-> arguments class .getName)})))
     (invoke-tool tool-id* (or arguments {}) context)))
 
-(defn- default-tool-invoker
-  [tool-id arguments context]
-  ((requiring-resolve 'xia.tool/execute-pipeline-tool)
-   tool-id
-   arguments
-   context))
+(defn- pipeline-tool-invoker
+  [invoke-tool]
+  (or invoke-tool
+      *tool-invoker*
+      (throw (ex-info "Restricted pipeline tool invoker is not configured"
+                      {:type :pipeline/missing-tool-invoker}))))
 
 (defn- make-call-tool
   [{:keys [context invoke-tool max-calls call-count]}]
@@ -473,7 +474,7 @@
         timeout-ms  (task-policy/tool-pipeline-timeout-ms)
         call-count  (atom 0)
         call-tool   (make-call-tool {:context (or context {})
-                                     :invoke-tool (or invoke-tool default-tool-invoker)
+                                     :invoke-tool (pipeline-tool-invoker invoke-tool)
                                      :max-calls max-calls*
                                      :call-count call-count})
         ctx         (make-ctx {:input input

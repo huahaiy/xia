@@ -53,7 +53,8 @@
   {:sci-worker-seq (AtomicLong. 0)
    :active-sci-workers (atom {})
    :shutdown? (atom false)
-   :current-ctx-atom (atom nil)})
+   :current-ctx-atom (atom nil)
+   :callbacks-atom (atom {})})
 
 (defn- maybe-current-runtime
   []
@@ -80,6 +81,22 @@
 (defn- current-ctx-atom
   []
   (:current-ctx-atom (current-runtime)))
+
+(defn- callbacks-atom
+  []
+  (:callbacks-atom (current-runtime)))
+
+(defn register-branch-task-launcher!
+  [f]
+  (swap! (callbacks-atom) assoc :branch-task-launcher f)
+  nil)
+
+(defn- branch-task-launcher
+  []
+  (or (:branch-task-launcher @(callbacks-atom))
+      (throw (ex-info "SCI branch task launcher is not registered"
+                      {:component :xia/sci-runtime
+                       :callback :branch-task-launcher}))))
 
 (defn- sci-timeout-ex
   [stage timeout-ms]
@@ -255,8 +272,7 @@
 
 (defn- run-branch-tasks
   [& args]
-  (let [f (requiring-resolve 'xia.agent/run-branch-tasks)]
-    (apply f args)))
+  (apply (branch-task-launcher) args))
 
 (def ^:private xia-agent-ns
   {'run-branch-tasks run-branch-tasks})
@@ -643,7 +659,8 @@
 (defn clear-runtime!
   []
   (when-let [runtime (maybe-current-runtime)]
-    (prepare-shutdown!))
+    (prepare-shutdown!)
+    (reset! (callbacks-atom) {}))
   nil)
 
 (defn- call-with-timeout

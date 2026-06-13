@@ -26,6 +26,7 @@
             [xia.skill]
             [xia.system]
             [xia.tool]
+            [xia.tool.callbacks :as tool-callbacks]
             [xia.web]
             [xia.working-memory])
   (:import [java.util.concurrent CountDownLatch TimeUnit]))
@@ -210,17 +211,23 @@
                (:async-runtime @observed)))))))
 
 (deftest tool-init-binds-direct-runtime-dependencies
-  (let [tool-runtime {:registry (atom {})}
+  (let [tool-runtime {:registry (atom {})
+                      :callbacks-atom (atom {})}
         db {:runtime {:runtime-name :db}}
-        sci-runtime {:runtime {:runtime-name :sci}}
         instance-supervisor {:runtime {:runtime-name :instance-supervisor}}
         llm-runtime {:runtime {:runtime-name :llm}}
         prompt-runtime {:runtime {:runtime-name :prompt}}
         working-memory-runtime {:runtime {:runtime-name :working-memory}}
         permission-runtime {:runtime {:runtime-name :permission}}
-        support (runtime-context/make {})
+        service-runtime {:runtime-name :service}
+        sci-context (runtime-context/make
+                      {:xia/service-runtime {:runtime service-runtime}})
+        sci-runtime {:runtime {:runtime-name :sci}
+                     :runtime-context sci-context}
         observed (atom [])]
     (with-redefs [xia.tool/make-runtime (fn [] tool-runtime)
+                  xia.agent/run-branch-tasks (fn [& args]
+                                               {:launched (vec args)})
                   xia.tool/ensure-bundled-tools! (fn []
                                                    (swap! observed conj
                                                           [:ensure
@@ -238,7 +245,6 @@
       (let [component (ig/init-key :xia/tool-runtime
                                    {:identity {}
                                     :sci-runtime sci-runtime
-                                    :runtime-support support
                                     :instance-supervisor instance-supervisor
                                     :db db
                                     :llm-runtime llm-runtime
@@ -256,6 +262,14 @@
                           :permission (:runtime permission-runtime)}]
                 :load]
                @observed))
+        (is (= service-runtime
+               (runtime-context/runtime (:runtime-context component) :xia/service-runtime)))
+        (is (= {:launched [["branch"] :objective "objective"]}
+               (runtime-context/with-runtime-context
+                 (:runtime-context component)
+                 #((tool-callbacks/branch-task-launcher)
+                   ["branch"]
+                   :objective "objective"))))
         (is (= (:runtime db)
                (runtime-context/runtime (:runtime-context component) :xia/db)))
         (is (= (:runtime llm-runtime)
@@ -264,6 +278,76 @@
                (runtime-context/runtime (:runtime-context component) :xia/prompt-runtime)))
         (is (= (:runtime working-memory-runtime)
                (runtime-context/runtime (:runtime-context component) :xia/working-memory-runtime)))))))
+
+(deftest sci-init-binds-explicit-sandbox-context
+  (let [db {:runtime {:runtime-name :db}}
+        async-runtime {:runtime {:runtime-name :async}}
+        runtime-state-runtime {:runtime {:runtime-name :runtime-state}}
+        retrieval-runtime {:runtime {:runtime-name :retrieval}}
+        oauth-runtime {:runtime {:runtime-name :oauth}}
+        browser-runtime {:runtime {:runtime-name :browser}}
+        prompt-runtime {:runtime {:runtime-name :prompt}}
+        fact-review-runtime {:runtime {:runtime-name :fact-review}}
+        agent-runtime {:runtime {:runtime-name :agent}}
+        working-memory-runtime {:runtime {:runtime-name :working-memory}}
+        llm-runtime {:runtime {:runtime-name :llm}}
+        local-ocr-runtime {:runtime {:runtime-name :local-ocr}}
+        service-runtime {:runtime {:runtime-name :service}}
+        web-runtime {:runtime {:runtime-name :web}}
+        instance-supervisor {:runtime {:runtime-name :instance-supervisor}}
+        observed (atom nil)]
+    (with-redefs [xia.sci-env/make-runtime (fn []
+                                              {:runtime-name :sci
+                                               :sci-worker-seq (java.util.concurrent.atomic.AtomicLong. 0)
+                                               :active-sci-workers (atom {})
+                                               :shutdown? (atom false)
+                                               :current-ctx-atom (atom nil)
+                                               :callbacks-atom (atom {})})
+                  xia.agent/run-branch-tasks (fn [& args]
+                                               {:launched (vec args)})
+                  xia.sci-env/reset-runtime! (fn []
+                                               (reset! observed
+                                                       {:sci (runtime-context/runtime :xia/sci-runtime)
+                                                        :db (runtime-context/runtime :xia/db)
+                                                        :agent (runtime-context/runtime :xia/agent-runtime)
+                                                        :tool (runtime-context/runtime :xia/tool-runtime)
+                                                        :http (runtime-context/runtime :xia/http-runtime)
+                                                        :checkpoint (runtime-context/runtime :xia/checkpoint-runtime)})
+                                               nil)]
+      (let [component (ig/init-key :xia/sci-runtime
+                                   {:db db
+                                    :async-runtime async-runtime
+                                    :runtime-state-runtime runtime-state-runtime
+                                    :retrieval-runtime retrieval-runtime
+                                    :oauth-runtime oauth-runtime
+                                    :browser-runtime browser-runtime
+                                    :prompt-runtime prompt-runtime
+                                    :fact-review-runtime fact-review-runtime
+                                    :agent-runtime agent-runtime
+                                    :working-memory-runtime working-memory-runtime
+                                    :llm-runtime llm-runtime
+                                    :local-ocr-runtime local-ocr-runtime
+                                    :service-runtime service-runtime
+                                    :web-runtime web-runtime
+                                    :instance-supervisor instance-supervisor})]
+        (is (= {:sci (dissoc (:runtime component) :runtime-context)
+                :db (:runtime db)
+                :agent (:runtime agent-runtime)
+                :tool nil
+                :http nil
+                :checkpoint nil}
+               @observed))
+        (is (= (:runtime service-runtime)
+               (runtime-context/runtime (:runtime-context component) :xia/service-runtime)))
+        (is (= (:runtime web-runtime)
+               (runtime-context/runtime (:runtime-context component) :xia/web-runtime)))
+        (is (= (:runtime instance-supervisor)
+               (runtime-context/runtime (:runtime-context component) :xia/instance-supervisor)))
+        (is (= {:launched [["branch"] :objective "objective"]}
+               (runtime-context/with-runtime-context
+                 (:runtime-context component)
+                 #(xia.sci-env/eval-string
+                   "(xia.agent/run-branch-tasks [\"branch\"] :objective \"objective\")"))))))))
 
 (deftest scheduler-halt-binds-component-runtime-context
   (let [runtime  {:runtime-name :scheduler}
@@ -313,7 +397,9 @@
             (let [db-component            {:runtime {:runtime-name :db}}
                   async-component         {:runtime {:runtime-name :async}}
                   runtime-state-component {:runtime {:runtime-name :runtime-state}}
+                  retrieval-component     {:runtime {:runtime-name :retrieval}}
                   fact-review-component   {:runtime {:runtime-name :fact-review}}
+                  browser-component       {:runtime {:runtime-name :browser}}
                   bridge-component        {:runtime {:runtime-name :bridge}}
                   oauth-component         {:runtime {:runtime-name :oauth}}
                   llm-component           {:runtime {:runtime-name :llm}}
@@ -322,6 +408,9 @@
                   sci-component           {:runtime {:runtime-name :sci}}
                   instance-component      {:runtime {:runtime-name :instance-supervisor}}
                   permission-component    {:runtime {:runtime-name :permission}}
+                  local-ocr-component     {:runtime {:runtime-name :local-ocr}}
+                  service-component       {:runtime {:runtime-name :service}}
+                  web-component           {:runtime {:runtime-name :web}}
                   tool-component          {:runtime {:runtime-name :tool}}
                   runtime-support  (runtime-context/make
                                       {:xia/db db-component
@@ -348,10 +437,22 @@
                [:xia/prompt-runtime {:async-runtime async-component}]
                [:xia/bridge-runtime nil]
                [:xia/sci-runtime {:db db-component
-                                   :runtime-support runtime-support}]
+                                   :async-runtime async-component
+                                   :runtime-state-runtime runtime-state-component
+                                   :retrieval-runtime retrieval-component
+                                   :oauth-runtime oauth-component
+                                   :browser-runtime browser-component
+                                   :prompt-runtime prompt-component
+                                   :fact-review-runtime fact-review-component
+                                   :agent-runtime {:runtime {:runtime-name :agent}}
+                                   :working-memory-runtime wm-component
+                                   :llm-runtime llm-component
+                                   :local-ocr-runtime local-ocr-component
+                                   :service-runtime service-component
+                                   :web-runtime web-component
+                                   :instance-supervisor instance-component}]
                [:xia/tool-runtime {:identity {}
                                     :sci-runtime sci-component
-                                    :runtime-support runtime-support
                                     :instance-supervisor instance-component
                                     :db db-component
                                     :llm-runtime llm-component
@@ -360,7 +461,6 @@
                                     :permission-runtime permission-component}]
                [:xia/permission-runtime nil]
                [:xia/instance-supervisor {:db db-component
-                                           :runtime-support runtime-support
                                            :enabled? false}]
                [:xia/scheduler {:tool-runtime tool-component
                                  :runtime-support runtime-support

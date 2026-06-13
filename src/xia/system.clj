@@ -31,6 +31,7 @@
             [xia.setup :as setup]
             [xia.skill :as skill]
             [xia.tool :as tool]
+            [xia.tool.callbacks :as tool-callbacks]
             [xia.web :as web]
             [xia.working-memory :as wm]
             [xia.browser.playwright :as playwright]
@@ -401,27 +402,61 @@
        (http/clear-runtime!))))
 
 (defmethod ig/init-key :xia/sci-runtime
-  [_ {:keys [db runtime-support]}]
+  [_ {:keys [db async-runtime runtime-state-runtime retrieval-runtime oauth-runtime
+             browser-runtime prompt-runtime fact-review-runtime agent-runtime
+             working-memory-runtime llm-runtime local-ocr-runtime service-runtime
+             web-runtime instance-supervisor]}]
   (let [runtime (sci-env/make-runtime)
-        runtime-context (runtime-context/assoc-component runtime-support
-                                                         :xia/sci-runtime
-                                                         {:runtime runtime})
+        runtime-context (runtime-context/make
+                          {:xia/db db
+                           :xia/async-runtime async-runtime
+                           :xia/runtime-state-runtime runtime-state-runtime
+                           :xia/retrieval-runtime retrieval-runtime
+                           :xia/oauth-runtime oauth-runtime
+                           :xia/browser-runtime browser-runtime
+                           :xia/prompt-runtime prompt-runtime
+                           :xia/fact-review-runtime fact-review-runtime
+                           :xia/agent-runtime agent-runtime
+                           :xia/working-memory-runtime working-memory-runtime
+                           :xia/llm-runtime llm-runtime
+                           :xia/local-ocr-runtime local-ocr-runtime
+                           :xia/service-runtime service-runtime
+                           :xia/web-runtime web-runtime
+                           :xia/instance-supervisor instance-supervisor
+                           :xia/sci-runtime {:runtime runtime}})
         runtime (assoc runtime :runtime-context runtime-context)]
+    (runtime-context/with-runtime-context
+      runtime-context
+      #(sci-env/register-branch-task-launcher! agent/run-branch-tasks))
     (runtime-context/with-runtime-context runtime-context sci-env/reset-runtime!)
     {:runtime runtime
      :runtime-context runtime-context
-     :db db}))
+     :db db
+     :async-runtime async-runtime
+     :runtime-state-runtime runtime-state-runtime
+     :retrieval-runtime retrieval-runtime
+     :oauth-runtime oauth-runtime
+     :browser-runtime browser-runtime
+     :prompt-runtime prompt-runtime
+     :fact-review-runtime fact-review-runtime
+     :agent-runtime agent-runtime
+     :working-memory-runtime working-memory-runtime
+     :llm-runtime llm-runtime
+     :local-ocr-runtime local-ocr-runtime
+     :service-runtime service-runtime
+     :web-runtime web-runtime
+     :instance-supervisor instance-supervisor}))
 
 (defmethod ig/halt-key! :xia/sci-runtime
   [_ component]
   (with-component-runtime-context component sci-env/clear-runtime!))
 
 (defmethod ig/init-key :xia/instance-supervisor
-  [_ {:keys [db runtime-support enabled? command]}]
+  [_ {:keys [db enabled? command]}]
   (let [runtime (instance-supervisor/make-runtime)
-        runtime-context (runtime-context/assoc-component runtime-support
-                                                         :xia/instance-supervisor
-                                                         {:runtime runtime})
+        runtime-context (runtime-context/make
+                          {:xia/db db
+                           :xia/instance-supervisor {:runtime runtime}})
         runtime (assoc runtime :runtime-context runtime-context)]
     (runtime-context/with-runtime-context
       runtime-context
@@ -438,11 +473,12 @@
   (with-component-runtime-context component instance-supervisor/clear-runtime!))
 
 (defmethod ig/init-key :xia/bootstrap
-  [_ {:keys [db overlay runtime-support instance-supervisor db-path instance template-instance
+  [_ {:keys [db overlay instance-supervisor db-path instance template-instance
              mode crypto-opts]}]
-  (let [runtime-context (runtime-context/assoc-component runtime-support
-                                                         :xia/instance-supervisor
-                                                         instance-supervisor)]
+  (let [runtime-context (runtime-context/make
+                          {:xia/db db
+                           :xia/runtime-overlay overlay
+                           :xia/instance-supervisor instance-supervisor})]
     (runtime-context/with-runtime-context
       runtime-context
       #(do
@@ -463,7 +499,6 @@
                        "mode; complete provider onboarding in the local web UI.")))
          {:db db
           :overlay overlay
-          :runtime-support runtime-support
           :runtime-context runtime-context
           :instance-supervisor instance-supervisor
           :instance instance}))))
@@ -474,7 +509,7 @@
 
 (defmethod ig/init-key :xia/identity
   [_ {:keys [bootstrap]}]
-  (runtime-context/with-runtime-context (:runtime-support bootstrap)
+  (runtime-context/with-runtime-context (:runtime-context bootstrap)
                                        identity/init-identity!)
   {:bootstrap bootstrap})
 
@@ -483,10 +518,10 @@
   nil)
 
 (defmethod ig/init-key :xia/tool-runtime
-  [_ {:keys [identity sci-runtime runtime-support instance-supervisor db llm-runtime
+  [_ {:keys [identity sci-runtime instance-supervisor db llm-runtime
              prompt-runtime working-memory-runtime permission-runtime]}]
   (let [runtime       (tool/make-runtime)
-        runtime-context (-> runtime-support
+        runtime-context (-> (:runtime-context sci-runtime)
                             (runtime-context/assoc-component :xia/sci-runtime sci-runtime)
                             (runtime-context/assoc-component :xia/instance-supervisor instance-supervisor)
                             (runtime-context/assoc-component :xia/db db)
@@ -496,6 +531,10 @@
                             (runtime-context/assoc-component :xia/permission-runtime permission-runtime)
                             (runtime-context/assoc-component :xia/tool-runtime {:runtime runtime}))
         runtime       (assoc runtime :runtime-context runtime-context)
+        _             (runtime-context/with-runtime-context
+                        runtime-context
+                        #(tool-callbacks/register-branch-task-launcher!
+                          agent/run-branch-tasks))
         bundled-count (runtime-context/with-runtime-context
                         runtime-context
                         tool/ensure-bundled-tools!)]

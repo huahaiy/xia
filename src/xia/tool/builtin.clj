@@ -3,8 +3,7 @@
 
    Bundled tool EDN points at these vars with :handler-var. User/plugin tools
    can still use SCI handler strings."
-  (:require [xia.agent :as agent]
-            [xia.artifact :as artifact]
+  (:require [xia.artifact :as artifact]
             [xia.board :as board]
             [xia.browser :as browser]
             [xia.calendar :as calendar]
@@ -16,6 +15,7 @@
             [xia.peer :as peer]
             [xia.pipeline :as pipeline]
             [xia.schedule :as schedule]
+            [xia.tool.callbacks :as tool-callbacks]
             [xia.web :as web]
             [xia.workspace :as workspace]))
 
@@ -124,11 +124,12 @@
 
 (defn branch-tasks
   [args]
-  (agent/run-branch-tasks
-    (or (get args "tasks") [])
-    :objective (get args "objective")
-    :max-parallel (get args "max_parallel")
-    :max-tool-rounds (get args "max_rounds")))
+  (let [launch-branch-tasks (tool-callbacks/branch-task-launcher)]
+    (launch-branch-tasks
+      (or (get args "tasks") [])
+      :objective (get args "objective")
+      :max-parallel (get args "max_parallel")
+      :max-tool-rounds (get args "max_rounds"))))
 
 (defn browser-bootstrap-runtime
   [args]
