@@ -14,17 +14,13 @@
             [xia.db-schema :as db-schema]
             [xia.db.session :as db-session]
             [xia.db.task :as db-task]
+            [xia.model-assets :as model-assets]
             [xia.paths :as paths]
             [xia.runtime-context :as runtime-context]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.runtime-state :as runtime-state]
             [xia.sensitive :as sensitive])
-  (:import [java.io InputStream]
-           [java.net URI]
-           [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
-           [java.nio.file Files Path Paths StandardCopyOption]
-           [java.nio.file.attribute FileAttribute]
-           [java.time Duration Instant]
+  (:import [java.time Instant]
            [java.util Date UUID]))
 
 ;; ---------------------------------------------------------------------------
@@ -158,28 +154,6 @@
   ;; the concrete provider keyword here.
   :llama.cpp)
 
-(def ^:private default-embedding-model-file
-  "nomic-embed-text-v2-moe-q8_0.gguf")
-
-(def ^:private default-embedding-model-url
-  (str "https://huggingface.co/ggml-org/Nomic-Embed-Text-V2-GGUF/resolve/main/"
-       default-embedding-model-file
-       "?download=true"))
-
-(def ^:private embedding-model-lock
-  (Object.))
-
-(def ^:private default-llm-model-file
-  "gemma-3-4b-it.Q4_K_M.gguf")
-
-(def ^:private default-llm-model-url
-  (str "https://huggingface.co/MaziyarPanahi/gemma-3-4b-it-GGUF/resolve/main/"
-       default-llm-model-file
-       "?download=true"))
-
-(def ^:private llm-model-lock
-  (Object.))
-
 (def ^:private default-embedding-provider-spec
   ;; Keep Xia's provider choice centralized so the default model can change
   ;; without touching the rest of the DB wiring. Let Datalevin derive
@@ -187,8 +161,8 @@
   ;; instead of hard-coding dimensions here.
   {:provider :llama.cpp
    :model-id "nomic-ai/nomic-embed-text-v2-moe"
-   :model-filename default-embedding-model-file
-   :model-url default-embedding-model-url})
+   :model-filename model-assets/default-embedding-model-file
+   :model-url model-assets/default-embedding-model-url})
 
 (def ^:private default-llm-provider-spec
   ;; Keep local summarization inside the Xia binary by using Datalevin's
@@ -197,8 +171,8 @@
   ;; capable enough to matter when users enable it.
   {:provider :llama.cpp
    :model-id "google/gemma-3-4b-it"
-   :model-filename default-llm-model-file
-   :model-url default-llm-model-url
+   :model-filename model-assets/default-llm-model-file
+   :model-url model-assets/default-llm-model-url
    :ctx-size 4096})
 
 (defn- default-embedding-domains
@@ -276,102 +250,6 @@
       :else
       runtime-entry)))
 
-(defn- create-http-client
-  []
-  (-> (HttpClient/newBuilder)
-      (.connectTimeout (Duration/ofSeconds 20))
-      (.followRedirects HttpClient$Redirect/NORMAL)
-      (.build)))
-
-(defn- move-file!
-  [^Path source ^Path target]
-  (try
-    (Files/move source target
-                (into-array java.nio.file.CopyOption
-                            [StandardCopyOption/ATOMIC_MOVE
-                             StandardCopyOption/REPLACE_EXISTING]))
-    (catch Exception _
-      (Files/move source target
-                  (into-array java.nio.file.CopyOption
-                              [StandardCopyOption/REPLACE_EXISTING])))))
-
-(defn- download-file!
-  [url target-path]
-  (let [^Path target  (Paths/get target-path (make-array String 0))
-        ^Path parent  (.getParent target)
-        tmp-dir       (or parent (Paths/get "." (make-array String 0)))
-        _             (when parent
-                        (Files/createDirectories parent (make-array FileAttribute 0)))
-        prefix        (str (.getFileName target) ".part-")
-        suffix        ".tmp"
-        tmp           (Files/createTempFile tmp-dir prefix suffix
-                                            (make-array FileAttribute 0))
-        ^HttpClient client (create-http-client)
-        ^HttpRequest req   (-> (HttpRequest/newBuilder (URI/create url))
-                               (.header "User-Agent" "xia")
-                               (.header "Accept" "application/octet-stream")
-                               (.timeout (Duration/ofMinutes 30))
-                               (.GET)
-                               (.build))
-        ^"[Ljava.nio.file.CopyOption;" copy-opts
-        (into-array java.nio.file.CopyOption
-                    [StandardCopyOption/REPLACE_EXISTING])]
-    (try
-      (let [resp   (.send client req (HttpResponse$BodyHandlers/ofInputStream))
-            status (.statusCode resp)]
-        (when-not (= 200 status)
-          (throw (ex-info "Failed to download managed model"
-                          {:url url :status status :target target-path})))
-        (with-open [^InputStream in (.body resp)]
-          (Files/copy in ^Path tmp copy-opts))
-        (move-file! tmp target)
-        target-path)
-      (finally
-        (when (Files/exists tmp (make-array java.nio.file.LinkOption 0))
-          (try
-            (Files/deleteIfExists tmp)
-            (catch Exception _)))))))
-
-(defn- announce-managed-model-download!
-  [artifact-label provider-spec]
-  (let [model-path (or (:model provider-spec) (:model-path provider-spec))
-        model-id   (or (:model-id provider-spec)
-                       (:model-filename provider-spec)
-                       "managed-model")
-        message    (str "Downloading Xia "
-                        artifact-label
-                        " model "
-                        model-id
-                        " to "
-                        model-path
-                        ". This may take a few minutes the first time.")]
-    (log/info message)
-    (println message)
-    (flush)))
-
-(defn- ensure-managed-model!
-  [provider-spec lock artifact-label]
-  (let [model-path (or (:model provider-spec) (:model-path provider-spec))]
-    (cond
-      (not (map? provider-spec))
-      provider-spec
-
-      (or (nil? model-path)
-          (nil? (:model-url provider-spec))
-          (.exists (io/file model-path)))
-      provider-spec
-
-      :else
-      (locking lock
-        (when-not (.exists (io/file model-path))
-          (announce-managed-model-download! artifact-label provider-spec)
-          (download-file! (:model-url provider-spec) model-path))
-        provider-spec))))
-
-(defn- ensure-managed-embedding-model!
-  [provider-spec]
-  (ensure-managed-model! provider-spec embedding-model-lock "embedding"))
-
 (defn- close-embedding-provider! []
   (when-let [provider @(embedding-provider-atom)]
     (try
@@ -425,8 +303,8 @@
                     (or @provider*
                         (locking provider*
                           (or @provider*
-                              (let [managed-spec (ensure-managed-model! provider-spec
-                                                                       llm-model-lock)
+                              (let [managed-spec (model-assets/ensure-managed-model!
+                                                   provider-spec)
                                     provider (d/new-llm-provider managed-spec)]
                                 (reset! provider* provider)
                                 provider)))))]
@@ -459,13 +337,13 @@
 (defn- prepare-managed-embedding-runtime!
   [datalevin-opts db-path]
   (let [provider-spec (resolve-embedding-provider-spec db-path datalevin-opts)]
-    (ensure-managed-embedding-model! provider-spec)
+    (model-assets/ensure-managed-embedding-model! provider-spec)
     datalevin-opts))
 
 (defn- init-embedding-provider!
   [db-path datalevin-opts]
   (let [provider-spec (-> (resolve-embedding-provider-spec db-path datalevin-opts)
-                          ensure-managed-embedding-model!)]
+                          model-assets/ensure-managed-embedding-model!)]
     (close-embedding-provider!)
     (let [provider (if (satisfies? emb/IEmbeddingProvider provider-spec)
                      provider-spec

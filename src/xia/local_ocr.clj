@@ -7,17 +7,13 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.llm :as llm]
+            [xia.model-assets :as model-assets]
             [xia.paths :as paths]
             [xia.policy :as task-policy]
             [xia.runtime-context :as runtime-context])
   (:import [datalevin.dtlvnative DTLV DTLV$dtlv_llama_vision_generator]
-           [java.io File InputStream]
-           [java.net URI]
-           [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse$BodyHandlers]
+           [java.io File]
            [java.nio.charset StandardCharsets]
-           [java.nio.file Files Path Paths StandardCopyOption]
-           [java.nio.file.attribute FileAttribute]
-           [java.time Duration]
            [java.util Base64]
            [java.util.concurrent Callable ExecutionException ExecutorService Executors ThreadFactory TimeUnit TimeoutException]))
 
@@ -292,82 +288,14 @@
                    (seq (resolved-mmproj-path)))
       (throw (missing-config-ex)))))
 
-(defn- create-http-client
-  []
-  (-> (HttpClient/newBuilder)
-      (.connectTimeout (Duration/ofSeconds 20))
-      (.followRedirects HttpClient$Redirect/NORMAL)
-      (.build)))
-
-(defn- move-file!
-  [^Path source ^Path target]
-  (try
-    (Files/move source target
-                (into-array java.nio.file.CopyOption
-                            [StandardCopyOption/ATOMIC_MOVE
-                             StandardCopyOption/REPLACE_EXISTING]))
-    (catch Exception _
-      (Files/move source target
-                  (into-array java.nio.file.CopyOption
-                              [StandardCopyOption/REPLACE_EXISTING])))))
-
-(defn- download-file!
-  [url target-path]
-  (let [^Path target  (Paths/get target-path (make-array String 0))
-        ^Path parent  (.getParent target)
-        tmp-dir       (or parent (Paths/get "." (make-array String 0)))
-        _             (when parent
-                        (Files/createDirectories parent (make-array FileAttribute 0)))
-        prefix        (str (.getFileName target) ".part-")
-        suffix        ".tmp"
-        tmp           (Files/createTempFile tmp-dir prefix suffix
-                                            (make-array FileAttribute 0))
-        ^HttpClient client (create-http-client)
-        ^HttpRequest req   (-> (HttpRequest/newBuilder (URI/create url))
-                               (.header "User-Agent" "xia")
-                               (.header "Accept" "application/octet-stream")
-                               (.timeout (Duration/ofMinutes 30))
-                               (.GET)
-                               (.build))
-        ^"[Ljava.nio.file.CopyOption;" copy-opts
-        (into-array java.nio.file.CopyOption
-                    [StandardCopyOption/REPLACE_EXISTING])]
-    (try
-      (let [resp   (.send client req (HttpResponse$BodyHandlers/ofInputStream))
-            status (.statusCode resp)]
-        (when-not (= 200 status)
-          (throw (ex-info "Failed to download managed OCR asset"
-                          {:url url :status status :target target-path})))
-        (with-open [^InputStream in (.body resp)]
-          (Files/copy in ^Path tmp copy-opts))
-        (move-file! tmp target)
-        target-path)
-      (finally
-        (when (Files/exists tmp (make-array java.nio.file.LinkOption 0))
-          (try
-            (Files/deleteIfExists tmp)
-            (catch Exception _)))))))
-
-(defn- announce-managed-download!
-  [label target-path]
-  (let [message (str "Downloading Xia managed OCR "
-                     label
-                     " to "
-                     target-path
-                     ". This may take a few minutes the first time.")]
-    (log/info message)
-    (println message)
-    (flush)))
-
 (defn- ensure-managed-asset!
   [target-path url label]
-  (when (and (seq target-path)
-             (seq url)
-             (not (.exists (io/file target-path))))
-    (locking (managed-asset-lock)
-      (when-not (.exists (io/file target-path))
-        (announce-managed-download! label target-path)
-        (download-file! url target-path))))
+  (model-assets/ensure-managed-file! {:target-path target-path
+                                      :url url
+                                      :lock (managed-asset-lock)
+                                      :artifact-kind "managed OCR"
+                                      :artifact-label label
+                                      :request-label (str "managed OCR " label " download")})
   target-path)
 
 (defn- ensure-managed-runtime-assets!

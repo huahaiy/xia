@@ -3,17 +3,21 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.ssrf :as ssrf]
-            [xia.policy :as task-policy])
+            [xia.policy.http :as http-policy])
   (:import [java.io BufferedInputStream BufferedOutputStream BufferedReader ByteArrayOutputStream
             EOFException InputStream InputStreamReader]
            [java.net InetAddress InetSocketAddress Socket SocketTimeoutException URI URLEncoder]
            [java.nio.charset Charset StandardCharsets]
+           [java.nio.file Files Path Paths StandardCopyOption]
+           [java.nio.file.attribute FileAttribute]
            [java.util.concurrent TimeoutException]
            [javax.net.ssl SNIHostName SSLSocket SSLSocketFactory]))
 
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-request-timeout-ms 120000)
+(def ^:private default-max-redirects 10)
 (def ^:private byte-array-class (Class/forName "[B"))
+(def ^:private redirect-statuses #{301 302 303 307 308})
 
 (defn- encode-query-params
   [query-params]
@@ -36,12 +40,16 @@
         (str base-url sep query))
       base-url)))
 
+(defn- trusted-request?
+  [{:keys [allow-private-network? trusted? trusted]}]
+  (boolean (or allow-private-network? trusted? trusted)))
+
 (defn- validate-request-target!
-  [{:keys [allow-private-network? url uri query-params]}]
+  [{:keys [url uri query-params] :as req}]
   (let [request-url-str (request-url {:url url :uri uri :query-params query-params})
         parsed-uri      (URI. request-url-str)
         resolution      (ssrf/resolve-url! request-url-str
-                                           {:allow-private-network? (boolean allow-private-network?)})]
+                                           {:allow-private-network? (trusted-request? req)})]
     (merge {:url request-url-str
             :uri parsed-uri
             :host (.getHost parsed-uri)}
@@ -393,6 +401,16 @@
                    :url        url}
                   cause)))
 
+(defn- redirect-status?
+  [status]
+  (contains? redirect-statuses (long status)))
+
+(defn- redirect-url
+  [{:keys [resolved-target]} headers]
+  (when-let [location (some-> (get headers "location") str/trim)]
+    (when-not (str/blank? location)
+      (str (.resolve ^URI (:uri resolved-target) location)))))
+
 (defn- chunked-input-stream
   [^InputStream in]
   (let [state (atom {:remaining 0
@@ -432,11 +450,38 @@
                      (swap! state assoc :remaining size)
                      (recur))))))))))))
 
+(defn- fixed-length-input-stream
+  [^InputStream in n]
+  (let [remaining (atom (long n))]
+    (proxy [InputStream] []
+      (read
+        ([]
+         (if (zero? @remaining)
+           -1
+           (let [byte (.read in)]
+             (if (= -1 byte)
+               (throw (EOFException. "HTTP response ended before Content-Length bytes were read"))
+               (do
+                 (swap! remaining dec)
+                 byte)))))
+        ([buf off len]
+         (cond
+           (zero? @remaining) -1
+           (not (pos? len)) 0
+           :else
+           (let [n-read (.read in buf off (int (min (long len) @remaining)))]
+             (if (= -1 n-read)
+               (throw (EOFException. "HTTP response ended before Content-Length bytes were read"))
+               (do
+                 (swap! remaining - n-read)
+                 n-read)))))))))
+
 (defn- response-body-stream
   [^InputStream in headers]
-  (if (chunked-transfer? headers)
-    (chunked-input-stream in)
-    in))
+  (cond
+    (chunked-transfer? headers) (chunked-input-stream in)
+    (some? (content-length headers)) (fixed-length-input-stream in (content-length headers))
+    :else in))
 
 (defn- send-streaming-request!
   [{:keys [connect-timeout timeout on-event]
@@ -505,6 +550,72 @@
     (catch SocketTimeoutException e
       (timed-out! timeout (request-url req) e))))
 
+(defn- move-file!
+  [^Path source ^Path target]
+  (try
+    (Files/move source target
+                (into-array java.nio.file.CopyOption
+                            [StandardCopyOption/ATOMIC_MOVE
+                             StandardCopyOption/REPLACE_EXISTING]))
+    (catch Exception _
+      (Files/move source target
+                  (into-array java.nio.file.CopyOption
+                              [StandardCopyOption/REPLACE_EXISTING])))))
+
+(defn- copy-response-body-to-file!
+  [^InputStream in headers ^Path target]
+  (with-open [stream (response-body-stream in headers)]
+    (Files/copy ^InputStream stream
+                target
+                (into-array java.nio.file.CopyOption
+                            [StandardCopyOption/REPLACE_EXISTING]))))
+
+(defn- delete-if-exists-quietly!
+  [^Path path]
+  (try
+    (Files/deleteIfExists path)
+    (catch Exception _)))
+
+(defn- send-download-request!
+  [{:keys [timeout target-path expected-status] :or {expected-status 200} :as req}]
+  (try
+    (with-open [^Socket socket (open-pinned-socket! req)]
+      (let [in       (BufferedInputStream. (.getInputStream socket))
+            out      (BufferedOutputStream. (.getOutputStream socket))
+            ^Path target (Paths/get target-path (make-array String 0))]
+        (write-http-request! out req)
+        (let [{:keys [status headers]} (parse-response-head! in)]
+          (if-let [location (when (redirect-status? status)
+                              (redirect-url req headers))]
+            {:status status
+             :headers headers
+             :redirect-url location}
+            (let [^Path parent (.getParent target)
+                  tmp-dir  (or parent (Paths/get "." (make-array String 0)))
+                  _        (when parent
+                             (Files/createDirectories parent (make-array FileAttribute 0)))
+                  tmp      (Files/createTempFile tmp-dir
+                                                 (str (.getFileName target) ".part-")
+                                                 ".tmp"
+                                                 (make-array FileAttribute 0))]
+              (try
+                (when-not (= (long expected-status) (long status))
+                  (throw (ex-info "HTTP download returned unexpected status"
+                                  {:url (request-url req)
+                                   :status status
+                                   :expected-status expected-status
+                                   :target target-path})))
+                (copy-response-body-to-file! in headers tmp)
+                (move-file! tmp target)
+                {:status status
+                 :headers headers
+                 :target-path target-path}
+                (finally
+                  (when (Files/exists tmp (make-array java.nio.file.LinkOption 0))
+                    (delete-if-exists-quietly! tmp)))))))))
+    (catch SocketTimeoutException e
+      (timed-out! timeout (request-url req) e))))
+
 (defn- transient-exception?
   [e]
   (boolean
@@ -544,13 +655,14 @@
      :retry-methods        methods retried by default, default #{:delete :get :head :options :put :trace}
      :retry-enabled?       override automatic method-based retry gating
      :allow-private-network? bypass SSRF private-network blocking for explicitly trusted targets
+     :trusted? / :trusted    aliases for trusted private-network bypass
      :request-label        optional log label
      :policy-observer      optional callback for retry-policy decisions"
   [{:keys [connect-timeout timeout request-label policy-observer]
     :or   {connect-timeout    default-connect-timeout-ms
            timeout            default-request-timeout-ms}
     :as   req}]
-  (let [retry-config (task-policy/http-request-retry-config req)
+  (let [retry-config (http-policy/http-request-retry-config req)
         req (merge req
                    retry-config
                    {:connect-timeout connect-timeout
@@ -580,7 +692,7 @@
               (let [resp (try
                            (send-request! req)
                            (catch Exception e
-                             (let [decision (task-policy/http-request-retry-decision
+                             (let [decision (http-policy/http-request-retry-decision
                                              req
                                              attempt
                                              {:transient-exception? (transient-exception? e)
@@ -590,7 +702,7 @@
                                  (retry! decision (.getMessage e))
                                  (throw e)))))
                     status (:status resp)]
-                (let [decision (task-policy/http-request-retry-decision
+                (let [decision (http-policy/http-request-retry-decision
                                 req
                                 attempt
                                 {:status status
@@ -618,3 +730,45 @@
     (send-streaming-request! (assoc req
                                     :on-event on-event
                                     :resolved-target resolved-target))))
+
+(defn- follow-redirect-request
+  [req redirect-url]
+  (-> req
+      (assoc :url redirect-url)
+      (dissoc :uri :query-params :resolved-target)))
+
+(defn download!
+  "Download an HTTP(S) resource to `:target-path` using the guarded egress path.
+
+   Supports the same URL, timeout, header, and private-network policy options as
+   `request`. The response body is streamed to a temporary file in the target
+   directory and atomically moved into place when possible."
+  [{:keys [connect-timeout timeout target-path headers max-redirects]
+    :or   {connect-timeout default-connect-timeout-ms
+           timeout         default-request-timeout-ms
+           max-redirects   default-max-redirects}
+    :as   req}]
+  (when-not (seq (or target-path ""))
+    (throw (ex-info "HTTP download requires :target-path" {})))
+  (let [req (merge {:method :get
+                    :headers {"User-Agent" "xia"
+                              "Accept" "application/octet-stream"}}
+                   req
+                   {:connect-timeout connect-timeout
+                    :timeout timeout
+                    :headers (merge {"User-Agent" "xia"
+                                     "Accept" "application/octet-stream"}
+                                    headers)})]
+    (loop [req req
+           remaining-redirects (long max-redirects)]
+      (let [resolved-target (validate-request-target! req)
+            resp (send-download-request! (assoc req :resolved-target resolved-target))]
+        (if-let [redirect-url (:redirect-url resp)]
+          (if (pos? remaining-redirects)
+            (recur (follow-redirect-request req redirect-url)
+                   (dec remaining-redirects))
+            (throw (ex-info "HTTP download exceeded redirect limit"
+                            {:url (request-url req)
+                             :redirect-url redirect-url
+                             :max-redirects max-redirects})))
+          resp)))))

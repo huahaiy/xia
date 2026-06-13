@@ -10,11 +10,13 @@
   xia.db-security-test
   xia.email-test
   xia.goal-test
+  xia.http-client-test
   xia.identity-test
   xia.llm-smoke-test
   xia.local-doc-smoke-test
   xia.local-ocr-test
   xia.mcp-test
+  xia.model-assets-test
   xia.oauth-test
   xia.pipeline-test
   xia.plugin-test
