@@ -77,6 +77,17 @@ This is intended for editing:
 - `resources/web/style.css`
 - files under `resources/web/favicon/`
 
+## Runtime/State Namespace Glossary
+
+- `xia.platform`: host platform/runtime feature detection, such as GraalVM native-image checks.
+- `xia.runtime-context`: dynamic Integrant component/runtime lookup context.
+- `xia.runtime-state`: process lifecycle and drain state exposed to control-plane code.
+- `xia.runtime-health`: idle/shutdown readiness snapshot assembled from runtime activity.
+- `xia.runtime-overlay`: managed/cloud overlay for config and catalog data that should not persist to the tenant DB.
+- `xia.agent.run-state`: mutable registry for active agent session/task runs and turn reservations.
+- `xia.retrieval-state`: retrieval invalidation counters for search-visible data changes.
+- `:xia/runtime-support`: Integrant component key that carries shared runtime support, not a namespace.
+
 ## Limitations
 
 - `--web-dev` only works when the web resources are file-backed on the classpath, which is the normal source checkout setup.

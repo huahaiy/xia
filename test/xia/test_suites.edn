@@ -20,13 +20,16 @@
   xia.oauth-test
   xia.pipeline-test
   xia.plugin-test
+  xia.permission-test
   xia.prompt-test
   xia.runtime-overlay-test
   xia.schedule-test
   xia.secret-test
   xia.service-test
+  xia.sci-env-test
   xia.skill-test
   xia.snapshot-test
+  xia.ssrf-test
   xia.summarizer-test
   xia.system-test
   xia.task-spec-test

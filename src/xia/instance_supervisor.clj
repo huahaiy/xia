@@ -11,7 +11,7 @@
             [xia.db :as db]
             [xia.http-client :as http-client]
             [xia.paths :as paths]
-            [xia.runtime :as runtime]
+            [xia.platform :as platform]
             [xia.runtime-context :as runtime-context])
   (:import [java.io File IOException]
            [java.lang ProcessBuilder$Redirect ProcessHandle]
@@ -82,7 +82,7 @@
   [command]
   (or (nonblank-string command)
       (some-> (env-value "XIA_INSTANCE_COMMAND") nonblank-string)
-      (when (runtime/native-image?)
+      (when (platform/native-image?)
         (current-process-command))
       default-command))
 
