@@ -14,8 +14,9 @@
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
             [xia.audit :as audit]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.db :as db]
+            [xia.interaction-context :as interaction-context]
             [xia.llm :as llm]
             [xia.permission :as permission]
             [xia.pipeline :as pipeline]
@@ -495,9 +496,9 @@
 (defn- tool-policy-env
   []
   {:vision-capable? llm/vision-capable?
-   :autonomous-run? autonomous/autonomous-run?
-   :trusted? autonomous/trusted?
-   :scope-available? autonomous/scope-available?})
+   :autonomous-run? interaction-context/autonomous-run?
+   :trusted? interaction-context/trusted?
+   :scope-available? autonomous-access/scope-available?})
 
 (defn- tool-description-for-llm
   [tool context]
@@ -668,7 +669,7 @@
                       :tool-name (or (:tool/name tool) (name tool-id))
                       :arguments arguments}
                      details)]
-    (autonomous/audit! context entry)
+    (interaction-context/audit! context entry)
     (audit/log! context
                 {:actor        :assistant
                  :type         :tool-execution

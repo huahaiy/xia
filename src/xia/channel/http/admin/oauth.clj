@@ -2,7 +2,7 @@
   "OAuth account admin HTTP handlers."
   (:require [charred.api :as json]
             [clojure.string :as str]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.channel.http.admin.common :as common]
             [xia.channel.http.request :as http-request]
             [xia.db :as db]
@@ -65,7 +65,7 @@
    :access_token_configured  (boolean (common/nonblank-str (:oauth.account/access-token account)))
    :refresh_token_configured (boolean (common/nonblank-str (:oauth.account/refresh-token account)))
    :token_type               (:oauth.account/token-type account)
-   :autonomous_approved      (boolean (autonomous/oauth-account-autonomous-approved? account))
+   :autonomous_approved      (boolean (autonomous-access/oauth-account-autonomous-approved? account))
    :connected                (boolean (common/nonblank-str (:oauth.account/access-token account)))
    :expires_at               (common/instant->str deps (:oauth.account/expires-at account))
    :connected_at             (common/instant->str deps (:oauth.account/connected-at account))})
@@ -105,7 +105,7 @@
 (defn- approve-template-oauth-account!
   [account]
   (if (and (oauth-account-template-service-spec account)
-           (not (autonomous/oauth-account-autonomous-approved? account)))
+           (not (autonomous-access/oauth-account-autonomous-approved? account)))
     (let [account-id (:oauth.account/id account)]
       (db/save-oauth-account!
        (cond-> {:id account-id

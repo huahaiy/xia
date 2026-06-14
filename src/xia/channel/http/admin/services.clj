@@ -1,6 +1,6 @@
 (ns xia.channel.http.admin.services
   "Service admin HTTP handlers."
-  (:require [xia.autonomous :as autonomous]
+  (:require [xia.autonomous.access :as autonomous-access]
             [xia.channel.http.admin.common :as common]
             [xia.db :as db]
             [xia.runtime-overlay :as runtime-overlay]
@@ -63,11 +63,11 @@
      :oauth_account_name                (:oauth.account/name oauth-account)
      :oauth_account_connected           (boolean (common/nonblank-str (:oauth.account/access-token oauth-account)))
      :oauth_account_autonomous_approved (boolean (and oauth-account
-                                                      (autonomous/oauth-account-autonomous-approved? oauth-account)))
+                                                      (autonomous-access/oauth-account-autonomous-approved? oauth-account)))
      :rate_limit_per_minute             (:service/rate-limit-per-minute service)
      :allow_private_network             (boolean (:service/allow-private-network? service))
      :effective_rate_limit_per_minute   (service-proxy/effective-rate-limit-per-minute service)
-     :autonomous_approved               (boolean (autonomous/service-autonomous-approved? service))
+     :autonomous_approved               (boolean (autonomous-access/service-autonomous-approved? service))
      :enabled                           (boolean (:service/enabled? service))
      :auth_key_configured               (boolean (common/nonblank-str (:service/auth-key service)))}))
 

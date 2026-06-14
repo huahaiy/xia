@@ -14,13 +14,14 @@
             [clojure.string :as str]
             [datalevin.core :as d]
             [taoensso.timbre :as log]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.browser.backend :as browser.backend]
             [xia.browser.playwright :as playwright]
             [xia.browser.remote :as remote]
             [xia.config :as cfg]
             [xia.crypto :as crypto]
             [xia.db :as db]
+            [xia.interaction-context :as interaction-context]
             [xia.prompt :as prompt]
             [xia.ssrf :as ssrf])
   (:import [datalevin.db DB]
@@ -870,23 +871,23 @@
       (throw (ex-info (str "No site credentials registered for: " (name site-id)
                            ". Register with xia.db/register-site-cred!")
                       {:site-id site-id})))
-    (when (autonomous/autonomous-run?)
+    (when (interaction-context/autonomous-run?)
       (cond
-        (not (autonomous/trusted?))
+        (not (interaction-context/trusted?))
         (do
-          (autonomous/audit! {:type    "site-login"
-                              :site-id (name site-id)
-                              :status  "blocked"
-                              :error   "trusted autonomous execution is required for site login"})
+          (interaction-context/audit! {:type    "site-login"
+                                       :site-id (name site-id)
+                                       :status  "blocked"
+                                       :error   "trusted autonomous execution is required for site login"})
           (throw (ex-info "site login requires trusted autonomous execution"
                           {:site-id site-id})))
 
-        (not (autonomous/site-autonomous-approved? cred))
+        (not (autonomous-access/site-autonomous-approved? cred))
         (do
-          (autonomous/audit! {:type    "site-login"
-                              :site-id (name site-id)
-                              :status  "blocked"
-                              :error   "site account is not approved for autonomous execution"})
+          (interaction-context/audit! {:type    "site-login"
+                                       :site-id (name site-id)
+                                       :status  "blocked"
+                                       :error   "site account is not approved for autonomous execution"})
           (throw (ex-info (str "Site account " (name site-id)
                                " is not approved for autonomous execution")
                           {:site-id site-id})))))
@@ -910,17 +911,17 @@
                                                           :username username
                                                           :password password
                                                           :extra-fields extra-fields})]
-          (autonomous/audit! {:type       "site-login"
-                              :site-id    (name site-id)
-                              :session-id session-id
-                              :status     "success"})
+          (interaction-context/audit! {:type       "site-login"
+                                       :site-id    (name site-id)
+                                       :session-id session-id
+                                       :status     "success"})
           login-result)
         (catch Exception e
-          (autonomous/audit! {:type       "site-login"
-                              :site-id    (name site-id)
-                              :session-id session-id
-                              :status     "error"
-                              :error      (.getMessage e)})
+          (interaction-context/audit! {:type       "site-login"
+                                       :site-id    (name site-id)
+                                       :session-id session-id
+                                       :status     "error"
+                                       :error      (.getMessage e)})
           (throw e))))))
 
 (defn login-interactive
@@ -938,11 +939,11 @@
   Returns:
      The logged-in page content with session-id."
   [url fields & {:keys [backend]}]
-  (when (autonomous/autonomous-run?)
-    (autonomous/audit! {:type   "site-login-interactive"
-                        :url    url
-                        :status "blocked"
-                        :error  "interactive login is unavailable during autonomous execution"})
+  (when (interaction-context/autonomous-run?)
+    (interaction-context/audit! {:type   "site-login-interactive"
+                                 :url    url
+                                 :status "blocked"
+                                 :error  "interactive login is unavailable during autonomous execution"})
     (throw (ex-info "interactive login is unavailable during autonomous execution" {:url url})))
   (when-not (prompt/prompt-available?)
     (throw (ex-info "Interactive login requires a terminal session" {})))
@@ -972,10 +973,10 @@
   []
   (->> (db/list-site-creds)
        (filter (fn [cred]
-                 (or (not (autonomous/autonomous-run?))
-                     (autonomous/site-autonomous-approved? cred))))
+                 (or (not (interaction-context/autonomous-run?))
+                     (autonomous-access/site-autonomous-approved? cred))))
        (mapv (fn [cred]
                {:id (:site-cred/id cred)
                 :name (:site-cred/name cred)
                 :login-url (:site-cred/login-url cred)
-                :autonomous-approved? (autonomous/site-autonomous-approved? cred)}))))
+                :autonomous-approved? (autonomous-access/site-autonomous-approved? cred)}))))

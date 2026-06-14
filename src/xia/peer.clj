@@ -3,8 +3,9 @@
    command channel, using stored service definitions so tokens never reach
    tool arguments."
   (:require [clojure.string :as str]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.db :as db]
+            [xia.interaction-context :as interaction-context]
             [xia.service :as service])
   (:import [java.net URI]))
 
@@ -40,8 +41,8 @@
 (defn- visible-peer-service?
   [service]
   (and (bearer-peer-service? service)
-       (or (not (autonomous/autonomous-run?))
-           (autonomous/service-approved? (:service/id service)))))
+       (or (not (interaction-context/autonomous-run?))
+           (autonomous-access/service-approved? (:service/id service)))))
 
 (defn list-peers
   "List configured bearer-auth services that can be used as Xia peers."
@@ -58,7 +59,7 @@
                 :base_url              (:service/base-url service)
                 :allow_private_network (boolean (:service/allow-private-network? service))
                 :local                 (loopback-base-url? (:service/base-url service))
-                :autonomous_approved   (boolean (autonomous/service-autonomous-approved? service))}))))
+                :autonomous_approved   (boolean (autonomous-access/service-autonomous-approved? service))}))))
 
 (defn- response-error-message
   [body]

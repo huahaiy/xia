@@ -5,7 +5,8 @@
    channels are still handled by xia.prompt, but tool code no longer owns the
    approval/session-grant mechanics."
   (:require [xia.audit :as audit]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
+            [xia.interaction-context :as interaction-context]
             [xia.llm :as llm]
             [xia.prompt :as prompt]
             [xia.runtime-context :as runtime-context]
@@ -72,9 +73,9 @@
 (defn- tool-policy-env
   []
   {:vision-capable? llm/vision-capable?
-   :autonomous-run? autonomous/autonomous-run?
-   :trusted? autonomous/trusted?
-   :scope-available? autonomous/scope-available?})
+   :autonomous-run? interaction-context/autonomous-run?
+   :trusted? interaction-context/trusted?
+   :scope-available? autonomous-access/scope-available?})
 
 (defn- approved-for-session?
   [session-id grant-key]

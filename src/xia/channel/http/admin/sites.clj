@@ -2,7 +2,7 @@
   "Site credential admin HTTP handlers."
   (:require [charred.api :as json]
             [clojure.string :as str]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.channel.http.admin.common :as common]
             [xia.db :as db]
             [xia.runtime-overlay :as runtime-overlay])
@@ -39,7 +39,7 @@
    :password_field      (:site-cred/password-field site)
    :form_selector       (:site-cred/form-selector site)
    :extra_fields        (:site-cred/extra-fields site)
-   :autonomous_approved (boolean (autonomous/site-autonomous-approved? site))
+   :autonomous_approved (boolean (autonomous-access/site-autonomous-approved? site))
    :username_configured (boolean (common/nonblank-str (:site-cred/username site)))
    :password_configured (boolean (common/nonblank-str (:site-cred/password site)))})
 

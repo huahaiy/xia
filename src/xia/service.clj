@@ -18,9 +18,10 @@
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
             [charred.api :as json]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.db :as db]
             [xia.http-client :as http]
+            [xia.interaction-context :as interaction-context]
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
             [xia.rate-limit :as rate-limit]
@@ -290,7 +291,7 @@
        :auth-key      (:service/auth-key svc)
        :auth-header   (:service/auth-header svc)
        :allow-private-network? (boolean (:service/allow-private-network? svc))
-       :autonomous-approved? (autonomous/service-autonomous-approved? svc)
+       :autonomous-approved? (autonomous-access/service-autonomous-approved? svc)
        :rate-limit-per-minute (effective-rate-limit-per-minute svc)
        :oauth-account-id (when (= :oauth-account auth-type)
                            (or oauth-account-id
@@ -307,53 +308,53 @@
   []
   (->> (db/list-services)
        (filter (fn [svc]
-                 (or (not (autonomous/autonomous-run?))
-                     (autonomous/service-approved? (:service/id svc)))))
+                 (or (not (interaction-context/autonomous-run?))
+                     (autonomous-access/service-approved? (:service/id svc)))))
        (mapv (fn [svc]
                {:id       (:service/id svc)
                 :name     (:service/name svc)
                 :base-url (:service/base-url svc)
                 :rate-limit-per-minute (effective-rate-limit-per-minute svc)
-                :autonomous-approved? (autonomous/service-autonomous-approved? svc)
+                :autonomous-approved? (autonomous-access/service-autonomous-approved? svc)
                 :enabled? (:service/enabled? svc)}))))
 
 (defn- ensure-autonomous-service-access!
   [service-id {:keys [auth-type oauth-account-id autonomous-approved?]} method path]
-  (when (autonomous/autonomous-run?)
+  (when (interaction-context/autonomous-run?)
     (cond
-      (not (autonomous/trusted?))
+      (not (interaction-context/trusted?))
       (do
-        (autonomous/audit! {:type       "service-request"
-                            :service-id (name service-id)
-                            :method     (name method)
-                            :path       path
-                            :status     "blocked"
-                            :error      "trusted autonomous execution is required for service access"})
+        (interaction-context/audit! {:type       "service-request"
+                                     :service-id (name service-id)
+                                     :method     (name method)
+                                     :path       path
+                                     :status     "blocked"
+                                     :error      "trusted autonomous execution is required for service access"})
         (throw (ex-info "service access requires trusted autonomous execution"
                         {:service-id service-id})))
 
       (not autonomous-approved?)
       (do
-        (autonomous/audit! {:type       "service-request"
-                            :service-id (name service-id)
-                            :method     (name method)
-                            :path       path
-                            :status     "blocked"
-                            :error      "service is not approved for autonomous execution"})
+        (interaction-context/audit! {:type       "service-request"
+                                     :service-id (name service-id)
+                                     :method     (name method)
+                                     :path       path
+                                     :status     "blocked"
+                                     :error      "service is not approved for autonomous execution"})
         (throw (ex-info (str "Service " (name service-id)
                              " is not approved for autonomous execution")
                         {:service-id service-id})))
 
       (and (= :oauth-account auth-type)
-           (not (autonomous/oauth-account-approved? oauth-account-id)))
+           (not (autonomous-access/oauth-account-approved? oauth-account-id)))
       (do
-        (autonomous/audit! {:type             "service-request"
-                            :service-id       (name service-id)
-                            :oauth-account-id (some-> oauth-account-id name)
-                            :method           (name method)
-                            :path             path
-                            :status           "blocked"
-                            :error            "oauth account is not approved for autonomous execution"})
+        (interaction-context/audit! {:type             "service-request"
+                                     :service-id       (name service-id)
+                                     :oauth-account-id (some-> oauth-account-id name)
+                                     :method           (name method)
+                                     :path             path
+                                     :status           "blocked"
+                                     :error            "oauth account is not approved for autonomous execution"})
         (throw (ex-info (str "OAuth account " (name oauth-account-id)
                              " is not approved for autonomous execution")
                         {:service-id service-id
@@ -414,14 +415,14 @@
         _       (log/debug "Service request:" (name service-id) method path)]
     (try
       (let [resp (http/request req)]
-        (autonomous/audit! (cond-> {:type        "service-request"
-                                    :service-id  (name service-id)
-                                    :method      (name method)
-                                    :path        path
-                                    :status      "success"
-                                    :http-status (:status resp)}
-                             (:oauth-account-id svc)
-                             (assoc :oauth-account-id (name (:oauth-account-id svc)))))
+        (interaction-context/audit! (cond-> {:type        "service-request"
+                                             :service-id  (name service-id)
+                                             :method      (name method)
+                                             :path        path
+                                             :status      "success"
+                                             :http-status (:status resp)}
+                                      (:oauth-account-id svc)
+                                      (assoc :oauth-account-id (name (:oauth-account-id svc)))))
         {:status  (:status resp)
          :headers (into {} (:headers resp))
          :body    (case as
@@ -431,12 +432,12 @@
                     :raw    (:body resp)
                     (:body resp))})
       (catch Exception e
-        (autonomous/audit! (cond-> {:type       "service-request"
-                                    :service-id (name service-id)
-                                    :method     (name method)
-                                    :path       path
-                                    :status     "error"
-                                    :error      (.getMessage e)}
-                             (:oauth-account-id svc)
-                             (assoc :oauth-account-id (name (:oauth-account-id svc)))))
+        (interaction-context/audit! (cond-> {:type       "service-request"
+                                             :service-id (name service-id)
+                                             :method     (name method)
+                                             :path       path
+                                             :status     "error"
+                                             :error      (.getMessage e)}
+                                      (:oauth-account-id svc)
+                                      (assoc :oauth-account-id (name (:oauth-account-id svc)))))
         (throw e)))))

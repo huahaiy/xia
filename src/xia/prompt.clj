@@ -7,6 +7,7 @@
    (approve! ...) which delegates to the current channel handler."
   (:require [clojure.string :as str]
             [xia.audit :as audit]
+            [xia.interaction-context :as interaction-context]
             [xia.runtime-context :as runtime-context]
             [xia.task-event :as task-event]))
 
@@ -73,10 +74,14 @@
   "Dynamic execution context for tool interactions, e.g. {:channel :terminal :session-id ...}."
   nil)
 
+(defn- interaction-context
+  []
+  (interaction-context/context))
+
 (declare deliver-pending-interaction!)
 
 (defn- current-channel []
-  (or (:channel *interaction-context*) :default))
+  (or (:channel (interaction-context)) :default))
 
 (defn- resolve-handler
   [handlers]
@@ -87,7 +92,7 @@
 
 (defn- invoke-runtime-hook!
   [hook-key payload]
-  (when-let [f (get *interaction-context* hook-key)]
+  (when-let [f (get (interaction-context) hook-key)]
     (try
       (f payload)
       (catch Throwable _
@@ -168,7 +173,7 @@
    - `:channel` (optional, defaults from `*interaction-context*`)
    - `:created-at` (optional, defaults to now)"
   [{:keys [interaction-id session-id task-id channel created-at] :as interaction}]
-  (let [context      *interaction-context*
+  (let [context      (interaction-context)
         interaction* (cond-> interaction
                        (nil? interaction-id) (assoc :interaction-id (str (random-uuid)))
                        (nil? session-id) (assoc :session-id (:session-id context))
@@ -432,7 +437,7 @@
    - `:busy?`
    - `:finalize-session!`"
   [handlers session-id intent & {:keys [reason context]}]
-  (let [audit-ctx (merge (select-keys *interaction-context* [:session-id :channel])
+  (let [audit-ctx (merge (select-keys (interaction-context) [:session-id :channel])
                          (select-keys context [:session-id :channel]))
         result
         (if-not session-id
@@ -494,7 +499,7 @@
    - `:steer-task!`
    - `:fork-task!`"
   [handlers task-id intent & {:keys [message context]}]
-  (let [audit-ctx (merge (select-keys *interaction-context* [:session-id :channel])
+  (let [audit-ctx (merge (select-keys (interaction-context) [:session-id :channel])
                          (select-keys context [:session-id :channel]))
         result
         (if-not task-id
@@ -568,7 +573,7 @@
     (invoke-runtime-hook! :task-runtime/on-input-request
                           {:label label
                            :mask? (boolean mask?)})
-    (audit/log! *interaction-context*
+    (audit/log! (interaction-context)
                 {:actor :user
                  :type  :input-request
                  :data  {:label label
@@ -578,7 +583,7 @@
                             {:label label
                              :mask? (boolean mask?)
                              :provided (not (clojure.string/blank? value))})
-      (audit/log! *interaction-context*
+      (audit/log! (interaction-context)
                   {:actor :user
                    :type  :input-response
                    :data  {:label label
@@ -604,13 +609,13 @@
    Returns true if approved, false if denied."
   [request]
   (let [f (resolve-handler (approval-handlers-atom))
-        req (merge {:channel (current-channel)} *interaction-context* request)]
+        req (merge {:channel (current-channel)} (interaction-context) request)]
     (when-not f
       (throw (ex-info "No approval handler available for current channel"
                       {:channel (current-channel)
                        :tool-id (:tool-id request)})))
     (invoke-runtime-hook! :task-runtime/on-approval-request req)
-    (audit/log! *interaction-context*
+    (audit/log! (interaction-context)
                 {:actor :user
                  :type  :approval-request
                  :tool-id (some-> (:tool-id req) name)
@@ -622,7 +627,7 @@
     (let [approved? (boolean (f req))]
       (invoke-runtime-hook! :task-runtime/on-approval-decision
                             (assoc req :approved? approved?))
-      (audit/log! *interaction-context*
+      (audit/log! (interaction-context)
                   {:actor :user
                    :type  :approval-decision
                    :tool-id (some-> (:tool-id req) name)
@@ -636,7 +641,7 @@
    Used to persist explicit approval-policy and execution-policy decisions."
   [decision]
   (invoke-runtime-hook! :task-runtime/on-policy-decision decision)
-  (audit/log! *interaction-context*
+  (audit/log! (interaction-context)
               {:actor :assistant
                :type :policy-decision
                :tool-id (some-> (:tool-id decision) name)
@@ -667,7 +672,7 @@
   (let [status* (or (task-event/normalize-runtime-status status) status)]
     (invoke-runtime-hook! :task-runtime/on-status status*)
     (when-let [f (resolve-handler (status-handlers-atom))]
-      (f (merge {:channel (current-channel)} *interaction-context* status*)))))
+      (f (merge {:channel (current-channel)} (interaction-context) status*)))))
 
 (defn status-available?
   "True if a status handler is registered."
@@ -687,7 +692,7 @@
    Returns nil if no assistant message handler is registered for the current channel."
   [message]
   (when-let [f (resolve-handler (assistant-message-handlers-atom))]
-    (f (merge {:channel (current-channel)} *interaction-context* message))))
+    (f (merge {:channel (current-channel)} (interaction-context) message))))
 
 (defn assistant-message-available?
   "True if an assistant message handler is registered."
@@ -708,7 +713,7 @@
   [event]
   (when-let [f (resolve-handler (runtime-event-handlers-atom))]
     (f (task-event/runtime-event
-        (merge {:channel (current-channel)} *interaction-context* event)))))
+        (merge {:channel (current-channel)} (interaction-context) event)))))
 
 (defn runtime-event-available?
   "True if a runtime event handler is registered."

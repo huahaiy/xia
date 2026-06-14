@@ -3,7 +3,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [xia.autonomous :as autonomous]
+            [xia.autonomous.access :as autonomous-access]
             [xia.db :as db]
             [xia.http-client :as http]
             [xia.prompt :as prompt]
@@ -262,7 +262,7 @@
           :refreshed []
           :errors    []}
          (let [accounts (into []
-                              (comp (filter autonomous/oauth-account-autonomous-approved?)
+                              (comp (filter autonomous-access/oauth-account-autonomous-approved?)
                                     (filter refreshable-account?)
                                     (filter proactive-refresh-needed?))
                               (db/list-oauth-accounts))
