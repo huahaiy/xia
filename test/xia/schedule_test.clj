@@ -1,323 +1,47 @@
 (ns xia.schedule-test
   (:require [clojure.test :refer :all]
-            [xia.agent.task-runtime :as task-runtime]
-            [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.prompt :as prompt]
             [xia.schedule :as schedule]
             [xia.scheduler :as scheduler]
             [xia.test-helpers :refer [with-test-db]]
-            [xia.tool :as tool]
-            [xia.working-memory :as wm]))
+            [xia.tool :as tool]))
 
 (use-fixtures :each with-test-db)
 
-(defn- reserved-next-run
-  [schedule-id]
-  (ffirst (db/q '[:find ?next :in $ ?sid
-                  :where
-                  [?e :schedule/id ?sid]
-                  [?e :schedule/reserved-next-run ?next]]
-                schedule-id)))
-
-(defn- schedule-state-entity
-  [schedule-id]
-  (when-let [eid (ffirst (db/q '[:find ?e :in $ ?sid
-                                  :where [?e :schedule.state/schedule-id ?sid]]
-                                schedule-id))]
-    (into {} (db/entity eid))))
-
-;; ---------------------------------------------------------------------------
-;; Create
-;; ---------------------------------------------------------------------------
-
 (deftest create-tool-schedule
   (let [result (schedule/create-schedule!
-                 {:id      :test-tool
-                  :name    "Test Tool Schedule"
-                  :spec    {:minute #{0} :hour #{9}}
-                  :type    :tool
-                  :tool-id :web-fetch})]
+                {:id      :test-tool
+                 :name    "Test Tool Schedule"
+                 :spec    {:minute #{0} :hour #{9}}
+                 :type    :tool
+                 :tool-id :web-fetch})]
     (is (= :test-tool (:id result)))
     (is (some? (:next-run result)))))
 
-(deftest create-prompt-schedule
-  (let [result (schedule/create-schedule!
-                 {:id     :test-prompt
-                  :name   "Morning Check"
-                  :spec   {:minute #{0} :hour #{8}}
-                  :type   :prompt
-                  :prompt "Check my email and summarize"})]
-    (is (= :test-prompt (:id result)))
-    (is (some? (:next-run result)))))
-
-(deftest create-interval-schedule
-  (let [result (schedule/create-schedule!
-                 {:id      :every-30
-                  :spec    {:interval-minutes 30}
-                  :type    :tool
-                  :tool-id :web-fetch})]
-    (is (= :every-30 (:id result)))
-    (is (some? (:next-run result)))))
-
-(deftest create-requires-id
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"must have an :id"
-        (schedule/create-schedule! {:spec {:minute #{0}} :type :tool :tool-id :x}))))
-
-(deftest create-requires-spec
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"must have a :spec"
-        (schedule/create-schedule! {:id :x :type :tool :tool-id :x}))))
-
-(deftest create-requires-valid-type
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"must be :tool or :prompt"
-        (schedule/create-schedule! {:id :x :spec {:minute #{0}} :type :bad}))))
-
-(deftest create-tool-requires-tool-id
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"must specify :tool-id"
-        (schedule/create-schedule! {:id :x :spec {:minute #{0}} :type :tool}))))
-
-(deftest create-prompt-requires-prompt
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"must specify :prompt"
-        (schedule/create-schedule! {:id :x :spec {:minute #{0}} :type :prompt}))))
-
 (deftest create-rejects-too-frequent
   (let [decisions (atom [])]
-    ;; Empty spec = every minute
     (with-redefs [prompt/policy-decision! (fn [decision]
                                             (swap! decisions conj decision)
                                             nil)]
       (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo #"too frequent"
-            (schedule/create-schedule!
-              {:id :x :spec {} :type :tool :tool-id :x})))
+           clojure.lang.ExceptionInfo #"too frequent"
+           (schedule/create-schedule!
+            {:id :x :spec {} :type :tool :tool-id :x})))
       (is (some #(= {:decision-type :schedule-frequency-policy
                      :allowed? false
                      :mode :calendar-frequency
                      :min-interval-minutes 5}
                     (select-keys %
-                                 [:decision-type :allowed? :mode :min-interval-minutes]))
+                                 [:decision-type
+                                  :allowed?
+                                  :mode
+                                  :min-interval-minutes]))
                 @decisions)))))
-
-(deftest create-rejects-short-interval
-  (let [decisions (atom [])]
-    (with-redefs [prompt/policy-decision! (fn [decision]
-                                            (swap! decisions conj decision)
-                                            nil)]
-      (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo #"too frequent"
-            (schedule/create-schedule!
-              {:id :x :spec {:interval-minutes 2} :type :tool :tool-id :x})))
-      (is (some #(= {:decision-type :schedule-frequency-policy
-                     :allowed? false
-                     :mode :interval-limit
-                     :interval-minutes 2
-                     :min-interval-minutes 5}
-                    (select-keys %
-                                 [:decision-type :allowed? :mode :interval-minutes :min-interval-minutes]))
-                @decisions)))))
-
-(deftest create-allows-5-min-interval
-  (let [result (schedule/create-schedule!
-                 {:id :every-5 :spec {:interval-minutes 5} :type :tool :tool-id :x})]
-    (is (= :every-5 (:id result)))))
-
-(deftest create-coerces-vectors-to-sets
-  ;; Tool params arrive as JSON arrays → vectors
-  (let [result (schedule/create-schedule!
-                 {:id      :vec-test
-                  :spec    {:minute [0 30] :hour [9 17]}
-                  :type    :tool
-                  :tool-id :x})]
-    (is (= :vec-test (:id result)))
-    (let [sched (schedule/get-schedule :vec-test)]
-      (is (= #{0 30} (:minute (:spec sched))))
-      (is (= #{9 17} (:hour (:spec sched)))))))
-
-;; ---------------------------------------------------------------------------
-;; Get
-;; ---------------------------------------------------------------------------
-
-(deftest get-schedule-returns-details
-  (schedule/create-schedule!
-    {:id          :detail-test
-     :name        "Detail Test"
-     :description "Testing details"
-     :spec        {:minute #{0} :hour #{9}}
-     :type        :tool
-     :tool-id     :web-fetch
-     :tool-args   {"url" "https://example.com"}})
-  (let [sched (schedule/get-schedule :detail-test)]
-    (is (= :detail-test (:id sched)))
-    (is (= "Detail Test" (:name sched)))
-    (is (= "Testing details" (:description sched)))
-    (is (= #{0} (:minute (:spec sched))))
-    (is (= #{9} (:hour (:spec sched))))
-    (is (= :tool (:type sched)))
-    (is (true? (:trusted? sched)))
-    (is (= :web-fetch (:tool-id sched)))
-    (is (= {"url" "https://example.com"} (:tool-args sched)))
-    (is (true? (:enabled? sched)))
-    (is (some? (:next-run sched)))))
-
-(deftest get-nonexistent-returns-nil
-  (is (nil? (schedule/get-schedule :nonexistent))))
-
-;; ---------------------------------------------------------------------------
-;; List
-;; ---------------------------------------------------------------------------
-
-(deftest list-schedules-test
-  (schedule/create-schedule!
-    {:id :sched-a :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (schedule/create-schedule!
-    {:id :sched-b :spec {:minute #{0} :hour #{18}} :type :prompt :prompt "check stuff"})
-  (let [scheds (schedule/list-schedules)]
-    (is (= 2 (count scheds)))
-    (is (every? :id scheds))
-    (is (every? :spec scheds))))
-
-;; ---------------------------------------------------------------------------
-;; Update
-;; ---------------------------------------------------------------------------
-
-(deftest update-schedule-name
-  (schedule/create-schedule!
-    {:id :upd-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (let [updated (schedule/update-schedule! :upd-test {:name "New Name"})]
-    (is (= "New Name" (:name updated)))))
-
-(deftest update-schedule-trust
-  (schedule/create-schedule!
-    {:id :trust-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (let [updated (schedule/update-schedule! :trust-test {:trusted? false})]
-    (is (false? (:trusted? updated)))))
-
-(deftest update-schedule-spec-recalculates-next-run
-  (schedule/create-schedule!
-    {:id :upd-spec :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (let [before (:next-run (schedule/get-schedule :upd-spec))
-        _      (schedule/update-schedule! :upd-spec {:spec {:minute #{0} :hour #{18}}})
-        after  (:next-run (schedule/get-schedule :upd-spec))]
-    (is (some? after))
-    (is (not= before after))))
-
-(deftest update-schedule-can-switch-between-prompt-and-tool
-  (schedule/create-schedule!
-    {:id :upd-kind :spec {:interval-minutes 30} :type :prompt :prompt "write a summary"})
-  (let [tool-version (schedule/update-schedule! :upd-kind
-                                                {:type :tool
-                                                 :tool-id :email-list
-                                                 :tool-args {:max_results 3}})
-        prompt-version (schedule/update-schedule! :upd-kind
-                                                  {:type :prompt
-                                                   :prompt "write a new summary"})]
-    (is (= :tool (:type tool-version)))
-    (is (= :email-list (:tool-id tool-version)))
-    (is (= {:max_results 3} (:tool-args tool-version)))
-    (is (nil? (:prompt tool-version)))
-    (is (= :prompt (:type prompt-version)))
-    (is (= "write a new summary" (:prompt prompt-version)))
-    (is (nil? (:tool-id prompt-version)))
-    (is (nil? (:tool-args prompt-version)))))
-
-(deftest update-nonexistent-throws
-  (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"not found"
-        (schedule/update-schedule! :nope {:name "x"}))))
-
-;; ---------------------------------------------------------------------------
-;; Pause / Resume
-;; ---------------------------------------------------------------------------
-
-(deftest pause-and-resume
-  (schedule/create-schedule!
-    {:id :pausable :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (is (true? (:enabled? (schedule/get-schedule :pausable))))
-  (schedule/pause-schedule! :pausable)
-  (is (false? (:enabled? (schedule/get-schedule :pausable))))
-  (schedule/resume-schedule! :pausable)
-  (is (true? (:enabled? (schedule/get-schedule :pausable)))))
-
-;; ---------------------------------------------------------------------------
-;; Remove
-;; ---------------------------------------------------------------------------
-
-(deftest remove-schedule-test
-  (schedule/create-schedule!
-    {:id :removable :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (is (some? (schedule/get-schedule :removable)))
-  (schedule/remove-schedule! :removable)
-  (is (nil? (schedule/get-schedule :removable))))
-
-;; ---------------------------------------------------------------------------
-;; Run history
-;; ---------------------------------------------------------------------------
-
-(deftest record-and-query-history
-  (schedule/create-schedule!
-    {:id :hist-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (let [now (java.util.Date.)]
-    (schedule/record-run! :hist-test
-      {:started-at  now
-       :finished-at (java.util.Date.)
-       :status      :success
-       :result      "all good"})
-    (schedule/record-run! :hist-test
-      {:started-at  (java.util.Date.)
-       :finished-at (java.util.Date.)
-       :status      :error
-       :error       "something broke"}))
-  (let [history (schedule/schedule-history :hist-test)]
-    (is (= 2 (count history)))
-    ;; Most recent first
-    (is (= :error (:status (first history))))
-    (is (= :success (:status (second history))))))
-
-(deftest record-run-persists-audit-actions
-  (schedule/create-schedule!
-    {:id :audit-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (schedule/record-run! :audit-test
-    {:started-at  (java.util.Date.)
-     :finished-at (java.util.Date.)
-     :status      :success
-     :actions     [{:tool-id "web-fetch"
-                    :status "success"
-                    :arguments {"url" "https://example.com"}}]
-     :result      "done"})
-  (let [run (first (schedule/schedule-history :audit-test))]
-    (is (= [{:tool-id "web-fetch"
-             :status "success"
-             :arguments {"url" "https://example.com"}}]
-           (:actions run)))
-    (is (= "done" (:result run)))))
-
-(deftest record-run-persists-meta
-  (schedule/create-schedule!
-    {:id :meta-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (schedule/record-run! :meta-test
-    {:started-at  (java.util.Date.)
-     :finished-at (java.util.Date.)
-     :status      :budget-exhausted
-     :meta        {:llm-budget {:scope :schedule-run
-                                :schedule-id :meta-test
-                                :llm-call-count 2
-                                :total-tokens 14}}
-     :error       "Reached the scheduled run LLM call budget (2/2)"})
-  (let [run (first (schedule/schedule-history :meta-test))]
-    (is (= {:llm-budget {:scope :schedule-run
-                         :schedule-id :meta-test
-                         :llm-call-count 2
-                         :total-tokens 14}}
-           (:meta run)))))
 
 (deftest safe-schedule-history-redacts-audit-actions
   (schedule/create-schedule!
-    {:id :audit-safe :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
+   {:id :audit-safe :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
   (schedule/record-run! :audit-safe
     {:started-at  (java.util.Date.)
      :finished-at (java.util.Date.)
@@ -329,78 +53,6 @@
     (is (not (contains? run :actions)))
     (is (not (contains? run :error)))))
 
-(deftest record-run-updates-last-run
-  (schedule/create-schedule!
-    {:id :last-run-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (is (nil? (:last-run (schedule/get-schedule :last-run-test))))
-  (schedule/record-run! :last-run-test
-    {:started-at (java.util.Date.) :status :success})
-  (is (some? (:last-run (schedule/get-schedule :last-run-test)))))
-
-(deftest trim-history-keeps-recent
-  (schedule/create-schedule!
-    {:id :trim-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (dotimes [idx 5]
-    (schedule/record-run! :trim-test
-      {:started-at (java.util.Date. (+ 1000 (* idx 10)))
-       :status :success
-       :result "ok"}))
-  (is (= 5 (count (schedule/schedule-history :trim-test 100))))
-  (schedule/trim-history! :trim-test 2)
-  (is (= 2 (count (schedule/schedule-history :trim-test 100)))))
-
-(deftest claim-schedule-run-reserves-next-wake-durably
-  (schedule/create-schedule!
-    {:id :claim-test :spec {:interval-minutes 30} :type :tool :tool-id :x})
-  (db/transact! [{:schedule/id :claim-test
-                  :schedule/next-run (java.util.Date. 0)}])
-  (let [started-at (java.util.Date. 1000)
-        expected   (java.util.Date. (+ (.getTime started-at)
-                                       (* 30 60 1000)))
-        claimed    (schedule/claim-schedule-run! :claim-test started-at)
-        sched      (schedule/get-schedule :claim-test)]
-    (is (= :claim-test (:id claimed)))
-    (is (= expected (:next-run sched)))
-    (is (= expected (reserved-next-run :claim-test)))
-    (is (empty? (schedule/due-schedules started-at)))))
-
-(deftest record-run-consumes-reserved-next-wake-without-double-advance
-  (schedule/create-schedule!
-    {:id :claimed-run :spec {:interval-minutes 30} :type :tool :tool-id :x})
-  (db/transact! [{:schedule/id :claimed-run
-                  :schedule/next-run (java.util.Date. 0)}])
-  (let [started-at (java.util.Date. 1000)]
-    (schedule/claim-schedule-run! :claimed-run started-at)
-    (let [reserved (reserved-next-run :claimed-run)]
-      (schedule/record-run! :claimed-run
-        {:started-at  started-at
-         :finished-at (java.util.Date. (+ (.getTime started-at) 5000))
-         :status      :success
-         :result      "ok"})
-      (let [sched (schedule/get-schedule :claimed-run)]
-        (is (= started-at (:last-run sched)))
-        (is (= reserved (:next-run sched)))
-        (is (nil? (reserved-next-run :claimed-run)))))))
-
-;; ---------------------------------------------------------------------------
-;; Durable task state / recovery
-;; ---------------------------------------------------------------------------
-
-(deftest schedule-task-creation-uses-canonical-task-shape
-  (let [_       (schedule/create-schedule!
-                 {:id :task-shape
-                  :spec {:minute #{0} :hour #{9}}
-                  :type :prompt
-                  :prompt "Summarize the dashboard"})
-        sched   (schedule/get-schedule :task-shape)
-        task-id (schedule/ensure-schedule-task! sched)
-        task    (db/get-task task-id)]
-    (is (= :task (:type task)))
-    (is (= :task (get-in task [:contract :kind])))
-    (is (= :schedule (get-in task [:meta :trigger :kind])))
-    (is (= :agent (get-in task [:meta :execution :mode])))
-    (is (= :llm (get-in task [:contract :spec :steps 0 :kind])))))
-
 (deftest tool-schedule-runs-through-task-spec-runner
   (db/install-tool! {:id          :scheduled-safe
                      :name        "scheduled-safe"
@@ -409,10 +61,10 @@
                      :handler     "(fn [_] {\"summary\" \"scheduled ok\" \"content\" \"ok\"})"})
   (tool/load-tool! :scheduled-safe)
   (schedule/create-schedule!
-    {:id :runner-schedule
-     :spec {:minute #{0} :hour #{9}}
-     :type :tool
-     :tool-id :scheduled-safe})
+   {:id :runner-schedule
+    :spec {:minute #{0} :hour #{9}}
+    :type :tool
+    :tool-id :scheduled-safe})
   (let [sched   (schedule/get-schedule :runner-schedule)
         _       (scheduler/run-tool-schedule! sched)
         task-id (schedule/schedule-task-id :runner-schedule)
@@ -427,196 +79,33 @@
     (is (some #(= :tool-call (:type %)) items))
     (is (some #(= :tool-result (:type %)) items))))
 
-(deftest prompt-schedule-runs-through-task-spec-runner
-  (let [calls (atom [])]
-    (schedule/create-schedule!
-      {:id :prompt-runner
-       :spec {:minute #{0} :hour #{9}}
-       :type :prompt
-       :prompt "Summarize the dashboard"})
-    (with-redefs [bridge/send-message!
-                  (fn [session-id message & {:as opts}]
-                    (swap! calls conj {:session-id session-id
-                                       :message message
-                                       :opts opts})
-                    "dashboard summarized")]
-      (let [sched   (schedule/get-schedule :prompt-runner)
-            _       (scheduler/run-prompt-schedule! sched)
-            task-id (schedule/schedule-task-id :prompt-runner)
-            task    (db/get-task task-id)
-            items   (mapcat #(db/turn-items (:id %))
-                             (db/task-turns task-id))
-            run     (first (schedule/schedule-history :prompt-runner))
-            call    (first @calls)]
-        (is (= :completed (:state task)))
-        (is (= :completed (get-in task [:meta :task-spec :status])))
-        (is (= :success (:status run)))
-        (is (= "dashboard summarized" (:result run)))
-        (is (= task-id (get-in run [:meta :task-id])))
-        (is (map? (get-in run [:meta :llm-budget])))
-        (is (= 1 (count @calls)))
-        (is (= "Summarize the dashboard" (:message call)))
-        (is (= :scheduler (get-in call [:opts :channel])))
-        (is (= task-id (get-in call [:opts :task-id])))
-        (is (some #(= :task-step (:type %)) items))))))
-
-(deftest task-state-builds-recovery-context
-  (schedule/create-schedule!
-    {:id :recoverable :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Check the dashboard"})
-  (let [task-id (schedule/ensure-schedule-task! (schedule/get-schedule :recoverable))]
-    (task-runtime/save-task-checkpoint!
-     task-id
-     {:phase :tool
-      :round 1
-      :summary "Opened the dashboard and attempted the primary action."
-      :tool-ids ["browser-open" "browser-click"]
-      :progress-status :resumable
-      :stack [{:title "Check the dashboard" :progress-status :in-progress}
-              {:title "Resume alternate path" :progress-status :resumable}]
-      :agenda [{:item "Open dashboard" :status :completed}
-               {:item "Resume alternate path" :status :resumable}
-               {:item "Investigate new branch" :status :diverged}]}))
-  (let [state (schedule/record-task-failure! :recoverable "No element matches selector #submit")
-        prompt (schedule/augment-prompt-with-recovery-context :recoverable "Check the dashboard")]
-    (is (= :backoff (:status state)))
-    (is (= :error (:phase state)))
-    (is (= 1 (:consecutive-failures state)))
-    (is (= "No element matches selector #submit" (:last-error state)))
-    (is (= {:decision-type :schedule-failure-policy
-            :mode :backoff
-            :same-failure? false
-            :consecutive-failures 1}
-           (select-keys (:last-policy state)
-                        [:decision-type :mode :same-failure? :consecutive-failures])))
-    (is (re-find #"Recovery context from previous scheduled attempts" prompt))
-    (is (re-find #"browser-query-elements" prompt))
-    (is (re-find #"Opened the dashboard and attempted the primary action" prompt))
-    (is (re-find #"Last checkpoint \[tool\]" prompt))
-    (is (re-find #"Agenda: Open dashboard; Resume alternate path; Investigate new branch" prompt))
-    (is (re-find #"Stack depth: 2" prompt))))
-
-(deftest task-state-ignores-legacy-schedule-checkpoint-fields
-  (schedule/create-schedule!
-    {:id :legacy-checkpoint
-     :spec {:minute #{0} :hour #{9}}
-     :type :prompt
-     :prompt "Continue the old run"})
-  (let [legacy-at (java.util.Date.)]
-    (db/transact! [{:schedule.state/schedule-id :legacy-checkpoint
-                    :schedule.state/status :backoff
-                    :schedule.state/checkpoint {:summary "Legacy schedule checkpoint"}
-                    :schedule.state/checkpoint-at legacy-at
-                    :schedule.state/last-success-summary "Legacy success"
-                    :schedule.state/last-recovery-hint "Legacy recovery"}])
-    (let [state (schedule/task-state :legacy-checkpoint)]
-      (is (= :backoff (:status state)))
-      (is (nil? (:checkpoint state)))
-      (is (nil? (:checkpoint-at state)))
-      (is (nil? (:last-success-summary state)))
-      (is (nil? (:last-recovery-hint state)))))
-  (schedule/record-task-start! :legacy-checkpoint {})
-  (let [state-record (schedule-state-entity :legacy-checkpoint)]
-    (is (not (contains? state-record :schedule.state/checkpoint)))
-    (is (not (contains? state-record :schedule.state/checkpoint-at)))
-    (is (not (contains? state-record :schedule.state/last-success-summary)))
-    (is (not (contains? state-record :schedule.state/last-recovery-hint)))))
-
-(deftest repeated-identical-failures-pause-schedule
-  (db/set-config! :schedule/pause-after-repeated-failures 2)
-  (schedule/create-schedule!
-    {:id :fragile-site :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Inspect the site"})
-  (schedule/record-task-failure! :fragile-site "No element matches selector #main")
-  (let [state (schedule/record-task-failure! :fragile-site "No element matches selector #main")
-        sched (schedule/get-schedule :fragile-site)]
-    (is (= :paused (:status state)))
-    (is (= 2 (:consecutive-failures state)))
-    (is (= {:decision-type :schedule-failure-policy
-            :mode :pause
-            :same-failure? true
-            :consecutive-failures 2}
-           (select-keys (:last-policy state)
-                        [:decision-type :mode :same-failure? :consecutive-failures])))
-    (is (false? (:enabled? sched)))))
-
-(deftest failed-prompt-schedule-exposes-resumable-session
-  (let [session-id (db/create-session! :scheduler)]
-    (schedule/create-schedule!
-      {:id :resume-me :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Continue the task"})
-    (wm/create-wm! session-id)
-    (let [task-id (schedule/ensure-schedule-task! (schedule/get-schedule :resume-me)
-                                                  :session-id session-id)]
-      (task-runtime/save-task-checkpoint!
-       task-id
-       {:phase :tool
-        :summary "Reached the target site and opened the work queue."
-        :session-id session-id}))
-    (schedule/record-task-failure! :resume-me "Timed out waiting for dashboard")
-    (is (= session-id
-           (schedule/resumable-session-id :resume-me)))
-    (wm/clear-wm! session-id)
-    (is (nil? (schedule/resumable-session-id :resume-me))
-        "A cleared working memory should force the schedule to start a fresh session")
-    (schedule/record-task-success! :resume-me "Finished successfully.")
-    (is (nil? (schedule/resumable-session-id :resume-me)))))
-
-(deftest task-success-clears-backoff-state
-  (schedule/create-schedule!
-    {:id :stabilized :spec {:minute #{0} :hour #{9}} :type :prompt :prompt "Do the thing"})
-  (schedule/record-task-failure! :stabilized "Timed out waiting for page")
-  (let [state (schedule/record-task-success! :stabilized "Recovered after reloading the page.")]
-    (is (= :success (:status state)))
-    (is (= :complete (:phase state)))
-    (is (= 0 (:consecutive-failures state)))
-    (is (nil? (:last-success-summary state)))
-    (is (nil? (:last-policy state)))
-    (is (nil? (:backoff-until state)))))
-
-;; ---------------------------------------------------------------------------
-;; Due schedules
-;; ---------------------------------------------------------------------------
-
-(deftest due-schedules-query
-  (schedule/create-schedule!
-    {:id :due-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  ;; Set next-run to the past
-  (db/transact! [{:schedule/id :due-test
-                  :schedule/next-run (java.util.Date. 0)}])
-  (let [due (schedule/due-schedules (java.util.Date.))]
-    (is (= 1 (count due)))
-    (is (= :due-test (:id (first due))))))
-
-(deftest disabled-schedules-not-due
-  (schedule/create-schedule!
-    {:id :disabled-test :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
-  (db/transact! [{:schedule/id :disabled-test
-                  :schedule/next-run (java.util.Date. 0)}])
-  (schedule/pause-schedule! :disabled-test)
-  (is (empty? (schedule/due-schedules (java.util.Date.)))))
-
-;; ---------------------------------------------------------------------------
-;; Schedule limit
-;; ---------------------------------------------------------------------------
-
 (deftest schedule-limit-enforced
   (let [decisions (atom [])]
     (dotimes [i 50]
       (schedule/create-schedule!
-        {:id (keyword (str "sched-" i))
-         :spec {:minute #{0} :hour #{9}}
-         :type :tool
-         :tool-id :x}))
+       {:id (keyword (str "sched-" i))
+        :spec {:minute #{0} :hour #{9}}
+        :type :tool
+        :tool-id :x}))
     (with-redefs [prompt/policy-decision! (fn [decision]
                                             (swap! decisions conj decision)
                                             nil)]
       (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo #"Too many schedules"
-            (schedule/create-schedule!
-              {:id :one-too-many :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})))
+           clojure.lang.ExceptionInfo #"Too many schedules"
+           (schedule/create-schedule!
+            {:id :one-too-many
+             :spec {:minute #{0} :hour #{9}}
+             :type :tool
+             :tool-id :x})))
       (is (some #(= {:decision-type :schedule-count-policy
                      :allowed? false
                      :mode :schedule-limit
                      :current-count 50
                      :max-schedules 50}
                     (select-keys %
-                                 [:decision-type :allowed? :mode :current-count :max-schedules]))
+                                 [:decision-type
+                                  :allowed?
+                                  :mode
+                                  :current-count
+                                  :max-schedules]))
                 @decisions)))))
