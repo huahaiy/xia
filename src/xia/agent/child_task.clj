@@ -45,13 +45,13 @@
                                :work-prompt work-prompt
                                :objective objective
                                :parent-task-id parent-task-id}))
-        meta*            (merge {:trigger {:kind :branch
-                                           :parent-task-id parent-task-id}
-                                 :execution {:mode :agent}}
+        meta*            (merge (cond-> {:trigger {:kind :branch}
+                                         :execution {:mode :agent}}
+                           parent-task-id
+                           (assoc-in [:trigger :parent-task-id] parent-task-id))
                                 meta)
         task-id          (db/create-task!
                           (cond-> {:session-id child-session-id
-                                   :parent-id parent-task-id
                                    :channel :branch
                                    :type :task
                                    :state (or state :running)
@@ -66,6 +66,8 @@
                                                   resource-session-id))
                                    :started-at (or started-at
                                                    (java.util.Date.))}
+                            parent-task-id
+                            (assoc :parent-id parent-task-id)
                             session-role
                             (assoc :session-role session-role)))]
     {:session-id child-session-id

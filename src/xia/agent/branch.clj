@@ -97,10 +97,11 @@
                  :resource-session-id resource-session-id*
                  :session-active? false
                  :state :running
-                 :meta {:branch-worker true
-                        :parent-session-id parent-session-id
-                        :resource-session-id resource-session-id*
-                        :objective objective}})
+                 :meta (cond-> {:branch-worker true
+                                 :parent-session-id parent-session-id
+                                 :resource-session-id resource-session-id*}
+                         (some? objective)
+                         (assoc :objective objective))})
         child-session-id (:session-id worker)
         child-task-id (:task-id worker)
         log-context (merge {:task task
