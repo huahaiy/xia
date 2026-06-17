@@ -18,6 +18,10 @@
 (def ^:private default-max-redirects 10)
 (def ^:private byte-array-class (Class/forName "[B"))
 (def ^:private redirect-statuses #{301 302 303 307 308})
+(def ^:private cross-origin-sensitive-headers
+  #{"authorization" "cookie" "proxy-authorization"})
+(def ^:private body-headers
+  #{"content-length" "content-type"})
 
 (defn- encode-query-params
   [query-params]
@@ -118,6 +122,16 @@
              "https" 443
              -1))))
 
+(defn- uri-origin
+  [^URI uri]
+  [(some-> (.getScheme uri) str/lower-case)
+   (some-> (.getHost uri) str/lower-case)
+   (effective-port uri)])
+
+(defn- same-origin?
+  [^URI a ^URI b]
+  (= (uri-origin a) (uri-origin b)))
+
 (defn- request-path
   [^URI uri]
   (str (if (str/blank? (.getRawPath uri))
@@ -145,6 +159,21 @@
   (if (keyword? header)
     (name header)
     (str header)))
+
+(defn- remove-headers
+  [headers blocked]
+  (into {}
+        (remove (fn [[header _]]
+                  (contains? blocked (str/lower-case (header-name header)))))
+        (or headers {})))
+
+(defn- remove-cross-origin-sensitive-headers
+  [headers]
+  (remove-headers headers cross-origin-sensitive-headers))
+
+(defn- remove-body-headers
+  [headers]
+  (remove-headers headers body-headers))
 
 (defn- write-header!
   [^BufferedOutputStream out header value]
@@ -636,6 +665,8 @@
   (and (integer? status)
        (<= 200 (int status) 299)))
 
+(declare follow-response-redirect-request)
+
 (defn request
   "Send an HTTP request with request-level timeout and retries.
 
@@ -654,65 +685,91 @@
      :retry-statuses       default #{408 409 425 429 500 502 503 504}
      :retry-methods        methods retried by default, default #{:delete :get :head :options :put :trace}
      :retry-enabled?       override automatic method-based retry gating
+     :follow-redirects?    follow 301/302/303/307/308 redirects, default false
+     :max-redirects        redirect limit when :follow-redirects? is true, default 10
      :allow-private-network? bypass SSRF private-network blocking for explicitly trusted targets
      :trusted? / :trusted    aliases for trusted private-network bypass
      :request-label        optional log label
-     :policy-observer      optional callback for retry-policy decisions"
-  [{:keys [connect-timeout timeout request-label policy-observer]
+     :policy-observer      optional callback for retry-policy decisions
+
+   Redirects are not followed unless :follow-redirects? is true. Followed
+   redirects are revalidated through the SSRF guard. Cross-origin redirects
+   strip Authorization, Cookie, and Proxy-Authorization headers; 303 switches
+   to GET and drops the request body."
+  [{:keys [connect-timeout timeout request-label policy-observer follow-redirects? max-redirects]
     :or   {connect-timeout    default-connect-timeout-ms
            timeout            default-request-timeout-ms}
     :as   req}]
-  (let [retry-config (http-policy/http-request-retry-config req)
-        req (merge req
-                   retry-config
-                   {:connect-timeout connect-timeout
-                    :timeout timeout})
-        resolved-target (validate-request-target! req)
-        request-url-str (:url resolved-target)
-        req (assoc req :resolved-target resolved-target)
-        label (or request-label "HTTP request")
-        emit-policy! (fn [decision]
-                       (when policy-observer
-                         (policy-observer (assoc decision
-                                                 :decision-type :http-retry-policy
-                                                 :request-label label
-                                                 :url request-url-str))))]
-    (letfn [(retry! [decision reason]
-              (let [delay-ms (:delay-ms decision)]
-                (log/warn reason
-                          "Retrying request"
-                          {:request label
-                           :attempt (:attempt decision)
-                           :max-attempts (:max-attempts decision)
-                           :delay-ms delay-ms
-                           :url request-url-str})
-                (sleep-ms! delay-ms)
-                (attempt-request (inc (long (:attempt decision))))))
-            (attempt-request [attempt]
-              (let [resp (try
-                           (send-request! req)
-                           (catch Exception e
-                             (let [decision (http-policy/http-request-retry-decision
-                                             req
-                                             attempt
-                                             {:transient-exception? (transient-exception? e)
-                                              :reason (.getMessage e)})]
-                               (emit-policy! decision)
-                               (if (:allowed? decision)
-                                 (retry! decision (.getMessage e))
-                                 (throw e)))))
-                    status (:status resp)]
-                (let [decision (http-policy/http-request-retry-decision
-                                req
-                                attempt
-                                {:status status
-                                 :reason (str label " returned transient status " status)})]
-                  (when-not (successful-status? status)
-                    (emit-policy! decision))
-                  (if (:allowed? decision)
-                    (retry! decision (str label " returned transient status " status))
-                    (assoc resp :attempt (or (:attempt resp) attempt))))))]
-      (attempt-request 1))))
+  (let [base-req (merge req
+                        {:connect-timeout connect-timeout
+                         :timeout timeout})
+        max-redirects (long (or max-redirects default-max-redirects))]
+    (letfn [(attempt-with-retries [req]
+              (let [retry-config (http-policy/http-request-retry-config req)
+                    req (merge req retry-config)
+                    resolved-target (validate-request-target! req)
+                    request-url-str (:url resolved-target)
+                    req (assoc req :resolved-target resolved-target)
+                    label (or request-label "HTTP request")
+                    emit-policy! (fn [decision]
+                                   (when policy-observer
+                                     (policy-observer
+                                      (assoc decision
+                                             :decision-type :http-retry-policy
+                                             :request-label label
+                                             :url request-url-str))))]
+                (letfn [(retry! [decision reason]
+                          (let [delay-ms (:delay-ms decision)]
+                            (log/warn reason
+                                      "Retrying request"
+                                      {:request label
+                                       :attempt (:attempt decision)
+                                       :max-attempts (:max-attempts decision)
+                                       :delay-ms delay-ms
+                                       :url request-url-str})
+                            (sleep-ms! delay-ms)
+                            (attempt-request (inc (long (:attempt decision))))))
+                        (attempt-request [attempt]
+                          (let [resp (try
+                                       (send-request! req)
+                                       (catch Exception e
+                                         (let [decision (http-policy/http-request-retry-decision
+                                                         req
+                                                         attempt
+                                                         {:transient-exception? (transient-exception? e)
+                                                          :reason (.getMessage e)})]
+                                           (emit-policy! decision)
+                                           (if (:allowed? decision)
+                                             (retry! decision (.getMessage e))
+                                             (throw e)))))
+                                status (:status resp)]
+                            (let [decision (http-policy/http-request-retry-decision
+                                            req
+                                            attempt
+                                            {:status status
+                                             :reason (str label " returned transient status " status)})]
+                              (when-not (successful-status? status)
+                                (emit-policy! decision))
+                              (if (:allowed? decision)
+                                (retry! decision (str label " returned transient status " status))
+                                (assoc resp
+                                       :attempt (or (:attempt resp) attempt)
+                                       :request req)))))]
+                  (attempt-request 1))))]
+      (loop [req base-req
+             remaining-redirects max-redirects]
+        (let [resp (attempt-with-retries req)]
+          (if-let [redirect-url (when follow-redirects?
+                                  (when (redirect-status? (:status resp))
+                                    (redirect-url (:request resp) (:headers resp))))]
+            (if (pos? remaining-redirects)
+              (recur (follow-response-redirect-request (:request resp) resp redirect-url)
+                     (dec remaining-redirects))
+              (throw (ex-info "HTTP request exceeded redirect limit"
+                              {:url (request-url (:request resp))
+                               :redirect-url redirect-url
+                               :max-redirects max-redirects})))
+            (dissoc resp :request)))))))
 
 (defn request-events
   "Send an HTTP request and stream `text/event-stream` responses via `:on-event`.
@@ -736,6 +793,25 @@
   (-> req
       (assoc :url redirect-url)
       (dissoc :uri :query-params :resolved-target)))
+
+(defn- follow-response-redirect-request
+  [req resp redirect-url]
+  (let [old-uri    (:uri (:resolved-target req))
+        new-uri    (URI. redirect-url)
+        status     (:status resp)
+        switch-get? (= 303 (long status))]
+    (cond-> (follow-redirect-request req redirect-url)
+      (and old-uri (not (same-origin? old-uri new-uri)))
+      (update :headers remove-cross-origin-sensitive-headers)
+
+      switch-get?
+      (assoc :method :get)
+
+      switch-get?
+      (dissoc :body)
+
+      switch-get?
+      (update :headers remove-body-headers))))
 
 (defn download!
   "Download an HTTP(S) resource to `:target-path` using the guarded egress path.
