@@ -9,6 +9,7 @@
             [xia.goal :as goal]
             [xia.runtime-state :as runtime-state]
             [xia.schedule :as schedule]
+            [xia.skill.proposal :as skill-proposal]
             [xia.task-event :as task-event]))
 
 (def ^:private history-session-channels #{:http :websocket :terminal :slack :telegram :imessage})
@@ -339,6 +340,10 @@
          persistent-goal (get-in task [:meta :persistent-goal])
          contract        (:contract task)
          constraints     (:constraints task)
+         skill-proposals (some->> (:id task)
+                                  skill-proposal/proposals-for-task
+                                  (mapv skill-proposal/proposal-summary)
+                                  not-empty)
          session-links   (not-empty (mapv #(session-link->body deps %) session-links))
          stack           (stack-view->body deps stack)]
      (cond-> {:id         (some-> (:id task) str)
@@ -365,6 +370,7 @@
        resume-hint (assoc :resume_hint resume-hint)
        recovery-brief (assoc :recovery_brief recovery-brief)
        persistent-goal (assoc :persistent_goal (persistent-goal->body deps persistent-goal))
+       skill-proposals (assoc :skill_proposals skill-proposals)
        inspection (assoc :inspection inspection)
        session-links (assoc :session_links session-links)
        stack (assoc :stack stack)
@@ -408,6 +414,10 @@
           boundary :boundary-summary} runtime-view
          contract    (history-contract->body (:contract task))
          constraints (:constraints task)
+         skill-proposals (some->> (:id task)
+                                  skill-proposal/proposals-for-task
+                                  (mapv skill-proposal/proposal-summary)
+                                  not-empty)
          session-links (not-empty (mapv #(session-link->body deps %) session-links))
          stack       (stack-view->body deps stack)]
      (cond-> {:id          (some-> (:id task) str)
@@ -431,6 +441,7 @@
        checkpoint-at (assoc :checkpoint_at (http-common/instant->str deps checkpoint-at))
        resume-hint (assoc :resume_hint resume-hint)
        recovery-brief (assoc :recovery_brief recovery-brief)
+       skill-proposals (assoc :skill_proposals skill-proposals)
        inspection (assoc :inspection inspection)
        session-links (assoc :session_links session-links)
        stack (assoc :stack stack)

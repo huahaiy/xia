@@ -56,6 +56,11 @@
 (def handle-curate-skills admin-skills/handle-curate-skills)
 (def handle-import-openclaw-skill admin-skills/handle-import-openclaw-skill)
 (def handle-skills admin-skills/handle-skills)
+(def handle-skill-proposals admin-skills/handle-skill-proposals)
+(def handle-create-skill-proposal admin-skills/handle-create-skill-proposal)
+(def handle-approve-skill-proposal admin-skills/handle-approve-skill-proposal)
+(def handle-llm-review-skill-proposal admin-skills/handle-llm-review-skill-proposal)
+(def handle-reject-skill-proposal admin-skills/handle-reject-skill-proposal)
 
 (def handle-save-plugin admin-plugins/handle-save-plugin)
 (def handle-enable-plugin admin-plugins/handle-enable-plugin)

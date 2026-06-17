@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [xia.agent.loop-guard :as loop-guard]
             [xia.agent.recorder :as recorder]
+            [xia.agent.task-finalization :as task-finalization]
             [xia.agent.task-runtime :as task-runtime]
             [xia.agent.tools :as agent-tools]
             [xia.autonomous :as autonomous]
@@ -214,6 +215,7 @@
   (prompt/status! {:state :completed
                    :phase :complete
                    :message "Ready"})
+  (task-finalization/launch-skill-learning! task-id)
   text)
 
 (defn iteration-limit!

@@ -21,6 +21,8 @@ system:
 - researching the web and extracting structured information
 - signing into websites and using saved site logins to do work
 - calling authenticated APIs through stored service connections
+- turning larger goals into durable, inspectable task plans that can pause,
+  resume, branch, and run scheduled work
 - running recurring background tasks on a schedule
 
 Xia is not a local computer-control agent. It does not access arbitrary files on
@@ -105,6 +107,13 @@ What to expect:
 - Xia resolves a turn-level operating envelope from org policy, workspace
   constraints, task constraints, user preferences, and session scratch context,
   so preferences and guardrails live outside prompt prose.
+- Xia represents durable work as task specs: explicit, inspectable plans with
+  steps, inputs, outputs, approvals, retries, pauses, and runtime history. The
+  task board and history views are projections over those durable tasks.
+- After completed tasks, Xia can look for reusable process knowledge and create
+  skill-improvement proposals. Safe agent-authored proposals may be reviewed by
+  an LLM, while user-owned, imported, system, or high-risk changes stay pending
+  for human review.
 - Xia stores its state in its
   [database](https://github.com/datalevin/datalevin), so conversations, memory,
   settings, and saved connections travel together.
@@ -135,12 +144,14 @@ What the local web UI is for:
 - use scratch pads for copied notes and working context
 - download Xia produced artifacts
 - view the current task and board-backed task lanes
+- inspect task plans, step progress, pauses, approvals, and task-history events
 - resume paused or scheduled work from explicit task boundary summaries and
   next-step hints
 - configure LLM providers, OAuth accounts, services, saved site logins, local
   document summarization settings, and so on
 - author, import, update-check, and curate safe prompt-only skills from local
   bundles or ClawHub zip URLs
+- review reusable skill proposals generated after completed tasks
 - manage scheduled tasks and other local assistant settings
 - expose an allowlisted MCP-compatible tool facade and durable coordination
   board tools for other trusted local agents through the command channel
@@ -164,6 +175,8 @@ intentionally want to expose it beyond the local machine.
   Xia can find them using hybrid search (fulltext + semantic).
 - Import safe OpenClaw-compatible prompt skills from ClawHub zip URLs or local
   bundles when they fit Xia's security model.
+- Let Xia turn recurring or multi-step work into task specs whose progress and
+  outputs remain visible and resumable.
 - Schedule recurring work like checks, summaries, monitoring, and maintenance.
 
 ## Privacy And Safety
@@ -184,6 +197,8 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 - plugin hook handlers run in restricted SCI, install disabled by default, and
   must declare explicit `:hook/...` capabilities before they can observe
   lifecycle events
+- self-learning writes reviewable skill proposals first; user-authored,
+  imported, system, and high-risk skills are not automatically changed
 - tools do not have ambient access to your host file system
 - authenticated API calls go through a capability proxy instead of exposing raw
   credentials
@@ -192,5 +207,6 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 ## More Documentation
 
 - Technical and implementation details: [doc/impl.md](doc/impl.md)
+- Task spec details: [doc/task-spec-v1.md](doc/task-spec-v1.md)
 - Multi-instance setup and template seeding: [doc/multi-instance.md](doc/multi-instance.md)
 - MCP facade and coordination board: [doc/mcp-and-board.md](doc/mcp-and-board.md)

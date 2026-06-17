@@ -7,6 +7,7 @@
             [xia.db :as db]
             [xia.db-schema :as db-schema]
             [xia.instance-supervisor :as instance-supervisor]
+            [xia.llm :as llm]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.test-helpers :as th]))
 
@@ -391,6 +392,68 @@
         (is (= 2 (get overlay "reload_count"))))
       (finally
         (runtime-overlay/clear!)))))
+
+(deftest skill-proposal-admin-review-flow
+  (let [create-response (#'http-admin/handle-create-skill-proposal
+                         (admin-deps {"op" "create"
+                                      "skill_id" "billing-follow-up"
+                                      "skill_name" "Billing Follow-up"
+                                      "title" "Create billing follow-up skill"
+                                      "rationale" "Reusable billing follow-up structure."
+                                      "content" "# Billing Follow-up\n\nUse concise dispute summaries."
+                                      "risk" "low"})
+                         {})
+        create-body     (response-json create-response)
+        proposal-id     (get-in create-body ["skill_proposal" "id"])
+        list-response   (#'http-admin/handle-skill-proposals (admin-deps) {})
+        list-body       (response-json list-response)
+        approve-response (#'http-admin/handle-approve-skill-proposal
+                          (admin-deps {"reviewer" "user"
+                                       "note" "Approved as a draft."})
+                          proposal-id
+                          {})
+        approve-body    (response-json approve-response)
+        saved           (db/get-skill :billing-follow-up)]
+    (is (= 201 (:status create-response)))
+    (is (= "pending" (get-in create-body ["skill_proposal" "status"])))
+    (is (= [proposal-id]
+           (mapv #(get % "id") (get list-body "skill_proposals"))))
+    (is (= 200 (:status approve-response)))
+    (is (= "applied" (get-in approve-body ["skill_proposal" "status"])))
+    (is (= false (get-in approve-body ["skill" "enabled"])))
+    (is (= false (:skill/enabled? saved)))
+    (is (= :agent-authored (:skill/trust-level saved)))))
+
+(deftest skill-proposal-admin-llm-review-flow
+  (let [create-response (#'http-admin/handle-create-skill-proposal
+                         (admin-deps {"op" "create"
+                                      "skill_id" "billing-escalation"
+                                      "skill_name" "Billing Escalation"
+                                      "title" "Create billing escalation skill"
+                                      "rationale" "Reusable billing escalation structure."
+                                      "content" "# Billing Escalation\n\nUse concise escalation summaries."
+                                      "risk" "low"})
+                         {})
+        create-body     (response-json create-response)
+        proposal-id     (get-in create-body ["skill_proposal" "id"])
+        review-response (with-redefs [llm/chat-message
+                                      (fn [& _]
+                                        {"content" "{\"decision\":\"approve\",\"reason\":\"Reusable and safe.\",\"enable\":true}"})]
+                          (#'http-admin/handle-llm-review-skill-proposal
+                           (admin-deps {"allow_enable" false})
+                           proposal-id
+                           {}))
+        review-body     (response-json review-response)
+        saved           (db/get-skill :billing-escalation)]
+    (is (= 201 (:status create-response)))
+    (is (= 200 (:status review-response)))
+    (is (= "approved" (get review-body "decision")))
+    (is (= "Reusable and safe." (get review-body "reason")))
+    (is (= "applied" (get-in review-body ["skill_proposal" "status"])))
+    (is (= "llm" (get-in review-body ["skill_proposal" "reviewer"])))
+    (is (= false (get-in review-body ["skill" "enabled"])))
+    (is (= false (:skill/enabled? saved)))
+    (is (= :agent-authored (:skill/trust-level saved)))))
 
 (deftest admin-runtime-overlay-reload-preserves-current-overlay-on-invalid-update
   (let [overlay-file (temp-overlay-file

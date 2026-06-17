@@ -76,6 +76,8 @@ Xia is designed to be a long-lived assistant that learns from every interaction.
 - **Authenticated online work:** stored API credentials, website logins, and first-class OAuth accounts.
 - **Session-scoped local documents:** explicit uploads of text, PDF, and Office docs with chunk-preferred retrieval and summary generation.
 - **Portable prompt skills:** native Xia skills plus a safe importer for a prompt-only subset of OpenClaw skills.
+- **Inspectable task specs:** durable task plans with explicit steps, dataflow, approvals, pause/resume state, and runtime history.
+- **Review-first skill learning:** completed tasks can generate reusable skill proposals, with LLM review allowed only for bounded agent-authored changes.
 - **Autonomous task scheduling:** recurring tasks, background maintenance, and session continuity.
 - **Privacy-first security:** strict credential isolation even when tools act on the user’s behalf.
 
@@ -247,6 +249,106 @@ budgets are exposed through the envelope and enforced against the LLM usage
 ledger when a persistent goal id is present. Agent turns attach the resolved
 envelope to the execution context so model routing, tools, and inspections can
 use one consistent operating envelope.
+
+## Task Specs
+
+Task specs are Xia's durable executable plan format. They live under a normal
+task contract:
+
+```clojure
+{:type :task
+ :state :ready
+ :contract {:kind :task
+            :version 1
+            :goal "Prepare report"
+            :spec {:kind :task
+                   :version 1
+                   :goal "Prepare report"
+                   :steps [...]}}
+ :meta {:trigger {...}
+        :execution {...}
+        :task-spec {...runtime state...}}}
+```
+
+The authored spec and runtime state are intentionally separate:
+
+- `:contract :spec` is the user/agent-authored plan.
+- `:meta :task-spec` is runner-owned state: current step, step statuses,
+  outputs, pause reason, resume token, deadlines, and timestamps.
+- `:type` should remain `:task`; schedule, branch, board, and execution mode
+  are metadata and projections rather than separate product task types.
+
+The implementation is split between:
+
+- `xia.task-spec.validate`: normalization and validation for the v1 spec
+  grammar.
+- `xia.task-spec`: authoring, repair, built-in executors, and the bounded
+  runner.
+- `xia.agent.task-runtime`: shared task persistence, events, pause/resume,
+  fork/branch controls, and task boundary recording.
+- `xia.task-inspection` and HTTP session handlers: UI-facing task-spec progress
+  and history projections.
+
+The runner dispatches each step by `:kind`. Built-in executors currently cover
+`:value`, `:emit`, `:condition`, `:tool`, `:input`, `:approval`, `:llm`,
+`:subtask`, `:branch`, `:parallel`, `:map`, and `:loop`. Executors can also be
+registered globally or supplied per run. Unknown or unavailable executable work
+pauses rather than escaping the data model.
+
+Task specs are also the canonical execution path for scheduled work and branch
+workers. Start/resume controls check whether a task has a spec and route it
+through `xia.task-spec/run-task!` when possible. The full v1 contract is in
+[task-spec-v1.md](task-spec-v1.md).
+
+## Post-Task Skill Learning
+
+Xia's self-learning loop is deliberately review-first. A completed task may
+produce reusable prompt-skill proposals, but proposal generation is separate
+from applying a skill mutation.
+
+Durable proposal state is stored with `:skill.proposal/*` attributes. The
+domain API lives in `xia.skill.proposal`:
+
+- `create-proposal!`: store a pending `:create`, `:patch`, or `:archive`
+  proposal.
+- `generate-proposals-for-task!`: ask an LLM to reflect on a completed task and
+  store pending proposals.
+- `review-proposal-with-llm!`: ask an LLM reviewer to approve or reject one
+  eligible proposal.
+- `generate-and-review-proposals-for-task!`: run generation and then LLM-review
+  all auto-reviewable proposals.
+- `apply-proposal!` and `reject-proposal!`: the only mutation points for
+  proposal status and skill changes.
+
+LLM review has a narrower authority than human review:
+
+- `:create` approvals save a disabled `:agent-authored` draft by default.
+- `:patch` and `:archive` approvals are allowed only when the target skill is
+  `:agent-authored`.
+- User-authored, imported, system, missing-target, and high-risk proposals are
+  left pending for human review.
+- Patch proposals can carry the source skill content hash; apply refuses to
+  mutate if the skill changed after proposal generation.
+- Review prompts instruct the reviewer to reject secrets, credentials, raw
+  private messages, private URLs, personal identifiers, and one-off task
+  details.
+
+Task finalization launches this loop through `xia.agent.task-finalization`.
+The launcher runs after task completion is persisted, submits background work
+through `xia.async/submit-background!`, and records status under
+`:meta :skill-learning`. It skips child/branch-worker tasks and prevents
+duplicate in-process launches for the same task. Failures are logged and stored
+as failed learning metadata; they never rethrow into task completion.
+
+The admin HTTP surface exposes proposal review:
+
+| Route | Purpose |
+|-------|---------|
+| `GET /admin/skill-proposals` | list proposals |
+| `POST /admin/skill-proposals` | create a proposal |
+| `POST /admin/skill-proposals/:id/approve` | human/admin approval |
+| `POST /admin/skill-proposals/:id/reject` | human/admin rejection |
+| `POST /admin/skill-proposals/:id/llm-review` | bounded LLM review |
 
 ## Bridge And Session Runner
 

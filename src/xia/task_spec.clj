@@ -3,6 +3,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [xia.agent.child-task-orchestration :as child-orch]
+            [xia.agent.task-finalization :as task-finalization]
             [xia.agent.task-runtime :as task-runtime]
             [xia.db :as db]
             [xia.llm :as llm]
@@ -3078,6 +3079,7 @@
                                    :error nil
                                    :finished-at (now)})
                 (close-turn! turn-id :completed summary nil)
+                (task-finalization/launch-skill-learning! task-id)
                 {:status :completed
                  :task-id task-id
                  :turn-id turn-id

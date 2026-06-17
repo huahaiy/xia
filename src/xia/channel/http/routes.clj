@@ -153,6 +153,9 @@
             admin-schedule-resume-match (re-matches #"/admin/schedules/([^/]+)/resume" uri)
             admin-plugin-enable-match (re-matches #"/admin/plugins/([^/]+)/enable" uri)
             admin-plugin-disable-match (re-matches #"/admin/plugins/([^/]+)/disable" uri)
+            admin-skill-proposal-llm-review-match (re-matches #"/admin/skill-proposals/([0-9a-fA-F-]+)/llm-review" uri)
+            admin-skill-proposal-approve-match (re-matches #"/admin/skill-proposals/([0-9a-fA-F-]+)/approve" uri)
+            admin-skill-proposal-reject-match (re-matches #"/admin/skill-proposals/([0-9a-fA-F-]+)/reject" uri)
             admin-skill-update-check-match (re-matches #"/admin/skills/([^/]+)/update-check" uri)
             admin-skill-match  (re-matches #"/admin/skills/([^/]+)" uri)
             llm-call-match (re-matches #"/llm-calls/([0-9a-fA-F-]+)" uri)
@@ -602,6 +605,30 @@
 
           (and (= method :post) (= uri "/admin/skills/curate"))
           (protected-route-response req #(http-admin/handle-curate-skills (admin-handler-deps) req))
+
+          (and (= method :get) (= uri "/admin/skill-proposals"))
+          (protected-route-response req #(http-admin/handle-skill-proposals (admin-handler-deps) req))
+
+          (and (= method :post) (= uri "/admin/skill-proposals"))
+          (protected-route-response req #(http-admin/handle-create-skill-proposal (admin-handler-deps) req))
+
+          (and (= method :post) admin-skill-proposal-llm-review-match)
+          (protected-route-response req #(http-admin/handle-llm-review-skill-proposal
+                                           (admin-handler-deps)
+                                           (second admin-skill-proposal-llm-review-match)
+                                           req))
+
+          (and (= method :post) admin-skill-proposal-approve-match)
+          (protected-route-response req #(http-admin/handle-approve-skill-proposal
+                                           (admin-handler-deps)
+                                           (second admin-skill-proposal-approve-match)
+                                           req))
+
+          (and (= method :post) admin-skill-proposal-reject-match)
+          (protected-route-response req #(http-admin/handle-reject-skill-proposal
+                                           (admin-handler-deps)
+                                           (second admin-skill-proposal-reject-match)
+                                           req))
 
           (and (= method :post) (= uri "/admin/plugins"))
           (protected-route-response req #(http-admin/handle-save-plugin (admin-handler-deps) req))

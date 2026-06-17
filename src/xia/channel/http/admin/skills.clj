@@ -4,7 +4,8 @@
             [xia.channel.http.admin.common :as common]
             [xia.db :as db]
             [xia.skill :as skill]
-            [xia.skill.openclaw :as openclaw-skill]))
+            [xia.skill.openclaw :as openclaw-skill]
+            [xia.skill.proposal :as skill-proposal]))
 
 (defn- infer-skill-id
   [data]
@@ -226,3 +227,98 @@
 (defn handle-skills
   [deps _req]
   (common/json-response deps 200 {:skills (mapv #(skill->body deps %) (db/list-skills))}))
+
+(defn- proposal->body
+  ([deps proposal]
+   (proposal->body deps proposal false))
+  ([deps proposal include-content?]
+   (cond-> (skill-proposal/proposal-summary proposal)
+     include-content? (assoc :content (:skill.proposal/content proposal))
+     (:skill.proposal/created-at proposal)
+     (assoc :created_at (common/instant->str deps (:skill.proposal/created-at proposal)))
+     (:skill.proposal/updated-at proposal)
+     (assoc :updated_at (common/instant->str deps (:skill.proposal/updated-at proposal)))
+     (:skill.proposal/reviewed-at proposal)
+     (assoc :reviewed_at (common/instant->str deps (:skill.proposal/reviewed-at proposal)))
+     (:skill.proposal/applied-at proposal)
+     (assoc :applied_at (common/instant->str deps (:skill.proposal/applied-at proposal))))))
+
+(defn- proposal-data->attrs
+  [data]
+  {:id (get data "id")
+   :task-id (get data "task_id")
+   :op (get data "op")
+   :skill-id (or (get data "skill_id")
+                 (get data "skill-id"))
+   :skill-name (or (get data "skill_name")
+                   (get data "skill-name")
+                   (get data "name"))
+   :title (get data "title")
+   :rationale (get data "rationale")
+   :content (get data "content")
+   :risk (get data "risk")
+   :source (get data "source")
+   :evidence (get data "evidence")})
+
+(defn handle-skill-proposals
+  [deps _req]
+  (common/json-response
+   deps
+   200
+   {:skill_proposals (mapv #(proposal->body deps %)
+                            (skill-proposal/list-proposals))}))
+
+(defn handle-create-skill-proposal
+  [deps req]
+  (try
+    (let [data     (or (common/read-body deps req) {})
+          proposal (skill-proposal/create-proposal! (proposal-data->attrs data))]
+      (common/json-response deps 201 {:skill_proposal (proposal->body deps proposal true)}))
+    (catch clojure.lang.ExceptionInfo e
+      (common/exception-response deps e))))
+
+(defn handle-approve-skill-proposal
+  [deps proposal-id req]
+  (try
+    (let [data   (or (common/read-body deps req) {})
+          result (skill-proposal/apply-proposal! proposal-id
+                                                 :reviewer (get data "reviewer")
+                                                 :note (get data "note")
+                                                 :enable? (true? (get data "enable")))]
+      (common/json-response
+       deps
+       200
+       {:skill_proposal (proposal->body deps (:proposal result) true)
+        :skill (skill->body deps (:skill result))}))
+    (catch clojure.lang.ExceptionInfo e
+      (common/exception-response deps e))))
+
+(defn handle-llm-review-skill-proposal
+  [deps proposal-id req]
+  (try
+    (let [data   (or (common/read-body deps req) {})
+          result (skill-proposal/review-proposal-with-llm!
+                  proposal-id
+                  :provider-id (common/nonblank-str (get data "provider_id"))
+                  :workload (common/nonblank-str (get data "workload"))
+                  :allow-enable? (true? (get data "allow_enable")))]
+      (common/json-response
+       deps
+       200
+       (cond-> {:decision (some-> (:decision result) name)
+                :reason (:reason result)
+                :skill_proposal (proposal->body deps (:proposal result) true)}
+         (:skill result) (assoc :skill (skill->body deps (:skill result))))))
+    (catch clojure.lang.ExceptionInfo e
+      (common/exception-response deps e))))
+
+(defn handle-reject-skill-proposal
+  [deps proposal-id req]
+  (try
+    (let [data     (or (common/read-body deps req) {})
+          proposal (skill-proposal/reject-proposal! proposal-id
+                                                    :reviewer (get data "reviewer")
+                                                    :note (get data "note"))]
+      (common/json-response deps 200 {:skill_proposal (proposal->body deps proposal true)}))
+    (catch clojure.lang.ExceptionInfo e
+      (common/exception-response deps e))))

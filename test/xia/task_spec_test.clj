@@ -6,6 +6,8 @@
             [xia.bridge :as bridge]
             [xia.db :as db]
             [xia.llm :as llm]
+            [xia.skill :as skill]
+            [xia.skill.proposal :as skill-proposal]
             [xia.task-spec :as task-spec]
             [xia.test-helpers :as th]
             [xia.tool :as tool]))
@@ -52,6 +54,44 @@
            (mapv :status (filter #(= :task-step (:type %)) items))))
     (is (some #(= :item.task-step (:type %)) events))
     (is (some #(= :task.completed (:type %)) events))))
+
+(deftest task-spec-completion-launches-post-task-skill-learning
+  (let [skill*  (skill/save-skill! {:id :agent-reporting
+                                    :name "Agent Reporting"
+                                    :content "# Agent Reporting\n\nUse a concise report."
+                                    :trust-level :agent-authored})
+        task-id (task-spec/create-task!
+                 {:goal "Prepare report"
+                  :steps [{:id :render
+                           :kind :value
+                           :value "report"}]})
+        task    (db/get-task task-id)]
+    (db/update-task! task-id
+                     {:contract (assoc (:contract task)
+                                       :skills [{:id :agent-reporting
+                                                 :version (:skill/version skill*)
+                                                 :content-sha256 (:skill/content-sha256 skill*)}])})
+    (with-redefs [async/submit-background! (fn [_label f]
+                                             (f)
+                                             ::future)
+                  llm/chat-message
+                  (fn [messages & _]
+                    (let [payload (get (second messages) "content")]
+                      (if (str/includes? payload "skill-improvement-reflection-request")
+                        {"content" "{\"proposals\":[{\"op\":\"patch\",\"skill_id\":\"agent-reporting\",\"title\":\"Add escalation section\",\"rationale\":\"Reusable reporting improvement.\",\"content\":\"# Agent Reporting\\n\\nUse a concise report with a clear escalation section.\",\"risk\":\"low\"}]}"}
+                        {"content" "{\"decision\":\"approve\",\"reason\":\"Reusable and safe.\"}"})))]
+      (let [result    (task-spec/run-task! task-id)
+            proposals (skill-proposal/proposals-for-task task-id)
+            updated   (db/get-skill :agent-reporting)
+            task*     (db/get-task task-id)]
+        (is (= :completed (:status result)))
+        (is (= 1 (count proposals)))
+        (is (= :applied (:skill.proposal/status (first proposals))))
+        (is (= "llm" (:skill.proposal/reviewer (first proposals))))
+        (is (= "# Agent Reporting\n\nUse a concise report with a clear escalation section."
+               (:skill/content updated)))
+        (is (= :completed (get-in task* [:meta :skill-learning :status])))
+        (is (= 1 (get-in task* [:meta :skill-learning :applied-count])))))))
 
 (deftest task-spec-validates-dependency-graph
   (is (thrown-with-msg?
