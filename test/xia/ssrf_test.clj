@@ -17,6 +17,26 @@
        clojure.lang.ExceptionInfo
        #"private/internal"
        (ssrf/resolve-public-url! (fn [_] (addresses "10.0.0.5"))
+                                 "https://service.example/resource")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"private/internal"
+       (ssrf/resolve-public-url! (fn [_] (addresses "100.64.0.1"))
+                                 "https://service.example/resource")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"private/internal"
+       (ssrf/resolve-public-url! (fn [_] (addresses "100.127.255.254"))
+                                 "https://service.example/resource")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"private/internal"
+       (ssrf/resolve-public-url! (fn [_] (addresses "fc00::1"))
+                                 "https://service.example/resource")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"private/internal"
+       (ssrf/resolve-public-url! (fn [_] (addresses "fdff:ffff::1"))
                                  "https://service.example/resource"))))
 
 (deftest private-addresses-require-explicit-opt-in
@@ -27,6 +47,20 @@
                              "https://service.example/resource"
                              {:allow-private-network? true})
           [:host :private-network?]))))
+
+(deftest public-url-resolution-allows-addresses-near-cgnat-and-ula-boundaries
+  (is (false?
+       (:private-network?
+        (ssrf/resolve-public-url! (fn [_] (addresses "100.63.255.255"))
+                                  "https://service.example/resource"))))
+  (is (false?
+       (:private-network?
+        (ssrf/resolve-public-url! (fn [_] (addresses "100.128.0.0"))
+                                  "https://service.example/resource"))))
+  (is (false?
+       (:private-network?
+        (ssrf/resolve-public-url! (fn [_] (addresses "fbff:ffff::1"))
+                                  "https://service.example/resource")))))
 
 (deftest public-url-resolution-rejects-unsupported-schemes-and-missing-hosts
   (is (thrown-with-msg?

@@ -7,12 +7,33 @@
   (:require [clojure.string :as str])
   (:import [java.net InetAddress URI UnknownHostException]))
 
+(defn- address-octets
+  [^InetAddress addr]
+  (mapv #(bit-and (int %) 0xff) (.getAddress addr)))
+
+(defn- cgnat-ipv4?
+  "True for 100.64.0.0/10."
+  [^InetAddress addr]
+  (let [octets (address-octets addr)]
+    (and (= 4 (count octets))
+         (= 100 (octets 0))
+         (<= 64 (octets 1) 127))))
+
+(defn- unique-local-ipv6?
+  "True for fc00::/7."
+  [^InetAddress addr]
+  (let [octets (address-octets addr)]
+    (and (= 16 (count octets))
+         (= 0xfc (bit-and 0xfe (octets 0))))))
+
 (defn private-ip?
-  "True if the address is private, loopback, or link-local."
+  "True if the address is private, loopback, link-local, ULA, or CGNAT."
   [^InetAddress addr]
   (or (.isLoopbackAddress addr)
       (.isLinkLocalAddress addr)
       (.isSiteLocalAddress addr)
+      (cgnat-ipv4? addr)
+      (unique-local-ipv6? addr)
       (.isAnyLocalAddress addr)))
 
 (defn resolve-host-addresses
