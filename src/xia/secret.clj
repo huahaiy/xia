@@ -5,8 +5,7 @@
    safe wrappers for use in the SCI sandbox. System code (xia.llm, xia.setup)
    accesses credentials directly through xia.db; sandboxed tool handlers go
    through these filtered functions instead."
-  (:require [clojure.string :as str]
-            [xia.db :as db]
+  (:require [xia.db :as db]
             [xia.sensitive :as sensitive]))
 
 ;; ---------------------------------------------------------------------------
@@ -43,36 +42,15 @@
                     {:key k})))
   (db/set-config! k v))
 
-(def ^:private blocked-attrs-pattern
-  "Regex matching attribute names that tools cannot query."
-  (re-pattern
-    (str "(?i)"
-         (str/join "|"
-                   ["api.key" "api-key" "apikey"
-                    "password" "passwd"
-                    "secret" "credential"
-                    "token" "oauth"
-                    "private.key" "private-key"]))))
-
 (def ^:private blocked-query-ops
   '#{pull pull-many})
 
 (def ^:private query-section-keys
   #{:find :with :in :where :keys :strs :syms})
 
-(defn- ident-name
-  [form]
-  (cond
-    (keyword? form) (name form)
-    (symbol? form)  (name form)
-    :else           nil))
-
 (defn- secret-like-ident?
   [form]
-  (or (and (keyword? form)
-           (secret-attr? form))
-      (when-let [n (ident-name form)]
-        (re-find blocked-attrs-pattern n))))
+  (sensitive/secret-query-ident? form))
 
 (defn- split-query-sections
   [query]
@@ -117,7 +95,17 @@
   [clause]
   (let [attr (nth clause 1)]
     (or (not (keyword? attr))
-        (secret-like-ident? attr))))
+        (secret-like-ident? attr)
+        (case attr
+          :config/key
+          (let [config-key (nth clause 2)]
+            (or (not (keyword? config-key))
+                (secret-config-key? config-key)))
+
+          :config/value
+          true
+
+          false))))
 
 (defn- unsafe-where-clause?
   [clause]

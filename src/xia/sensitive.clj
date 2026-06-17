@@ -41,6 +41,26 @@
    match the generic secret prefixes."
   #{:web/search-brave-api-key})
 
+(def ^:private blocked-ident-pattern
+  "Regex matching attribute or key names that sandboxed code cannot query."
+  (re-pattern
+    (str "(?i)"
+         (str/join "|"
+                   ["api.key" "api-key" "apikey"
+                    "password" "passwd"
+                    "secret" "credential"
+                    "token" "oauth"
+                    "private.key" "private-key"]))))
+
+(defn- named-ident?
+  [value]
+  (instance? clojure.lang.Named value))
+
+(defn- ident-name
+  [form]
+  (when (named-ident? form)
+    (name form)))
+
 (defn encrypted-attr?
   "True if the given attribute keyword should be encrypted at rest."
   [attr]
@@ -58,5 +78,17 @@
   "True if the given config key should be treated as secret."
   [k]
   (or (contains? secret-config-keys k)
-      (when-let [ns (namespace k)]
+      (when-let [ns (when (named-ident? k)
+                      (namespace k))]
         (some #(str/starts-with? ns %) secret-config-prefixes))))
+
+(defn secret-query-ident?
+  "True if the given query identifier or literal should be hidden from
+   sandboxed code."
+  [form]
+  (or (and (keyword? form)
+           (secret-attr? form))
+      (and (named-ident? form)
+           (secret-config-key? form))
+      (when-let [n (ident-name form)]
+        (re-find blocked-ident-pattern n))))

@@ -45,6 +45,14 @@
     (is (not (secret/secret-config-key? :user/name)))
     (is (not (secret/secret-config-key? :context/budget)))))
 
+(deftest secret-query-ident?-test
+  (testing "uses the shared config-key classifier"
+    (is (sensitive/secret-query-ident? :oauth/google))
+    (is (sensitive/secret-query-ident? 'oauth/google))
+    (is (sensitive/secret-query-ident? :web/search-brave-api-key)))
+  (testing "keeps non-secret config keys query-safe as literals"
+    (is (not (sensitive/secret-query-ident? :user/name)))))
+
 (deftest encrypted-attr?-test
   (testing "credentials stay encrypted at rest"
     (is (sensitive/encrypted-attr? :llm.provider/api-key))
@@ -155,6 +163,32 @@
           clojure.lang.ExceptionInfo #"Access denied"
           (secret/safe-q '[:find ?v :in $ ?attr :where [?e ?attr ?v]]
                          :service/auth-key)))))
+
+(deftest safe-q-blocks-raw-config-secret-access
+  (db/set-config! :oauth/google "refresh-token")
+  (db/set-config! :user/name "Alice")
+
+  (testing "blocks direct secret config key lookups"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?e :where
+                           [?e :config/key :oauth/google]]))))
+
+  (testing "blocks config key enumeration"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?k :where
+                           [?e :config/key ?k]]))))
+
+  (testing "blocks raw config value reads even for non-secret keys"
+    (is (thrown-with-msg?
+          clojure.lang.ExceptionInfo #"Access denied"
+          (secret/safe-q '[:find ?v :where
+                           [?e :config/key :user/name]
+                           [?e :config/value ?v]]))))
+
+  (testing "safe-get-config remains the allowed path for non-secret config"
+    (is (= "Alice" (secret/safe-get-config :user/name)))))
 
 (deftest safe-q-blocks-non-vector-and-symbol-built-secret-queries
   (testing "rejects non-vector query forms outright"
