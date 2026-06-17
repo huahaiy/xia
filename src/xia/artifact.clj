@@ -3,6 +3,7 @@
   (:require [charred.api :as json]
             [clojure.string :as str]
             [datalevin.core :as d]
+            [taoensso.timbre :as log]
             [xia.db :as db]
             [xia.memory :as memory]
             [xia.scratch :as scratch]
@@ -259,7 +260,10 @@
              (some? pdf-bytes))
     (try
       (extract-pdf-text name media-type pdf-bytes)
-      (catch Exception _
+      (catch Exception e
+        (log/debug e "Failed to extract PDF artifact text; leaving text unavailable"
+                   {:artifact-name name
+                    :media-type media-type})
         nil))))
 
 (defn- normalize-preview

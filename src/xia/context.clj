@@ -202,14 +202,18 @@
     (when (valid-budget parsed)
       (merge default-system-prompt-budget parsed))))
 
+(defn- parse-system-prompt-budget-or-nil
+  [raw]
+  (try
+    (parse-system-prompt-budget raw)
+    (catch Exception e
+      (log/debug e "Failed to parse :context/budget; using default context budget")
+      nil)))
+
 (defn- configured-system-prompt-budget []
   (cfg/custom-option :context/budget
                      default-system-prompt-budget
-                     (fn [raw]
-                       (try
-                         (parse-system-prompt-budget raw)
-                         (catch Exception _
-                           nil)))))
+                     parse-system-prompt-budget-or-nil))
 
 (defn- configured-history-budget []
   (cfg/positive-long :context/history-budget
@@ -233,11 +237,7 @@
   {:system-prompt-budget
    (cfg/custom-option-resolution :context/budget
                                  default-system-prompt-budget
-                                 (fn [raw]
-                                   (try
-                                     (parse-system-prompt-budget raw)
-                                     (catch Exception _
-                                       nil))))
+                                 parse-system-prompt-budget-or-nil)
    :recent-history-message-limit
    (cfg/positive-long-resolution :context/recent-history-message-limit
                                  default-recent-history-message-limit)
