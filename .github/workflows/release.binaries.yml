@@ -25,28 +25,26 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Clojure CLI
+      - name: Set up Leiningen
         uses: DeLaGuardo/setup-clojure@13
         with:
-          cli: latest
+          lein: latest
 
-      - name: Cache Clojure dependencies
+      - name: Cache Leiningen dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.m2/repository
-            ~/.gitlibs
-            ~/.deps.clj
-            .cpcache
-          key: clj-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+            ~/.lein/self-installs
+          key: lein-${{ runner.os }}-${{ hashFiles('project.clj') }}
           restore-keys: |
-            clj-${{ runner.os }}-
+            lein-${{ runner.os }}-
 
       - name: Prefetch dependencies
-        run: clojure -P
+        run: lein deps
 
       - name: Run test suite
-        run: clojure -M:test0
+        run: lein test
 
   build:
     name: Native ${{ matrix.target }}
@@ -80,23 +78,21 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Clojure CLI
+      - name: Set up Leiningen
         uses: DeLaGuardo/setup-clojure@13
         with:
-          cli: latest
+          lein: latest
 
-      - name: Cache Clojure dependencies
+      - name: Cache Leiningen dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.m2/repository
-            ~/.gitlibs
-            ~/.deps.clj
-            .cpcache
-          key: clj-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('deps.edn') }}
+            ~/.lein/self-installs
+          key: lein-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('project.clj') }}
           restore-keys: |
-            clj-${{ runner.os }}-${{ matrix.target }}-
-            clj-${{ runner.os }}-
+            lein-${{ runner.os }}-${{ matrix.target }}-
+            lein-${{ runner.os }}-
 
       - name: Set up GraalVM
         uses: graalvm/setup-graalvm@v1
@@ -111,7 +107,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Prefetch dependencies
-        run: clojure -P
+        run: lein with-profile -dev,+release deps
 
       - name: Compute artifact names
         id: names
