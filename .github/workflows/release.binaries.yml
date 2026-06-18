@@ -107,7 +107,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Prefetch dependencies
-        run: lein with-profile -dev,+release deps
+        run: lein with-profile -user,-dev,+release deps
 
       - name: Compute artifact names
         id: names

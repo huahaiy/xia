@@ -23,7 +23,7 @@ fi
 cd "$ROOT_DIR"
 
 lein clean
-lein with-profile -dev,+release uberjar
+lein with-profile -user,-dev,+release uberjar
 cp "$ROOT_DIR/target/xia.jar" "$STAGED_JAR"
 lein clean
 

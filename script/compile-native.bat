@@ -23,7 +23,7 @@ if errorlevel 1 (
   popd
   exit /b %errorlevel%
 )
-call lein with-profile -dev,+release uberjar
+call lein with-profile -user,-dev,+release uberjar
 if errorlevel 1 (
   if exist "%STAGED_JAR%" del /q "%STAGED_JAR%"
   popd
