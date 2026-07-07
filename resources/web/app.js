@@ -2184,14 +2184,6 @@ async function safeFetch(url, options, retryingLocalSession) {
   return response;
 }
 
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 const _pending = {};
 function dedup(key, fn) {
   if (_pending[key]) return _pending[key];
@@ -2243,8 +2235,8 @@ function normalizeServerErrorMessage(message) {
   return text;
 }
 
-function firstNonEmpty(value, fallback) {
-  return value && String(value).trim() ? String(value).trim() : (fallback || '');
+function firstNonEmpty() {
+  return firstPresentText.apply(null, arguments);
 }
 
 function firstPresentText() {
@@ -8980,7 +8972,7 @@ clearInputEl.addEventListener('click', () => {
   composerEl.focus();
 });
 
-document.getElementById('new-scratch').addEventListener('click', () => { if (!state.activePad) createScratchPad(); });
+document.getElementById('new-scratch').addEventListener('click', () => { createScratchPad(); });
 scratchTitleEl.addEventListener('input', trackScratchInput);
 scratchEditorEl.addEventListener('input', trackScratchInput);
 
@@ -9369,17 +9361,18 @@ if (state.sessionId) {
     pollTaskRuntime();
   }
 }
-let _pollIntervalId = window.setInterval(() => {
-  if (state.sessionId) {
-    if (state.sending || !state.currentTaskId) {
-      pollTaskRuntime();
-    } else if (state.pendingInput && !state.pendingInput.prompt_id) {
-      pollPrompt();
-    } else if (state.pendingApproval && !state.pendingApproval.approval_id) {
-      pollApproval();
-    }
+function pollTick() {
+  if (!state.sessionId) return;
+  if (state.sending || !state.currentTaskId) {
+    pollTaskRuntime();
+  } else if (state.pendingInput && !state.pendingInput.prompt_id) {
+    pollPrompt();
+  } else if (state.pendingApproval && !state.pendingApproval.approval_id) {
+    pollApproval();
   }
-}, 1000);
+}
+
+let _pollIntervalId = window.setInterval(pollTick, 1000);
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
@@ -9389,15 +9382,7 @@ document.addEventListener('visibilitychange', () => {
     }
   } else {
     if (!_pollIntervalId) {
-      _pollIntervalId = window.setInterval(() => {
-        if (state.sessionId) {
-          if (state.sending) {
-            pollTaskRuntime();
-          } else if (state.pendingApproval && !state.pendingApproval.approval_id) {
-            pollApproval();
-          }
-        }
-      }, 1000);
+      _pollIntervalId = window.setInterval(pollTick, 1000);
     }
     if (state.sessionId) {
       pollCurrentTask().then(() => {
