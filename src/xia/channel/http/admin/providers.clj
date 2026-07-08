@@ -151,7 +151,6 @@
      :api_key_url              (:api-key-url template)
      :docs_url                 (:docs-url template)
      :install_url              (:install-url template)
-     :account_connector        (some-> (:account-connector template) name)
      :access_modes             access-modes
      :auth_types               auth-types
      :oauth_provider_templates (->> (or (:oauth-provider-templates template) [])

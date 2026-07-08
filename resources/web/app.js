@@ -1,5 +1,6 @@
 const storageKeys = {
-  sessionId: 'xia.local-ui.session-id'
+  sessionId: 'xia.local-ui.session-id',
+  theme: 'xia.local-ui.theme'
 };
 const state = {
   sessionId: sessionStorage.getItem(storageKeys.sessionId) || '',
@@ -92,7 +93,6 @@ const state = {
   providerDraft: null,
   workloadRoutingDraft: null,
   pendingProviderOauthFlow: null,
-  pendingProviderBrowserSessionFlow: null,
   activeProviderId: '',
   activeOauthAccountId: '',
   activeServiceId: '',
@@ -101,7 +101,6 @@ const state = {
   activeSkillId: '',
   providerSaving: false,
   workloadRoutingSaving: false,
-  providerAccountConnecting: false,
   contextSaving: false,
   retentionSaving: false,
   knowledgeDecaySaving: false,
@@ -214,6 +213,7 @@ const identityStatusEl = document.getElementById('identity-status');
 const saveIdentityEl = document.getElementById('save-identity');
 const providerOnboardingEl = document.getElementById('provider-onboarding');
 const providerTemplateListEl = document.getElementById('provider-template-list');
+const providerTemplateCardsEl = document.getElementById('provider-template-cards');
 const providerOnboardingStatusEl = document.getElementById('provider-onboarding-status');
 const providerCardEl = document.getElementById('provider-card');
 const providerListEl = document.getElementById('provider-list');
@@ -229,11 +229,12 @@ const providerModelListEl = document.getElementById('provider-model-list');
 const fetchProviderModelsEl = document.getElementById('fetch-provider-models');
 const providerModelCapabilityNoteEl = document.getElementById('provider-model-capability-note');
 const providerAccessModeEl = document.getElementById('provider-access-mode');
+const providerAccessModeFieldEl = providerAccessModeEl.closest('.field');
 const providerCredentialSourceEl = document.getElementById('provider-credential-source');
+const providerCredentialSourceFieldEl = providerCredentialSourceEl.closest('.field');
 const providerOauthAccountEl = document.getElementById('provider-oauth-account');
+const providerOauthAccountFieldEl = providerOauthAccountEl.closest('.field');
 const providerOauthAccountNoteEl = document.getElementById('provider-oauth-account-note');
-const providerBrowserSessionEl = document.getElementById('provider-browser-session');
-const providerBrowserSessionNoteEl = document.getElementById('provider-browser-session-note');
 const providerConfigureOauthEl = document.getElementById('provider-configure-oauth');
 const providerOpenAccountEl = document.getElementById('provider-open-account');
 const providerOpenDocsEl = document.getElementById('provider-open-docs');
@@ -241,6 +242,7 @@ const providerSystemPromptBudgetEl = document.getElementById('provider-system-pr
 const providerHistoryBudgetEl = document.getElementById('provider-history-budget');
 const providerRateLimitEl = document.getElementById('provider-rate-limit-per-minute');
 const providerApiKeyEl = document.getElementById('provider-api-key');
+const providerApiKeyFieldEl = providerApiKeyEl.closest('.field');
 const providerApiKeyNoteEl = document.getElementById('provider-api-key-note');
 const providerDefaultEl = document.getElementById('provider-default');
 const providerStatusEl = document.getElementById('provider-status');
@@ -445,6 +447,7 @@ const sidebarAccordionEls = Array.from(document.querySelectorAll('.sidebar-accor
 const tabLinks = document.querySelectorAll('.tab-link');
 const tabPanels = document.querySelectorAll('.tab-panel');
 const advancedToggleEl = document.getElementById('advanced-toggle');
+const themeToggleEl = document.getElementById('theme-toggle');
 const providerOnboardingPlaceholderEl = document.createComment('provider-onboarding-placeholder');
 if (providerOnboardingEl && providerOnboardingEl.parentNode) {
   providerOnboardingEl.parentNode.insertBefore(providerOnboardingPlaceholderEl, providerOnboardingEl);
@@ -453,6 +456,54 @@ const providerCardPlaceholderEl = document.createComment('provider-card-placehol
 if (providerCardEl && providerCardEl.parentNode) {
   providerCardEl.parentNode.insertBefore(providerCardPlaceholderEl, providerCardEl);
 }
+
+/* ── Theme ── */
+const themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+const themeLabels = { system: 'Auto', light: 'Light', dark: 'Dark' };
+
+function themePreference() {
+  let stored = null;
+  try {
+    stored = localStorage.getItem(storageKeys.theme);
+  } catch (_err) {}
+  return stored === 'light' || stored === 'dark' ? stored : 'system';
+}
+
+function applyTheme() {
+  const preference = themePreference();
+  const resolved = preference === 'system'
+    ? (themeMedia.matches ? 'dark' : 'light')
+    : preference;
+  document.documentElement.dataset.theme = resolved;
+  if (themeToggleEl) {
+    themeToggleEl.textContent = 'Theme: ' + themeLabels[preference];
+    themeToggleEl.setAttribute('aria-label', 'Theme: ' + themeLabels[preference]
+      + (preference === 'system' ? ' (follows system)' : '')
+      + '. Click to change.');
+  }
+}
+
+function cycleTheme() {
+  const order = ['system', 'light', 'dark'];
+  const next = order[(order.indexOf(themePreference()) + 1) % order.length];
+  try {
+    if (next === 'system') {
+      localStorage.removeItem(storageKeys.theme);
+    } else {
+      localStorage.setItem(storageKeys.theme, next);
+    }
+  } catch (_err) {}
+  applyTheme();
+  setStatus('Theme: ' + themeLabels[next] + (next === 'system' ? ' (follows system)' : ''));
+}
+
+if (themeToggleEl) {
+  themeToggleEl.addEventListener('click', cycleTheme);
+}
+if (typeof themeMedia.addEventListener === 'function') {
+  themeMedia.addEventListener('change', applyTheme);
+}
+applyTheme();
 
 /* ── Accessible modal helpers ── */
 const FOCUSABLE_SELECTOR =
@@ -2651,7 +2702,6 @@ function providerCredentialSourceLabel(credentialSource) {
   if (credentialSource === 'none') return 'No credential';
   if (credentialSource === 'api-key') return 'API key';
   if (credentialSource === 'oauth-account') return 'API sign-in';
-  if (credentialSource === 'browser-session') return 'Web account session';
   return 'Not set';
 }
 
@@ -2668,14 +2718,6 @@ function providerTemplateAccessModes(template) {
       label: 'API credential',
       credential_sources: ['oauth-account'],
       default: true
-    });
-  }
-  if (authTypes.includes('browser-session')) {
-    inferred.push({
-      id: 'account',
-      label: 'Web account session',
-      credential_sources: ['browser-session'],
-      default: !inferred.length
     });
   }
   if (authTypes.includes('api-key')) {
@@ -2758,14 +2800,12 @@ function providerCredentialSource(provider) {
   }
   if (provider && provider.oauth_account) return 'oauth-account';
   if (provider && provider.api_key_configured) return 'api-key';
-  if (provider && provider.browser_session) return 'api-key';
   return 'none';
 }
 
 function providerAccessMode(provider) {
   if (provider && provider.access_mode) return provider.access_mode;
   const credentialSource = providerCredentialSource(provider);
-  if (credentialSource === 'browser-session') return 'account';
   if (credentialSource === 'oauth-account') return 'api';
   if (credentialSource === 'api-key') return 'api';
   if (provider && provider.template === 'ollama') return 'local';
@@ -2921,12 +2961,6 @@ function providerModelFetchCredentialState() {
       reason: 'Set up an API sign-in before fetching models.'
     };
   }
-  if (credentialSource === 'browser-session') {
-    return {
-      enabled: false,
-      reason: 'Fetching models requires an API credential for this provider.'
-    };
-  }
   return { enabled: true, reason: '' };
 }
 
@@ -2939,11 +2973,6 @@ function providerMeta(provider) {
   if (provider.model) bits.push(provider.model);
   if (accessMode) bits.push(providerAccessModeLabel(accessMode));
   if (credentialSource) bits.push(providerCredentialSourceLabel(credentialSource));
-  if (provider.browser_session_connected) {
-    bits.push('Web account connected');
-  } else if (credentialSource === 'browser-session') {
-    bits.push(provider.browser_session ? 'Web account needs reconnect' : 'Web account not connected');
-  }
   if (provider.oauth_account_name) {
     bits.push(provider.oauth_account_connected
       ? ('API sign-in: ' + provider.oauth_account_name)
@@ -2974,7 +3003,7 @@ function providerMeta(provider) {
     }
   }
   if (provider.default) bits.push('Default');
-  if (credentialSource === 'api-key' || ((credentialSource !== 'oauth-account' && credentialSource !== 'browser-session') && provider.api_key_configured)) {
+  if (credentialSource === 'api-key' || (credentialSource !== 'oauth-account' && provider.api_key_configured)) {
     bits.push(provider.api_key_configured ? 'API key stored' : 'No API key');
   }
   return bits.join(' • ');
@@ -3016,16 +3045,7 @@ function selectedProviderOauthAccount() {
 
 function providerPrimaryAction(template, accessMode, credentialSource) {
   if (!template) return null;
-  if (credentialSource === 'browser-session' && template.account_connector) {
-    const pending = state.pendingProviderBrowserSessionFlow
-      && state.pendingProviderBrowserSessionFlow.connectorId === template.account_connector;
-    return {
-      kind: 'browser-session',
-      label: pending ? 'Finish Sign-In' : 'Start Sign-In',
-      connectorId: template.account_connector
-    };
-  }
-  if (credentialSource === 'oauth-account' || (accessMode === 'account' && !template.account_connector)) {
+  if (credentialSource === 'oauth-account' || accessMode === 'account') {
     const linkedAccount = selectedProviderOauthAccount();
     if (linkedAccount && !linkedAccount.connected && oauthAccountSupportsConnectNow(linkedAccount)) {
       return {
@@ -3144,10 +3164,6 @@ async function openProviderPrimaryAction(action, options = {}) {
     await beginProviderOauthSetup();
     return;
   }
-  if (action.kind === 'browser-session' && action.connectorId) {
-    await beginProviderBrowserSessionSetup(action.connectorId, options);
-    return;
-  }
   if (action.kind === 'external' && action.url) {
     const popup = window.open(action.url, '_blank', 'noopener,noreferrer');
     if (popup && typeof popup.focus === 'function') {
@@ -3194,7 +3210,63 @@ function renderProviderTemplateOptions() {
   const selectedTemplate = providerTemplateById(providerTemplateEl.value);
   providerTemplateNoteEl.textContent = providerTemplateNote(selectedTemplate);
   providerTemplateEl.title = providerTemplateTooltip(selectedTemplate);
+  renderProviderTemplateCards();
   syncProviderModelFetchUi();
+}
+
+function templatePickBadgeText(template) {
+  const modeId = defaultProviderAccessMode(template);
+  if (modeId === 'local') return 'Local';
+  if (modeId === 'account') return 'Sign-in';
+  return 'API';
+}
+
+function buildProviderTemplatePickCard(template) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'template-pick-card';
+  card.dataset.templateId = template.id || '';
+  card.setAttribute('role', 'radio');
+  const tooltip = [template.description, template.notes].filter(Boolean).join(' — ');
+  if (tooltip) card.title = tooltip;
+  const name = document.createElement('span');
+  name.className = 'template-pick-name';
+  name.textContent = firstNonEmpty(template.name, template.id);
+  card.appendChild(name);
+  const badge = document.createElement('span');
+  badge.className = 'template-pick-badge';
+  badge.textContent = templatePickBadgeText(template);
+  card.appendChild(badge);
+  card.addEventListener('click', () => {
+    if (state.providerSaving) return;
+    if (providerTemplateEl.value === (template.id || '')) return;
+    providerTemplateEl.value = template.id || '';
+    providerTemplateEl.dispatchEvent(new Event('change'));
+  });
+  return card;
+}
+
+let _renderedTemplateCardKey = '';
+
+function renderProviderTemplateCards() {
+  if (!providerTemplateCardsEl) return;
+  const templates = state.admin.llmProviderTemplates || [];
+  const key = templates.map((template) => template.id || '').join(',');
+  if (key !== _renderedTemplateCardKey) {
+    _renderedTemplateCardKey = key;
+    providerTemplateCardsEl.replaceChildren();
+    templates.forEach((template) => {
+      providerTemplateCardsEl.appendChild(buildProviderTemplatePickCard(template));
+    });
+  }
+  const selectedId = providerTemplateEl.value;
+  Array.from(providerTemplateCardsEl.children).forEach((card) => {
+    const active = card.dataset.templateId === selectedId;
+    card.classList.toggle('active', active);
+    card.setAttribute('aria-checked', String(active));
+    card.tabIndex = active ? 0 : -1;
+  });
+  providerTemplateCardsEl.classList.toggle('is-disabled', !!state.providerSaving);
 }
 
 function providerTemplateNeedsManualBaseUrl(template) {
@@ -3223,6 +3295,27 @@ function syncProviderModelFetchUi() {
   const fetchState = providerModelFetchState();
   fetchProviderModelsEl.disabled = state.providerSaving || state.providerModelsFetching || !fetchState.enabled;
   fetchProviderModelsEl.title = fetchState.enabled ? '' : fetchState.reason;
+  fetchProviderModelsEl.textContent = state.providerModelsFetching
+    ? 'Fetching models...'
+    : (state.providerModels.length ? 'Refresh models' : 'Fetch models');
+}
+
+let _providerModelsAutoFetchKey = '';
+
+function maybeAutoFetchProviderModels() {
+  if (state.providerModels.length || state.providerModelsFetching || state.providerSaving) return;
+  const fetchState = providerModelFetchState();
+  if (!fetchState.enabled) return;
+  const contextKey = [
+    providerBaseUrlEl.value.trim(),
+    providerCredentialSourceEl.value,
+    providerApiKeyValueForRequests() ? 'inline-key' : '',
+    providerRequestContextProviderId() || '',
+    providerOauthAccountEl.value || ''
+  ].join('|');
+  if (_providerModelsAutoFetchKey === contextKey) return;
+  _providerModelsAutoFetchKey = contextKey;
+  fetchProviderModels({ silent: true });
 }
 
 function renderProviderAccessModeOptions() {
@@ -3333,18 +3426,6 @@ function providerPrimaryActionTooltip(primaryAction) {
   return 'Use Set Up API Sign-In to create a saved OAuth API sign-in, then link it here.';
 }
 
-function providerBrowserSessionStatusNote() {
-  if (providerCredentialSourceEl.value !== 'browser-session') {
-    return '';
-  }
-  if (providerBrowserSessionEl.value) {
-    return state.pendingProviderBrowserSessionFlow
-      ? 'Finish sign-in after the provider page has loaded in the Xia-managed browser.'
-      : 'A saved web account session is ready for this provider.';
-  }
-  return 'Use Start Sign-In to open a Xia-managed browser, complete the provider login there, then finish the connection.';
-}
-
 function syncProviderAuthInputs() {
   const accessMode = providerAccessModeEl.value;
   const credentialSource = providerCredentialSourceEl.value;
@@ -3352,6 +3433,7 @@ function syncProviderAuthInputs() {
   const template = providerTemplateById(providerTemplateEl.value);
   const oauthAccounts = state.admin.oauthAccounts || [];
   const hideOauthAccountPicker = credentialSource !== 'oauth-account' || oauthAccounts.length === 1;
+  const oauthNote = providerOauthAccountStatusNote();
   const actions = providerVisibleActions(template, accessMode, credentialSource);
   const primaryAction = actions[0] || null;
   const accountAction = actions.find((action) => action.label === 'Open Account') || null;
@@ -3360,10 +3442,17 @@ function syncProviderAuthInputs() {
   providerTemplateEl.disabled = providerSaving;
   providerAccessModeEl.disabled = providerSaving;
   providerCredentialSourceEl.disabled = providerSaving;
+  providerAccessModeFieldEl.hidden = providerAccessModeEl.options.length <= 1;
+  providerCredentialSourceFieldEl.hidden = providerCredentialSourceEl.options.length <= 1;
+  // Hide the whole OAuth Account field unless it has a visible control or note —
+  // otherwise a lone "OAuth Account" label floats over nothing (e.g. a single
+  // connected account, where the picker is hidden and the note is empty).
+  providerOauthAccountFieldEl.hidden = credentialSource !== 'oauth-account'
+    || (hideOauthAccountPicker && !oauthNote);
   providerOauthAccountEl.hidden = hideOauthAccountPicker;
   providerOauthAccountEl.disabled = providerSaving || hideOauthAccountPicker;
+  providerApiKeyFieldEl.hidden = credentialSource !== 'api-key';
   providerApiKeyEl.disabled = providerSaving || credentialSource !== 'api-key';
-  providerBrowserSessionNoteEl.hidden = credentialSource !== 'browser-session';
   providerConfigureOauthEl.hidden = !primaryAction;
   providerConfigureOauthEl.textContent = primaryAction ? primaryAction.label : 'Open Setup';
   providerConfigureOauthEl.title = providerPrimaryActionTooltip(primaryAction);
@@ -3375,14 +3464,13 @@ function syncProviderAuthInputs() {
     ? 'noopener noreferrer'
     : '';
   providerConfigureOauthEl.setAttribute('aria-disabled',
-    (providerSaving || state.oauthSaving || state.providerAccountConnecting || !primaryAction) ? 'true' : 'false');
+    (providerSaving || state.oauthSaving || !primaryAction) ? 'true' : 'false');
   providerOpenAccountEl.hidden = !accountAction;
   providerOpenAccountEl.href = accountAction ? accountAction.url : '';
   providerOpenDocsEl.hidden = !docsAction;
   providerOpenDocsEl.href = docsAction ? docsAction.url : '';
-  providerOauthAccountNoteEl.textContent = providerOauthAccountStatusNote();
-  providerOauthAccountNoteEl.hidden = !providerOauthAccountNoteEl.textContent;
-  providerBrowserSessionNoteEl.textContent = providerBrowserSessionStatusNote();
+  providerOauthAccountNoteEl.textContent = oauthNote;
+  providerOauthAccountNoteEl.hidden = !oauthNote;
   syncProviderApiKeyReuse();
 }
 
@@ -3770,18 +3858,23 @@ function escapeHtml(text) {
   return d.innerHTML;
 }
 
-async function fetchProviderModels() {
+async function fetchProviderModels(options = {}) {
+  // When triggered automatically (e.g. focusing the model field), stay quiet in
+  // the status line: report neither progress nor failure, so an unreachable
+  // provider never blasts an unsolicited error. The button label and the opened
+  // dropdown carry all the feedback the auto path needs.
+  const announce = !options.silent;
   var baseUrl = providerBaseUrlEl.value.trim();
   var apiKey = providerApiKeyValueForRequests();
   var providerId = providerRequestContextProviderId();
   var fetchState = providerModelFetchState();
   if (!fetchState.enabled) {
-    providerStatusEl.textContent = fetchState.reason;
+    if (announce) providerStatusEl.textContent = fetchState.reason;
     return;
   }
   state.providerModelsFetching = true;
   syncProviderModelFetchUi();
-  providerStatusEl.textContent = 'Fetching models...';
+  if (announce) providerStatusEl.textContent = 'Fetching models...';
   try {
     var data = await fetchJson('/admin/provider-models', {
       method: 'POST',
@@ -3793,15 +3886,17 @@ async function fetchProviderModels() {
       })
     });
     state.providerModels = Array.isArray(data.models) ? data.models : [];
-    providerStatusEl.textContent = state.providerModels.length
-      ? state.providerModels.length + ' models available — type to filter.'
-      : 'No models returned by this provider.';
+    if (announce) {
+      providerStatusEl.textContent = state.providerModels.length
+        ? state.providerModels.length + ' models available — type to filter.'
+        : 'No models returned by this provider.';
+    }
     providerModelEl.focus();
     renderProviderModelList();
     maybeFetchProviderModelMetadata();
   } catch (err) {
     state.providerModels = [];
-    providerStatusEl.textContent = err.message || 'Failed to fetch models.';
+    if (announce) providerStatusEl.textContent = err.message || 'Failed to fetch models.';
   } finally {
     state.providerModelsFetching = false;
     syncProviderModelFetchUi();
@@ -3835,7 +3930,6 @@ function applyProviderTemplate(templateId, options = {}) {
   if (!options.preserveCredentialSource) {
     providerCredentialSourceEl.value = defaultProviderCredentialSource(template, providerAccessModeEl.value);
     providerOauthAccountEl.value = '';
-    providerBrowserSessionEl.value = '';
   }
   renderProviderOauthAccountOptions();
   providerStatusEl.textContent = options.statusText || ('Template applied. Choose a model for ' + firstNonEmpty(template.name, template.id) + '.');
@@ -4356,7 +4450,6 @@ function captureProviderDraft() {
     accessMode: providerAccessModeEl.value,
     credentialSource: providerCredentialSourceEl.value,
     oauthAccount: providerOauthAccountEl.value,
-    browserSession: providerBrowserSessionEl.value,
     systemPromptBudget: providerSystemPromptBudgetEl.value,
     historyBudget: providerHistoryBudgetEl.value,
     systemPromptBudgetAuto: providerSystemPromptBudgetEl.dataset.autoBudget === 'metadata',
@@ -4391,7 +4484,6 @@ function restoreProviderDraft(draft, options = {}) {
     || defaultProviderCredentialSource(providerTemplateById(providerTemplateEl.value), providerAccessModeEl.value);
   renderProviderOauthAccountOptions();
   providerOauthAccountEl.value = draft.oauthAccount || '';
-  providerBrowserSessionEl.value = draft.browserSession || '';
   providerSystemPromptBudgetEl.value = draft.systemPromptBudget || '';
   providerHistoryBudgetEl.value = draft.historyBudget || '';
   clearProviderBudgetAutoFlags();
@@ -4441,97 +4533,12 @@ function syncPendingProviderOauthDraft(accountId) {
   state.providerDraft = Object.assign({}, state.providerDraft, {
     accessMode: 'account',
     credentialSource: 'oauth-account',
-    oauthAccount: accountId || '',
-    browserSession: ''
+    oauthAccount: accountId || ''
   });
   if (state.pendingProviderOauthFlow) {
     state.pendingProviderOauthFlow = Object.assign({}, state.pendingProviderOauthFlow, {
       accountId: accountId || ''
     });
-  }
-}
-
-function syncPendingProviderBrowserSessionDraft(sessionId, connectorId) {
-  if (!state.providerDraft) return;
-  state.providerDraft = Object.assign({}, state.providerDraft, {
-    accessMode: 'account',
-    credentialSource: 'browser-session',
-    oauthAccount: '',
-    browserSession: sessionId || ''
-  });
-  if (state.pendingProviderBrowserSessionFlow) {
-    state.pendingProviderBrowserSessionFlow = Object.assign({}, state.pendingProviderBrowserSessionFlow, {
-      connectorId: connectorId || state.pendingProviderBrowserSessionFlow.connectorId || '',
-      sessionId: sessionId || ''
-    });
-  }
-}
-
-async function beginProviderBrowserSessionSetup(connectorId, options = {}) {
-  const template = providerTemplateById(providerTemplateEl.value);
-  const reconnecting = !!providerBrowserSessionEl.value && !state.pendingProviderBrowserSessionFlow;
-  if (providerAccessModeEl.value !== 'account') {
-    providerAccessModeEl.value = 'account';
-    renderProviderCredentialSourceOptions();
-  }
-  if (providerCredentialSourceEl.value !== 'browser-session') {
-    providerCredentialSourceEl.value = 'browser-session';
-  }
-  syncProviderAuthInputs();
-  state.providerDraft = captureProviderDraft();
-  if (!state.pendingProviderBrowserSessionFlow || reconnecting) {
-    state.pendingProviderBrowserSessionFlow = {
-      connectorId: connectorId || (template && template.account_connector) || '',
-      sessionId: '',
-      providerName: computedProviderName({ templateId: providerTemplateEl.value })
-    };
-  }
-  const pending = state.pendingProviderBrowserSessionFlow || {};
-
-  state.providerAccountConnecting = true;
-  providerBrowserSessionNoteEl.textContent = pending.sessionId
-    ? 'Checking the local browser sign-in...'
-    : 'Opening a Xia-managed browser...';
-  updateAdminButtons();
-  try {
-    if (pending.sessionId) {
-      const data = await fetchJson('/admin/provider-account-connectors/' + encodeURIComponent(pending.connectorId || connectorId) + '/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          browser_session: pending.sessionId
-        })
-      });
-      const connection = data.connection || {};
-      providerBrowserSessionEl.value = connection.session_id || pending.sessionId || '';
-      state.pendingProviderBrowserSessionFlow = null;
-      syncPendingProviderBrowserSessionDraft(providerBrowserSessionEl.value, connectorId);
-      providerStatusEl.textContent = 'Web account session is ready. Save the model when you are done.';
-      providerBrowserSessionNoteEl.textContent = connection.message || 'Web account session is ready.';
-      if (options.globalStatus) setStatus(options.globalStatus);
-    } else {
-      const data = await fetchJson('/admin/provider-account-connectors/' + encodeURIComponent(connectorId) + '/start', {
-        method: 'POST'
-      });
-      const connection = data.connection || {};
-      providerBrowserSessionEl.value = connection.session_id || '';
-      state.pendingProviderBrowserSessionFlow = {
-        connectorId: connection.connector || connectorId,
-        sessionId: connection.session_id || '',
-        providerName: pending.providerName || computedProviderName({ templateId: providerTemplateEl.value })
-      };
-      syncPendingProviderBrowserSessionDraft(providerBrowserSessionEl.value, connection.connector || connectorId);
-      providerStatusEl.textContent = connection.message || 'Finish the provider sign-in in the browser window, then click Finish Sign-In.';
-      providerBrowserSessionNoteEl.textContent = connection.message || 'Finish the provider sign-in in the browser window, then click Finish Sign-In.';
-      if (options.globalStatus) setStatus(options.globalStatus);
-    }
-  } catch (err) {
-    providerStatusEl.textContent = err.message || 'Failed to start account sign-in.';
-    providerBrowserSessionNoteEl.textContent = err.message || 'Failed to start account sign-in.';
-  } finally {
-    state.providerAccountConnecting = false;
-    syncProviderAuthInputs();
-    updateAdminButtons();
   }
 }
 
@@ -4543,8 +4550,6 @@ async function beginProviderOauthSetup(options = {}) {
   if (providerCredentialSourceEl.value !== 'oauth-account') {
     providerCredentialSourceEl.value = 'oauth-account';
   }
-  providerBrowserSessionEl.value = '';
-  state.pendingProviderBrowserSessionFlow = null;
   syncProviderAuthInputs();
   const draft = captureProviderDraft();
   const template = providerTemplateById(draft.template);
@@ -4700,7 +4705,6 @@ function historySessionMeta(session) {
   if (session.last_message_at) bits.push('Last ' + formatDateTime(session.last_message_at));
   else if (session.created_at) bits.push('Created ' + formatDateTime(session.created_at));
   bits.push((session.message_count || 0) + ' msgs');
-  if (session.preview) bits.push(session.preview);
   return bits.join(' • ');
 }
 
@@ -5317,7 +5321,6 @@ function resetProviderForm(statusText) {
   state.activeProviderId = '';
   state.providerDraft = null;
   state.pendingProviderOauthFlow = null;
-  state.pendingProviderBrowserSessionFlow = null;
   providerDetailHeaderEl.textContent = 'New model';
   providerIdEl.value = '';
   providerTemplateEl.value = defaultProviderTemplateId();
@@ -5326,7 +5329,6 @@ function resetProviderForm(statusText) {
   providerAccessModeEl.value = '';
   providerCredentialSourceEl.value = '';
   providerOauthAccountEl.value = '';
-  providerBrowserSessionEl.value = '';
   providerSystemPromptBudgetEl.value = '';
   providerHistoryBudgetEl.value = '';
   clearProviderBudgetAutoFlags();
@@ -5673,7 +5675,6 @@ function selectProvider(provider) {
   state.activeProviderId = provider.id || '';
   state.providerDraft = null;
   state.pendingProviderOauthFlow = null;
-  state.pendingProviderBrowserSessionFlow = null;
   providerDetailHeaderEl.textContent = providerDisplayName(provider);
   providerIdEl.value = provider.id || '';
   providerTemplateEl.value = provider.template || '';
@@ -5687,7 +5688,6 @@ function selectProvider(provider) {
   providerCredentialSourceEl.value = provider.credential_source || providerCredentialSource(provider);
   renderProviderOauthAccountOptions();
   providerOauthAccountEl.value = provider.oauth_account || '';
-  providerBrowserSessionEl.value = provider.browser_session || '';
   providerSystemPromptBudgetEl.value = provider.system_prompt_budget || '';
   providerHistoryBudgetEl.value = provider.history_budget || '';
   clearProviderBudgetAutoFlags();
@@ -5705,10 +5705,6 @@ function selectProvider(provider) {
     providerStatusEl.textContent = provider.oauth_account_connected
       ? 'API sign-in connected.'
       : 'API sign-in still needs to be connected.';
-  } else if (providerCredentialSource(provider) === 'browser-session') {
-    providerStatusEl.textContent = provider.browser_session_connected
-      ? 'Web account session is ready.'
-      : 'Web account session needs to be reconnected.';
   } else if (providerCredentialSource(provider) === 'api-key') {
     providerStatusEl.textContent = provider.api_key_configured
       ? 'API key stored. Enter a new one to replace it.'
@@ -6664,7 +6660,6 @@ async function saveProvider() {
     });
     state.providerDraft = null;
     state.pendingProviderOauthFlow = null;
-    state.pendingProviderBrowserSessionFlow = null;
     providerApiKeyEl.value = '';
     state.activeProviderId = '';
     await loadAdminConfig();
@@ -9041,6 +9036,23 @@ knowledgeQueryEl.addEventListener('keydown', (event) => {
 });
 
 
+if (providerTemplateCardsEl) {
+  providerTemplateCardsEl.addEventListener('keydown', (event) => {
+    if (state.providerSaving) return;
+    const cards = Array.from(providerTemplateCardsEl.children);
+    if (!cards.length) return;
+    const current = cards.indexOf(document.activeElement);
+    let next = -1;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (current + 1) % cards.length;
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (current - 1 + cards.length) % cards.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = cards.length - 1;
+    if (next === -1) return;
+    event.preventDefault();
+    cards[next].focus();
+    cards[next].click();
+  });
+}
 providerTemplateEl.addEventListener('change', () => {
   state.providerModels = [];
   setProviderModelVision('', false);
@@ -9075,7 +9087,11 @@ providerModelEl.addEventListener('input', () => {
   if (state.providerModels.length) renderProviderModelList();
 });
 providerModelEl.addEventListener('focus', () => {
-  if (state.providerModels.length) renderProviderModelList();
+  if (state.providerModels.length) {
+    renderProviderModelList();
+  } else {
+    maybeAutoFetchProviderModels();
+  }
 });
 providerModelEl.addEventListener('change', () => {
   clearProviderModelVisionIfModelChanged();
@@ -9110,8 +9126,6 @@ fetchProviderModelsEl.addEventListener('click', () => fetchProviderModels());
 providerAccessModeEl.addEventListener('change', () => {
   if (providerAccessModeEl.value !== 'account') {
     state.pendingProviderOauthFlow = null;
-    state.pendingProviderBrowserSessionFlow = null;
-    providerBrowserSessionEl.value = '';
   }
   renderProviderCredentialSourceOptions();
   syncProviderAuthInputs();
@@ -9120,10 +9134,6 @@ providerAccessModeEl.addEventListener('change', () => {
 providerCredentialSourceEl.addEventListener('change', () => {
   if (providerCredentialSourceEl.value !== 'oauth-account') {
     state.pendingProviderOauthFlow = null;
-  }
-  if (providerCredentialSourceEl.value !== 'browser-session') {
-    state.pendingProviderBrowserSessionFlow = null;
-    providerBrowserSessionEl.value = '';
   }
   syncProviderAuthInputs();
   updateAdminButtons();
@@ -9331,6 +9341,10 @@ updateComposerState();
 renderSharedWorkspaceList();
 renderLittleXiaList();
 bindStaticInfoHints();
+if (window.matchMedia('(max-width: 980px)').matches) {
+  const notesAccordion = document.getElementById('notes-accordion');
+  if (notesAccordion) notesAccordion.open = false;
+}
 composerEl.focus();
 Promise.all([
   loadSessionMessages(),
