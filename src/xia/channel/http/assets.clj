@@ -220,7 +220,5 @@
   (if-let [html (read-resource deps "index.html")]
     (with-web-dev-headers
       deps
-      (assoc-in (html-response (inject-web-dev-client deps html))
-                [:headers "Set-Cookie"]
-                ((:session-cookie-header deps))))
+      (html-response (inject-web-dev-client deps html)))
     {:status 404 :body "Not Found"}))

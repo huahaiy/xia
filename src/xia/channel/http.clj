@@ -203,10 +203,6 @@
 (defn- session-secret []
   (http-auth/session-secret (auth-secret-deps)))
 
-(defn- session-cookie-header []
-  (str http-auth/local-session-cookie-name "=" (session-secret)
-       "; Path=/; HttpOnly; SameSite=Strict"))
-
 (defn- hmac-sha256-base64url
   [secret message]
   (http-auth/hmac-sha256-base64url secret message))
@@ -231,9 +227,8 @@
 
 (defn- asset-handler-deps
   []
-  {:json-response         json-response
-   :session-cookie-header session-cookie-header
-   :web-dev-state-atom    (web-dev-state-atom)})
+  {:json-response      json-response
+   :web-dev-state-atom (web-dev-state-atom)})
 
 (defn- configure-web-dev!
   [enabled?]
@@ -980,7 +975,8 @@
 
 (defn- start-with-current-runtime!
   [bind-host port {:keys [web-dev?] :or {web-dev? false}}]
-  (let [runtime (current-runtime)]
+  (let [bind-host (http-auth/validate-bind-host! bind-host)
+        runtime   (current-runtime)]
     (when-let [{:keys [bind-host port]} @(server-atom)]
       (throw (ex-info "HTTP/WebSocket server already running"
                       {:bind-host bind-host

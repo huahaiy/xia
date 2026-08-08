@@ -43,7 +43,7 @@
    [nil "--instance-command PATH" "Executable path to use when starting child Xia instances (or set XIA_INSTANCE_COMMAND)"]
    [nil "--runtime-overlay PATH" "Runtime overlay EDN path (or set XIA_RUNTIME_OVERLAY)"]
    ["-d" "--db PATH" "Database path"]
-   ["-b" "--bind HOST" "HTTP/WebSocket bind address (default: 127.0.0.1)"
+   ["-b" "--bind HOST" "HTTP/WebSocket bind address; remote binds require authentication (default: 127.0.0.1)"
     :default (:bind default-run-options)]
    ["-p" "--port PORT" "HTTP/WebSocket port"
     :default (:port default-run-options)
@@ -92,7 +92,7 @@
   (println "  xia --instance qa --template-instance base  Seed qa from base")
   (println "  xia --runtime-overlay /run/xia/overlay.edn  Apply a managed runtime overlay")
   (println "  xia --log-file xia.log  Write logs to a file")
-  (println "  xia --bind 0.0.0.0      Expose server beyond localhost")
+  (println "  xia --bind 0.0.0.0      Remote bind; requires managed-proxy or command auth")
   (println "  xia --db /path/to/db    Use a specific database"))
 
 (defn- print-pack-help [summary]

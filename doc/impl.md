@@ -190,10 +190,11 @@ from that file at request time. Xia no longer relies on inline
 
 ## Managed Tenant Proxy Auth
 
-Local Xia UI auth and managed SaaS tenant auth are separate. Local routes still
-use the `xia-local-session` cookie and local-origin checks. The `/local-session`
-bootstrap endpoint remains local-only and must not be used by tenant-origin
-browsers.
+Local Xia UI auth and managed SaaS tenant auth are separate. In local mode,
+protected UI routes use the `xia-local-session` cookie, a numeric loopback peer
+check, and local-origin checks. Managed-proxy mode disables local-cookie
+bootstrap and authentication; tenant-origin browsers must use signed proxy
+proofs instead.
 
 Managed tenant traffic is admitted only when Hai has already authenticated the
 Better Auth session, authorized tenant membership, and `gang` forwards a signed

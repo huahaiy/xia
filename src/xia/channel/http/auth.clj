@@ -5,7 +5,8 @@
             [xia.rate-limit :as rate-limit]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.util :as util])
-  (:import [java.nio.charset StandardCharsets]
+  (:import [java.net InetAddress]
+           [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
            [java.util Base64]
            [java.util.concurrent ConcurrentHashMap]
@@ -16,6 +17,92 @@
 (def local-session-cookie-name "xia-local-session")
 
 (def ^:private local-hosts #{"localhost" "127.0.0.1" "::1" "[::1]"})
+(def ^:private wildcard-binds #{"0.0.0.0" "0:0:0:0:0:0:0:0" "::"})
+
+(defn- ipv4-octets
+  [value]
+  (let [parts (str/split (or value "") #"\." -1)]
+    (when (and (= 4 (count parts))
+               (every? #(boolean (re-matches #"[0-9]{1,3}" %)) parts))
+      (let [octets (mapv #(Long/parseLong %) parts)]
+        (when (every? #(<= 0 % 255) octets)
+          octets)))))
+
+(defn- normalize-ip-brackets
+  [value]
+  (if (and (str/starts-with? value "[")
+           (str/ends-with? value "]")
+           (str/includes? value ":"))
+    (subs value 1 (dec (count value)))
+    value))
+
+(defn- loopback-ip-literal?
+  "True only for numeric IPv4 or IPv6 loopback literals. This deliberately
+   does not resolve peer-supplied hostnames."
+  [value]
+  (let [address (some-> value str str/trim not-empty normalize-ip-brackets)]
+    (boolean
+     (when address
+       (if-let [octets (ipv4-octets address)]
+         (= 127 (first octets))
+         (when (str/includes? address ":")
+           (try
+             (.isLoopbackAddress (InetAddress/getByName address))
+             (catch Exception _ false))))))))
+
+(defn- loopback-remote-addr?
+  "True when :remote-addr is a numeric loopback address. Only the socket peer
+   is trusted; X-Forwarded-For / X-Real-IP are deliberately ignored."
+  [req]
+  (loopback-ip-literal? (:remote-addr req)))
+
+(defn- invalid-bind-host!
+  [bind-host cause]
+  (throw (ex-info "HTTP bind host must be a resolvable IP address or hostname."
+                  {:bind-host bind-host
+                   :type :http/invalid-bind-host}
+                  cause)))
+
+(defn- bind-host-analysis
+  [bind-host]
+  (let [requested (some-> bind-host str str/trim not-empty)]
+    (when-not requested
+      (invalid-bind-host! bind-host nil))
+    (let [normalized (normalize-ip-brackets requested)
+          lower      (str/lower-case normalized)]
+      (if (contains? wildcard-binds lower)
+        {:requested-host requested
+         :effective-host normalized
+         :non-loopback? true}
+        (do
+          ;; Do not let malformed numeric-looking values fall through to DNS.
+          (when (and (re-matches #"[0-9.]+" normalized)
+                     (nil? (ipv4-octets normalized)))
+            (invalid-bind-host! bind-host nil))
+          (let [addresses (try
+                            (vec (InetAddress/getAllByName normalized))
+                            (catch Exception e
+                              (invalid-bind-host! bind-host e)))]
+            (when-not (seq addresses)
+              (invalid-bind-host! bind-host nil))
+            {:requested-host requested
+             ;; Pin hostname resolution so the server binds the address that
+             ;; was validated instead of resolving the hostname a second time.
+             :effective-host (if (or (ipv4-octets normalized)
+                                     (str/includes? normalized ":"))
+                               normalized
+                               (.getHostAddress ^InetAddress (first addresses)))
+             :non-loopback? (not-every? #(.isLoopbackAddress ^InetAddress %)
+                                        addresses)}))))))
+
+(defn non-loopback-bind?
+  "True when bind-host would expose the server beyond loopback."
+  [bind-host]
+  (try
+    (:non-loopback? (bind-host-analysis bind-host))
+    (catch Exception _
+      true)))
+
 (def ^:private command-channel-token-config-key :secret/command-channel-token)
 (def ^:private command-channel-next-token-config-key :secret/command-channel-token-next)
 (def ^:private managed-proxy-enabled-config-key :http/managed-proxy-enabled?)
@@ -125,6 +212,10 @@
   []
   (cfg/boolean-option managed-proxy-enabled-config-key false))
 
+(defn- local-ui-auth-enabled?
+  []
+  (not (managed-proxy-enabled?)))
+
 (defn- trim-trailing-newline
   [value]
   (some-> value (str/replace #"(?:\r?\n)\z" "")))
@@ -142,6 +233,32 @@
             (throw (ex-info "Managed proxy secret file does not exist."
                             {:config-key managed-proxy-secret-file-config-key
                              :path path}))))))))
+
+(defn- validate-managed-proxy-config!
+  []
+  (when (managed-proxy-enabled?)
+    (when-not (managed-proxy-secret)
+      (throw (ex-info "Managed proxy authentication is enabled but its secret file is missing or empty."
+                      {:config-key managed-proxy-secret-file-config-key
+                       :type :http/invalid-managed-proxy-config})))
+    :managed-proxy))
+
+(defn validate-bind-host!
+  "Validate and pin the HTTP bind host. Non-loopback binds require either a
+   usable managed-proxy configuration or a command-channel token."
+  [bind-host]
+  (let [{:keys [effective-host non-loopback?]} (bind-host-analysis bind-host)
+        managed-auth-mode                    (validate-managed-proxy-config!)
+        command-auth-mode                    (when (and non-loopback?
+                                                        (seq (command-channel-tokens)))
+                                               :command-channel)
+        remote-auth-mode                     (or managed-auth-mode command-auth-mode)]
+    (when (and non-loopback? (nil? remote-auth-mode))
+      (throw (ex-info "Refusing to bind to a non-loopback address without remote authentication. Configure managed-proxy authentication, set XIA_COMMAND_TOKEN, or use --bind 127.0.0.1."
+                      {:bind-host bind-host
+                       :effective-bind-host effective-host
+                       :type :http/remote-auth-required})))
+    effective-host))
 
 (defn- normalize-base-url
   [value]
@@ -356,7 +473,9 @@
 
 (defn handle-local-session-bootstrap
   [deps req]
-  (if-not (trusted-local-origin? req)
+  (if-not (and (local-ui-auth-enabled?)
+               (loopback-remote-addr? req)
+               (trusted-local-origin? req))
     (forbidden-response deps)
     (-> ((:json-response deps) 200 {:ok true})
         (assoc-in [:headers "Set-Cookie"] (session-cookie-header deps)))))
@@ -605,7 +724,9 @@
 
 (defn- valid-local-ui-request?
   [deps req]
-  (and (trusted-local-origin? req)
+  (and (local-ui-auth-enabled?)
+       (loopback-remote-addr? req)
+       (trusted-local-origin? req)
        (valid-session-secret? deps req)))
 
 (defn- valid-managed-proxy-request?
