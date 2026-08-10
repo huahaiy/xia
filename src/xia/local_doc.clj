@@ -31,6 +31,9 @@
 (def ^:private chunk-summary-char-limit 320)
 (def ^:private doc-summary-char-limit 900)
 (def ^:private doc-summary-max-chunks 4)
+(def ^:private office-archive-max-entries 10000)
+(def ^:private office-archive-max-entry-bytes (* 64 1024 1024))
+(def ^:private office-archive-max-expanded-bytes (* 128 1024 1024))
 (def ^:private pdf-media-type "application/pdf")
 (def ^:private docx-media-type "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 (def ^:private xlsx-media-type "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -534,29 +537,58 @@
     (alength ^bytes data)))
 
 (defn- copy-input-stream-bytes
-  [in]
+  [in entry-name expanded-bytes]
   (let [^ByteArrayOutputStream out (ByteArrayOutputStream.)
         buffer (byte-array 8192)]
-    (loop [read-count (.read ^java.io.InputStream in buffer)]
-      (when (pos? read-count)
-        (.write out buffer 0 read-count)
-        (recur (.read ^java.io.InputStream in buffer))))
-    (.toByteArray out)))
+    (loop [entry-bytes 0]
+      (let [read-count (.read ^java.io.InputStream in buffer)]
+        (if-not (pos? read-count)
+          (.toByteArray out)
+          (let [entry-bytes* (+ (long entry-bytes) read-count)
+                expanded-bytes* (+ (long @expanded-bytes) read-count)]
+            (when (> entry-bytes* office-archive-max-entry-bytes)
+              (throw (ex-info "Office archive entry exceeds expansion limit"
+                              {:type :local-doc/archive-limit-exceeded
+                               :limit :entry-bytes
+                               :entry entry-name
+                               :max office-archive-max-entry-bytes
+                               :actual entry-bytes*})))
+            (when (> expanded-bytes* office-archive-max-expanded-bytes)
+              (throw (ex-info "Office archive exceeds expansion limit"
+                              {:type :local-doc/archive-limit-exceeded
+                               :limit :expanded-bytes
+                               :entry entry-name
+                               :max office-archive-max-expanded-bytes
+                               :actual expanded-bytes*})))
+            (reset! expanded-bytes expanded-bytes*)
+            (.write out buffer 0 read-count)
+            (recur entry-bytes*)))))))
 
 (defn- zip-entry-bytes-map
   [^bytes archive-bytes]
   (with-open [in (ByteArrayInputStream. archive-bytes)
               ^ZipInputStream zip (ZipInputStream. in)]
     (loop [^ZipEntry entry (.getNextEntry zip)
+           entry-count 0
+           expanded-bytes (atom 0)
            acc {}]
       (if-not entry
         acc
         (let [entry-name (.getName entry)
+              entry-count* (inc (long entry-count))
+              _ (when (> entry-count* office-archive-max-entries)
+                  (throw (ex-info "Office archive has too many entries"
+                                  {:type :local-doc/archive-limit-exceeded
+                                   :limit :entry-count
+                                   :entry entry-name
+                                   :max office-archive-max-entries
+                                   :actual entry-count*})))
               next-acc (if (.isDirectory entry)
                          acc
-                         (assoc acc entry-name (copy-input-stream-bytes zip)))]
+                         (assoc acc entry-name
+                                (copy-input-stream-bytes zip entry-name expanded-bytes)))]
           (.closeEntry zip)
-          (recur (.getNextEntry zip) next-acc))))))
+          (recur (.getNextEntry zip) entry-count* expanded-bytes next-acc))))))
 
 (defn- secure-document-builder-factory
   []

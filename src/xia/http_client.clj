@@ -10,18 +10,40 @@
            [java.nio.charset Charset StandardCharsets]
            [java.nio.file Files Path Paths StandardCopyOption]
            [java.nio.file.attribute FileAttribute]
-           [java.util.concurrent TimeoutException]
+           [java.util.concurrent ArrayBlockingQueue Callable ExecutionException Future RejectedExecutionException
+            ThreadFactory ThreadPoolExecutor ThreadPoolExecutor$AbortPolicy TimeUnit TimeoutException]
            [javax.net.ssl SNIHostName SSLSocket SSLSocketFactory]))
 
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-request-timeout-ms 120000)
 (def ^:private default-max-redirects 10)
+(def ^:private default-max-response-bytes (* 64 1024 1024))
+(def ^:private default-max-download-bytes (* 8 1024 1024 1024))
+(def ^:private default-max-response-header-count 200)
+(def ^:private default-max-response-header-line-bytes (* 16 1024))
+(def ^:private default-max-response-header-bytes (* 64 1024))
+(def ^:private dns-worker-count 4)
+(def ^:private dns-queue-capacity 64)
 (def ^:private byte-array-class (Class/forName "[B"))
 (def ^:private redirect-statuses #{301 302 303 307 308})
 (def ^:private cross-origin-sensitive-headers
   #{"authorization" "cookie" "proxy-authorization"})
 (def ^:private body-headers
   #{"content-length" "content-type"})
+
+(def ^:private dns-executor
+  (delay
+    (ThreadPoolExecutor.
+      dns-worker-count
+      dns-worker-count
+      0
+      TimeUnit/MILLISECONDS
+      (ArrayBlockingQueue. dns-queue-capacity)
+      (reify ThreadFactory
+        (newThread [_ runnable]
+          (doto (Thread. runnable "xia-http-dns")
+            (.setDaemon true))))
+      (ThreadPoolExecutor$AbortPolicy.))))
 
 (defn- encode-query-params
   [query-params]
@@ -44,16 +66,127 @@
         (str base-url sep query))
       base-url)))
 
+(defn- positive-long-option
+  [value option-name]
+  (let [parsed (try
+                 (long value)
+                 (catch Exception _ nil))]
+    (when-not (and parsed (pos? parsed))
+      (throw (ex-info (str option-name " must be a positive integer")
+                      {:option option-name
+                       :value value})))
+    parsed))
+
+(defn- now-nanos
+  []
+  (System/nanoTime))
+
+(defn- deadline-after-ms
+  [timeout-ms]
+  (let [now   (now-nanos)
+        delta (.toNanos TimeUnit/MILLISECONDS (long timeout-ms))]
+    (unchecked-add now delta)))
+
+(defn- timed-out!
+  [req phase cause]
+  (let [timeout (long (:timeout req))
+        url     (request-url req)]
+    (throw (ex-info (str "HTTP request timed out after " timeout " ms")
+                    {:type       :http/deadline-exceeded
+                     :phase      phase
+                     :timeout-ms timeout
+                     :url        url}
+                    cause))))
+
+(defn- deadline-exceeded?
+  [error]
+  (= :http/deadline-exceeded (:type (ex-data error))))
+
+(defn- remaining-ms!
+  ([req]
+   (remaining-ms! req :request))
+  ([req phase]
+   (let [remaining-nanos (unchecked-subtract (long (:deadline-nanos req))
+                                              (now-nanos))]
+     (when-not (pos? remaining-nanos)
+       (timed-out! req phase (TimeoutException. "HTTP request deadline exceeded")))
+     (min (long Integer/MAX_VALUE)
+          (inc (quot (dec remaining-nanos) 1000000))))))
+
+(defn- bounded-timeout-ms
+  [req configured-timeout phase]
+  (int (min (positive-long-option configured-timeout :connect-timeout)
+            (remaining-ms! req phase)
+            (long Integer/MAX_VALUE))))
+
+(defn- with-request-bounds
+  [req timeout]
+  (let [timeout* (positive-long-option timeout :timeout)]
+    (merge {:max-response-bytes default-max-response-bytes
+            :max-response-header-count default-max-response-header-count
+            :max-response-header-line-bytes default-max-response-header-line-bytes
+            :max-response-header-bytes default-max-response-header-bytes}
+           req
+           {:timeout timeout*
+            :deadline-nanos (or (:deadline-nanos req)
+                                (deadline-after-ms timeout*))
+            :max-response-bytes (positive-long-option
+                                  (or (:max-response-bytes req)
+                                      default-max-response-bytes)
+                                  :max-response-bytes)
+            :max-response-header-count (positive-long-option
+                                         (or (:max-response-header-count req)
+                                             default-max-response-header-count)
+                                         :max-response-header-count)
+            :max-response-header-line-bytes (positive-long-option
+                                              (or (:max-response-header-line-bytes req)
+                                                  default-max-response-header-line-bytes)
+                                              :max-response-header-line-bytes)
+            :max-response-header-bytes (positive-long-option
+                                         (or (:max-response-header-bytes req)
+                                             default-max-response-header-bytes)
+                                         :max-response-header-bytes)})))
+
 (defn- trusted-request?
   [{:keys [allow-private-network? trusted? trusted]}]
   (boolean (or allow-private-network? trusted? trusted)))
+
+(defn- resolve-url-before-deadline!
+  [req request-url-str]
+  (let [^ThreadPoolExecutor executor @dns-executor
+        ^Future task (try
+               (.submit executor
+                        ^Callable
+                        (reify Callable
+                          (call [_]
+                            (ssrf/resolve-url!
+                              request-url-str
+                              {:allow-private-network? (trusted-request? req)}))))
+               (catch RejectedExecutionException e
+                 (throw (ex-info "HTTP DNS resolver capacity exceeded"
+                                 {:type :http/dns-capacity
+                                  :url request-url-str
+                                  :capacity dns-queue-capacity}
+                                 e))))]
+    (try
+      (.get task (remaining-ms! req :dns) TimeUnit/MILLISECONDS)
+      (catch java.util.concurrent.TimeoutException e
+        (.cancel task true)
+        (.purge executor)
+        (timed-out! req :dns e))
+      (catch InterruptedException e
+        (.cancel task true)
+        (.purge executor)
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch ExecutionException e
+        (throw (or (.getCause e) e))))))
 
 (defn- validate-request-target!
   [{:keys [url uri query-params] :as req}]
   (let [request-url-str (request-url {:url url :uri uri :query-params query-params})
         parsed-uri      (URI. request-url-str)
-        resolution      (ssrf/resolve-url! request-url-str
-                                           {:allow-private-network? (trusted-request? req)})]
+        resolution      (resolve-url-before-deadline! req request-url-str)]
     (merge {:url request-url-str
             :uri parsed-uri
             :host (.getHost parsed-uri)}
@@ -203,11 +336,27 @@
       (.write out ^bytes body))
     (.flush out)))
 
+(defn- limit-exceeded!
+  [req limit-name max-value actual-value]
+  (throw (ex-info (str "HTTP response exceeded " (name limit-name) " limit")
+                  {:type :http/limit-exceeded
+                   :limit limit-name
+                   :max max-value
+                   :actual actual-value
+                   :url (request-url req)})))
+
 (defn- read-line-crlf!
-  [^InputStream in]
-  (let [out (ByteArrayOutputStream.)]
-    (loop []
+  [^InputStream in req total-bytes-atom]
+  (let [out      (ByteArrayOutputStream.)
+        max-line (long (:max-response-header-line-bytes req))
+        max-total (long (:max-response-header-bytes req))]
+    (loop [line-bytes 0]
+      (remaining-ms! req :response-headers)
       (let [b (.read in)]
+        (when (not= -1 b)
+          (let [total (swap! total-bytes-atom inc)]
+            (when (> (long total) max-total)
+              (limit-exceeded! req :header-bytes max-total total))))
         (cond
           (= -1 b)
           (when (pos? (.size out))
@@ -220,12 +369,14 @@
                                (= 13 (bit-and 0xff (aget bytes (dec size)))))
                         (dec size)
                         size)]
-            (String. bytes 0 size StandardCharsets/ISO_8859_1))
+            (String. bytes 0 (int size) StandardCharsets/ISO_8859_1))
 
           :else
-          (do
+          (let [line-bytes* (inc (long line-bytes))]
+            (when (> line-bytes* max-line)
+              (limit-exceeded! req :header-line-bytes max-line line-bytes*))
             (.write out b)
-            (recur)))))))
+            (recur line-bytes*)))))))
 
 (defn- parse-status-code
   [status-line]
@@ -237,72 +388,81 @@
                       {:status-line status-line})))))
 
 (defn- read-headers!
-  [^InputStream in]
-  (loop [headers {}]
-    (let [line (read-line-crlf! in)]
+  [^InputStream in req total-bytes-atom]
+  (let [max-count (long (:max-response-header-count req))]
+    (loop [headers {}
+           count* 0]
+      (let [line (read-line-crlf! in req total-bytes-atom)]
       (cond
         (nil? line) headers
         (str/blank? line) headers
         :else
-        (let [idx (.indexOf ^String line ":")]
-          (if (neg? idx)
-            (recur headers)
-            (let [header (str/lower-case (str/trim (subs line 0 idx)))
-                  value  (str/trim (subs line (inc idx)))]
-              (recur (update headers header
-                             (fn [existing]
-                               (if (seq existing)
-                                 (str existing "," value)
-                                 value)))))))))))
+        (let [count** (inc (long count*))
+              idx     (.indexOf ^String line ":")]
+          (when (> count** max-count)
+            (limit-exceeded! req :header-count max-count count**))
+          (when (neg? idx)
+            (throw (ex-info "Invalid HTTP response header"
+                            {:type :http/invalid-response-header
+                             :url (request-url req)})))
+          (let [header (str/lower-case (str/trim (subs line 0 idx)))
+                value  (str/trim (subs line (inc idx)))]
+            (when (str/blank? header)
+              (throw (ex-info "Invalid HTTP response header name"
+                              {:type :http/invalid-response-header
+                               :url (request-url req)})))
+            (recur (update headers header
+                           (fn [existing]
+                             (if (seq existing)
+                               (str existing "," value)
+                               value)))
+                   count**))))))))
 
 (defn- parse-response-head!
-  [^InputStream in]
-  (let [status-line (read-line-crlf! in)
+  [^InputStream in req]
+  (let [total-bytes (atom 0)
+        status-line (read-line-crlf! in req total-bytes)
         status      (parse-status-code status-line)
-        headers     (read-headers! in)]
+        headers     (read-headers! in req total-bytes)]
     {:status status
      :headers headers}))
 
 (defn- content-length
   [headers]
   (when-let [value (get headers "content-length")]
-    (try
-      (Long/parseLong (str/trim (first (str/split value #","))))
-      (catch Exception _
-        nil))))
+    (let [values (mapv str/trim (str/split value #","))
+          lengths (try
+                    (mapv #(Long/parseLong %) values)
+                    (catch Exception e
+                      (throw (ex-info "Invalid HTTP Content-Length"
+                                      {:type :http/invalid-content-length
+                                       :value value}
+                                      e))))]
+      (when (or (some neg? lengths)
+                (not (apply = lengths)))
+        (throw (ex-info "Invalid or conflicting HTTP Content-Length"
+                        {:type :http/invalid-content-length
+                         :value value})))
+      (first lengths))))
 
 (defn- chunked-transfer?
   [headers]
   (some #(= "chunked" (str/lower-case (str/trim %)))
         (str/split (or (get headers "transfer-encoding") "") #",")))
 
-(defn- read-exactly!
-  [^InputStream in n]
-  (let [out       (ByteArrayOutputStream.)
-        remaining (atom (long n))
-        buf       (byte-array 8192)]
-    (while (pos? @remaining)
-      (let [n-read (.read in buf 0 (int (min (long (alength buf)) @remaining)))]
-        (when (= -1 n-read)
-          (throw (EOFException. "HTTP response ended before Content-Length bytes were read")))
-        (.write out buf 0 n-read)
-        (swap! remaining - n-read)))
-    (.toByteArray out)))
-
-(defn- read-until-eof!
-  [^InputStream in]
-  (read-all-bytes! in))
-
 (defn- read-chunk-size!
-  [^InputStream in]
-  (let [line (read-line-crlf! in)
-        size (some-> line
-                     (str/split #";" 2)
-                     first
-                     str/trim)]
-    (when (str/blank? size)
+  [^InputStream in req trailer-bytes]
+  (let [line (read-line-crlf! in req trailer-bytes)
+        size-text (some-> line
+                          (str/split #";" 2)
+                          first
+                          str/trim)]
+    (when (str/blank? size-text)
       (throw (EOFException. "HTTP chunked response ended before chunk size was read")))
-    (Long/parseLong size 16)))
+    (let [size (Long/parseLong size-text 16)]
+      (when (neg? size)
+        (throw (java.io.IOException. "Invalid negative HTTP chunk size")))
+      size)))
 
 (defn- consume-crlf!
   [^InputStream in]
@@ -318,32 +478,15 @@
                      "Invalid HTTP chunk delimiter")))))
 
 (defn- consume-trailing-headers!
-  [^InputStream in]
-  (loop []
-    (let [line (read-line-crlf! in)]
-      (when (and line (not (str/blank? line)))
-        (recur)))))
-
-(defn- read-chunked-body!
-  [^InputStream in]
-  (let [out (ByteArrayOutputStream.)
-        buf (byte-array 8192)]
-    (loop []
-      (let [size (read-chunk-size! in)]
-        (if (zero? size)
-          (do
-            (consume-trailing-headers! in)
-            (.toByteArray out))
-          (do
-            (loop [remaining size]
-              (when (pos? remaining)
-                (let [n-read (.read in buf 0 (int (min (long (alength buf)) remaining)))]
-                  (when (= -1 n-read)
-                    (throw (EOFException. "HTTP chunked response ended before chunk bytes were read")))
-                  (.write out buf 0 n-read)
-                  (recur (- remaining n-read)))))
-            (consume-crlf! in)
-            (recur)))))))
+  [^InputStream in req trailer-bytes]
+  (let [max-count (long (:max-response-header-count req))]
+    (loop [count* 0]
+      (let [line (read-line-crlf! in req trailer-bytes)]
+        (when (and line (not (str/blank? line)))
+          (let [count** (inc (long count*))]
+            (when (> count** max-count)
+              (limit-exceeded! req :trailer-count max-count count**))
+            (recur count**)))))))
 
 (defn- bodyless-response?
   [method status]
@@ -351,13 +494,14 @@
       (<= 100 (long status) 199)
       (#{204 304} (long status))))
 
+(declare response-body-stream)
+
 (defn- read-response-body!
-  [^InputStream in headers method status]
-  (cond
-    (bodyless-response? method status) (byte-array 0)
-    (chunked-transfer? headers) (read-chunked-body! in)
-    (some? (content-length headers)) (read-exactly! in (content-length headers))
-    :else (read-until-eof! in)))
+  [^InputStream in headers method status req]
+  (if (bodyless-response? method status)
+    (byte-array 0)
+    (with-open [^InputStream stream (response-body-stream in headers req)]
+      (read-all-bytes! stream))))
 
 (defn- ip-literal?
   [host]
@@ -368,7 +512,7 @@
   [host]
   (when-not (ip-literal? host)
     (try
-      (SNIHostName. host)
+      (SNIHostName. ^String host)
       (catch Exception _
         nil))))
 
@@ -380,7 +524,7 @@
                        :host host}))))
 
 (defn- open-pinned-socket-to-address!
-  [{:keys [connect-timeout timeout resolved-target]} ^InetAddress address]
+  [{:keys [connect-timeout resolved-target] :as req} ^InetAddress address]
   (let [^URI uri       (:uri resolved-target)
         host           (:host resolved-target)
         scheme         (str/lower-case (.getScheme uri))
@@ -389,17 +533,19 @@
     (try
       (.connect raw-socket
                 (InetSocketAddress. address (int port))
-                (int connect-timeout))
-      (.setSoTimeout raw-socket (int timeout))
+                (bounded-timeout-ms req connect-timeout :connect))
+      (.setSoTimeout raw-socket
+                     (int (remaining-ms! req :response)))
       (if (= "https" scheme)
         (let [factory    (SSLSocketFactory/getDefault)
-              ssl-socket ^SSLSocket (.createSocket factory raw-socket host (int port) true)
+              ssl-socket ^SSLSocket (.createSocket factory raw-socket ^String host (int port) true)
               params     (.getSSLParameters ssl-socket)]
           (.setEndpointIdentificationAlgorithm params "HTTPS")
           (when-let [server-name (sni-host host)]
             (.setServerNames params [server-name]))
           (.setSSLParameters ssl-socket params)
-          (.setSoTimeout ssl-socket (int timeout))
+          (.setSoTimeout ssl-socket
+                         (int (remaining-ms! req :tls-handshake)))
           (.startHandshake ssl-socket)
           ssl-socket)
         raw-socket)
@@ -416,19 +562,27 @@
       (let [result (try
                      {:socket (open-pinned-socket-to-address! req (nth addresses idx))}
                      (catch Exception e
-                       {:error e}))]
+                       (if (deadline-exceeded? e)
+                         (throw e)
+                         {:error e})))]
         (if-let [socket (:socket result)]
           socket
           (if (< (inc idx) (count addresses))
             (recur (inc idx))
             (throw (:error result))))))))
 
-(defn- timed-out!
-  [timeout url cause]
-  (throw (ex-info (str "HTTP request timed out after " timeout " ms")
-                  {:timeout-ms timeout
-                   :url        url}
-                  cause)))
+(defn- deadline-input-stream
+  [^Socket socket ^InputStream in req]
+  (proxy [InputStream] []
+    (read
+      ([]
+       (.setSoTimeout socket (int (remaining-ms! req :response-body)))
+       (.read in))
+      ([buf off len]
+       (.setSoTimeout socket (int (remaining-ms! req :response-body)))
+       (.read in buf off len)))
+    (close []
+      (.close in))))
 
 (defn- redirect-status?
   [status]
@@ -441,9 +595,10 @@
       (str (.resolve ^URI (:uri resolved-target) location)))))
 
 (defn- chunked-input-stream
-  [^InputStream in]
+  [^InputStream in req]
   (let [state (atom {:remaining 0
-                     :eof? false})]
+                     :eof? false})
+        framing-bytes (atom 0)]
     (proxy [InputStream] []
       (read
         ([]
@@ -461,7 +616,7 @@
                (pos? remaining)
                (let [n-read (.read in buf off (int (min (long len) (long remaining))))]
                  (if (= -1 n-read)
-                   -1
+                   (throw (EOFException. "HTTP chunked response ended before chunk bytes were read"))
                    (do
                      (let [remaining* (- (long remaining) n-read)]
                        (swap! state assoc :remaining remaining*)
@@ -469,10 +624,10 @@
                          (consume-crlf! in)))
                      n-read)))
                :else
-               (let [size (read-chunk-size! in)]
+               (let [size (read-chunk-size! in req framing-bytes)]
                  (if (zero? size)
                    (do
-                     (consume-trailing-headers! in)
+                     (consume-trailing-headers! in req framing-bytes)
                      (swap! state assoc :eof? true)
                      -1)
                    (do
@@ -505,22 +660,63 @@
                  (swap! remaining - n-read)
                  n-read)))))))))
 
+(defn- limited-input-stream
+  [^InputStream in req max-bytes]
+  (let [total (atom 0)
+        max-bytes (long max-bytes)]
+    (proxy [InputStream] []
+      (read
+        ([]
+         (let [byte (.read in)]
+           (if (= -1 byte)
+             -1
+             (let [total* (swap! total inc)]
+               (when (> (long total*) max-bytes)
+                 (limit-exceeded! req :response-bytes max-bytes total*))
+               byte))))
+        ([buf]
+         (.read ^InputStream this buf 0 (alength ^bytes buf)))
+        ([buf off len]
+         (if-not (pos? len)
+           0
+           (let [remaining (- max-bytes (long @total))
+                 read-len  (int (min (long len) (inc (max 0 remaining))))
+                 n-read    (.read in buf off read-len)]
+             (if (= -1 n-read)
+               -1
+               (let [total* (swap! total + n-read)]
+                 (when (> (long total*) max-bytes)
+                   (limit-exceeded! req :response-bytes max-bytes total*))
+                 n-read))))))
+      (close []
+        (.close in)))))
+
 (defn- response-body-stream
-  [^InputStream in headers]
-  (cond
-    (chunked-transfer? headers) (chunked-input-stream in)
-    (some? (content-length headers)) (fixed-length-input-stream in (content-length headers))
-    :else in))
+  [^InputStream in headers req]
+  (let [max-bytes (long (:max-response-bytes req))
+        length    (content-length headers)]
+    (when (and length (> (long length) max-bytes))
+      (limit-exceeded! req :response-bytes max-bytes length))
+    (limited-input-stream
+      (cond
+        (chunked-transfer? headers) (chunked-input-stream in req)
+        (some? length) (fixed-length-input-stream in length)
+        :else in)
+      req
+      max-bytes)))
 
 (defn- send-streaming-request!
-  [{:keys [connect-timeout timeout on-event]
+  [{:keys [on-event]
     :as req}]
   (try
     (with-open [^Socket socket (open-pinned-socket! req)]
-      (let [in  (BufferedInputStream. (.getInputStream socket))
+      (let [in  (deadline-input-stream
+                  socket
+                  (BufferedInputStream. (.getInputStream socket))
+                  req)
             out (BufferedOutputStream. (.getOutputStream socket))]
         (write-http-request! out req)
-        (let [{:keys [status headers]} (parse-response-head! in)]
+        (let [{:keys [status headers]} (parse-response-head! in req)]
           (if (and (= 200 status)
                    (str/starts-with? (or (get headers "content-type") "")
                                      "text/event-stream"))
@@ -528,11 +724,12 @@
               (when-not on-event
                 (throw (ex-info "Streaming HTTP request requires :on-event callback"
                                 {:url (request-url req)})))
-              (let [^InputStream stream (response-body-stream in headers)
+              (let [^InputStream stream (response-body-stream in headers req)
                     reader (BufferedReader.
                              (InputStreamReader. stream StandardCharsets/UTF_8))]
                 (loop [event-type nil
                        data-lines []]
+                  (remaining-ms! req :response-body)
                   (if-let [line (.readLine reader)]
                     (if (str/blank? line)
                       (do
@@ -557,27 +754,30 @@
                        :streamed? true})))))
             {:status status
              :headers headers
-             :body (decode-body (read-response-body! in headers (:method req) status)
+             :body (decode-body (read-response-body! in headers (:method req) status req)
                                 headers)}))))
     (catch SocketTimeoutException e
-      (timed-out! timeout (request-url req) e))))
+      (timed-out! req :response-body e))))
 
 (defn- send-request!
-  [{:keys [connect-timeout timeout as]
+  [{:keys [as]
     :or   {as :string}
     :as   req}]
   (try
     (with-open [^Socket socket (open-pinned-socket! req)]
-      (let [in  (BufferedInputStream. (.getInputStream socket))
+      (let [in  (deadline-input-stream
+                  socket
+                  (BufferedInputStream. (.getInputStream socket))
+                  req)
             out (BufferedOutputStream. (.getOutputStream socket))]
         (write-http-request! out req)
-        (let [{:keys [status headers]} (parse-response-head! in)
-              body (read-response-body! in headers (:method req) status)]
+        (let [{:keys [status headers]} (parse-response-head! in req)
+              body (read-response-body! in headers (:method req) status req)]
           {:status  status
            :headers headers
            :body    (response-body body headers as)})))
     (catch SocketTimeoutException e
-      (timed-out! timeout (request-url req) e))))
+      (timed-out! req :response-body e))))
 
 (defn- move-file!
   [^Path source ^Path target]
@@ -592,8 +792,8 @@
                               [StandardCopyOption/REPLACE_EXISTING])))))
 
 (defn- copy-response-body-to-file!
-  [^InputStream in headers ^Path target]
-  (with-open [stream (response-body-stream in headers)]
+  [^InputStream in headers ^Path target req]
+  (with-open [^InputStream stream (response-body-stream in headers req)]
     (Files/copy ^InputStream stream
                 target
                 (into-array java.nio.file.CopyOption
@@ -606,14 +806,17 @@
     (catch Exception _)))
 
 (defn- send-download-request!
-  [{:keys [timeout target-path expected-status] :or {expected-status 200} :as req}]
+  [{:keys [target-path expected-status] :or {expected-status 200} :as req}]
   (try
     (with-open [^Socket socket (open-pinned-socket! req)]
-      (let [in       (BufferedInputStream. (.getInputStream socket))
+      (let [in       (deadline-input-stream
+                       socket
+                       (BufferedInputStream. (.getInputStream socket))
+                       req)
             out      (BufferedOutputStream. (.getOutputStream socket))
             ^Path target (Paths/get target-path (make-array String 0))]
         (write-http-request! out req)
-        (let [{:keys [status headers]} (parse-response-head! in)]
+        (let [{:keys [status headers]} (parse-response-head! in req)]
           (if-let [location (when (redirect-status? status)
                               (redirect-url req headers))]
             {:status status
@@ -634,7 +837,7 @@
                                    :status status
                                    :expected-status expected-status
                                    :target target-path})))
-                (copy-response-body-to-file! in headers tmp)
+                (copy-response-body-to-file! in headers tmp req)
                 (move-file! tmp target)
                 {:status status
                  :headers headers
@@ -643,7 +846,7 @@
                   (when (Files/exists tmp (make-array java.nio.file.LinkOption 0))
                     (delete-if-exists-quietly! tmp)))))))))
     (catch SocketTimeoutException e
-      (timed-out! timeout (request-url req) e))))
+      (timed-out! req :response-body e))))
 
 (defn- transient-exception?
   [e]
@@ -659,6 +862,15 @@
 (defn- sleep-ms!
   [delay-ms]
   (Thread/sleep (long delay-ms)))
+
+(defn- sleep-before-deadline!
+  [req delay-ms]
+  (let [remaining (remaining-ms! req :retry-backoff)]
+    (when (>= (long delay-ms) remaining)
+      (timed-out! req :retry-backoff
+                  (TimeoutException. "Retry backoff exceeds request deadline")))
+    (sleep-ms! delay-ms)
+    (remaining-ms! req :retry-backoff)))
 
 (defn- successful-status?
   [status]
@@ -678,6 +890,10 @@
      :query-params         map appended to URL
      :timeout              full request timeout in ms, default 120000
      :connect-timeout      connect timeout in ms, default 30000
+     :max-response-bytes   maximum decoded response body bytes, default 64 MiB
+     :max-response-header-count maximum response header fields, default 200
+     :max-response-header-line-bytes maximum status/header line bytes, default 16 KiB
+     :max-response-header-bytes maximum total status/header bytes, default 64 KiB
      :as                   response body format, default :string; supports :string and :byte-array
      :max-attempts         retry attempts, default 3
      :initial-backoff-ms   default 1000
@@ -700,9 +916,9 @@
     :or   {connect-timeout    default-connect-timeout-ms
            timeout            default-request-timeout-ms}
     :as   req}]
-  (let [base-req (merge req
-                        {:connect-timeout connect-timeout
-                         :timeout timeout})
+  (let [base-req (with-request-bounds
+                   (merge req {:connect-timeout connect-timeout})
+                   timeout)
         max-redirects (long (or max-redirects default-max-redirects))]
     (letfn [(attempt-with-retries [req]
               (let [retry-config (http-policy/http-request-retry-config req)
@@ -727,21 +943,24 @@
                                        :max-attempts (:max-attempts decision)
                                        :delay-ms delay-ms
                                        :url request-url-str})
-                            (sleep-ms! delay-ms)
+                            (sleep-before-deadline! req delay-ms)
                             (attempt-request (inc (long (:attempt decision))))))
                         (attempt-request [attempt]
+                          (remaining-ms! req :attempt)
                           (let [resp (try
                                        (send-request! req)
                                        (catch Exception e
-                                         (let [decision (http-policy/http-request-retry-decision
-                                                         req
-                                                         attempt
-                                                         {:transient-exception? (transient-exception? e)
-                                                          :reason (.getMessage e)})]
-                                           (emit-policy! decision)
-                                           (if (:allowed? decision)
-                                             (retry! decision (.getMessage e))
-                                             (throw e)))))
+                                         (if (deadline-exceeded? e)
+                                           (throw e)
+                                           (let [decision (http-policy/http-request-retry-decision
+                                                           req
+                                                           attempt
+                                                           {:transient-exception? (transient-exception? e)
+                                                            :reason (.getMessage e)})]
+                                             (emit-policy! decision)
+                                             (if (:allowed? decision)
+                                               (retry! decision (.getMessage e))
+                                               (throw e))))))
                                 status (:status resp)]
                             (let [decision (http-policy/http-request-retry-decision
                                             req
@@ -758,6 +977,7 @@
                   (attempt-request 1))))]
       (loop [req base-req
              remaining-redirects max-redirects]
+        (remaining-ms! req :redirect)
         (let [resp (attempt-with-retries req)]
           (if-let [redirect-url (when follow-redirects?
                                   (when (redirect-status? (:status resp))
@@ -780,9 +1000,9 @@
     :or   {connect-timeout default-connect-timeout-ms
            timeout         default-request-timeout-ms}
     :as   req}]
-  (let [req (assoc req
-                   :connect-timeout connect-timeout
-                   :timeout timeout)
+  (let [req (with-request-bounds
+              (assoc req :connect-timeout connect-timeout)
+              timeout)
         resolved-target (validate-request-target! req)]
     (send-streaming-request! (assoc req
                                     :on-event on-event
@@ -813,35 +1033,55 @@
       switch-get?
       (update :headers remove-body-headers))))
 
+(defn- follow-download-redirect-request
+  [req redirect-url]
+  (let [old-uri (:uri (:resolved-target req))
+        new-uri (URI. redirect-url)]
+    (cond-> (follow-redirect-request req redirect-url)
+      (and old-uri (not (same-origin? old-uri new-uri)))
+      (update :headers remove-cross-origin-sensitive-headers))))
+
 (defn download!
   "Download an HTTP(S) resource to `:target-path` using the guarded egress path.
 
    Supports the same URL, timeout, header, and private-network policy options as
    `request`. The response body is streamed to a temporary file in the target
-   directory and atomically moved into place when possible."
-  [{:keys [connect-timeout timeout target-path headers max-redirects]
+   directory and atomically moved into place when possible. Downloads default
+   to an 8 GiB maximum; callers may lower it with `:max-download-bytes`."
+  [{:keys [connect-timeout timeout target-path headers max-redirects max-download-bytes]
     :or   {connect-timeout default-connect-timeout-ms
            timeout         default-request-timeout-ms
            max-redirects   default-max-redirects}
     :as   req}]
   (when-not (seq (or target-path ""))
     (throw (ex-info "HTTP download requires :target-path" {})))
-  (let [req (merge {:method :get
-                    :headers {"User-Agent" "xia"
-                              "Accept" "application/octet-stream"}}
-                   req
-                   {:connect-timeout connect-timeout
-                    :timeout timeout
-                    :headers (merge {"User-Agent" "xia"
-                                     "Accept" "application/octet-stream"}
-                                    headers)})]
+  (let [download-limit (or max-download-bytes
+                           (:max-response-bytes req)
+                           default-max-download-bytes)
+        req (with-request-bounds
+              (merge {:method :get
+                      :headers {"User-Agent" "xia"
+                                "Accept" "application/octet-stream"}}
+                     req
+                     {:connect-timeout connect-timeout
+                      :max-response-bytes download-limit
+                      :max-download-bytes (positive-long-option
+                                            download-limit
+                                            :max-download-bytes)
+                      :headers (merge {"User-Agent" "xia"
+                                       "Accept" "application/octet-stream"}
+                                      headers)})
+              timeout)]
     (loop [req req
            remaining-redirects (long max-redirects)]
+      (remaining-ms! req :redirect)
       (let [resolved-target (validate-request-target! req)
             resp (send-download-request! (assoc req :resolved-target resolved-target))]
         (if-let [redirect-url (:redirect-url resp)]
           (if (pos? remaining-redirects)
-            (recur (follow-redirect-request req redirect-url)
+            (recur (follow-download-redirect-request
+                     (assoc req :resolved-target resolved-target)
+                     redirect-url)
                    (dec remaining-redirects))
             (throw (ex-info "HTTP download exceeded redirect limit"
                             {:url (request-url req)

@@ -39,6 +39,13 @@
        (ssrf/resolve-public-url! (fn [_] (addresses "fdff:ffff::1"))
                                  "https://service.example/resource"))))
 
+(deftest public-url-resolution-rejects-mixed-public-and-private-results
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"private/internal"
+       (ssrf/resolve-public-url! (fn [_] (addresses "93.184.216.34" "127.0.0.1"))
+                                 "https://mixed.example/resource"))))
+
 (deftest private-addresses-require-explicit-opt-in
   (is (= {:host "service.example"
           :private-network? true}

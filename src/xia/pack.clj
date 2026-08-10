@@ -3,8 +3,8 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str])
-  (:import [java.io BufferedInputStream BufferedOutputStream
-            File FileInputStream FileOutputStream]
+  (:import [java.io BufferedInputStream BufferedOutputStream ByteArrayOutputStream
+            File FileInputStream FileOutputStream InputStream]
            [java.nio.charset StandardCharsets]
            [java.nio.file Files LinkOption OpenOption Path Paths StandardOpenOption]
            [java.time Instant]
@@ -15,6 +15,10 @@
 (def ^:private archive-extension ".xia")
 (def ^:private support-dir-name ".xia")
 (def ^:private support-dir-entry "db/.xia")
+(def ^:private default-max-archive-entries 100000)
+(def ^:private default-max-archive-entry-bytes (* 8 1024 1024 1024))
+(def ^:private default-max-archive-expanded-bytes (* 16 1024 1024 1024))
+(def ^:private max-manifest-bytes (* 1024 1024))
 
 (defn- epoch-millis->date
   [millis]
@@ -174,11 +178,54 @@
                        :manifest-path (.getAbsolutePath manifest-file)})))
     (edn/read-string (slurp manifest-file))))
 
+(defn- archive-limit-exceeded!
+  [limit-name max-value actual-value entry-name]
+  (throw (ex-info (str "Archive exceeded " (name limit-name) " limit")
+                  (cond-> {:type :archive/limit-exceeded
+                           :limit limit-name
+                           :max max-value
+                           :actual actual-value}
+                    entry-name (assoc :entry entry-name)))))
+
+(defn- positive-long-option
+  [value option-name]
+  (let [parsed (try (long value) (catch Exception _ nil))]
+    (when-not (and parsed (pos? parsed))
+      (throw (ex-info (str option-name " must be a positive integer")
+                      {:option option-name :value value})))
+    parsed))
+
+(defn- copy-limited-bytes!
+  [^InputStream in max-bytes limit-name entry-name]
+  (let [out    (ByteArrayOutputStream.)
+        buffer (byte-array buffer-size)]
+    (loop [total 0]
+      (let [n (.read in buffer)]
+        (if (neg? n)
+          (.toByteArray out)
+          (let [total* (+ (long total) n)]
+            (when (> total* (long max-bytes))
+              (archive-limit-exceeded! limit-name max-bytes total* entry-name))
+            (.write out buffer 0 n)
+            (recur total*)))))))
+
 (defn read-manifest
   [archive-path]
   (with-open [zip (ZipFile. (io/file archive-path))]
     (when-let [entry (.getEntry zip manifest-entry)]
-      (edn/read-string (slurp (.getInputStream zip entry))))))
+      (let [declared-size (.getSize entry)]
+        (when (> declared-size max-manifest-bytes)
+          (archive-limit-exceeded! :manifest-bytes
+                                   max-manifest-bytes
+                                   declared-size
+                                   manifest-entry))
+        (with-open [in (.getInputStream zip entry)]
+          (edn/read-string
+            (String. ^bytes (copy-limited-bytes! in
+                                                 max-manifest-bytes
+                                                 :manifest-bytes
+                                                 manifest-entry)
+                     StandardCharsets/UTF_8)))))))
 
 (defn- delete-tree!
   [path]
@@ -249,31 +296,101 @@
              (Files/isSymbolicLink target))
     (throw (symlink-path-ex root-file entry-name target))))
 
+(defn- account-expanded-bytes!
+  [state n limits entry-name entry-bytes]
+  (let [entry-bytes* (+ (long entry-bytes) (long n))
+        total-bytes* (+ (long (:bytes @state)) (long n))
+        max-entry-bytes (long (:max-entry-bytes limits))
+        max-expanded-bytes (long (:max-expanded-bytes limits))]
+    (when (> entry-bytes* max-entry-bytes)
+      (archive-limit-exceeded! :entry-bytes max-entry-bytes entry-bytes* entry-name))
+    (when (> total-bytes* max-expanded-bytes)
+      (archive-limit-exceeded! :expanded-bytes max-expanded-bytes total-bytes* entry-name))
+    (swap! state assoc :bytes total-bytes*)
+    entry-bytes*))
+
+(defn- register-archive-entry!
+  [state limits ^java.util.zip.ZipEntry entry]
+  (let [entry-name (.getName entry)
+        entry-count (inc (long (:entries @state)))
+        max-entries (long (:max-entries limits))
+        declared-size (.getSize entry)]
+    (when (> entry-count max-entries)
+      (archive-limit-exceeded! :entry-count max-entries entry-count entry-name))
+    (when (and (not (.isDirectory entry))
+               (not (neg? declared-size)))
+      (when (> declared-size (long (:max-entry-bytes limits)))
+        (archive-limit-exceeded! :entry-bytes
+                                 (:max-entry-bytes limits)
+                                 declared-size
+                                 entry-name))
+      (when (> declared-size
+               (- (long (:max-expanded-bytes limits))
+                  (long (:bytes @state))))
+        (archive-limit-exceeded! :expanded-bytes
+                                 (:max-expanded-bytes limits)
+                                 (+ (long (:bytes @state)) declared-size)
+                                 entry-name)))
+    (swap! state assoc :entries entry-count)))
+
 (defn- extract-entry!
-  [^ZipFile zip ^File root-file ^java.util.zip.ZipEntry entry]
-  (let [^Path target (safe-target-path root-file (.getName entry))]
+  [^ZipFile zip ^File root-file ^java.util.zip.ZipEntry entry limits state]
+  (register-archive-entry! state limits entry)
+  (let [entry-name (.getName entry)
+        ^Path target (safe-target-path root-file entry-name)]
+    (when (and (= manifest-entry entry-name)
+               (> (.getSize entry) max-manifest-bytes))
+      (archive-limit-exceeded! :manifest-bytes
+                               max-manifest-bytes
+                               (.getSize entry)
+                               entry-name))
     (if (.isDirectory entry)
-      (ensure-safe-directory-path! root-file target (.getName entry))
+      (ensure-safe-directory-path! root-file target entry-name)
       (do
         (when-let [^Path parent (.getParent target)]
-          (ensure-safe-directory-path! root-file parent (.getName entry)))
-        (ensure-safe-file-target! root-file target (.getName entry))
-        (let [^File target-file (.toFile target)]
-          (with-open [in  (.getInputStream zip entry)
-                      out (BufferedOutputStream. (Files/newOutputStream target (nofollow-open-options)))]
-            (let [buffer (byte-array buffer-size)]
-              (loop []
-                (let [n (.read in buffer)]
-                  (when (pos? n)
+          (ensure-safe-directory-path! root-file parent entry-name))
+        (ensure-safe-file-target! root-file target entry-name)
+        (with-open [in  (.getInputStream zip entry)
+                    out (BufferedOutputStream. (Files/newOutputStream target (nofollow-open-options)))]
+          (let [buffer (byte-array buffer-size)]
+            (loop [entry-bytes 0]
+              (let [n (.read in buffer)]
+                (when (pos? n)
+                  (let [entry-bytes* (account-expanded-bytes!
+                                       state n limits entry-name entry-bytes)]
+                    (when (and (= manifest-entry entry-name)
+                               (> entry-bytes* max-manifest-bytes))
+                      (archive-limit-exceeded! :manifest-bytes
+                                               max-manifest-bytes
+                                               entry-bytes*
+                                               entry-name))
                     (.write out buffer 0 n)
-                    (recur)))))))
+                    (recur (long entry-bytes*))))))))
         (when (pos? (.getTime entry))
           (.setLastModified ^File (.toFile target) (.getTime entry)))))))
 
 (defn unpack!
-  [archive-path dest-root & {:keys [force?] :or {force? false}}]
+  "Extract a Xia archive with path and expansion safeguards.
+
+   Defaults allow at most 100,000 entries, 8 GiB per entry, and 16 GiB total
+   expanded data. Callers restoring a known larger archive may pass lower or
+   higher positive `:max-entries`, `:max-entry-bytes`, and
+   `:max-expanded-bytes` values explicitly."
+  [archive-path dest-root & {:keys [force? max-entries max-entry-bytes max-expanded-bytes]
+                             :or {force? false}}]
   (let [archive-file (io/file archive-path)
-        root-file    (io/file dest-root)]
+        root-file    (io/file dest-root)
+        root-existed? (.exists ^File root-file)
+        limits       {:max-entries (positive-long-option
+                                     (or max-entries default-max-archive-entries)
+                                     :max-entries)
+                      :max-entry-bytes (positive-long-option
+                                         (or max-entry-bytes default-max-archive-entry-bytes)
+                                         :max-entry-bytes)
+                      :max-expanded-bytes (positive-long-option
+                                            (or max-expanded-bytes default-max-archive-expanded-bytes)
+                                            :max-expanded-bytes)}
+        state        (atom {:entries 0 :bytes 0})]
     (when-not (.exists ^File archive-file)
       (throw (ex-info "Archive does not exist" {:archive archive-path})))
     (when (and (.exists ^File root-file) force?)
@@ -281,13 +398,18 @@
     (when-not (.exists ^File root-file)
       (Files/createDirectories (.toPath root-file)
                                (make-array java.nio.file.attribute.FileAttribute 0)))
-    (with-open [zip (ZipFile. archive-file)]
-      (doseq [entry (enumeration-seq (.entries zip))]
-        (extract-entry! zip root-file entry)))
-    {:archive-path (.getAbsolutePath archive-file)
-     :root-path    (.getAbsolutePath root-file)
-     :db-path      (open-db-path (.getAbsolutePath root-file))
-     :manifest     (read-manifest-file (.getAbsolutePath root-file))}))
+    (try
+      (with-open [zip (ZipFile. archive-file)]
+        (doseq [entry (enumeration-seq (.entries zip))]
+          (extract-entry! zip root-file entry limits state)))
+      {:archive-path (.getAbsolutePath archive-file)
+       :root-path    (.getAbsolutePath root-file)
+       :db-path      (open-db-path (.getAbsolutePath root-file))
+       :manifest     (read-manifest-file (.getAbsolutePath root-file))}
+      (catch Exception e
+        (when (or force? (not root-existed?))
+          (delete-tree! dest-root))
+        (throw e)))))
 
 (defn- tree-last-modified
   [path]
