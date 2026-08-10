@@ -22,8 +22,6 @@
           (io/copy in out)
           (.toByteArray out))))))
 
-(def ^:private web-dev-poll-interval-ms 1000)
-
 (def ^:private web-dev-no-cache-headers
   {"Cache-Control" "no-store, no-cache, must-revalidate, max-age=0"
    "Pragma" "no-cache"
@@ -32,6 +30,11 @@
 (def ^:private static-assets
   {"/style.css"                     {:path "style.css" :content-type "text/css"}
    "/app.js"                        {:path "app.js" :content-type "text/javascript"}
+   "/theme-init.js"                 {:path "theme-init.js" :content-type "text/javascript; charset=utf-8"}
+   "/oauth-callback.js"             {:path "oauth-callback.js" :content-type "text/javascript; charset=utf-8"}
+   "/__dev/web-reload.js"           {:path "web-dev.js" :content-type "text/javascript; charset=utf-8"}
+   "/vendor/marked-12.0.2.min.js"   {:path "vendor/marked-12.0.2.min.js" :content-type "text/javascript; charset=utf-8"}
+   "/vendor/dompurify-3.1.7.min.js" {:path "vendor/dompurify-3.1.7.min.js" :content-type "text/javascript; charset=utf-8"}
    "/favicon.ico"                   {:path "favicon/favicon.ico" :content-type "image/x-icon" :binary? true}
    "/favicon/favicon.svg"           {:path "favicon/favicon.svg" :content-type "image/svg+xml"}
    "/favicon/favicon-96x96.png"     {:path "favicon/favicon-96x96.png" :content-type "image/png" :binary? true}
@@ -143,28 +146,7 @@
   [deps html]
   (if-not (web-dev-enabled? deps)
     html
-    (let [version (or (web-dev-version deps) "0")
-          script  (str "<script>"
-                       "(function(){"
-                       "var currentVersion=" (pr-str version) ";"
-                       "async function poll(){"
-                       "try{"
-                       "var response=await fetch('/__dev/web-reload',{cache:'no-store'});"
-                       "if(!response.ok){return;}"
-                       "var payload=await response.json();"
-                       "if(payload && payload.version && payload.version!==currentVersion){"
-                       "window.location.reload();"
-                       "return;}"
-                       "if(payload && payload.version){currentVersion=payload.version;}"
-                       "}catch(_err){}"
-                       "}"
-                       "window.setInterval(function(){"
-                       "if(document.visibilityState!=='hidden'){poll();}"
-                       "},"
-                       web-dev-poll-interval-ms
-                       ");"
-                       "})();"
-                       "</script>")]
+    (let [script "<script src=\"/__dev/web-reload.js\"></script>"]
       (if (str/includes? html "</body>")
         (str/replace html "</body>" (str script "</body>"))
         (str html script)))))

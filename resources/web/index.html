@@ -9,18 +9,10 @@
   <link rel="icon" type="image/png" sizes="96x96" href="favicon/favicon-96x96.png">
   <link rel="apple-touch-icon" sizes="180x180" href="favicon/apple-touch-icon.png">
   <link rel="manifest" href="favicon/site.webmanifest">
-  <script>
-    try {
-      var xiaTheme = localStorage.getItem('xia.local-ui.theme');
-      if (xiaTheme !== 'light' && xiaTheme !== 'dark') {
-        xiaTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      }
-      document.documentElement.dataset.theme = xiaTheme;
-    } catch (_e) {}
-  </script>
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
+  <script src="vendor/marked-12.0.2.min.js"></script>
+  <script src="vendor/dompurify-3.1.7.min.js"></script>
 </head>
 <body>
   <a href="#composer" class="skip-link">Skip to chat</a>

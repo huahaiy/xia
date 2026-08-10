@@ -1,5 +1,7 @@
 (ns xia.channel.http-test
   (:require [charred.api :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [xia.channel.http :as http]
             [xia.channel.http.auth :as http-auth]
@@ -185,6 +187,83 @@
       (is (= 200 (:status response)))
       (is (nil? (get-in response [:headers "Set-Cookie"]))
           (str "home route leaked a local-session cookie to " remote-addr)))))
+
+(defn- production-router
+  []
+  (#'http/make-router (http/make-runtime)))
+
+(deftest privileged-ui-is-self-contained-and-csp-compatible
+  (let [html        (slurp (io/resource "web/index.html"))
+        executable-tags (re-seq #"(?is)<(?:script|link)\b[^>]*>" html)
+        remote-url? #(re-find #"(?i)\b(?:src|href)\s*=\s*['\"](?:https?:)?//" %)
+        script-srcs (map second (re-seq #"(?i)<script\b[^>]*\bsrc=['\"]([^'\"]+)['\"]" html))]
+    (is (not-any? remote-url? executable-tags)
+        "the privileged UI must not download scripts or stylesheets at runtime")
+    (is (empty? (re-seq #"(?is)<script(?![^>]*\bsrc\s*=)[^>]*>" html))
+        "script-src 'self' requires index.html to avoid inline scripts")
+    (is (= #{"theme-init.js"
+             "vendor/marked-12.0.2.min.js"
+             "vendor/dompurify-3.1.7.min.js"
+             "app.js"}
+           (set script-srcs)))
+    (doseq [src script-srcs]
+      (is (some? (io/resource (str "web/" (str/replace src #"^/" ""))))
+          (str "missing packaged UI script: " src)))))
+
+(deftest http-boundary-adds-browser-security-headers
+  (let [handler  (production-router)
+        response (handler {:request-method :get
+                           :uri "/"
+                           :remote-addr "127.0.0.1"
+                           :headers {}})
+        headers  (:headers response)
+        csp      (get headers "Content-Security-Policy")]
+    (is (= 200 (:status response)))
+    (is (= "nosniff" (get headers "X-Content-Type-Options")))
+    (is (= "no-referrer" (get headers "Referrer-Policy")))
+    (is (= "DENY" (get headers "X-Frame-Options")))
+    (doseq [directive ["default-src 'self'"
+                       "base-uri 'none'"
+                       "connect-src 'self'"
+                       "frame-ancestors 'none'"
+                       "object-src 'none'"
+                       "script-src 'self'"]]
+      (is (str/includes? csp directive) directive))
+    (is (not (str/includes? csp "script-src 'self' 'unsafe-inline'"))
+        "the script policy must not permit inline execution")))
+
+(deftest vendored-ui-assets-are-served-locally
+  (let [handler (production-router)]
+    (doseq [uri ["/theme-init.js"
+                 "/oauth-callback.js"
+                 "/vendor/marked-12.0.2.min.js"
+                 "/vendor/dompurify-3.1.7.min.js"]]
+      (let [response (handler {:request-method :get
+                               :uri uri
+                               :remote-addr "127.0.0.1"
+                               :headers {}})]
+        (is (= 200 (:status response)) uri)
+        (is (= "text/javascript; charset=utf-8"
+               (get-in response [:headers "Content-Type"]))
+            uri)
+        (is (= "nosniff" (get-in response [:headers "X-Content-Type-Options"]))
+            uri)
+        (is (not (str/blank? (:body response))) uri)))))
+
+(deftest oauth-callback-page-remains-usable-under-the-global-csp
+  (let [handler  (production-router)
+        response (handler {:request-method :get
+                           :uri "/oauth/callback"
+                           :query-string ""
+                           :remote-addr "127.0.0.1"
+                           :headers {}})
+        body     (:body response)]
+    (is (= 200 (:status response)))
+    (is (str/includes? body "data-event=\"xia-oauth-complete\""))
+    (is (str/includes? body "<script src=\"/oauth-callback.js\"></script>"))
+    (is (empty? (re-seq #"(?is)<script(?![^>]*\bsrc\s*=)[^>]*>" body)))
+    (is (str/includes? (get-in response [:headers "Content-Security-Policy"])
+                       "script-src 'self'"))))
 
 (deftest local-session-bootstrap-requires-loopback-remote-addr
   (let [response (local-bootstrap-response "10.0.0.10" {"origin" "http://localhost:3008"})]

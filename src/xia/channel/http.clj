@@ -917,12 +917,13 @@
   (let [multipart-router (multipart/wrap-multipart-params #(router* runtime %))]
     (fn [req]
       (with-runtime runtime
-        #(try
-           (multipart-router req)
-           (catch clojure.lang.ExceptionInfo e
-             (exception-response e))
-           (catch Exception e
-             (exception-response e)))))))
+        #(http-response/with-security-headers
+           (try
+             (multipart-router req)
+             (catch clojure.lang.ExceptionInfo e
+               (exception-response e))
+             (catch Exception e
+               (exception-response e))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle

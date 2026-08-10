@@ -171,23 +171,18 @@
   [status title message account-id]
   (let [title*   (escape-html title)
         message* (escape-html message)
-        account* (some-> account-id name escape-html)]
+        account* (some-> account-id name escape-html)
+        status*  (escape-html (name status))]
     (str "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
          "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
          "<title>Xia OAuth</title>"
          "<style>body{margin:0;font-family:\"Avenir Next\",\"Segoe UI\",sans-serif;background:#f5efe3;color:#172119;display:grid;place-items:center;min-height:100vh;padding:24px;}main{max-width:36rem;background:rgba(255,252,246,.96);border:1px solid rgba(23,33,25,.12);border-radius:24px;padding:28px;box-shadow:0 20px 50px rgba(23,33,25,.12);}h1{margin:0 0 12px;font-size:2rem;}p{line-height:1.6;margin:0 0 10px;}code{font-family:\"SFMono-Regular\",Consolas,monospace;background:rgba(23,33,25,.06);padding:2px 6px;border-radius:8px;}</style>"
-         "</head><body><main><h1>" title* "</h1><p>" message* "</p>"
+         "</head><body><main id=\"oauth-callback-result\" data-event=\"xia-oauth-complete\" data-status=\"" status*
+         "\" data-account-id=\"" (or account* "") "\"><h1>" title* "</h1><p>" message* "</p>"
          (when account*
            (str "<p>OAuth account: <code>" account* "</code></p>"))
          "<p>You can close this window and return to Xia.</p>"
-         "<script>"
-         "try {"
-         "  if (window.opener && window.opener !== window) {"
-         "    window.opener.postMessage({type:'xia-oauth-complete', status:" (json/write-json-str (name status)) ", account_id:" (json/write-json-str (some-> account-id name)) "}, window.location.origin);"
-         "  }"
-         "} catch (_err) {}"
-         "setTimeout(() => { try { window.close(); } catch (_err) {} }, 1200);"
-         "</script></main></body></html>")))
+         "<script src=\"/oauth-callback.js\"></script></main></body></html>")))
 
 (defn handle-save-oauth-account
   [deps req]
