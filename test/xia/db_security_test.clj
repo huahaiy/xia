@@ -3,6 +3,7 @@
             [datalevin.core :as d]
             [xia.crypto :as crypto]
             [xia.db :as db]
+            [xia.llm-log :as llm-log]
             [xia.schedule :as schedule]
             [xia.test-helpers :as th :refer [with-test-db]]))
 
@@ -76,7 +77,7 @@
     (is (crypto/encrypted? raw-value))
     (is (= "gho_secret" (db/get-config :token/github)))))
 
-(deftest llm-log-payloads-are-stored-in-plaintext-at-rest
+(deftest llm-log-payload-capture-is-disabled-by-default
   (let [call-id (random-uuid)]
     (db/log-llm-call! {:id call-id
                        :session-id (random-uuid)
@@ -90,14 +91,51 @@
     (let [eid (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))
           raw (raw-entity eid)
           call (db/get-llm-call call-id)]
+      (is (= :openrouter (:llm.log/provider-id raw)))
+      (is (= :ok (:llm.log/status raw)))
+      (is (nil? (:llm.log/messages raw)))
+      (is (nil? (:llm.log/response raw)))
+      (is (nil? (:llm.log/tools raw)))
+      (is (nil? (:llm.log/error raw)))
+      (is (nil? (:messages call)))
+      (is (nil? (:response call)))
+      (is (nil? (:tools call)))
+      (is (nil? (:error call))))))
+
+(deftest explicitly-enabled-llm-log-payloads-are-plaintext-and-sandbox-redacted
+  (db/set-config! llm-log/full-payloads-config-key true)
+  (let [call-id (random-uuid)]
+    (db/log-llm-call! {:id call-id
+                       :messages "[{\"role\":\"user\",\"content\":\"secret\"}]"
+                       :response "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
+                       :tools "[{\"name\":\"browser-open\"}]"
+                       :error "provider error"
+                       :status :error})
+    (let [eid  (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))
+          raw  (raw-entity eid)
+          call (db/get-llm-call call-id)]
       (is (= "[{\"role\":\"user\",\"content\":\"secret\"}]" (:llm.log/messages raw)))
       (is (= "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}" (:llm.log/response raw)))
       (is (= "[{\"name\":\"browser-open\"}]" (:llm.log/tools raw)))
       (is (= "provider error" (:llm.log/error raw)))
-      (is (= "[{\"role\":\"user\",\"content\":\"secret\"}]" (:messages call)))
-      (is (= "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}" (:response call)))
-      (is (= "[{\"name\":\"browser-open\"}]" (:tools call)))
-      (is (= "provider error" (:error call))))))
+      (is (= (:llm.log/messages raw) (:messages call)))
+      (is (= (:llm.log/response raw) (:response call)))
+      (is (= (:llm.log/tools raw) (:tools call)))
+      (is (= (:llm.log/error raw) (:error call))))))
+
+(deftest llm-log-retention-is-configurable-and-enforced
+  (let [old-id    (random-uuid)
+        recent-id (random-uuid)
+        ten-days-ms (* 10 24 60 60 1000)]
+    (db/set-config! llm-log/retention-days-config-key 30)
+    (db/log-llm-call! {:id old-id
+                       :created-at (java.util.Date. (- (System/currentTimeMillis) ten-days-ms))
+                       :status :ok})
+    (is (some? (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] old-id))))
+    (db/set-config! llm-log/retention-days-config-key 7)
+    (db/log-llm-call! {:id recent-id :status :ok})
+    (is (nil? (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] old-id))))
+    (is (some? (ffirst (db/q '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] recent-id))))))
 
 (deftest audit-event-payloads-are-stored-in-plaintext-at-rest
   (let [event-id (random-uuid)

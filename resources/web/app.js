@@ -46,6 +46,7 @@ const state = {
     providers: [],
     llmProviderTemplates: [],
     conversationContext: null,
+    llmLogging: null,
     memoryRetention: null,
     knowledgeDecay: null,
     localDocSummarization: null,
@@ -102,6 +103,7 @@ const state = {
   providerSaving: false,
   workloadRoutingSaving: false,
   contextSaving: false,
+  llmLoggingSaving: false,
   retentionSaving: false,
   knowledgeDecaySaving: false,
   localDocSummarizationSaving: false,
@@ -193,6 +195,10 @@ const llmCallListEl = document.getElementById('llm-call-list');
 const llmCallDetailEl = document.getElementById('llm-call-detail');
 const llmCallStatusEl = document.getElementById('llm-call-status');
 const refreshLlmCallsEl = document.getElementById('refresh-llm-calls');
+const llmLogFullPayloadsEl = document.getElementById('llm-log-full-payloads');
+const llmLogRetentionDaysEl = document.getElementById('llm-log-retention-days');
+const llmLoggingSettingsStatusEl = document.getElementById('llm-logging-settings-status');
+const saveLlmLoggingEl = document.getElementById('save-llm-logging');
 const knowledgeQueryEl = document.getElementById('knowledge-query');
 const searchKnowledgeEl = document.getElementById('search-knowledge');
 const knowledgeNodeListEl = document.getElementById('knowledge-node-list');
@@ -4954,6 +4960,9 @@ function updateAdminButtons() {
   contextRecentHistoryMessageLimitEl.disabled = state.contextSaving;
   contextHistoryBudgetEl.disabled = state.contextSaving;
   saveContextEl.disabled = state.contextSaving;
+  llmLogFullPayloadsEl.disabled = state.llmLoggingSaving;
+  llmLogRetentionDaysEl.disabled = state.llmLoggingSaving;
+  saveLlmLoggingEl.disabled = state.llmLoggingSaving;
   saveRetentionEl.disabled = state.retentionSaving;
   saveKnowledgeDecayEl.disabled = state.knowledgeDecaySaving;
   localDocModelSummaryBackendEl.disabled = state.localDocSummarizationSaving;
@@ -6015,6 +6024,18 @@ async function loadHistorySchedulesImpl() {
 // LLM Call Log
 // ---------------------------------------------------------------------------
 
+function renderLlmLoggingSettings() {
+  const settings = state.admin.llmLogging || {};
+  llmLogFullPayloadsEl.checked = !!settings.full_payloads_enabled;
+  llmLogRetentionDaysEl.value = settings.retention_days || '';
+  if (!state.llmLoggingSaving) {
+    llmLoggingSettingsStatusEl.textContent = settings.full_payloads_enabled
+      ? 'Detailed payload capture is enabled for future calls.'
+      : 'Detailed payload capture is off; metadata-only logging is active.';
+  }
+  updateAdminButtons();
+}
+
 function renderLlmCallList() {
   llmCallListEl.innerHTML = '';
   if (!state.llmCalls.length) {
@@ -6048,7 +6069,7 @@ function renderLlmCallDetail() {
   llmCallDetailEl.innerHTML = '';
   const call = state.activeLlmCall;
   if (!call) {
-    llmCallDetailEl.innerHTML = '<div class="admin-list-empty">Select a call to inspect its prompt and response.</div>';
+    llmCallDetailEl.innerHTML = '<div class="admin-list-empty">Select a call to inspect its metadata and any captured payload.</div>';
     return;
   }
   // Meta row
@@ -6342,6 +6363,7 @@ async function loadAdminConfigImpl() {
     state.admin.providers = Array.isArray(data.providers) ? data.providers : [];
     state.admin.llmProviderTemplates = Array.isArray(data.llm_provider_templates) ? data.llm_provider_templates : [];
     state.admin.conversationContext = data.conversation_context || null;
+    state.admin.llmLogging = data.llm_logging || null;
     state.admin.webSearch = data.web_search || {};
     state.admin.memoryRetention = data.memory_retention || null;
     state.admin.knowledgeDecay = data.knowledge_decay || null;
@@ -6403,6 +6425,7 @@ async function loadAdminConfigImpl() {
     renderProviderOauthAccountOptions();
     renderWorkloadRouting();
     renderConversationContextSettings();
+    renderLlmLoggingSettings();
     renderWebSearchSettings();
     renderMemoryRetentionSettings();
     renderKnowledgeDecaySettings();
@@ -6669,6 +6692,31 @@ async function saveProvider() {
     providerStatusEl.textContent = err.message || 'Failed to save.';
   } finally {
     state.providerSaving = false;
+    updateAdminButtons();
+  }
+}
+
+async function saveLlmLogging() {
+  if (state.llmLoggingSaving) return;
+  state.llmLoggingSaving = true;
+  llmLoggingSettingsStatusEl.textContent = 'Saving...';
+  updateAdminButtons();
+  try {
+    const data = await fetchJson('/admin/llm-logging', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        full_payloads_enabled: llmLogFullPayloadsEl.checked,
+        retention_days: llmLogRetentionDaysEl.value
+      })
+    });
+    state.admin.llmLogging = data.llm_logging || state.admin.llmLogging;
+    state.llmLoggingSaving = false;
+    renderLlmLoggingSettings();
+    setStatus('LLM logging settings saved');
+  } catch (err) {
+    state.llmLoggingSaving = false;
+    llmLoggingSettingsStatusEl.textContent = err.message || 'Failed to save LLM logging settings.';
     updateAdminButtons();
   }
 }
@@ -9026,6 +9074,7 @@ if (persistentGoalClearEl) {
 refreshHistorySessionsEl.addEventListener('click', () => loadHistorySessions());
 refreshHistorySchedulesEl.addEventListener('click', () => loadHistorySchedules());
 refreshLlmCallsEl.addEventListener('click', () => loadLlmCalls());
+saveLlmLoggingEl.addEventListener('click', () => saveLlmLogging());
 searchKnowledgeEl.addEventListener('click', () => searchKnowledgeNodes());
 knowledgeQueryEl.addEventListener('input', () => updateAdminButtons());
 knowledgeQueryEl.addEventListener('keydown', (event) => {

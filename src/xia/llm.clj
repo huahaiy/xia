@@ -10,6 +10,7 @@
             [xia.config :as cfg]
             [xia.db :as db]
             [xia.http-client :as http]
+            [xia.llm-log :as llm-log]
             [xia.llm.routing :as llm-routing]
             [xia.oauth :as oauth]
             [xia.prompt :as prompt]
@@ -58,6 +59,25 @@
     :description "Post-response rating of which retrieved facts were useful."
     :async? true}])
 (def ^:private runtime-context-key :xia/llm-runtime)
+
+(defn diagnostic-log-config-resolutions
+  "Return effective-source details for persisted LLM diagnostic settings."
+  []
+  {:full-payloads? (cfg/boolean-option-resolution
+                    llm-log/full-payloads-config-key
+                    llm-log/default-full-payloads?)
+   :retention-days (cfg/custom-option-resolution
+                    llm-log/retention-days-config-key
+                    llm-log/default-retention-days
+                    llm-log/parse-retention-days)})
+
+(defn diagnostic-log-settings
+  "Return the effective LLM diagnostic persistence settings. Detailed prompt,
+   tool, response, and error payload capture is disabled by default."
+  []
+  (let [resolutions (diagnostic-log-config-resolutions)]
+    {:full-payloads? (get-in resolutions [:full-payloads? :value])
+     :retention-days (get-in resolutions [:retention-days :value])}))
 
 (defn make-runtime
   []
@@ -1391,23 +1411,28 @@
                         :error e}))
             dur-ms (- (now-ms) t0)]
         (try
-          (let [usage       (when (:ok? result)
-                              (get (:response result) "usage"))
-                log-entry   (cond-> {:id          call-id
-                                     :session-id  (:session-id opts)
-                                     :provider-id provider-id
-                                     :model       model
-                                     :workload    (:workload attempt)
-                                     :duration-ms dur-ms
-                                     :messages    (json/write-json-str messages)
-                                     :created-at  (java.util.Date.)}
+          (let [usage        (when (:ok? result)
+                               (get (:response result) "usage"))
+                log-settings (diagnostic-log-settings)
+                full?       (:full-payloads? log-settings)
+                log-entry    (cond-> {:id          call-id
+                                      :session-id  (:session-id opts)
+                                      :provider-id provider-id
+                                      :model       model
+                                      :workload    (:workload attempt)
+                                      :duration-ms dur-ms
+                                      :created-at  (java.util.Date.)}
                               (:ok? result)
-                              (assoc :status   :ok
-                                     :response (json/write-json-str (:response result)))
+                              (assoc :status :ok)
                               (not (:ok? result))
-                              (assoc :status :error
-                                     :error  (str (:error result)))
-                              (some? (:tools opts))
+                              (assoc :status :error)
+                              full?
+                              (assoc :messages (json/write-json-str messages))
+                              (and full? (:ok? result))
+                              (assoc :response (json/write-json-str (:response result)))
+                              (and full? (not (:ok? result)))
+                              (assoc :error (str (:error result)))
+                              (and full? (some? (:tools opts)))
                               (assoc :tools (json/write-json-str (:tools opts)))
                               (get usage "prompt_tokens")
                               (assoc :prompt-tokens (get usage "prompt_tokens"))

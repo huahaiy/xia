@@ -1245,6 +1245,7 @@
    :entity-created-at   entity-created-at
    :entity-updated-at   entity-updated-at
    :epoch-millis->date  epoch-millis->date
+   :get-config          get-config
    :q                   q
    :raw-entity          raw-entity
    :transact!           transact!})
@@ -1700,10 +1701,16 @@
 ;; ---------------------------------------------------------------------------
 
 (defn log-llm-call!
-  "Write an LLM call log entry. `entry` is a map with keys matching :llm.log/* attrs.
-   Automatically prunes entries beyond the retention limit."
+  "Write an LLM call log entry. Detailed payload fields are persisted only
+   when explicitly enabled. Entries beyond the configured retention limit are
+   pruned automatically."
   [entry]
   (db-session/log-llm-call! (session-deps) entry))
+
+(defn prune-llm-log!
+  "Immediately enforce the configured LLM diagnostic retention window."
+  []
+  (db-session/prune-llm-log! (session-deps)))
 
 (defn list-llm-calls
   "Return recent LLM call log entries, newest first. `limit` defaults to 50."
@@ -1714,7 +1721,8 @@
    (db-session/list-llm-calls (session-deps) limit session-id)))
 
 (defn get-llm-call
-  "Return a single LLM call log entry with full messages/response."
+  "Return a single LLM call log entry. Detailed payload fields are present only
+   when capture was enabled when the call was stored."
   [call-id]
   (db-session/get-llm-call (session-deps) call-id))
 

@@ -62,7 +62,17 @@
     (is (not (sensitive/encrypted-attr? :message/content)))
     (is (not (sensitive/encrypted-attr? :llm.log/response)))
     (is (not (sensitive/encrypted-attr? :audit.event/data)))
-    (is (not (sensitive/encrypted-attr? :schedule-run/result)))))
+    (is (not (sensitive/encrypted-attr? :schedule-run/result))))
+  (testing "plaintext sensitive classes are explicit, disjoint, and sandbox-redacted"
+    (is (contains? sensitive/plaintext-user-content-attrs :message/tool-calls))
+    (is (contains? sensitive/plaintext-user-content-attrs :audit.event/data))
+    (is (contains? sensitive/plaintext-user-content-attrs :schedule-run/actions))
+    (is (contains? sensitive/plaintext-diagnostic-attrs :llm.log/messages))
+    (is (contains? sensitive/plaintext-diagnostic-attrs :llm.log/error))
+    (is (empty? (filter sensitive/encrypted-attrs
+                        sensitive/sandbox-only-secret-attrs)))
+    (is (every? sensitive/secret-attr?
+                sensitive/sandbox-only-secret-attrs))))
 
 ;; ---------------------------------------------------------------------------
 ;; safe-get-config tests
@@ -95,7 +105,17 @@
                           (secret/safe-set-config! :credential/gmail "stolen")))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"Access denied"
-                          (secret/safe-set-config! :secret/stuff "nope")))))
+                          (secret/safe-set-config! :secret/stuff "nope"))))
+  (testing "blocks privacy-boundary config writes"
+    (is (= "false" (do
+                      (db/set-config! :llm/log-full-payloads? false)
+                      (secret/safe-get-config :llm/log-full-payloads?))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Access denied"
+                          (secret/safe-set-config! :llm/log-full-payloads? true)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Access denied"
+                          (secret/safe-set-config! :llm/log-retention-days 3650)))))
 
 ;; ---------------------------------------------------------------------------
 ;; safe-q tests

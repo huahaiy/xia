@@ -540,6 +540,9 @@
           (and (= method :post) (= uri "/admin/memory-retention"))
           (protected-route-response req #(http-admin/handle-save-memory-retention (admin-handler-deps) req))
 
+          (and (= method :post) (= uri "/admin/llm-logging"))
+          (protected-route-response req #(http-admin/handle-save-llm-logging (admin-handler-deps) req))
+
           (and (= method :post) (= uri "/admin/identity"))
           (protected-route-response req #(http-admin/handle-save-identity (admin-handler-deps) req))
 

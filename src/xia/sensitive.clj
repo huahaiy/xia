@@ -12,21 +12,31 @@
     :site-cred/username
     :site-cred/password})
 
-(def sandbox-only-secret-attrs
-  "DB attributes that are redacted from sandboxed code but not encrypted at rest."
+(def plaintext-user-content-attrs
+  "Durable user-content attributes that are intentionally plaintext at rest so
+   Xia can search, resume, and render them. They remain hidden from sandboxed
+   code because their values can contain credentials pasted by a user."
   #{:session/history-recap
     :session/tool-recap
     :message/content
     :message/tool-calls
     :message/tool-result
-    :llm.log/messages
-    :llm.log/tools
-    :llm.log/response
-    :llm.log/error
     :audit.event/data
     :schedule-run/result
     :schedule-run/error
     :schedule-run/actions})
+
+(def plaintext-diagnostic-attrs
+  "Disposable LLM diagnostic payloads. These are plaintext, sandbox-redacted,
+   disabled by default, and governed by the LLM log retention policy."
+  #{:llm.log/messages
+    :llm.log/tools
+    :llm.log/response
+    :llm.log/error})
+
+(def sandbox-only-secret-attrs
+  "DB attributes that are redacted from sandboxed code but not encrypted at rest."
+  (into plaintext-user-content-attrs plaintext-diagnostic-attrs))
 
 (def secret-attr-namespaces
   "Attribute namespace prefixes that are always treated as secret."
@@ -40,6 +50,12 @@
   "Specific config keys that are secret even when their namespace does not
    match the generic secret prefixes."
   #{:web/search-brave-api-key})
+
+(def sandbox-blocked-config-write-keys
+  "Non-secret settings whose mutation would change a security or privacy
+   boundary. Sandboxed code may inspect these values but cannot change them."
+  #{:llm/log-full-payloads?
+    :llm/log-retention-days})
 
 (def ^:private blocked-ident-pattern
   "Regex matching attribute or key names that sandboxed code cannot query."
@@ -81,6 +97,12 @@
       (when-let [ns (when (named-ident? k)
                       (namespace k))]
         (some #(str/starts-with? ns %) secret-config-prefixes))))
+
+(defn sandbox-blocked-config-write-key?
+  "True if sandboxed code must not mutate the config key."
+  [k]
+  (or (secret-config-key? k)
+      (contains? sandbox-blocked-config-write-keys k)))
 
 (defn secret-query-ident?
   "True if the given query identifier or literal should be hidden from

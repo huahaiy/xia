@@ -2,10 +2,9 @@
   "Session, message, WM snapshot, LLM log, and audit persistence helpers."
   (:require [charred.api :as json]
             [clojure.string :as str]
-            [datalevin.core :as d])
+            [datalevin.core :as d]
+            [xia.llm-log :as llm-log])
   (:import [java.util UUID]))
-
-(def ^:private llm-log-retention-ms (* 30 24 60 60 1000))
 
 (defn- q*
   [deps query & inputs]
@@ -42,6 +41,11 @@
 (defn- epoch-millis->date*
   [deps value]
   ((:epoch-millis->date deps) value))
+
+(defn- get-config*
+  [deps config-key]
+  (when-let [get-config (:get-config deps)]
+    (get-config config-key)))
 
 (defn- session-eid
   [deps session-id]
@@ -938,9 +942,11 @@
                            :last-message  (get latest-by-eid last-eid)}]))
               summaries)))))
 
-(defn- prune-llm-log!
+(defn prune-llm-log!
+  "Delete LLM diagnostic entries older than the configured retention window."
   [deps]
-  (let [cutoff (java.util.Date. (- (.getTime (java.util.Date.)) llm-log-retention-ms))
+  (let [{:keys [retention-days]} (llm-log/settings #(get-config* deps %))
+        cutoff (llm-log/retention-cutoff (java.util.Date.) retention-days)
         old    (q* deps '[:find ?e :in $ ?cutoff
                           :where
                           [?e :llm.log/id _]
@@ -952,21 +958,23 @@
 
 (defn log-llm-call!
   [deps entry]
-  (transact!* deps
-              [(merge {:llm.log/id         (or (:id entry) (random-uuid))
-                       :llm.log/created-at (or (:created-at entry) (java.util.Date.))}
-                      (when-let [v (:session-id entry)] {:llm.log/session-id v})
-                      (when-let [v (:provider-id entry)] {:llm.log/provider-id v})
-                      (when-let [v (:model entry)] {:llm.log/model v})
-                      (when-let [v (:workload entry)] {:llm.log/workload v})
-                      (when-let [v (:messages entry)] {:llm.log/messages v})
-                      (when-let [v (:tools entry)] {:llm.log/tools v})
-                      (when-let [v (:response entry)] {:llm.log/response v})
-                      (when-let [v (:status entry)] {:llm.log/status v})
-                      (when-let [v (:error entry)] {:llm.log/error v})
-                      (when-let [v (:duration-ms entry)] {:llm.log/duration-ms v})
-                      (when-let [v (:prompt-tokens entry)] {:llm.log/prompt-tokens v})
-                      (when-let [v (:completion-tokens entry)] {:llm.log/completion-tokens v}))])
+  (let [settings (llm-log/settings #(get-config* deps %))
+        entry*   (llm-log/persisted-entry settings entry)]
+    (transact!* deps
+                [(merge {:llm.log/id         (or (:id entry*) (random-uuid))
+                         :llm.log/created-at (or (:created-at entry*) (java.util.Date.))}
+                        (when-let [v (:session-id entry*)] {:llm.log/session-id v})
+                        (when-let [v (:provider-id entry*)] {:llm.log/provider-id v})
+                        (when-let [v (:model entry*)] {:llm.log/model v})
+                        (when-let [v (:workload entry*)] {:llm.log/workload v})
+                        (when-let [v (:messages entry*)] {:llm.log/messages v})
+                        (when-let [v (:tools entry*)] {:llm.log/tools v})
+                        (when-let [v (:response entry*)] {:llm.log/response v})
+                        (when-let [v (:status entry*)] {:llm.log/status v})
+                        (when-let [v (:error entry*)] {:llm.log/error v})
+                        (when-let [v (:duration-ms entry*)] {:llm.log/duration-ms v})
+                        (when-let [v (:prompt-tokens entry*)] {:llm.log/prompt-tokens v})
+                        (when-let [v (:completion-tokens entry*)] {:llm.log/completion-tokens v}))]))
   (prune-llm-log! deps))
 
 (defn- llm-call-related-messages
@@ -995,6 +1003,7 @@
   ([deps limit]
    (list-llm-calls deps limit nil))
   ([deps limit session-id]
+   (prune-llm-log! deps)
    (->> (if session-id
           (q* deps '[:find ?e ?t
                      :in $ ?sid
@@ -1025,6 +1034,7 @@
 
 (defn get-llm-call
   [deps call-id]
+  (prune-llm-log! deps)
   (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :llm.log/id ?id]] call-id))]
     (let [e (decrypt-entity* deps (raw-entity* deps eid))]
       {:id                (:llm.log/id e)

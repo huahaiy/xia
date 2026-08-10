@@ -206,6 +206,11 @@
              "vendor/dompurify-3.1.7.min.js"
              "app.js"}
            (set script-srcs)))
+    (doseq [control-id ["llm-log-full-payloads"
+                        "llm-log-retention-days"
+                        "save-llm-logging"]]
+      (is (str/includes? html (str "id=\"" control-id "\""))
+          (str "missing LLM logging privacy control: " control-id)))
     (doseq [src script-srcs]
       (is (some? (io/resource (str "web/" (str/replace src #"^/" ""))))
           (str "missing packaged UI script: " src)))))

@@ -526,6 +526,12 @@ The `xia.db` functions exposed to the sandbox are safe wrappers that enforce acc
 
 ### Master Key Handling
 
+Xia encrypts credential fields, not the complete database. Conversations, tool
+arguments/results, audit payloads, schedule outputs, memories, documents, and
+other user content are intentionally plaintext so local product features can
+search and resume them. See [Stored Data Classification](data-classification.md)
+for the authoritative classification and LLM diagnostic retention controls.
+
 - **Explicit key support:** `XIA_MASTER_KEY` and `XIA_MASTER_KEY_FILE` can provide a raw 32-byte base64 key for unattended deployments.
 - **Passphrase mode:** `XIA_MASTER_PASSPHRASE` and `XIA_MASTER_PASSPHRASE_FILE` derive the master key with PBKDF2. Interactive CLI startup also prompts for a passphrase for new DBs.
 - **File-backed secret policy:** `XIA_MASTER_KEY_FILE` and `XIA_MASTER_PASSPHRASE_FILE` are rejected if they point inside `<db-path>`, and on POSIX systems they are rejected if group or world permissions are present.

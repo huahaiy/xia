@@ -20,6 +20,7 @@
             [xia.identity :as identity]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.llm :as llm]
+            [xia.llm-log :as llm-log]
             [xia.llm-provider-template :as llm-provider-template]
             [xia.local-ocr :as local-ocr]
             [xia.memory :as memory]
@@ -159,6 +160,19 @@
                                                                    (:recent-history-message-limit resolutions))
                                     :history_budget (config-resolution->admin-body
                                                       (:history-budget resolutions))}}))
+
+(defn- llm-logging->admin-body
+  []
+  (let [{:keys [full-payloads? retention-days]} (llm/diagnostic-log-settings)
+        resolutions (llm/diagnostic-log-config-resolutions)]
+    {:full_payloads_enabled (boolean full-payloads?)
+     :retention_days       (long retention-days)
+     :sources              {:full_payloads_enabled (some-> (get-in resolutions [:full-payloads? :source]) name)
+                            :retention_days (some-> (get-in resolutions [:retention-days :source]) name)}
+     :config_resolution    {:full_payloads_enabled (config-resolution->admin-body
+                                                    (:full-payloads? resolutions))
+                            :retention_days (config-resolution->admin-body
+                                             (:retention-days resolutions))}}))
 
 (defn- local-doc-summarization->admin-body
   []
@@ -415,6 +429,7 @@
                                    sort-by-name)
       :web_search (web-search->admin-body)
       :conversation_context (conversation-context->admin-body)
+      :llm_logging (llm-logging->admin-body)
       :memory_retention (memory-retention->admin-body deps)
       :knowledge_decay (knowledge-decay->admin-body)
       :memory_consolidation (memory-consolidation->admin-body)
@@ -476,6 +491,38 @@
         (save-config-override! :memory/episode-retained-decayed-count
                                retained-count))
       (common/json-response deps 200 {:memory_retention (memory-retention->admin-body deps)}))
+    (catch clojure.lang.ExceptionInfo e
+      (common/exception-response deps e))))
+
+(defn handle-save-llm-logging
+  [deps req]
+  (try
+    (let [data          (or (common/read-body deps req) {})
+          full-present? (contains? data "full_payloads_enabled")
+          full-value    (get data "full_payloads_enabled")
+          retention-present? (contains? data "retention_days")
+          retention-raw (get data "retention_days")
+          retention-days (when retention-present?
+                           (let [text (common/nonblank-str retention-raw)]
+                             (when text
+                               (or (llm-log/parse-retention-days text)
+                                   (throw (ex-info
+                                           (str "'retention_days' must be an integer between 1 and "
+                                                llm-log/max-retention-days)
+                                           {:field "retention_days"
+                                            :value retention-raw}))))))]
+      (when (and full-present?
+                 (some? full-value)
+                 (not (instance? Boolean full-value)))
+        (throw (ex-info "'full_payloads_enabled' must be a boolean"
+                        {:field "full_payloads_enabled"
+                         :value full-value})))
+      (when full-present?
+        (save-config-override! llm-log/full-payloads-config-key full-value))
+      (when retention-present?
+        (save-config-override! llm-log/retention-days-config-key retention-days))
+      (db/prune-llm-log!)
+      (common/json-response deps 200 {:llm_logging (llm-logging->admin-body)}))
     (catch clojure.lang.ExceptionInfo e
       (common/exception-response deps e))))
 

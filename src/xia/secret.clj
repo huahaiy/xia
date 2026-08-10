@@ -35,10 +35,10 @@
   (db/get-config k))
 
 (defn safe-set-config!
-  "Like db/set-config! but refuses to write to secret keys."
+  "Like db/set-config! but refuses to write secret or security-boundary keys."
   [k v]
-  (when (secret-config-key? k)
-    (throw (ex-info "Access denied: cannot write secret config key from tool"
+  (when (sensitive/sandbox-blocked-config-write-key? k)
+    (throw (ex-info "Access denied: cannot write protected config key from tool"
                     {:key k})))
   (db/set-config! k v))
 

@@ -8,6 +8,7 @@
             [xia.db-schema :as db-schema]
             [xia.instance-supervisor :as instance-supervisor]
             [xia.llm :as llm]
+            [xia.llm-log :as llm-log]
             [xia.runtime-overlay :as runtime-overlay]
             [xia.test-helpers :as th]))
 
@@ -474,3 +475,39 @@
         (is (= "remote" (runtime-overlay/config-db-value :browser/backend-default))))
       (finally
         (runtime-overlay/clear!)))))
+
+(deftest admin-config-shows-privacy-preserving-llm-log-defaults
+  (let [response (#'http-admin/handle-admin-config (admin-deps) {})
+        body     (response-json response)
+        settings (get body "llm_logging")]
+    (is (= 200 (:status response)))
+    (is (= false (get settings "full_payloads_enabled")))
+    (is (= llm-log/default-retention-days (get settings "retention_days")))
+    (is (= "default" (get-in settings ["sources" "full_payloads_enabled"])))
+    (is (= "default" (get-in settings ["sources" "retention_days"])))))
+
+(deftest admin-save-llm-logging-validates-persists-and-prunes
+  (let [old-id      (random-uuid)
+        ten-days-ms (* 10 24 60 60 1000)]
+    (db/log-llm-call! {:id old-id
+                       :created-at (java.util.Date. (- (System/currentTimeMillis) ten-days-ms))
+                       :status :ok})
+    (let [response (#'http-admin/handle-save-llm-logging
+                    (admin-deps {"full_payloads_enabled" true
+                                 "retention_days" "7"})
+                    {})
+          body     (response-json response)]
+      (is (= 200 (:status response)))
+      (is (= "true" (db/tenant-config-value llm-log/full-payloads-config-key)))
+      (is (= "7" (db/tenant-config-value llm-log/retention-days-config-key)))
+      (is (= true (get-in body ["llm_logging" "full_payloads_enabled"])))
+      (is (= 7 (get-in body ["llm_logging" "retention_days"])))
+      (is (nil? (db/get-llm-call old-id))))
+    (let [bad-days (#'http-admin/handle-save-llm-logging
+                    (admin-deps {"retention_days" (inc llm-log/max-retention-days)})
+                    {})
+          bad-boolean (#'http-admin/handle-save-llm-logging
+                       (admin-deps {"full_payloads_enabled" "true"})
+                       {})]
+      (is (= 400 (:status bad-days)))
+      (is (= 400 (:status bad-boolean))))))

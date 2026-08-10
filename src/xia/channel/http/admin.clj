@@ -19,6 +19,7 @@
 (def handle-reload-runtime-overlay admin-config/handle-reload-runtime-overlay)
 (def handle-admin-config admin-config/handle-admin-config)
 (def handle-save-memory-retention admin-config/handle-save-memory-retention)
+(def handle-save-llm-logging admin-config/handle-save-llm-logging)
 (def handle-save-web-search admin-config/handle-save-web-search)
 (def handle-save-identity admin-config/handle-save-identity)
 (def handle-save-conversation-context admin-config/handle-save-conversation-context)

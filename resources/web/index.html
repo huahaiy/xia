@@ -397,17 +397,34 @@
             <div class="admin-card" data-settings-section="llm-call-log">
               <div class="panel-header">
                 <div>
-                  <h3 class="panel-title" title="Inspect prompts, responses, token usage, and latency for every LLM call.">LLM Call Log</h3>
-                  <p class="panel-note">Audit prompts, responses, tools, and model usage for each LLM call.</p>
+                  <h3 class="panel-title" title="Inspect model usage and optionally retain detailed prompts and responses.">LLM Call Log</h3>
+                  <p class="panel-note">Model, token, status, and latency metadata is retained. Detailed payload capture is optional.</p>
                 </div>
                 <button type="button" class="secondary" id="refresh-llm-calls">Refresh</button>
+              </div>
+              <div class="field-grid">
+                <div class="field full">
+                  <div class="check-row">
+                    <input type="checkbox" id="llm-log-full-payloads">
+                    <label class="check-label" for="llm-log-full-payloads">Store full prompts, tool definitions, responses, and provider errors</label>
+                  </div>
+                  <p class="secret-note">Off by default. Detailed payloads may contain sensitive user content and are stored as plaintext diagnostics.</p>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="llm-log-retention-days">Log Retention (Days)</label>
+                  <input type="number" id="llm-log-retention-days" class="text-input" min="1" max="3650" step="1" placeholder="30">
+                </div>
+              </div>
+              <div class="composer-foot">
+                <div class="admin-status" aria-live="polite" id="llm-logging-settings-status">Loading LLM logging settings...</div>
+                <button type="button" class="primary" id="save-llm-logging">Save logging settings</button>
               </div>
               <div class="llm-log-grid">
                 <div class="admin-list" id="llm-call-list">
                   <div class="admin-list-empty">LLM calls will appear here once Xia starts making requests.</div>
                 </div>
                 <div class="llm-call-detail" id="llm-call-detail">
-                  <div class="admin-list-empty">Select a call to inspect its prompt and response.</div>
+                  <div class="admin-list-empty">Select a call to inspect its metadata and any captured payload.</div>
                 </div>
               </div>
               <div class="admin-status" aria-live="polite" id="llm-call-status">Loading LLM call log...</div>

@@ -184,7 +184,9 @@ intentionally want to expose it beyond the local machine.
 Xia is built to be useful on a daily machine without getting broad access to the
 host machine, so you do not have to provision a dedicated machine for Xia:
 
-- secrets are encrypted at rest in the database
+- stored credentials and secret configuration values are encrypted at rest;
+  conversations, tool payloads, audit data, schedule outputs, and other user
+  content are not field-encrypted and rely on host/database access controls
 - tools run inside a restricted sandbox
 - every tool invocation passes through a central permission gate before handler
   code runs; terminal, HTTP, Slack, Telegram, and iMessage approvals route
@@ -207,6 +209,7 @@ host machine, so you do not have to provision a dedicated machine for Xia:
 ## More Documentation
 
 - Technical and implementation details: [doc/impl.md](doc/impl.md)
+- Stored-data classification and retention: [doc/data-classification.md](doc/data-classification.md)
 - Task spec details: [doc/task-spec-v1.md](doc/task-spec-v1.md)
 - Multi-instance setup and template seeding: [doc/multi-instance.md](doc/multi-instance.md)
 - MCP facade and coordination board: [doc/mcp-and-board.md](doc/mcp-and-board.md)
