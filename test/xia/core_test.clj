@@ -31,7 +31,7 @@
 
 (defn- temp-dir []
   (str (Files/createTempDirectory "xia-core-test"
-         (into-array FileAttribute []))))
+                                  (into-array FileAttribute []))))
 
 (defn- clear-core-runtime!
   []
@@ -61,8 +61,8 @@
   []
   (clear-core-runtime!)
   (let [context (runtime-context/make
-                  {:xia/db {:runtime (xia.db/make-runtime)}
-                   :xia/runtime-state-runtime {:runtime (runtime-state/make-runtime)}})]
+                 {:xia/db {:runtime (xia.db/make-runtime)}
+                  :xia/runtime-state-runtime {:runtime (runtime-state/make-runtime)}})]
     (runtime-context/with-runtime-context context runtime-state/mark-stopped!)
     context))
 
@@ -113,10 +113,10 @@
                      #'xia.core/remove-shutdown-hook! (fn [_] nil)
                      #'xia.core/make-cleanup (fn [_] (fn [] nil))}
       (fn []
-         (with-redefs-fn {#'xia.pack/env-value (fn [k] (get key-file-env k))}
-           (fn []
-             (pack/pack! db-path archive)))
-         (core/-main archive)))
+        (with-redefs-fn {#'xia.pack/env-value (fn [k] (get key-file-env k))}
+          (fn []
+            (pack/pack! db-path archive)))
+        (core/-main archive)))
     (is (string? (:db @started)))
     (is (= archive (get-in @started [:archive-context :archive-path])))
     (is (.endsWith ^String (:db @started) "/db"))
@@ -178,7 +178,7 @@
                  :port 4011
                  :web-dev true}]
     (with-redefs-fn {#'xia.system/ensure-db-dir! (fn [db-path]
-                                                 (swap! calls conj [:ensure-db-dir db-path]))
+                                                   (swap! calls conj [:ensure-db-dir db-path]))
                      #'xia.db/connect! (fn [db-path crypto-opts]
                                          (swap! calls conj [:db/connect db-path
                                                             (contains? crypto-opts :passphrase-provider)]))
@@ -196,13 +196,13 @@
                      #'xia.skill/all-enabled-skills (fn [] [:skill-a])
                      #'xia.scheduler/start! (fn [] (swap! calls conj :scheduler/start))
                      #'xia.channel.http/start! (fn [bind port opts]
-                                                (swap! calls conj [:http/start bind port opts]))
+                                                 (swap! calls conj [:http/start bind port opts]))
                      #'xia.core/local-ui-url (fn [bind port]
-                                              (str "http://"
-                                                   (if (= bind "0.0.0.0") "localhost" bind)
-                                                   ":"
-                                                   port
-                                                   "/"))}
+                                               (str "http://"
+                                                    (if (= bind "0.0.0.0") "localhost" bind)
+                                                    ":"
+                                                    port
+                                                    "/"))}
       #(let [output (with-out-str
                       (reset! started (core/start-server-runtime! options)))]
          (is (.contains ^String output "Xia server running on 0.0.0.0:4011"))
@@ -275,11 +275,11 @@
                      #'xia.channel.http/start! (fn [_ _ _] nil)
                      #'xia.channel.http/current-port (fn [] 4012)
                      #'xia.core/local-ui-url (fn [bind port]
-                                              (str "http://"
-                                                   (if (= bind "0.0.0.0") "localhost" bind)
-                                                   ":"
-                                                   port
-                                                   "/"))}
+                                               (str "http://"
+                                                    (if (= bind "0.0.0.0") "localhost" bind)
+                                                    ":"
+                                                    port
+                                                    "/"))}
       #(let [output (with-out-str
                       (reset! started (core/start-server-runtime! options)))]
          (is (.contains ^String output "Xia server running on 0.0.0.0:4012"))
@@ -303,8 +303,8 @@
                      #'xia.tool/registered-tools (fn [] [])
                      #'xia.skill/all-enabled-skills (fn [] [])
                      #'xia.agent/recover-runtime-tasks! (fn []
-                                                         (swap! calls conj :agent/recover-runtime-tasks)
-                                                         [])
+                                                          (swap! calls conj :agent/recover-runtime-tasks)
+                                                          [])
                      #'xia.scheduler/start! (fn [] nil)
                      #'xia.channel.http/start! (fn [_ _ _] nil)
                      #'xia.core/local-ui-url (fn [_ _] "http://localhost:4011/")}

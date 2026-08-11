@@ -208,7 +208,7 @@
      :external-provider-id  (external-provider-id)
      :resolved-external-provider-id provider-id
      :external-provider-vision? (boolean (and provider
-                                             (llm/vision-capable? provider)))
+                                              (llm/vision-capable? provider)))
      :configured            (boolean (case model-backend*
                                        :external (external-provider-ready?)
                                        (and (seq resolved-model-path*)
@@ -405,8 +405,8 @@
   [mode]
   {:generator (create-vision-generator! mode)
    :executor  (Executors/newSingleThreadExecutor
-                (daemon-thread-factory
-                  (str "xia-local-ocr-" (name (:id mode)))) )})
+               (daemon-thread-factory
+                (str "xia-local-ocr-" (name (:id mode)))))})
 
 (defn- shared-vision-runtime!
   [mode]

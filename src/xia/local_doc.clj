@@ -384,7 +384,7 @@
 (defn- chunk-entry
   [index chunk-text]
   (let [extractive-summary (extractive-summary-text chunk-text
-                                                   chunk-summary-char-limit)
+                                                    chunk-summary-char-limit)
         model-summary      (summarizer/summarize-chunk chunk-text
                                                        chunk-summary-char-limit)
         summary            (or model-summary extractive-summary)]
@@ -705,10 +705,10 @@
   [si]
   (transduce (keep node-text)
              (completing
-               (fn [^StringBuilder sb fragment]
-                 (.append sb ^String fragment))
-               (fn [^StringBuilder sb]
-                 (.toString sb)))
+              (fn [^StringBuilder sb fragment]
+                (.append sb ^String fragment))
+              (fn [^StringBuilder sb]
+                (.toString sb)))
              (StringBuilder.)
              (descendant-elements-by-local-name si "t")))
 
@@ -749,25 +749,25 @@
             doc (.getDocumentElement workbook-doc)
             by-workbook
             (into [] (keep-indexed
-                       (fn [idx sheet]
-                         (let [entry (or (some-> (element-attr-ns sheet office-rel-ns "id" "r:id")
-                                                 rel-map)
-                                         (nth worksheet-paths idx nil))]
-                           (when entry
-                             {:name  (or (element-attr sheet "name")
-                                         (str "Sheet " (indexed-ordinal idx)))
-                              :entry entry}))))
+                      (fn [idx sheet]
+                        (let [entry (or (some-> (element-attr-ns sheet office-rel-ns "id" "r:id")
+                                                rel-map)
+                                        (nth worksheet-paths idx nil))]
+                          (when entry
+                            {:name  (or (element-attr sheet "name")
+                                        (str "Sheet " (indexed-ordinal idx)))
+                             :entry entry}))))
                   (descendant-elements-by-local-name doc "sheet"))]
         (if (seq by-workbook)
-	          by-workbook
-	          (into [] (map-indexed (fn [idx path]
-	                                  {:name (str "Sheet " (indexed-ordinal idx))
-	                                   :entry path}))
-	                worksheet-paths)))
-	      (into [] (map-indexed (fn [idx path]
-	                              {:name (str "Sheet " (indexed-ordinal idx))
-	                               :entry path}))
-	            worksheet-paths))))
+          by-workbook
+          (into [] (map-indexed (fn [idx path]
+                                  {:name (str "Sheet " (indexed-ordinal idx))
+                                   :entry path}))
+                worksheet-paths)))
+      (into [] (map-indexed (fn [idx path]
+                              {:name (str "Sheet " (indexed-ordinal idx))
+                               :entry path}))
+            worksheet-paths))))
 
 (defn- slide-entry-paths
   [entries]
@@ -804,12 +804,12 @@
                                   sheet-root (.getDocumentElement sheet-doc)
                                   rows       (->> (descendant-elements-by-local-name sheet-root "row")
                                                   (eduction
-                                                    (map (fn [row]
-                                                           (->> (direct-child-elements-by-local-name row "c")
-                                                                (eduction (map #(xlsx-cell-text % shared-strings))
-                                                                          (remove str/blank?))
-                                                                (str/join "\t"))))
-                                                    (remove str/blank?)))]
+                                                   (map (fn [row]
+                                                          (->> (direct-child-elements-by-local-name row "c")
+                                                               (eduction (map #(xlsx-cell-text % shared-strings))
+                                                                         (remove str/blank?))
+                                                               (str/join "\t"))))
+                                                   (remove str/blank?)))]
                               (str/join "\n" (cons (str "## Sheet: " name) rows))))]
       (normalize-text (str/join "\n\n" (eduction (remove str/blank?) sheet-sections))))
     (catch Exception e
@@ -820,15 +820,15 @@
   (try
     (let [entries        (zip-entry-bytes-map pptx-bytes)
           slide-sections (map-indexed
-                           (fn [idx entry-path]
-                             (let [^Document slide-doc (parse-xml-bytes (get entries entry-path))
-                                   slide-root (.getDocumentElement slide-doc)
-                                   text-lines (eduction (keep node-text)
-                                                        (descendant-elements-by-local-name slide-root "t"))]
-                               (str/join "\n"
-                                         (cons (str "## Slide " (indexed-ordinal idx))
-                                               (nonblank-lines text-lines)))))
-                           (slide-entry-paths entries))]
+                          (fn [idx entry-path]
+                            (let [^Document slide-doc (parse-xml-bytes (get entries entry-path))
+                                  slide-root (.getDocumentElement slide-doc)
+                                  text-lines (eduction (keep node-text)
+                                                       (descendant-elements-by-local-name slide-root "t"))]
+                              (str/join "\n"
+                                        (cons (str "## Slide " (indexed-ordinal idx))
+                                              (nonblank-lines text-lines)))))
+                          (slide-entry-paths entries))]
       (normalize-text (str/join "\n\n" (eduction (remove str/blank?) slide-sections))))
     (catch Exception e
       (office-extraction-failed :local-doc/pptx-extraction-failed name media-type e))))
@@ -876,10 +876,10 @@
           {:media-type   media-type*
            :source-bytes source-bytes
            :text         (normalize-text
-                           (local-ocr/ocr-image-bytes source-bytes
-                                                      {:name name*
-                                                       :media-type media-type*
-                                                       :ocr-mode ocr-mode*}))
+                          (local-ocr/ocr-image-bytes source-bytes
+                                                     {:name name*
+                                                      :media-type media-type*
+                                                      :ocr-mode ocr-mode*}))
            :dedupe?      false})
         (throw (image-bytes-required-ex name* media-type*)))
 
@@ -941,7 +941,7 @@
       (and (previewable-binary-media-type? media-type*)
            (some? bytes-base64))
       (preview-text (normalize-text (String. ^bytes (decode-base64 (str bytes-base64))
-                                                   StandardCharsets/UTF_8)))
+                                             StandardCharsets/UTF_8)))
 
       :else
       nil)))
@@ -957,7 +957,7 @@
 (defn- session-eid
   [session-id]
   (ffirst (db/q '[:find ?e :in $ ?sid :where [?e :session/id ?sid]]
-                 session-id)))
+                session-id)))
 
 (defn- session-channel
   [session-eid]
@@ -979,7 +979,7 @@
 (defn- doc-eid
   [doc-id]
   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :local.doc/id ?id]]
-                 doc-id)))
+                doc-id)))
 
 (defn- chunk-eid
   [chunk-id]
@@ -1026,26 +1026,26 @@
   (when (seq chunks)
     (let [chunk-ids (mapv (fn [_] (random-uuid)) chunks)]
       (db/transact!
-        (mapv (fn [chunk-id {:keys [index text summary summary-source summarized-at preview]}]
-                {:local.doc.chunk/id      chunk-id
-                 :local.doc.chunk/doc     doc-eid
-                 :local.doc.chunk/session session-eid
-                 :local.doc.chunk/index   index
-                 :local.doc.chunk/summary-source summary-source
-                 :local.doc.chunk/summarized-at summarized-at
-                 :local.doc.chunk/summary summary
-                 :local.doc.chunk/text    text
-                 :local.doc.chunk/preview preview})
-              chunk-ids
-              chunks))
+       (mapv (fn [chunk-id {:keys [index text summary summary-source summarized-at preview]}]
+               {:local.doc.chunk/id      chunk-id
+                :local.doc.chunk/doc     doc-eid
+                :local.doc.chunk/session session-eid
+                :local.doc.chunk/index   index
+                :local.doc.chunk/summary-source summary-source
+                :local.doc.chunk/summarized-at summarized-at
+                :local.doc.chunk/summary summary
+                :local.doc.chunk/text    text
+                :local.doc.chunk/preview preview})
+             chunk-ids
+             chunks))
       (let [chunk-eids (->> chunk-ids
                             (keep chunk-eid)
                             vec)]
         (when (seq chunk-eids)
           (db/transact!
-            (mapv (fn [chunk-eid*]
-                    [:db/add doc-eid :local.doc/chunks chunk-eid*])
-                  chunk-eids)))
+           (mapv (fn [chunk-eid*]
+                   [:db/add doc-eid :local.doc/chunks chunk-eid*])
+                 chunk-eids)))
         chunk-eids))))
 
 (defn- replace-doc-chunks!
@@ -1210,7 +1210,7 @@
   ([] (list-docs (require-session-id)))
   ([session-id]
    (let [session-id* (normalize-session-id session-id)
-        session-eid* (session-eid session-id*)]
+         session-eid* (session-eid session-id*)]
      (when-not session-eid*
        (throw (session-not-found-ex session-id*)))
      (->> (db/q '[:find ?e :in $ ?session :where [?e :local.doc/session ?session]]
@@ -1324,9 +1324,9 @@
   [query & {:keys [top fts-query] :or {top 5}}]
   (let [top*           (max 1 (long (or top 5)))
         global-results (memory/search-local-docs nil
-                                                query
-                                                :top top*
-                                                :fts-query fts-query)]
+                                                 query
+                                                 :top top*
+                                                 :fts-query fts-query)]
     (->> global-results
          (map (fn [result]
                 (if-let [doc (get-doc (:id result))]
@@ -1396,31 +1396,31 @@
           preview     (preview-text text*)
           channel     (session-channel session-eid*)]
       (db/transact!
-        [{:local.doc/id         doc-id
-          :local.doc/session    session-eid*
-          :local.doc/name       name*
-          :local.doc/media-type media-type
-          :local.doc/source     (or source default-source)
-          :local.doc/size-bytes size-bytes*
-          :local.doc/sha256     sha256
-          :local.doc/status     :ready
-          :local.doc/summary-source summary-source
-          :local.doc/summarized-at summarized-at
-          :local.doc/summary    summary
-          :local.doc/text       text*
-          :local.doc/preview    preview
-          :local.doc/chunk-count chunk-count}
-         (upload-episode {:session-id session-id*
-                          :session-channel channel
-                          :name name*
-                          :media-type media-type
-                          :size-bytes size-bytes*
-                          :sha256 sha256
-                          :summary summary
-                          :preview preview
-                          :chunk-count chunk-count
-                          :existing? (boolean existing)
-                          :doc-id doc-id})])
+       [{:local.doc/id         doc-id
+         :local.doc/session    session-eid*
+         :local.doc/name       name*
+         :local.doc/media-type media-type
+         :local.doc/source     (or source default-source)
+         :local.doc/size-bytes size-bytes*
+         :local.doc/sha256     sha256
+         :local.doc/status     :ready
+         :local.doc/summary-source summary-source
+         :local.doc/summarized-at summarized-at
+         :local.doc/summary    summary
+         :local.doc/text       text*
+         :local.doc/preview    preview
+         :local.doc/chunk-count chunk-count}
+        (upload-episode {:session-id session-id*
+                         :session-channel channel
+                         :name name*
+                         :media-type media-type
+                         :size-bytes size-bytes*
+                         :sha256 sha256
+                         :summary summary
+                         :preview preview
+                         :chunk-count chunk-count
+                         :existing? (boolean existing)
+                         :doc-id doc-id})])
       (let [doc-eid*             (doc-eid doc-id)
             existing-chunk-count (count (doc-chunk-eids doc-eid*))]
         (when (or (not existing)
@@ -1457,25 +1457,25 @@
           doc-id         (random-uuid)
           error-message  (.getMessage ^Throwable error)]
       (db/transact!
-        [(cond-> {:local.doc/id      doc-id
-                  :local.doc/session session-eid*
-                  :local.doc/name    name*
-                  :local.doc/source  (or source default-source)
-                  :local.doc/status  :failed
-                  :local.doc/error   error-message}
-           media-type* (assoc :local.doc/media-type media-type*)
-           (some? size-bytes*) (assoc :local.doc/size-bytes size-bytes*)
-           sha256 (assoc :local.doc/sha256 sha256)
-           preview (assoc :local.doc/preview preview))
-         (failed-upload-episode {:session-id session-id*
-                                 :session-channel channel
-                                 :name name*
-                                 :media-type media-type*
-                                 :size-bytes size-bytes*
-                                 :sha256 sha256
-                                 :preview preview
-                                 :doc-id doc-id
-                                 :error-message error-message})])
+       [(cond-> {:local.doc/id      doc-id
+                 :local.doc/session session-eid*
+                 :local.doc/name    name*
+                 :local.doc/source  (or source default-source)
+                 :local.doc/status  :failed
+                 :local.doc/error   error-message}
+          media-type* (assoc :local.doc/media-type media-type*)
+          (some? size-bytes*) (assoc :local.doc/size-bytes size-bytes*)
+          sha256 (assoc :local.doc/sha256 sha256)
+          preview (assoc :local.doc/preview preview))
+        (failed-upload-episode {:session-id session-id*
+                                :session-channel channel
+                                :name name*
+                                :media-type media-type*
+                                :size-bytes size-bytes*
+                                :sha256 sha256
+                                :preview preview
+                                :doc-id doc-id
+                                :error-message error-message})])
       (document-from-eid (doc-eid doc-id)))))
 
 (defn delete-doc!

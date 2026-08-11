@@ -348,8 +348,8 @@
 (defn- encode-mime-base64
   [^bytes data]
   (.encodeToString
-    (Base64/getMimeEncoder 76 (.getBytes "\r\n" StandardCharsets/UTF_8))
-    data))
+   (Base64/getMimeEncoder 76 (.getBytes "\r\n" StandardCharsets/UTF_8))
+   data))
 
 (defn- sanitize-header-value
   [value]
@@ -651,36 +651,36 @@
 (defn- render-leaf-part
   [{:keys [content-type transfer-encoding disposition filename body extra-headers]}]
   (str/join
-    "\r\n"
-    (concat
-      [(str "Content-Type: " content-type)]
-      (when transfer-encoding
-        [(str "Content-Transfer-Encoding: " transfer-encoding)])
-      (when disposition
-        [(str "Content-Disposition: " disposition
-              (when filename
-                (str "; filename=\"" (escape-header-param filename) "\"")))])
-      extra-headers
-      ["" body])))
+   "\r\n"
+   (concat
+    [(str "Content-Type: " content-type)]
+    (when transfer-encoding
+      [(str "Content-Transfer-Encoding: " transfer-encoding)])
+    (when disposition
+      [(str "Content-Disposition: " disposition
+            (when filename
+              (str "; filename=\"" (escape-header-param filename) "\"")))])
+    extra-headers
+    ["" body])))
 
 (declare render-part)
 
 (defn- render-multipart-part
   [{:keys [content-type boundary parts extra-headers]}]
   (let [body (str/join
-               "\r\n"
-               (concat
-                 (mapcat (fn [part]
-                           [(str "--" boundary)
-                            (render-part part)])
-                         parts)
-                 [(str "--" boundary "--")]))]
+              "\r\n"
+              (concat
+               (mapcat (fn [part]
+                         [(str "--" boundary)
+                          (render-part part)])
+                       parts)
+               [(str "--" boundary "--")]))]
     (str/join
-      "\r\n"
-      (concat
-        [(str "Content-Type: " content-type "; boundary=\"" boundary "\"")]
-        extra-headers
-        ["" body]))))
+     "\r\n"
+     (concat
+      [(str "Content-Type: " content-type "; boundary=\"" boundary "\"")]
+      extra-headers
+      ["" body]))))
 
 (defn- render-part
   [part]
@@ -991,9 +991,9 @@
   [page-path skip-filtered next-page-path]
   (str microsoft-filtered-page-token-prefix
        (encode-base64url
-         (json/write-json-str {"page_path"       page-path
-                               "skip_filtered"  (long skip-filtered)
-                               "next_page_path" next-page-path}))))
+        (json/write-json-str {"page_path"       page-path
+                              "skip_filtered"  (long skip-filtered)
+                              "next_page_path" next-page-path}))))
 
 (defn- microsoft-page-path
   [service-id page-token]
@@ -1195,18 +1195,18 @@
   (if-let [bytes (attachment-result-bytes attachment)]
     (let [name      (attachment-artifact-name attachment idx)
           artifact* (artifact/create-artifact!
-                      {:name       name
-                       :title      name
-                       :media-type (:mime-type attachment)
-                       :bytes      bytes
-                       :source     :email-attachment
-                       :meta       {:email/service-id   (clojure.core/name service-id)
-                                    :email/source-kind  (clojure.core/name source-kind)
-                                    :email/source-id    source-id
-                                    :email/attachment-id (:attachment-id attachment)
-                                    :email/part-id      (:part-id attachment)
-                                    :email/filename     (:filename attachment)
-                                    :email/mime-type    (:mime-type attachment)}})]
+                     {:name       name
+                      :title      name
+                      :media-type (:mime-type attachment)
+                      :bytes      bytes
+                      :source     :email-attachment
+                      :meta       {:email/service-id   (clojure.core/name service-id)
+                                   :email/source-kind  (clojure.core/name source-kind)
+                                   :email/source-id    source-id
+                                   :email/attachment-id (:attachment-id attachment)
+                                   :email/part-id      (:part-id attachment)
+                                   :email/filename     (:filename attachment)
+                                   :email/mime-type    (:mime-type attachment)}})]
       (assoc attachment
              :artifact-id (str (:id artifact*))
              :artifact-name (:name artifact*)
@@ -1271,17 +1271,17 @@
     detail
     (let [attachments* (->> (:attachments detail)
                             (map-indexed
-                              (fn [idx attachment]
-                                (cond-> attachment
-                                  save-attachments?
-                                  (save-attachment-artifact! service-id
-                                                             source-id
-                                                             source-kind
-                                                             idx))))
+                             (fn [idx attachment]
+                               (cond-> attachment
+                                 save-attachments?
+                                 (save-attachment-artifact! service-id
+                                                            source-id
+                                                            source-kind
+                                                            idx))))
                             (mapv #(strip-inline-attachment-content
-                                     %
-                                     include-attachment-data?
-                                     max-attachment-bytes)))
+                                    %
+                                    include-attachment-data?
+                                    max-attachment-bytes)))
           saved        (into [] (keep saved-attachment-artifact-summary) attachments*)]
       (cond-> (assoc detail :attachments attachments*)
         (seq saved)
@@ -1347,16 +1347,16 @@
   [to subject body {:keys [cc bcc reply-to in-reply-to references thread-id html-body attachments]}]
   (let [attachments* (normalize-attachments attachments)]
     (cond-> {:raw (encode-base64url
-                    (raw-message {:to          to
-                                  :cc          cc
-                                  :bcc         bcc
-                                  :subject     subject
-                                  :body        body
-                                  :reply-to    reply-to
-                                  :in-reply-to in-reply-to
-                                  :references  references
-                                  :html-body   html-body
-                                  :attachments attachments*}))}
+                   (raw-message {:to          to
+                                 :cc          cc
+                                 :bcc         bcc
+                                 :subject     subject
+                                 :body        body
+                                 :reply-to    reply-to
+                                 :in-reply-to in-reply-to
+                                 :references  references
+                                 :html-body   html-body
+                                 :attachments attachments*}))}
       (nonblank-str thread-id)
       (assoc :threadId (nonblank-str thread-id)))))
 
@@ -3081,8 +3081,8 @@
           unread-filter?   (and query unread-only?)
           initial-page-path (path-with-query-params path
                                                     (microsoft-list-query-params {:query        query
-                                                                                 :max-results  max-results
-                                                                                 :unread-only? unread-only?}))
+                                                                                  :max-results  max-results
+                                                                                  :unread-only? unread-only?}))
           {:keys [page-path skip-filtered next-page-path]}
           (microsoft-page-state service-id initial-page-path page-token)]
       (loop [current-page-path page-path
@@ -3389,14 +3389,14 @@
               :save-attachments? save-attachments?
               :max-saved-attachment-bytes max-saved-attachment-bytes}]
     (finalize-attachment-artifacts
-      (backend-read-message backend
-                            service-id
-                            message-id
-                            (attachment-fetch-opts opts))
-      service-id
-      message-id
-      :message
-      opts)))
+     (backend-read-message backend
+                           service-id
+                           message-id
+                           (attachment-fetch-opts opts))
+     service-id
+     message-id
+     :message
+     opts)))
 
 (defn send-message
   "Send an email through the detected email backend."
@@ -3469,14 +3469,14 @@
               :save-attachments? save-attachments?
               :max-saved-attachment-bytes max-saved-attachment-bytes}]
     (finalize-attachment-artifacts
-      (backend-read-draft backend
-                          service-id
-                          draft-id
-                          (attachment-fetch-opts opts))
-      service-id
-      draft-id
-      :draft
-      opts)))
+     (backend-read-draft backend
+                         service-id
+                         draft-id
+                         (attachment-fetch-opts opts))
+     service-id
+     draft-id
+     :draft
+     opts)))
 
 (defn save-draft
   "Create or update a draft using the detected email backend."

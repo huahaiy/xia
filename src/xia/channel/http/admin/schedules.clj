@@ -134,31 +134,31 @@
                             true))
           saved         (if existing
                           (schedule/update-schedule!
-                            schedule-id
-                            (cond-> {:name        name
-                                     :description description
-                                     :spec        spec
-                                     :type        schedule-type
-                                     :trusted?    trusted?
-                                     :enabled?    enabled?}
-                              (= schedule-type :tool)
-                              (assoc :tool-id tool-id
-                                     :tool-args tool-args)
-                              (= schedule-type :prompt)
-                              (assoc :prompt prompt)))
+                           schedule-id
+                           (cond-> {:name        name
+                                    :description description
+                                    :spec        spec
+                                    :type        schedule-type
+                                    :trusted?    trusted?
+                                    :enabled?    enabled?}
+                             (= schedule-type :tool)
+                             (assoc :tool-id tool-id
+                                    :tool-args tool-args)
+                             (= schedule-type :prompt)
+                             (assoc :prompt prompt)))
                           (do
                             (schedule/create-schedule!
-                              (cond-> {:id          schedule-id
-                                       :name        name
-                                       :description description
-                                       :spec        spec
-                                       :type        schedule-type
-                                       :trusted?    trusted?}
-                                (= schedule-type :tool)
-                                (assoc :tool-id tool-id
-                                       :tool-args tool-args)
-                                (= schedule-type :prompt)
-                                (assoc :prompt prompt)))
+                             (cond-> {:id          schedule-id
+                                      :name        name
+                                      :description description
+                                      :spec        spec
+                                      :type        schedule-type
+                                      :trusted?    trusted?}
+                               (= schedule-type :tool)
+                               (assoc :tool-id tool-id
+                                      :tool-args tool-args)
+                               (= schedule-type :prompt)
+                               (assoc :prompt prompt)))
                             (if enabled?
                               (schedule/get-schedule schedule-id)
                               (schedule/pause-schedule! schedule-id))))]

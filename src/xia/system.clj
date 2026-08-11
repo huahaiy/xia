@@ -358,25 +358,25 @@
              checkpoint-runtime llm-runtime local-ocr-runtime
              service-runtime web-runtime fact-review-runtime permission-runtime]}]
   (runtime-context/make
-    {:xia/db db
-     :xia/runtime-overlay overlay
-     :xia/runtime-state-runtime runtime-state-runtime
-     :xia/retrieval-runtime retrieval-runtime
-     :xia/oauth-runtime oauth-runtime
-     :xia/browser-runtime browser-runtime
-     :xia/async-runtime async-runtime
-     :xia/prompt-runtime prompt-runtime
-     :xia/fact-review-runtime fact-review-runtime
-     :xia/agent-runtime agent-runtime
-     :xia/working-memory-runtime working-memory-runtime
-     :xia/bridge-runtime bridge-runtime
-     :xia/hippocampus-runtime hippocampus-runtime
-     :xia/checkpoint-runtime checkpoint-runtime
-     :xia/llm-runtime llm-runtime
-     :xia/local-ocr-runtime local-ocr-runtime
-     :xia/service-runtime service-runtime
-     :xia/web-runtime web-runtime
-     :xia/permission-runtime permission-runtime}))
+   {:xia/db db
+    :xia/runtime-overlay overlay
+    :xia/runtime-state-runtime runtime-state-runtime
+    :xia/retrieval-runtime retrieval-runtime
+    :xia/oauth-runtime oauth-runtime
+    :xia/browser-runtime browser-runtime
+    :xia/async-runtime async-runtime
+    :xia/prompt-runtime prompt-runtime
+    :xia/fact-review-runtime fact-review-runtime
+    :xia/agent-runtime agent-runtime
+    :xia/working-memory-runtime working-memory-runtime
+    :xia/bridge-runtime bridge-runtime
+    :xia/hippocampus-runtime hippocampus-runtime
+    :xia/checkpoint-runtime checkpoint-runtime
+    :xia/llm-runtime llm-runtime
+    :xia/local-ocr-runtime local-ocr-runtime
+    :xia/service-runtime service-runtime
+    :xia/web-runtime web-runtime
+    :xia/permission-runtime permission-runtime}))
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
@@ -408,22 +408,22 @@
              web-runtime instance-supervisor]}]
   (let [runtime (sci-env/make-runtime)
         runtime-context (runtime-context/make
-                          {:xia/db db
-                           :xia/async-runtime async-runtime
-                           :xia/runtime-state-runtime runtime-state-runtime
-                           :xia/retrieval-runtime retrieval-runtime
-                           :xia/oauth-runtime oauth-runtime
-                           :xia/browser-runtime browser-runtime
-                           :xia/prompt-runtime prompt-runtime
-                           :xia/fact-review-runtime fact-review-runtime
-                           :xia/agent-runtime agent-runtime
-                           :xia/working-memory-runtime working-memory-runtime
-                           :xia/llm-runtime llm-runtime
-                           :xia/local-ocr-runtime local-ocr-runtime
-                           :xia/service-runtime service-runtime
-                           :xia/web-runtime web-runtime
-                           :xia/instance-supervisor instance-supervisor
-                           :xia/sci-runtime {:runtime runtime}})
+                         {:xia/db db
+                          :xia/async-runtime async-runtime
+                          :xia/runtime-state-runtime runtime-state-runtime
+                          :xia/retrieval-runtime retrieval-runtime
+                          :xia/oauth-runtime oauth-runtime
+                          :xia/browser-runtime browser-runtime
+                          :xia/prompt-runtime prompt-runtime
+                          :xia/fact-review-runtime fact-review-runtime
+                          :xia/agent-runtime agent-runtime
+                          :xia/working-memory-runtime working-memory-runtime
+                          :xia/llm-runtime llm-runtime
+                          :xia/local-ocr-runtime local-ocr-runtime
+                          :xia/service-runtime service-runtime
+                          :xia/web-runtime web-runtime
+                          :xia/instance-supervisor instance-supervisor
+                          :xia/sci-runtime {:runtime runtime}})
         runtime (assoc runtime :runtime-context runtime-context)]
     (runtime-context/with-runtime-context
       runtime-context
@@ -455,8 +455,8 @@
   [_ {:keys [db enabled? command]}]
   (let [runtime (instance-supervisor/make-runtime)
         runtime-context (runtime-context/make
-                          {:xia/db db
-                           :xia/instance-supervisor {:runtime runtime}})
+                         {:xia/db db
+                          :xia/instance-supervisor {:runtime runtime}})
         runtime (assoc runtime :runtime-context runtime-context)]
     (runtime-context/with-runtime-context
       runtime-context
@@ -476,9 +476,9 @@
   [_ {:keys [db overlay instance-supervisor db-path instance template-instance
              mode crypto-opts]}]
   (let [runtime-context (runtime-context/make
-                          {:xia/db db
-                           :xia/runtime-overlay overlay
-                           :xia/instance-supervisor instance-supervisor})]
+                         {:xia/db db
+                          :xia/runtime-overlay overlay
+                          :xia/instance-supervisor instance-supervisor})]
     (runtime-context/with-runtime-context
       runtime-context
       #(do
@@ -510,7 +510,7 @@
 (defmethod ig/init-key :xia/identity
   [_ {:keys [bootstrap]}]
   (runtime-context/with-runtime-context (:runtime-context bootstrap)
-                                       identity/init-identity!)
+    identity/init-identity!)
   {:bootstrap bootstrap})
 
 (defmethod ig/halt-key! :xia/identity

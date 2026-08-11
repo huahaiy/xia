@@ -842,9 +842,9 @@
       (task-spec/llm-executor
        (assoc args
               :context (cond-> (merge context
-                                       {:session-id session-id
-                                        :channel channel
-                                        :message (or (:message context) message)})
+                                      {:session-id session-id
+                                       :channel channel
+                                       :message (or (:message context) message)})
                          provider-id (assoc :provider-id provider-id)
                          resource-session-id (assoc :resource-session-id resource-session-id)
                          runtime-op (assoc :runtime-op runtime-op)))))))

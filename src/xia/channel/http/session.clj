@@ -493,7 +493,7 @@
 (defn- internal-server-error-response
   [deps ^Throwable throwable]
   (http-common/json-response deps 500 {:error (or (http-common/throwable-message deps throwable)
-                                       "internal server error")}))
+                                                  "internal server error")}))
 
 (defn- chat-request
   ([deps req]
@@ -547,11 +547,11 @@
                                      :content    response
                                      :message    (when assistant-message
                                                    (session-message->body deps assistant-message))}
-                               task (assoc :task (task->body deps task))
-                               task (assoc :task_id (some-> (:id task) str))
-                               persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
-                               (:current-turn-id task) (assoc :current_turn_id
-                                                              (str (:current-turn-id task))))]
+                              task (assoc :task (task->body deps task))
+                              task (assoc :task_id (some-> (:id task) str))
+                              persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
+                              (:current-turn-id task) (assoc :current_turn_id
+                                                             (str (:current-turn-id task))))]
       (http-common/touch-rest-session! deps session-id)
       (http-common/json-response deps 200 body))
     (catch clojure.lang.ExceptionInfo e
@@ -592,8 +592,8 @@
        (:async-channel req)
        (handle-chat-async deps req chat)
 
-     :else
-     (handle-chat-sync deps chat)))))
+       :else
+       (handle-chat-sync deps chat)))))
 
 (defn- with-active-session
   [deps session-id expected-channel f]
@@ -620,52 +620,52 @@
    (handle-get-status deps session-id nil))
   ([deps session-id expected-channel]
    (with-active-session
-    deps
-    session-id
-    expected-channel
-    (fn [sid session-uuid]
-      (let [task            (bridge/current-session-task sid)
-            persistent-goal (goal/current-goal session-uuid)
-            status          (or (when task
-                                  (task-runtime-status deps task))
-                                (get @(session-statuses-atom deps) sid))]
-        (http-common/json-response deps 200
-                                   (cond-> {:session_id sid
-                                            :status     (status->body deps status)}
-                                     task (assoc :task_id (some-> (:id task) str))
-                                     persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
-                                     (:current-turn-id task) (assoc :current_turn_id
-                                                                    (str (:current-turn-id task))))))))))
+     deps
+     session-id
+     expected-channel
+     (fn [sid session-uuid]
+       (let [task            (bridge/current-session-task sid)
+             persistent-goal (goal/current-goal session-uuid)
+             status          (or (when task
+                                   (task-runtime-status deps task))
+                                 (get @(session-statuses-atom deps) sid))]
+         (http-common/json-response deps 200
+                                    (cond-> {:session_id sid
+                                             :status     (status->body deps status)}
+                                      task (assoc :task_id (some-> (:id task) str))
+                                      persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
+                                      (:current-turn-id task) (assoc :current_turn_id
+                                                                     (str (:current-turn-id task))))))))))
 
 (defn handle-get-current-task
   ([deps session-id]
    (handle-get-current-task deps session-id nil))
   ([deps session-id expected-channel]
    (with-active-session
-    deps
-    session-id
-    expected-channel
-    (fn [sid session-uuid]
-      (let [task            (bridge/current-session-task sid)
-            persistent-goal (goal/current-goal session-uuid)]
-        (http-common/json-response deps 200
-                                   (cond-> {:session_id sid
-                                            :task       (when task
-                                                          (task->body deps task))}
-                                     task (assoc :task_id (some-> (:id task) str))
-                                     task (assoc :task_live (boolean (live-task? task)))
-                                     persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
-                                     (:current-turn-id task) (assoc :current_turn_id
-                                                                    (str (:current-turn-id task))))))))))
+     deps
+     session-id
+     expected-channel
+     (fn [sid session-uuid]
+       (let [task            (bridge/current-session-task sid)
+             persistent-goal (goal/current-goal session-uuid)]
+         (http-common/json-response deps 200
+                                    (cond-> {:session_id sid
+                                             :task       (when task
+                                                           (task->body deps task))}
+                                      task (assoc :task_id (some-> (:id task) str))
+                                      task (assoc :task_live (boolean (live-task? task)))
+                                      persistent-goal (assoc :goal (persistent-goal->body deps persistent-goal))
+                                      (:current-turn-id task) (assoc :current_turn_id
+                                                                     (str (:current-turn-id task))))))))))
 
 (defn- with-goal-session
   [deps session-id expected-channel f]
   (with-active-session
-   deps
-   session-id
-   expected-channel
-   (fn [_sid session-uuid]
-     (f session-uuid))))
+    deps
+    session-id
+    expected-channel
+    (fn [_sid session-uuid]
+      (f session-uuid))))
 
 (defn- goal-task-id
   [goal]
@@ -690,8 +690,8 @@
   [deps ^clojure.lang.ExceptionInfo e]
   (let [data (ex-data e)]
     (http-common/json-response deps
-                    (long (or (:status data) 500))
-                    {:error (or (:error data) (.getMessage e))})))
+                               (long (or (:status data) 500))
+                               {:error (or (:error data) (.getMessage e))})))
 
 (defn- pause-goal-task!
   [goal]
@@ -726,8 +726,8 @@
      expected-channel
      (fn [sid]
        (http-common/json-response deps 200
-                       {:session_id (str sid)
-                        :goal (persistent-goal->body deps (goal/current-goal sid))})))))
+                                  {:session_id (str sid)
+                                   :goal (persistent-goal->body deps (goal/current-goal sid))})))))
 
 (defn handle-set-goal
   ([deps session-id req]
@@ -754,16 +754,16 @@
                  resume-policy (or (get data "resume_policy")
                                    (get data "resume-policy"))
                  goal* (goal/set-goal! sid
-                                        text
-                                        :max-turns max-turns
-                                        :success-criteria success-criteria
-                                        :constraints constraints
-                                        :preferences preferences
-                                        :budget budget
-                                        :resume-policy resume-policy)]
+                                       text
+                                       :max-turns max-turns
+                                       :success-criteria success-criteria
+                                       :constraints constraints
+                                       :preferences preferences
+                                       :budget budget
+                                       :resume-policy resume-policy)]
              (http-common/json-response deps 200
-                             {:session_id (str sid)
-                              :goal (persistent-goal->body deps goal*)})))
+                                        {:session_id (str sid)
+                                         :goal (persistent-goal->body deps goal*)})))
          (catch clojure.lang.ExceptionInfo e
            (goal-ex-response deps e)))))))
 
@@ -780,10 +780,10 @@
          (let [goal* (goal/pause-goal! sid)
                control (pause-goal-task! goal*)]
            (http-common/json-response deps 200
-                           (cond-> {:session_id (str sid)
-                                    :goal (persistent-goal->body deps goal*)}
-                             control (assoc :task_control
-                                            (goal-task-control->body deps control)))))
+                                      (cond-> {:session_id (str sid)
+                                               :goal (persistent-goal->body deps goal*)}
+                                        control (assoc :task_control
+                                                       (goal-task-control->body deps control)))))
          (catch clojure.lang.ExceptionInfo e
            (goal-ex-response deps e)))))))
 
@@ -800,10 +800,10 @@
          (let [goal* (goal/resume-goal! sid)
                control (resume-goal-task! goal*)]
            (http-common/json-response deps 200
-                           (cond-> {:session_id (str sid)
-                                    :goal (persistent-goal->body deps goal*)}
-                             control (assoc :task_control
-                                            (goal-task-control->body deps control)))))
+                                      (cond-> {:session_id (str sid)
+                                               :goal (persistent-goal->body deps goal*)}
+                                        control (assoc :task_control
+                                                       (goal-task-control->body deps control)))))
          (catch clojure.lang.ExceptionInfo e
            (goal-ex-response deps e)))))))
 
@@ -821,8 +821,8 @@
          (do
            (goal/clear-goal! sid)
            (http-common/json-response deps 200
-                           {:session_id (str sid)
-                            :goal nil})))))))
+                                      {:session_id (str sid)
+                                       :goal nil})))))))
 
 (defn- interaction-body-key
   [kind]
@@ -890,9 +890,9 @@
       (let [selector (assoc (:selector target) :kind kind)]
         (if-let [interaction (bridge/resolve-pending-interaction selector)]
           (http-common/json-response deps 200
-                          {:pending true
-                           (interaction-body-key kind)
-                           (interaction->body deps kind interaction)})
+                                     {:pending true
+                                      (interaction-body-key kind)
+                                      (interaction->body deps kind interaction)})
           (http-common/json-response deps 200 {:pending false}))))))
 
 (defn- prompt-submission
@@ -941,11 +941,11 @@
           (case status
             :missing
             (http-common/json-response deps 404
-                            {:error (interaction-missing-error kind)})
+                                       {:error (interaction-missing-error kind)})
 
             :stale
             (http-common/json-response deps 409
-                            {:error (interaction-stale-error kind)})
+                                       {:error (interaction-stale-error kind)})
 
             (do
               (when-let [session-id (:touch-session-id target)]
@@ -1039,7 +1039,7 @@
                                        (map #(session-message->body deps %)))))]
            (http-common/touch-rest-session! deps session-id)
            (http-common/json-response deps 200 {:session_id session-id
-                                     :messages   messages}))))
+                                                :messages   messages}))))
      (catch IllegalArgumentException _
        (http-common/json-response deps 400 {:error "invalid session id"})))))
 
@@ -1064,18 +1064,18 @@
                                            :busy? (fn [session-id]
                                                     (session-busy?* deps session-id))
                                            :finalize-session! (fn [session-id]
-                                                               (finalize-rest-session!* deps session-id :explicit)))
+                                                                (finalize-rest-session!* deps session-id :explicit)))
            {:keys [response-kind status status-key message]} (bridge/session-control-result-view :close result)]
        (case response-kind
          :accepted
          (http-common/json-response deps 202 {:session_id sid
-                                   :status status-key
-                                   :closing true})
+                                              :status status-key
+                                              :closing true})
 
          :completed
          (http-common/json-response deps 200 {:session_id sid
-                                   :status status-key
-                                   :already_closed (= :already-closed status)})
+                                              :status status-key
+                                              :already_closed (= :already-closed status)})
 
          :conflict
          (http-common/json-response deps 409 {:error message})
@@ -1089,20 +1089,20 @@
                                                         (:channel %)))))
         history-data  (db/session-history-data (map :id sessions))]
     (http-common/json-response deps 200
-                    {:sessions (->> sessions
-                                    (into [] (map #(history-session->body deps
-                                                                          %
-                                                                          (get history-data (:id %))))))})))
+                               {:sessions (->> sessions
+                                               (into [] (map #(history-session->body deps
+                                                                                     %
+                                                                                     (get history-data (:id %))))))})))
 
 (defn handle-history-tasks
   [deps]
   (let [tasks         (db/list-tasks)
         history-data  (db/task-history-data (map :id tasks))]
     (http-common/json-response deps 200
-                    {:tasks (->> tasks
-                                 (into [] (map #(history-task->body deps
-                                                                   %
-                                                                   (get history-data (:id %))))))})))
+                               {:tasks (->> tasks
+                                            (into [] (map #(history-task->body deps
+                                                                               %
+                                                                               (get history-data (:id %))))))})))
 
 (defn handle-get-task
   [deps task-id]
@@ -1110,10 +1110,10 @@
     (let [uuid (java.util.UUID/fromString task-id)]
       (if-let [{:keys [task turns]} (bridge/task-detail-view uuid)]
         (http-common/json-response deps 200
-                        {:task  (task->body deps task)
-                         :turns (mapv (fn [{:keys [turn items]}]
-                                        (task-turn->body deps turn items))
-                                     turns)})
+                                   {:task  (task->body deps task)
+                                    :turns (mapv (fn [{:keys [turn items]}]
+                                                   (task-turn->body deps turn items))
+                                                 turns)})
         (http-common/json-response deps 404 {:error "task not found"})))
     (catch IllegalArgumentException _
       (http-common/json-response deps 400 {:error "invalid task id"}))))
@@ -1124,8 +1124,8 @@
     (let [uuid (java.util.UUID/fromString task-id)]
       (if-let [{:keys [events]} (bridge/task-event-history uuid)]
         (http-common/json-response deps 200
-                        {:task_id (str uuid)
-                         :events  (mapv #(task-event->body deps %) events)})
+                                   {:task_id (str uuid)
+                                    :events  (mapv #(task-event->body deps %) events)})
         (http-common/json-response deps 404 {:error "task not found"})))
     (catch IllegalArgumentException _
       (http-common/json-response deps 400 {:error "invalid task id"}))))
@@ -1142,10 +1142,10 @@
         (let [{:keys [next-index events]} ((:task-runtime-events-after deps) uuid after)
               events* (mapv #(task-event->body deps %) events)]
           (http-common/json-response deps 200
-                          {:task_id (str uuid)
-                           :after after
-                           :next_stream_index (long (or next-index 0))
-                           :events events*}))))
+                                     {:task_id (str uuid)
+                                      :after after
+                                      :next_stream_index (long (or next-index 0))
+                                      :events events*}))))
     (catch IllegalArgumentException _
       (http-common/json-response deps 400 {:error "invalid task id"}))))
 
@@ -1221,38 +1221,38 @@
 
       :conflict
       (http-common/json-response deps 409 {:error (or (:error result) message)
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)
-                                :execution_session_id (some-> (:session-id result) str)})
+                                           :task_id (some-> (:task-id result) str)
+                                           :session_id (some-> (:session-id result) str)
+                                           :execution_session_id (some-> (:session-id result) str)})
 
       :unavailable
       (http-common/json-response deps 503 {:error (or (:error result) message)
-                                :task_id (some-> (:task-id result) str)
-                                :session_id (some-> (:session-id result) str)
-                                :execution_session_id (some-> (:session-id result) str)})
+                                           :task_id (some-> (:task-id result) str)
+                                           :session_id (some-> (:session-id result) str)
+                                           :execution_session_id (some-> (:session-id result) str)})
 
       :accepted
       (http-common/json-response deps 202
-                      (cond-> {:status status-key
-                               :task_id (some-> (:task-id result) str)
-                               :session_id (some-> (:session-id result) str)
-                               :execution_session_id (some-> (:session-id result) str)}
-                        (= status :forking)
-                        (assoc :task (when-let [task (:task result)]
-                                       (task->body deps task)))))
+                                 (cond-> {:status status-key
+                                          :task_id (some-> (:task-id result) str)
+                                          :session_id (some-> (:session-id result) str)
+                                          :execution_session_id (some-> (:session-id result) str)}
+                                   (= status :forking)
+                                   (assoc :task (when-let [task (:task result)]
+                                                  (task->body deps task)))))
 
       :completed
       (http-common/json-response deps 200
-                      (cond-> {:status status-key}
-                        (:session-id result)
-                        (assoc :execution_session_id (some-> (:session-id result) str))
+                                 (cond-> {:status status-key}
+                                   (:session-id result)
+                                   (assoc :execution_session_id (some-> (:session-id result) str))
 
-                        (contains? #{:already-paused :already-stopped} status)
-                        (assoc :task_id (some-> (:task-id result) str)
-                               :session_id (some-> (:session-id result) str))
-                        (contains? #{:paused :stopped} status)
-                        (assoc :task (when-let [task (:task result)]
-                                       (task->body deps task)))))
+                                   (contains? #{:already-paused :already-stopped} status)
+                                   (assoc :task_id (some-> (:task-id result) str)
+                                          :session_id (some-> (:session-id result) str))
+                                   (contains? #{:paused :stopped} status)
+                                   (assoc :task (when-let [task (:task result)]
+                                                  (task->body deps task)))))
 
       (http-common/json-response deps 500 {:error "unknown task control result"}))))
 
@@ -1304,13 +1304,13 @@
 (defn handle-history-schedules
   [deps]
   (http-common/json-response deps 200
-                  {:schedules (->> (schedule/list-schedules)
-                                   (sort-by (fn [sched]
-                                              (or (http-common/date->millis deps (:last-run sched))
-                                                  (http-common/date->millis deps (:next-run sched))
-                                                  Long/MIN_VALUE))
-                                            >)
-                                   (into [] (map #(history-schedule->body deps %))))}))
+                             {:schedules (->> (schedule/list-schedules)
+                                              (sort-by (fn [sched]
+                                                         (or (http-common/date->millis deps (:last-run sched))
+                                                             (http-common/date->millis deps (:next-run sched))
+                                                             Long/MIN_VALUE))
+                                                       >)
+                                              (into [] (map #(history-schedule->body deps %))))}))
 
 (defn handle-history-schedule-runs
   [deps schedule-id]
@@ -1320,9 +1320,9 @@
       (if-not sched
         (http-common/json-response deps 404 {:error "schedule not found"})
         (http-common/json-response deps 200
-                        {:schedule (history-schedule->body deps sched)
-                         :runs     (into [] (map #(history-run->body deps %))
-                                         (schedule/schedule-history sid 20))})))
+                                   {:schedule (history-schedule->body deps sched)
+                                    :runs     (into [] (map #(history-run->body deps %))
+                                                    (schedule/schedule-history sid 20))})))
     (catch clojure.lang.ExceptionInfo e
       (http-common/exception-response deps e))))
 
@@ -1335,8 +1335,8 @@
     (if (and raw-session-id (nil? session-id))
       (http-common/json-response deps 400 {:error "invalid session id"})
       (http-common/json-response deps 200
-                      {:calls (into [] (map #(llm-call-summary->body deps %))
-                                    (db/list-llm-calls (min limit 200) session-id))}))))
+                                 {:calls (into [] (map #(llm-call-summary->body deps %))
+                                               (db/list-llm-calls (min limit 200) session-id))}))))
 
 (defn handle-get-llm-call
   [deps call-id]
@@ -1361,6 +1361,6 @@
                             (db/session-audit-events sid 1000))]
            (http-common/touch-rest-session! deps session-id)
            (http-common/json-response deps 200 {:session_id session-id
-                                     :events     events}))))
+                                                :events     events}))))
      (catch IllegalArgumentException _
        (http-common/json-response deps 400 {:error "invalid session id"})))))

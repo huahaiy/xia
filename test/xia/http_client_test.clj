@@ -17,8 +17,8 @@
 (defn- read-request-head!
   [socket]
   (let [reader (BufferedReader.
-                 (InputStreamReader. (.getInputStream socket)
-                                     StandardCharsets/US_ASCII))]
+                (InputStreamReader. (.getInputStream socket)
+                                    StandardCharsets/US_ASCII))]
     (loop [lines []]
       (let [line (.readLine reader)]
         (if (and line (not= "" line))
@@ -63,11 +63,11 @@
     (try
       (with-redefs [xia.ssrf/resolve-url! (local-pinned-resolution "bounded.example")]
         (http-client/request
-          (merge {:url (str "http://bounded.example:" port "/resource")
-                  :allow-private-network? true
-                  :max-attempts 1
-                  :timeout 1000}
-                 request-opts)))
+         (merge {:url (str "http://bounded.example:" port "/resource")
+                 :allow-private-network? true
+                 :max-attempts 1
+                 :timeout 1000}
+                request-opts)))
       (finally
         (.close server)
         (deref worker 2000 :timeout)))))
@@ -194,11 +194,11 @@
 
 (deftest response-rejects-oversized-content-length-before-reading-body
   (let [ex (thrown-ex-info
-             #(request-raw-response
-                (str "HTTP/1.1 200 OK\r\n"
-                     "Content-Length: 1000\r\n"
-                     "Connection: close\r\n\r\n")
-                {:max-response-bytes 32}))]
+            #(request-raw-response
+              (str "HTTP/1.1 200 OK\r\n"
+                   "Content-Length: 1000\r\n"
+                   "Connection: close\r\n\r\n")
+              {:max-response-bytes 32}))]
     (is (= :http/limit-exceeded (:type (ex-data ex))))
     (is (= :response-bytes (:limit (ex-data ex))))
     (is (= 32 (:max (ex-data ex))))
@@ -224,11 +224,11 @@
         ex (try
              (with-redefs [xia.ssrf/resolve-url! (local-pinned-resolution "chunks.example")]
                (thrown-ex-info
-                 #(http-client/request {:url (str "http://chunks.example:" port "/stream")
-                                        :allow-private-network? true
-                                        :max-response-bytes 32
-                                        :max-attempts 1
-                                        :timeout 1000})))
+                #(http-client/request {:url (str "http://chunks.example:" port "/stream")
+                                       :allow-private-network? true
+                                       :max-response-bytes 32
+                                       :max-attempts 1
+                                       :timeout 1000})))
              (finally
                (.close server)))]
     (is (= :http/limit-exceeded (:type (ex-data ex))))
@@ -276,10 +276,10 @@
         ex (try
              (with-redefs [xia.ssrf/resolve-url! (local-pinned-resolution "slow.example")]
                (thrown-ex-info
-                 #(http-client/request {:url (str "http://slow.example:" port "/slow")
-                                        :allow-private-network? true
-                                        :timeout 180
-                                        :max-attempts 1})))
+                #(http-client/request {:url (str "http://slow.example:" port "/slow")
+                                       :allow-private-network? true
+                                       :timeout 180
+                                       :max-attempts 1})))
              (finally
                (.close server)))
         elapsed (- (System/currentTimeMillis) started)]
@@ -291,12 +291,12 @@
 (deftest timeout-bounds-dns-resolution
   (let [started (System/currentTimeMillis)
         ex (with-redefs [ssrf/resolve-url! (fn [& _]
-                                            (Thread/sleep 1000)
-                                            (throw (AssertionError. "late DNS result")))]
+                                             (Thread/sleep 1000)
+                                             (throw (AssertionError. "late DNS result")))]
              (thrown-ex-info
-               #(http-client/request {:url "https://slow-dns.example/resource"
-                                      :timeout 75
-                                      :max-attempts 1})))
+              #(http-client/request {:url "https://slow-dns.example/resource"
+                                     :timeout 75
+                                     :max-attempts 1})))
         elapsed (- (System/currentTimeMillis) started)]
     (is (= :http/deadline-exceeded (:type (ex-data ex))))
     (is (= :dns (:phase (ex-data ex))))
@@ -306,18 +306,18 @@
   (let [attempts (atom 0)
         started  (System/currentTimeMillis)
         ex (with-redefs [ssrf/resolve-url! (fn [url _]
-                                            {:url url
-                                             :uri (URI. url)
-                                             :host "retry.example"
-                                             :addresses []})
+                                             {:url url
+                                              :uri (URI. url)
+                                              :host "retry.example"
+                                              :addresses []})
                          http-client/send-request! (fn [_]
                                                      (swap! attempts inc)
                                                      {:status 503 :headers {} :body "busy"})]
              (thrown-ex-info
-               #(http-client/request {:url "https://retry.example/resource"
-                                      :timeout 100
-                                      :max-attempts 5
-                                      :initial-backoff-ms 1000})))
+              #(http-client/request {:url "https://retry.example/resource"
+                                     :timeout 100
+                                     :max-attempts 5
+                                     :initial-backoff-ms 1000})))
         elapsed (- (System/currentTimeMillis) started)]
     (is (= 1 @attempts))
     (is (= :http/deadline-exceeded (:type (ex-data ex))))
@@ -349,10 +349,10 @@
                                  (throw (ex-info "Access to private/internal network addresses is blocked"
                                                  {:url url :opts opts}))))]
                  (thrown-ex-info
-                   #(http-client/request {:url (str "http://public.example:" port "/start")
-                                          :follow-redirects? true
-                                          :max-attempts 1
-                                          :timeout 1000})))]
+                  #(http-client/request {:url (str "http://public.example:" port "/start")
+                                         :follow-redirects? true
+                                         :max-attempts 1
+                                         :timeout 1000})))]
         (is (re-find #"private/internal" (.getMessage ^Throwable ex)))
         (is (= 2 (count @calls)))
         (is (str/includes? (second @calls) "127.0.0.1")))
@@ -376,11 +376,11 @@
                    (catch SocketException _ :closed)))]
     (try
       (let [ex (thrown-ex-info
-                 #(http-client/download! {:url (str "http://127.0.0.1:" port "/large")
-                                          :target-path target
-                                          :trusted true
-                                          :max-download-bytes 16
-                                          :timeout 1000}))]
+                #(http-client/download! {:url (str "http://127.0.0.1:" port "/large")
+                                         :target-path target
+                                         :trusted true
+                                         :max-download-bytes 16
+                                         :timeout 1000}))]
         (is (= :http/limit-exceeded (:type (ex-data ex))))
         (is (= :response-bytes (:limit (ex-data ex))))
         (is (= "existing" (slurp target))))

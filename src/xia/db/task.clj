@@ -86,7 +86,7 @@
                     [?link :task.session-link/role ?role]
                     [?link :task.session-link/created-at ?created-at]
                     [?link :task.session-link/updated-at ?updated-at]]
-                 task-eid*)
+             task-eid*)
          (map (fn [[sid role created-at updated-at]]
                 {:session-id sid
                  :role role
@@ -123,14 +123,14 @@
   [deps task-eid*]
   (long (or (ffirst (q* deps '[:find (count ?turn) :in $ ?task
                                :where [?turn :task.turn/task ?task]]
-                          task-eid*))
+                        task-eid*))
             0)))
 
 (defn- count-turn-items
   [deps turn-eid*]
   (long (or (ffirst (q* deps '[:find (count ?item) :in $ ?turn
                                :where [?item :task.item/turn ?turn]]
-                          turn-eid*))
+                        turn-eid*))
             0)))
 
 (defn- touch-task!
@@ -169,7 +169,7 @@
     :schedule {:trigger {:kind :schedule}
                :execution {:mode :hybrid}}
     :branch {:trigger (cond-> {:kind :branch}
-                       parent-id (assoc :parent-task-id parent-id))
+                        parent-id (assoc :parent-task-id parent-id))
              :execution {:mode :agent}}
     :board-card {:trigger {:kind :user}
                  :board {:visible? true}}
@@ -311,7 +311,7 @@
                 (some? started-at) (assoc :task/started-at started-at)
                 (some? finished-at) (assoc :task/finished-at finished-at))]))
       (attach-task-session!* deps eid session-eid* (or session-role :attached))
-    true)))
+      true)))
 
 (defn get-task
   [deps task-id]
@@ -523,7 +523,7 @@
                     [?turn :task.turn/id ?turn-id]
                     [?turn :task.turn/index ?index]
                     [(get-else $ ?turn :task.turn/created-at 0) ?created-at]]
-              task-eid*)
+             task-eid*)
          (sort-by second)
          (mapv (fn [[turn-id _ _]]
                  (let [eid        (turn-eid deps turn-id)
@@ -608,12 +608,12 @@
                     [?item :task.item/turn ?turn]
                     [?item :task.item/id ?item-id]
                     [?item :task.item/index ?index]]
-              turn-eid*)
+             turn-eid*)
          (sort-by second)
          (mapv (fn [[item-id _]]
                  (let [eid        (ffirst (q* deps '[:find ?e :in $ ?iid
                                                      :where [?e :task.item/id ?iid]]
-                                               item-id))
+                                              item-id))
                        entity-map (decrypt-entity* deps (raw-entity* deps eid))]
                    (item-entity->body deps turn-id entity-map)))))
     []))
@@ -633,7 +633,7 @@
                                       [?task :task/id ?task-id]
                                       [?turn :task.turn/task ?task]
                                       [?turn :task.turn/index ?index]]
-                                task-ids*)
+                               task-ids*)
                            (sort-by (juxt first #(nth % 2))))
             turns-by-task
             (reduce (fn [acc [task-id turn-eid _]]
@@ -651,7 +651,7 @@
                                          [?turn :task.turn/id ?turn-id]
                                          [?item :task.item/turn ?turn]
                                          [?item :task.item/index ?index]]
-                                   turn-ids*)
+                                  turn-ids*)
                               (sort-by (juxt first #(nth % 2)))))
             items-by-turn
             (reduce (fn [acc [turn-id item-eid _]]

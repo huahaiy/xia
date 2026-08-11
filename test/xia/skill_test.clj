@@ -160,7 +160,7 @@
         (is (= (:skill/content-sha256 skill*)
                (get-in proposal [:skill.proposal/source :skill :content-sha256])))
         (is (= "Use a concise tone." (second (clojure.string/split (:skill/content (db/get-skill :email-drafting))
-                                                                    #"\n\n"))))))))
+                                                                   #"\n\n"))))))))
 
 (deftest llm-review-applies-agent-authored-patch
   (let [saved    (skill/save-skill! {:id :agent-email-drafting

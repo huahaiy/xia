@@ -124,7 +124,7 @@
     (let [norm  (normalize spec)
           zone  (ZoneId/systemDefault)
           start (-> after .toInstant (.atZone zone) .toLocalDateTime
-                     (.plusMinutes 1) (.withSecond 0) (.withNano 0))
+                    (.plusMinutes 1) (.withSecond 0) (.withNano 0))
           limit (.plusYears start 1)
           {:keys [minute hour month]} norm]
       (loop [t start]

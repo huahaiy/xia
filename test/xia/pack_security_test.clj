@@ -11,8 +11,8 @@
 (defn- temp-paths
   []
   (let [dir (Files/createTempDirectory
-              "xia-pack-security-test"
-              (make-array FileAttribute 0))]
+             "xia-pack-security-test"
+             (make-array FileAttribute 0))]
     {:archive (str (.resolve dir "input.xia"))
      :dest (str (.resolve dir "expanded"))}))
 

@@ -173,8 +173,8 @@
                             :message (str "Paused after reaching the "
                                           (limits/budget-summary budget-status))}
                            ((:autonomy-status-fields deps) updated-autonomy-state
-                            iteration
-                            max-iterations)))
+                                                           iteration
+                                                           max-iterations)))
     final-text))
 
 (defn complete!
@@ -274,8 +274,8 @@
                                           max-iterations
                                           ")")}
                            ((:autonomy-status-fields deps) updated-autonomy-state
-                            iteration
-                            max-iterations)))
+                                                           iteration
+                                                           max-iterations)))
     final-text))
 
 (defn continue!

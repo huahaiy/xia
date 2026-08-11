@@ -143,9 +143,9 @@ Rules:
                       (when (:context episode)
                         (str "\nContext: " (:context episode))))
         response (llm/chat-simple
-                   [{:role "system" :content extraction-prompt}
-                    {:role "user"   :content user-msg}]
-                   :workload :memory-extraction)]
+                  [{:role "system" :content extraction-prompt}
+                   {:role "user"   :content user-msg}]
+                  :workload :memory-extraction)]
     (try
       (json/read-json response)
       (catch Exception e
@@ -184,18 +184,18 @@ Rules:
   [episodes]
   (let [user-msg (->> episodes
                       (map-indexed
-                        (fn [idx {:keys [timestamp type summary context]}]
-                          (str "Episode " idx
-                               "\nTimestamp: " (instant-string timestamp)
-                               "\nType: " (name type)
-                               "\nSummary: " summary
-                               (when context
-                                 (str "\nContext: " context)))))
+                       (fn [idx {:keys [timestamp type summary context]}]
+                         (str "Episode " idx
+                              "\nTimestamp: " (instant-string timestamp)
+                              "\nType: " (name type)
+                              "\nSummary: " summary
+                              (when context
+                                (str "\nContext: " context)))))
                       (str/join "\n\n---\n\n"))
         response (llm/chat-simple
-                   [{:role "system" :content importance-prompt}
-                    {:role "user"   :content user-msg}]
-                   :workload :memory-importance)]
+                  [{:role "system" :content importance-prompt}
+                   {:role "user"   :content user-msg}]
+                  :workload :memory-importance)]
     (let [parsed  (try
                     (json/read-json response)
                     (catch Exception e
@@ -208,24 +208,24 @@ Rules:
                         {:response parsed})))
       (let [scores-by-index
             (reduce
-              (fn [scores entry]
-                (let [idx (get entry "index")]
-                  (when-not (number? idx)
-                    (throw (ex-info "Episode importance entry is missing a numeric index"
-                                    {:entry entry})))
-                  (let [idx* (long idx)]
-                    (when-not (< -1 idx* (count episodes))
-                      (throw (ex-info "Episode importance index is out of range"
-                                      {:entry entry
-                                       :episode-count (count episodes)})))
-                    (when (contains? scores idx*)
-                      (throw (ex-info "Episode importance response contains duplicate indexes"
-                                      {:entry entry
-                                       :indexes (keys scores)})))
-                    (assoc scores idx*
-                           (normalize-importance (get entry "importance"))))))
-              {}
-              entries)]
+             (fn [scores entry]
+               (let [idx (get entry "index")]
+                 (when-not (number? idx)
+                   (throw (ex-info "Episode importance entry is missing a numeric index"
+                                   {:entry entry})))
+                 (let [idx* (long idx)]
+                   (when-not (< -1 idx* (count episodes))
+                     (throw (ex-info "Episode importance index is out of range"
+                                     {:entry entry
+                                      :episode-count (count episodes)})))
+                   (when (contains? scores idx*)
+                     (throw (ex-info "Episode importance response contains duplicate indexes"
+                                     {:entry entry
+                                      :indexes (keys scores)})))
+                   (assoc scores idx*
+                          (normalize-importance (get entry "importance"))))))
+             {}
+             entries)]
         (when-not (= (count scores-by-index) (count episodes))
           (throw (ex-info "Episode importance batch returned incomplete ratings"
                           {:expected (count episodes)
@@ -267,36 +267,36 @@ Rules:
   [{:keys [entities relations facts]}]
   (let [now (java.util.Date.)]
     (update-runtime-stats!
-      (fn [stats]
-        (-> stats
-            (update :attempted-episode-count inc)
-            (update :successful-episode-count inc)
-            (update :extracted-entity-count + (long entities))
-            (update :extracted-relation-count + (long relations))
-            (update :extracted-fact-count + (long facts))
-            (assoc :last-attempt-at now
-                   :last-success-at now
-                   :last-error nil
-                   :last-error-kind nil))))))
+     (fn [stats]
+       (-> stats
+           (update :attempted-episode-count inc)
+           (update :successful-episode-count inc)
+           (update :extracted-entity-count + (long entities))
+           (update :extracted-relation-count + (long relations))
+           (update :extracted-fact-count + (long facts))
+           (assoc :last-attempt-at now
+                  :last-success-at now
+                  :last-error nil
+                  :last-error-kind nil))))))
 
 (defn- record-failure!
   [error-kind error-message]
   (let [now        (java.util.Date.)
         error-kind (keyword (or error-kind :error))]
     (update-runtime-stats!
-      (fn [stats]
-        (cond-> (-> stats
-                    (update :attempted-episode-count inc)
-                    (update :failed-attempt-count inc)
-                    (assoc :last-attempt-at now
-                           :last-failure-at now
-                           :last-error (some-> error-message str)
-                           :last-error-kind error-kind))
-          (= :invalid-extraction error-kind)
-          (update :invalid-extraction-count inc)
+     (fn [stats]
+       (cond-> (-> stats
+                   (update :attempted-episode-count inc)
+                   (update :failed-attempt-count inc)
+                   (assoc :last-attempt-at now
+                          :last-failure-at now
+                          :last-error (some-> error-message str)
+                          :last-error-kind error-kind))
+         (= :invalid-extraction error-kind)
+         (update :invalid-extraction-count inc)
 
-          (= :exception error-kind)
-          (update :exception-count inc))))))
+         (= :exception error-kind)
+         (update :exception-count inc))))))
 
 (defn- failed-episode-summary
   []
@@ -529,8 +529,8 @@ Rules:
                              (assoc :persist? true)
                              (assoc :properties
                                     (merge-node-properties
-                                      (:properties current)
-                                      props))))))
+                                     (:properties current)
+                                     props))))))
               (doseq [fact facts]
                 (queue-fact-tx! fact-tx* facts* refreshed-facts
                                 node fact episode-eid now))))))
@@ -557,23 +557,23 @@ Rules:
                      (assoc :kg.edge/label (get rel "label")))))))
 
       (vec
-        (concat
-          (retract-episode-extractions-tx episode-eid)
-          (->> (vals @nodes*)
-               (filter :persist?)
-               (map (fn [{:keys [id name type properties new?]}]
-                      (cond-> {:kg.node/id         id
-                               :kg.node/name       name
-                               :kg.node/type       type
-                               :kg.node/updated-at now}
-                        new?       (assoc :kg.node/created-at now)
-                        properties (assoc :kg.node/properties properties)))))
-          @fact-tx*
-          @edge-tx*
-          (when mark-processed?
-            [[:db/add episode-eid :episode/processed? true]
-             [:db/add episode-eid :episode/importance
-              (float (normalize-importance importance))]]))))))
+       (concat
+        (retract-episode-extractions-tx episode-eid)
+        (->> (vals @nodes*)
+             (filter :persist?)
+             (map (fn [{:keys [id name type properties new?]}]
+                    (cond-> {:kg.node/id         id
+                             :kg.node/name       name
+                             :kg.node/type       type
+                             :kg.node/updated-at now}
+                      new?       (assoc :kg.node/created-at now)
+                      properties (assoc :kg.node/properties properties)))))
+        @fact-tx*
+        @edge-tx*
+        (when mark-processed?
+          [[:db/add episode-eid :episode/processed? true]
+           [:db/add episode-eid :episode/importance
+            (float (normalize-importance importance))]]))))))
 
 (defn- keywordize-props
   "Convert string-keyed JSON map from LLM to keyword-keyed map for idoc storage.
@@ -581,10 +581,10 @@ Rules:
   [m]
   (when (map? m)
     (reduce-kv
-      (fn [acc k v]
-        (assoc acc (keyword k) (if (map? v) (keywordize-props v) v)))
-      {}
-      m)))
+     (fn [acc k v]
+       (assoc acc (keyword k) (if (map? v) (keywordize-props v) v)))
+     {}
+     m)))
 
 (defn- merge-extraction!
   "Merge extracted knowledge into the knowledge graph.
@@ -620,8 +620,8 @@ Rules:
                                            :importance (or importance
                                                            default-episode-importance))
                 prune-plan (memory/processed-episode-prune-plan
-                             (java.util.Date.)
-                             {:exclude-eids [eid]})]
+                            (java.util.Date.)
+                            {:exclude-eids [eid]})]
             (db/transact! (into merge-tx (:tx-data prune-plan)))))
         (let [{:keys [entities relations facts] :as counts}
               (extraction-counts extraction)]
@@ -695,13 +695,13 @@ Rules:
                                            "]")))))
                         (clojure.string/join "\n"))
         response   (llm/chat-simple
-                     [{:role "system"
-                       :content "Summarize this conversation in 1-3 sentences.
+                    [{:role "system"
+                      :content "Summarize this conversation in 1-3 sentences.
                                 Focus on: what was discussed, what was decided,
                                 what the user wanted, and any personal information
                                 shared. Be factual and concise."}
-                      {:role "user" :content convo-text}]
-                     :workload :memory-summary)]
+                     {:role "user" :content convo-text}]
+                    :workload :memory-summary)]
     response))
 
 (defn reset-runtime!
@@ -736,7 +736,7 @@ Rules:
                       (first (:tasks @(background-consolidation-state-atom))))]
       (try
         @task
-      (catch Exception _
+        (catch Exception _
           nil))
       (recur))))
 
@@ -843,23 +843,23 @@ Rules:
             doc-names       (referenced-local-doc-names messages)
             artifact-names  (referenced-artifact-names messages)
             context    (not-empty
-                         (str/join "\n"
-                                   (cond-> []
-                                     topics
-                                     (conj (str "Topic: " topics))
-                                     (seq doc-names)
-                                     (conj (str "Local documents referenced: "
-                                                (str/join ", " doc-names)))
-                                     (seq artifact-names)
-                                     (conj (str "Artifacts referenced: "
-                                                (str/join ", " artifact-names))))))]
+                        (str/join "\n"
+                                  (cond-> []
+                                    topics
+                                    (conj (str "Topic: " topics))
+                                    (seq doc-names)
+                                    (conj (str "Local documents referenced: "
+                                               (str/join ", " doc-names)))
+                                    (seq artifact-names)
+                                    (conj (str "Artifacts referenced: "
+                                               (str/join ", " artifact-names))))))]
         (memory/record-episode!
-          {:type         :conversation
-           :summary      summary
-           :context      context
-           :channel      channel
-           :session-id   session-id
-           :participants (cfg/string-option :user/name nil)})
+         {:type         :conversation
+          :summary      summary
+          :context      context
+          :channel      channel
+          :session-id   session-id
+          :participants (cfg/string-option :user/name nil)})
         (case consolidation-mode
           :sync
           (consolidate-pending!)
@@ -932,9 +932,9 @@ Rules:
         updated-ms (.getTime updated-at)
         grace-period-ms (long (:grace-period-ms decay-config))]
     (util/long-max 0
-              (- as-of-ms
-                 updated-ms
-                 grace-period-ms))))
+                   (- as-of-ms
+                      updated-ms
+                      grace-period-ms))))
 
 (defn- effective-decayed-at
   [^java.util.Date updated-at ^java.util.Date last-decayed]
@@ -991,15 +991,15 @@ Rules:
                      [(compare ?decayed ?cutoff) ?cmp]
                      [(<= ?cmp 0)]]
                    cutoff)
-	             (mapv (fn [[eid confidence utility updated decayed]]
-	                     [eid
-	                      confidence
-	                      utility
-	                      updated
-	                      (effective-decayed-at updated decayed)]))
-	             (filterv (fn [[_ _ _ _ last-decayed]]
-	                        (>= (- (.getTime as-of) (.getTime ^java.util.Date last-decayed))
-	                            step-ms*))))]
+             (mapv (fn [[eid confidence utility updated decayed]]
+                     [eid
+                      confidence
+                      utility
+                      updated
+                      (effective-decayed-at updated decayed)]))
+             (filterv (fn [[_ _ _ _ last-decayed]]
+                        (>= (- (.getTime as-of) (.getTime ^java.util.Date last-decayed))
+                            step-ms*))))]
     (into (vec never-decayed) previously-decayed)))
 
 (defn- fact-bottomed-at-map
@@ -1062,32 +1062,32 @@ Rules:
          bottomed-map  (fact-bottomed-at-map (mapv first facts))
          {:keys [decay-tx]}
          (reduce
-           (fn [{:keys [decay-tx] :as acc} [eid confidence utility updated last-decayed]]
-             (let [decayed-conf   (next-confidence confidence utility updated last-decayed as-of decay-config)
-                   effective-conf (double (or decayed-conf confidence))
-                   bottomed-at    (inferred-bottomed-at {:kg.fact/bottomed-at (get bottomed-map eid)}
-                                                        confidence
-                                                        effective-conf
+          (fn [{:keys [decay-tx] :as acc} [eid confidence utility updated last-decayed]]
+            (let [decayed-conf   (next-confidence confidence utility updated last-decayed as-of decay-config)
+                  effective-conf (double (or decayed-conf confidence))
+                  bottomed-at    (inferred-bottomed-at {:kg.fact/bottomed-at (get bottomed-map eid)}
+                                                       confidence
+                                                       effective-conf
                                                        updated
                                                        last-decayed
                                                        as-of
                                                        decay-config)]
-               (let [existing-bottomed-at (get bottomed-map eid)
-                     new-tx (cond-> []
-                              (and decayed-conf
-                                   (> (abs-double (- effective-conf (double confidence)))
-                                      1.0e-9))
-                              (into [[:db/add eid :kg.fact/confidence (float effective-conf)]
-                                     [:db/add eid :kg.fact/decayed-at as-of]])
+              (let [existing-bottomed-at (get bottomed-map eid)
+                    new-tx (cond-> []
+                             (and decayed-conf
+                                  (> (abs-double (- effective-conf (double confidence)))
+                                     1.0e-9))
+                             (into [[:db/add eid :kg.fact/confidence (float effective-conf)]
+                                    [:db/add eid :kg.fact/decayed-at as-of]])
 
-                              (and bottomed-at
-                                   (not= bottomed-at existing-bottomed-at))
-                              (conj [:db/add eid :kg.fact/bottomed-at bottomed-at]))]
-                 (if (seq new-tx)
-                   (update acc :decay-tx into new-tx)
-                   acc))))
-           {:decay-tx []}
-           facts)]
+                             (and bottomed-at
+                                  (not= bottomed-at existing-bottomed-at))
+                             (conj [:db/add eid :kg.fact/bottomed-at bottomed-at]))]
+                (if (seq new-tx)
+                  (update acc :decay-tx into new-tx)
+                  acc))))
+          {:decay-tx []}
+          facts)]
      (when (seq decay-tx)
        (log/info "Updated confidence of" (count (filter #(= :kg.fact/confidence (nth % 2 nil)) decay-tx)) "stale fact fields")
        (db/transact! decay-tx))

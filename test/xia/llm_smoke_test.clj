@@ -7,7 +7,7 @@
   (fn [f]
     (llm/clear-runtime!)
     (let [context (runtime-context/make
-                    {:xia/llm-runtime {:runtime (llm/make-runtime)}})]
+                   {:xia/llm-runtime {:runtime (llm/make-runtime)}})]
       (try
         (runtime-context/with-runtime-context context f)
         (finally
@@ -83,9 +83,9 @@
       (is (= "ok"
              (llm/chat-simple [{"role" "user" "content" "two"}])))
       (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo
-            #"Rate limit exceeded for provider default"
-            (llm/chat-simple [{"role" "user" "content" "three"}])))
+           clojure.lang.ExceptionInfo
+           #"Rate limit exceeded for provider default"
+           (llm/chat-simple [{"role" "user" "content" "three"}])))
       (is (= [{:decision-type :provider-rate-limit-policy
                :allowed? false
                :mode :rate-limit
@@ -93,7 +93,7 @@
                :workload nil
                :limit 2}]
              (mapv #(select-keys %
-                                  [:decision-type :allowed? :mode :provider-id :workload :limit])
+                                 [:decision-type :allowed? :mode :provider-id :workload :limit])
                    @decisions)))
       (is (= 2 @request-count))
       (let [health (llm/provider-health-summary :default)]
@@ -141,9 +141,9 @@
       (is (= "ok"
              (llm/chat-simple [{"role" "user" "content" "two"}])))
       (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo
-            #"Rate limit exceeded for provider default"
-            (llm/chat-simple [{"role" "user" "content" "three"}])))
+           clojure.lang.ExceptionInfo
+           #"Rate limit exceeded for provider default"
+           (llm/chat-simple [{"role" "user" "content" "three"}])))
       (llm/reset-runtime!)
       (is (= :openai-a (:provider-id (llm/resolve-provider-selection {:workload :assistant}))))
       (is (= "ok"

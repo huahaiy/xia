@@ -117,18 +117,18 @@
                                             (limits/throw-if-exhausted!
                                              task-budget-state)))
               llm/*request-observer* (compose-request-limit-observer
-                                       outer-request-observer
-                                       (fn [request]
-                                         (limits/record-turn-request!
-                                          turn-budget-state
-                                          request)
-                                         (task-runtime/record-task-limit-request!
-                                          task-id
-                                          task-budget-state
-                                          request)
-                                         (limits/log-usage!
-                                          base-execution-context
-                                          request)))]
+                                      outer-request-observer
+                                      (fn [request]
+                                        (limits/record-turn-request!
+                                         turn-budget-state
+                                         request)
+                                        (task-runtime/record-task-limit-request!
+                                         task-id
+                                         task-budget-state
+                                         request)
+                                        (limits/log-usage!
+                                         base-execution-context
+                                         request)))]
       (loop [iteration 1
              fact-eids []
              explicit-fact-eids []

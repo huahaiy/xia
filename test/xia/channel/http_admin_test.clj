@@ -21,9 +21,9 @@
 (defn- temp-overlay-file
   [payload]
   (let [path (str (java.nio.file.Files/createTempFile
-                    "xia-admin-overlay"
-                    ".edn"
-                    (make-array java.nio.file.attribute.FileAttribute 0)))]
+                   "xia-admin-overlay"
+                   ".edn"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))]
     (spit (io/file path) (pr-str payload))
     path))
 
@@ -66,22 +66,22 @@
   (instance-supervisor/configure! {:enabled? true
                                    :command "/opt/xia/bin/xia"})
   (runtime-overlay/activate!
-    (overlay
-     {:snapshot/id "overlay-debug-v1"
-      :config-overrides {:browser/backend-default :remote
-                         :browser/remote-enabled? true
-                         :context/recent-history-message-limit 55
-                         :web/search-backend "searxng"}
-      :forced-keys #{:browser/backend-default}
-      :tx-data [{:llm.provider/id :platform-openai
-                 :llm.provider/name "OpenAI (Platform)"
-                 :llm.provider/default? true}
-                {:service/id :platform-search
-                 :service/name "Platform Search"}
-                {:oauth.account/id :platform-oauth
-                 :oauth.account/name "Platform OAuth"}
-                {:site-cred/id :platform-site
-                 :site-cred/name "Platform Site"}]}))
+   (overlay
+    {:snapshot/id "overlay-debug-v1"
+     :config-overrides {:browser/backend-default :remote
+                        :browser/remote-enabled? true
+                        :context/recent-history-message-limit 55
+                        :web/search-backend "searxng"}
+     :forced-keys #{:browser/backend-default}
+     :tx-data [{:llm.provider/id :platform-openai
+                :llm.provider/name "OpenAI (Platform)"
+                :llm.provider/default? true}
+               {:service/id :platform-search
+                :service/name "Platform Search"}
+               {:oauth.account/id :platform-oauth
+                :oauth.account/name "Platform OAuth"}
+               {:site-cred/id :platform-site
+                :site-cred/name "Platform Site"}]}))
   (try
     (db/set-config! :context/history-budget 777)
     (db/set-config! :web/search-brave-api-key "tenant-brave-key")
@@ -129,95 +129,95 @@
             oauth-by-id    (into {} (map (juxt #(get % "id") identity)) (get body "oauth_accounts"))
             site-by-id     (into {} (map (juxt #(get % "id") identity)) (get body "sites"))
             templates      (get body "oauth_provider_templates")]
-      (is (= 200 (:status response)))
-      (is (= db/current-schema-version
-             (get db-schema "schema_version")))
-      (is (= db/current-schema-version
-             (get db-schema "supported_schema_version")))
-      (is (= (db-schema/released-schema-version)
-             (get db-schema "released_schema_version")))
-      (is (= (db-schema/frozen-schema-versions)
-             (get db-schema "frozen_schema_versions")))
-      (is (= (str "xia/schema/" db/current-schema-version ".edn")
-             (get db-schema "schema_resource_path")))
-      (is (= (str "xia/schema/" db/current-schema-version ".edn")
-             (get db-schema "supported_schema_resource_path")))
-      (is (string? (get db-schema "schema_applied_at")))
-      (is (= (mapv (fn [{:keys [from-version to-version description]}]
-                     {"from_version" from-version
-                      "to_version" to-version
-                      "description" description})
-                   (db-schema/migration-registry-summary))
-             (get db-schema "available_migrations")))
-      (is (= []
-             (get db-schema "migration_history")))
-      (is (= true (get overlay "active")))
-      (is (= "overlay-debug-v1" (get overlay "snapshot_id")))
-      (is (= 1 (get overlay "overlay_schema_version")))
-      (is (= 1 (get overlay "source_overlay_schema_version")))
-      (is (= "tenant-test" (get overlay "tenant_id")))
-      (is (= "runtime-test" (get overlay "runtime_id")))
-      (is (= "platform-openai" (get overlay "provider_default_id")))
-      (is (= #{"browser/backend-default"
-               "browser/remote-enabled?"
-               "context/recent-history-message-limit"
-               "web/search-backend"}
-             (set (get overlay "config_override_keys"))))
-      (is (= ["browser/backend-default"]
-             (get overlay "forced_keys")))
-      (is (= 1 (get-in overlay ["entity_counts" "providers"])))
-      (is (= 1 (get-in overlay ["entity_counts" "services"])))
-      (is (= 1 (get-in overlay ["entity_counts" "oauth_accounts"])))
-      (is (= 1 (get-in overlay ["entity_counts" "site_creds"])))
-      (is (= "runtime-overlay" (get-in web-search ["sources" "backend"])))
-      (is (= "tenant-db" (get-in web-search ["sources" "brave_api_key"])))
-      (is (= "default" (get-in web-search ["sources" "searxng_url"])))
-      (is (= "" (get web-search "backend")))
-      (is (= "tenant-brave-key" (get web-search "brave_api_key")))
-      (is (= "" (get web-search "searxng_url")))
-      (is (= "searxng-json" (get-in web-search ["config_resolution" "backend" "effective_value"])))
-      (is (= "replace" (get-in web-search ["config_resolution" "backend" "overlay" "mode"])))
-      (is (= "duckduckgo-html" (get-in web-search ["config_resolution" "backend" "default_value"])))
-      (is (= "tenant-brave-key" (get-in web-search ["config_resolution" "brave_api_key" "tenant_value"])))
-      (is (= "tenant-db" (get-in web-search ["config_resolution" "brave_api_key" "source"])))
-      (is (= "default" (get-in web-search ["config_resolution" "searxng_url" "source"])))
-      (is (= "runtime-overlay" (get-in conversation ["sources" "recent_history_message_limit"])))
-      (is (= "tenant-db" (get-in conversation ["sources" "history_budget"])))
-      (is (= "replace" (get-in conversation ["config_resolution" "recent_history_message_limit" "overlay" "mode"])))
-      (is (= 55 (get-in conversation ["config_resolution" "recent_history_message_limit" "effective_value"])))
-      (is (= 24 (get-in conversation ["config_resolution" "recent_history_message_limit" "default_value"])))
-      (is (= "runtime-overlay" (get-in conversation ["config_resolution" "recent_history_message_limit" "source"])))
-      (is (= 777 (get-in conversation ["config_resolution" "history_budget" "tenant_value"])))
-      (is (= "tenant-db" (get-in conversation ["config_resolution" "history_budget" "source"])))
-      (is (= "default" (get-in backup ["sources" "retain_count"])))
-      (is (= 7 (get-in backup ["config_resolution" "retain_count" "default_value"])))
-      (is (= "default" (get-in backup ["config_resolution" "retain_count" "source"])))
-      (is (= "remote" (get browser-runtime "configured_default_backend")))
-      (is (= "remote" (get browser-runtime "selected_auto_backend")))
-      (is (= "runtime-overlay" (get-in browser-runtime ["sources" "configured_default_backend"])))
-      (is (= "runtime-overlay" (get-in browser-runtime ["sources" "remote_enabled"])))
-      (is (= "tenant-db" (get-in browser-runtime ["sources" "remote_base_url"])))
-      (is (= "tenant-db" (get-in browser-runtime ["sources" "playwright_headless"])))
-      (is (= "http://browser-runtime.internal" (get-in browser-runtime ["config_resolution" "remote" "base_url" "tenant_value"])))
-      (is (= false (get-in browser-runtime ["config_resolution" "playwright" "headless" "tenant_value"])))
-      (is (= "runtime-overlay" (get-in browser-runtime ["config_resolution" "remote" "enabled" "source"])))
-      (is (= true (get instance-mgmt "configured")))
-      (is (= true (get instance-mgmt "enabled")))
-      (is (= true (get instance-mgmt "host_capability_enabled")))
-      (is (= "/opt/xia/bin/xia" (get instance-mgmt "command")))
-      (is (= "tenant-db" (get-in instance-mgmt ["sources" "enabled"])))
-      (is (= true (get-in instance-mgmt ["config_resolution" "enabled" "tenant_value"])))
-      (is (= "runtime-overlay" (get-in provider-by-id ["platform-openai" "runtime_source"])))
-      (is (= "tenant-db" (get-in provider-by-id ["tenant-openai" "runtime_source"])))
-      (is (= "runtime-overlay" (get-in service-by-id ["platform-search" "runtime_source"])))
-      (is (= "tenant-db" (get-in service-by-id ["tenant-search" "runtime_source"])))
-      (is (= "runtime-overlay" (get-in oauth-by-id ["platform-oauth" "runtime_source"])))
-      (is (= "tenant-db" (get-in oauth-by-id ["tenant-oauth" "runtime_source"])))
-      (is (= "runtime-overlay" (get-in site-by-id ["platform-site" "runtime_source"])))
-      (is (= "tenant-db" (get-in site-by-id ["tenant-site" "runtime_source"])))
-      (is (= #{"github" "google" "gmail" "google-calendar"
-               "microsoft" "microsoft-mail" "microsoft-calendar"}
-             (set (map #(get % "id") templates))))))
+        (is (= 200 (:status response)))
+        (is (= db/current-schema-version
+               (get db-schema "schema_version")))
+        (is (= db/current-schema-version
+               (get db-schema "supported_schema_version")))
+        (is (= (db-schema/released-schema-version)
+               (get db-schema "released_schema_version")))
+        (is (= (db-schema/frozen-schema-versions)
+               (get db-schema "frozen_schema_versions")))
+        (is (= (str "xia/schema/" db/current-schema-version ".edn")
+               (get db-schema "schema_resource_path")))
+        (is (= (str "xia/schema/" db/current-schema-version ".edn")
+               (get db-schema "supported_schema_resource_path")))
+        (is (string? (get db-schema "schema_applied_at")))
+        (is (= (mapv (fn [{:keys [from-version to-version description]}]
+                       {"from_version" from-version
+                        "to_version" to-version
+                        "description" description})
+                     (db-schema/migration-registry-summary))
+               (get db-schema "available_migrations")))
+        (is (= []
+               (get db-schema "migration_history")))
+        (is (= true (get overlay "active")))
+        (is (= "overlay-debug-v1" (get overlay "snapshot_id")))
+        (is (= 1 (get overlay "overlay_schema_version")))
+        (is (= 1 (get overlay "source_overlay_schema_version")))
+        (is (= "tenant-test" (get overlay "tenant_id")))
+        (is (= "runtime-test" (get overlay "runtime_id")))
+        (is (= "platform-openai" (get overlay "provider_default_id")))
+        (is (= #{"browser/backend-default"
+                 "browser/remote-enabled?"
+                 "context/recent-history-message-limit"
+                 "web/search-backend"}
+               (set (get overlay "config_override_keys"))))
+        (is (= ["browser/backend-default"]
+               (get overlay "forced_keys")))
+        (is (= 1 (get-in overlay ["entity_counts" "providers"])))
+        (is (= 1 (get-in overlay ["entity_counts" "services"])))
+        (is (= 1 (get-in overlay ["entity_counts" "oauth_accounts"])))
+        (is (= 1 (get-in overlay ["entity_counts" "site_creds"])))
+        (is (= "runtime-overlay" (get-in web-search ["sources" "backend"])))
+        (is (= "tenant-db" (get-in web-search ["sources" "brave_api_key"])))
+        (is (= "default" (get-in web-search ["sources" "searxng_url"])))
+        (is (= "" (get web-search "backend")))
+        (is (= "tenant-brave-key" (get web-search "brave_api_key")))
+        (is (= "" (get web-search "searxng_url")))
+        (is (= "searxng-json" (get-in web-search ["config_resolution" "backend" "effective_value"])))
+        (is (= "replace" (get-in web-search ["config_resolution" "backend" "overlay" "mode"])))
+        (is (= "duckduckgo-html" (get-in web-search ["config_resolution" "backend" "default_value"])))
+        (is (= "tenant-brave-key" (get-in web-search ["config_resolution" "brave_api_key" "tenant_value"])))
+        (is (= "tenant-db" (get-in web-search ["config_resolution" "brave_api_key" "source"])))
+        (is (= "default" (get-in web-search ["config_resolution" "searxng_url" "source"])))
+        (is (= "runtime-overlay" (get-in conversation ["sources" "recent_history_message_limit"])))
+        (is (= "tenant-db" (get-in conversation ["sources" "history_budget"])))
+        (is (= "replace" (get-in conversation ["config_resolution" "recent_history_message_limit" "overlay" "mode"])))
+        (is (= 55 (get-in conversation ["config_resolution" "recent_history_message_limit" "effective_value"])))
+        (is (= 24 (get-in conversation ["config_resolution" "recent_history_message_limit" "default_value"])))
+        (is (= "runtime-overlay" (get-in conversation ["config_resolution" "recent_history_message_limit" "source"])))
+        (is (= 777 (get-in conversation ["config_resolution" "history_budget" "tenant_value"])))
+        (is (= "tenant-db" (get-in conversation ["config_resolution" "history_budget" "source"])))
+        (is (= "default" (get-in backup ["sources" "retain_count"])))
+        (is (= 7 (get-in backup ["config_resolution" "retain_count" "default_value"])))
+        (is (= "default" (get-in backup ["config_resolution" "retain_count" "source"])))
+        (is (= "remote" (get browser-runtime "configured_default_backend")))
+        (is (= "remote" (get browser-runtime "selected_auto_backend")))
+        (is (= "runtime-overlay" (get-in browser-runtime ["sources" "configured_default_backend"])))
+        (is (= "runtime-overlay" (get-in browser-runtime ["sources" "remote_enabled"])))
+        (is (= "tenant-db" (get-in browser-runtime ["sources" "remote_base_url"])))
+        (is (= "tenant-db" (get-in browser-runtime ["sources" "playwright_headless"])))
+        (is (= "http://browser-runtime.internal" (get-in browser-runtime ["config_resolution" "remote" "base_url" "tenant_value"])))
+        (is (= false (get-in browser-runtime ["config_resolution" "playwright" "headless" "tenant_value"])))
+        (is (= "runtime-overlay" (get-in browser-runtime ["config_resolution" "remote" "enabled" "source"])))
+        (is (= true (get instance-mgmt "configured")))
+        (is (= true (get instance-mgmt "enabled")))
+        (is (= true (get instance-mgmt "host_capability_enabled")))
+        (is (= "/opt/xia/bin/xia" (get instance-mgmt "command")))
+        (is (= "tenant-db" (get-in instance-mgmt ["sources" "enabled"])))
+        (is (= true (get-in instance-mgmt ["config_resolution" "enabled" "tenant_value"])))
+        (is (= "runtime-overlay" (get-in provider-by-id ["platform-openai" "runtime_source"])))
+        (is (= "tenant-db" (get-in provider-by-id ["tenant-openai" "runtime_source"])))
+        (is (= "runtime-overlay" (get-in service-by-id ["platform-search" "runtime_source"])))
+        (is (= "tenant-db" (get-in service-by-id ["tenant-search" "runtime_source"])))
+        (is (= "runtime-overlay" (get-in oauth-by-id ["platform-oauth" "runtime_source"])))
+        (is (= "tenant-db" (get-in oauth-by-id ["tenant-oauth" "runtime_source"])))
+        (is (= "runtime-overlay" (get-in site-by-id ["platform-site" "runtime_source"])))
+        (is (= "tenant-db" (get-in site-by-id ["tenant-site" "runtime_source"])))
+        (is (= #{"github" "google" "gmail" "google-calendar"
+                 "microsoft" "microsoft-mail" "microsoft-calendar"}
+               (set (map #(get % "id") templates))))))
     (finally
       (runtime-overlay/clear!)
       (instance-supervisor/configure! {:enabled? false}))))
@@ -275,9 +275,9 @@
 
 (deftest admin-config-shows-redacted-messaging-config-resolution
   (runtime-overlay/activate!
-    (overlay
-     {:snapshot/id "overlay-messaging-v1"
-      :config-overrides {:messaging/imessage-enabled? true}}))
+   (overlay
+    {:snapshot/id "overlay-messaging-v1"
+     :config-overrides {:messaging/imessage-enabled? true}}))
   (try
     (db/set-config! :messaging/slack-enabled? "true")
     (db/set-config! :secret/messaging-slack-bot-token "slack-secret-token")
@@ -303,9 +303,9 @@
 
 (deftest admin-config-shows-effective-tenant-winner-under-overlay-cap
   (runtime-overlay/activate!
-    (overlay
-     {:snapshot/id "overlay-cap-debug-v1"
-      :bounded-config {:context/history-budget 6000}}))
+   (overlay
+    {:snapshot/id "overlay-cap-debug-v1"
+     :bounded-config {:context/history-budget 6000}}))
   (try
     (db/set-config! :context/history-budget 5000)
     (let [response     (#'http-admin/handle-admin-config (admin-deps) {})
@@ -323,17 +323,17 @@
 
 (deftest admin-save-provider-rejects-overlay-managed-provider
   (runtime-overlay/activate!
-    (overlay
-     {:snapshot/id "overlay-locked-provider"
-      :tx-data [{:llm.provider/id :platform-openai
-                 :llm.provider/name "OpenAI (Platform)"}]}))
+   (overlay
+    {:snapshot/id "overlay-locked-provider"
+     :tx-data [{:llm.provider/id :platform-openai
+                :llm.provider/name "OpenAI (Platform)"}]}))
   (try
     (let [response (#'http-admin/handle-save-provider
-                     (admin-deps {"id" "platform-openai"
-                                  "name" "Mutated Provider"
-                                  "base_url" "https://platform.example"
-                                  "model" "gpt-5"})
-                     {})
+                    (admin-deps {"id" "platform-openai"
+                                 "name" "Mutated Provider"
+                                 "base_url" "https://platform.example"
+                                 "model" "gpt-5"})
+                    {})
           body     (response-json response)]
       (is (= 409 (:status response)))
       (is (= "entity is managed by the active runtime overlay"
@@ -347,16 +347,16 @@
 
 (deftest admin-save-provider-persists-model-budget-hints
   (let [response (#'http-admin/handle-save-provider
-                   (admin-deps {"id" "openai"
-                                "name" "OpenAI"
-                                "base_url" "https://api.example.com/v1"
-                                "model" "gpt-test"
-                                "context_window" "128000"
-                                "context_window_source" "metadata"
-                                "recommended_system_prompt_budget" "24000"
-                                "recommended_history_budget" "72000"
-                                "recommended_input_budget_cap" "96000"})
-                   {})
+                  (admin-deps {"id" "openai"
+                               "name" "OpenAI"
+                               "base_url" "https://api.example.com/v1"
+                               "model" "gpt-test"
+                               "context_window" "128000"
+                               "context_window_source" "metadata"
+                               "recommended_system_prompt_budget" "24000"
+                               "recommended_history_budget" "72000"
+                               "recommended_input_budget_cap" "96000"})
+                  {})
         body     (response-json response)
         provider (db/get-provider :openai)]
     (is (= 200 (:status response)))
@@ -373,9 +373,9 @@
 
 (deftest admin-runtime-overlay-reload-updates-current-file
   (let [overlay-file (temp-overlay-file
-                       (overlay
-                        {:snapshot/id "overlay-reload-v1"
-                         :config-overrides {:browser/backend-default :playwright}}))]
+                      (overlay
+                       {:snapshot/id "overlay-reload-v1"
+                        :config-overrides {:browser/backend-default :playwright}}))]
     (try
       (runtime-overlay/load-file! overlay-file)
       (spit (io/file overlay-file)
@@ -458,9 +458,9 @@
 
 (deftest admin-runtime-overlay-reload-preserves-current-overlay-on-invalid-update
   (let [overlay-file (temp-overlay-file
-                       (overlay
-                        {:snapshot/id "overlay-stable-v1"
-                         :config-overrides {:browser/backend-default :remote}}))]
+                      (overlay
+                       {:snapshot/id "overlay-stable-v1"
+                        :config-overrides {:browser/backend-default :remote}}))]
     (try
       (runtime-overlay/load-file! overlay-file)
       (spit (io/file overlay-file)

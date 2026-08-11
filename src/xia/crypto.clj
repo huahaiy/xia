@@ -81,8 +81,8 @@
 (defn- set-owner-only-perms! [^Path path]
   (try
     (set-posix-file-permissions!
-      path
-      (PosixFilePermissions/fromString "rw-------"))
+     path
+     (PosixFilePermissions/fromString "rw-------"))
     (catch UnsupportedOperationException _
       (warn-unset-secret-file-perms! path
                                      "POSIX file permissions are unavailable on this platform/filesystem"))
@@ -142,20 +142,20 @@
     (when-not allow-insecure-key-file?
       (when (file-under-db-path? db-path file-path)
         (throw (ex-info
-                 (str label " must not be stored inside the DB path unless "
-                      ":allow-insecure-key-file? is true")
-                 {:path file-path
-                  :db-path db-path
-                  :reason :inside-db-path})))
+                (str label " must not be stored inside the DB path unless "
+                     ":allow-insecure-key-file? is true")
+                {:path file-path
+                 :db-path db-path
+                 :reason :inside-db-path})))
       (let [{:keys [status permissions]} (secret-file-permission-state path)]
         (case status
           :insecure
           (throw (ex-info
-                   (str label " must use owner-only permissions unless "
-                        ":allow-insecure-key-file? is true")
-                   {:path file-path
-                    :permissions permissions
-                    :reason :insecure-permissions}))
+                  (str label " must use owner-only permissions unless "
+                       ":allow-insecure-key-file? is true")
+                  {:path file-path
+                   :permissions permissions
+                   :reason :insecure-permissions}))
 
           :unverifiable
           (warn-unverifiable-secret-file-perms! label path)
@@ -272,62 +272,62 @@
          provider-ctx         {:db-path   db-path
                                :salt-path salt-path
                                :new?      (not salt-exists?)}]
-    (cond
-      (some? key-file)
-      {:key (read-key-file db-path key-file allow-insecure-key-file?)
-       :source :key-file
-       :path key-file}
+     (cond
+       (some? key-file)
+       {:key (read-key-file db-path key-file allow-insecure-key-file?)
+        :source :key-file
+        :path key-file}
 
-      (some? passphrase)
-      (passphrase-key db-path passphrase :passphrase)
+       (some? passphrase)
+       (passphrase-key db-path passphrase :passphrase)
 
-      (some? passphrase-file)
-      (assoc (passphrase-key db-path (read-passphrase-file db-path
-                                                           passphrase-file
-                                                           allow-insecure-key-file?)
-                             :passphrase-file)
-             :path passphrase-file)
+       (some? passphrase-file)
+       (assoc (passphrase-key db-path (read-passphrase-file db-path
+                                                            passphrase-file
+                                                            allow-insecure-key-file?)
+                              :passphrase-file)
+              :path passphrase-file)
 
-      (seq env-key)
-      {:key (decode-key env-key)
-       :source :env}
+       (seq env-key)
+       {:key (decode-key env-key)
+        :source :env}
 
-      (seq env-key-file)
-      {:key (read-key-file db-path env-key-file allow-insecure-key-file?)
-       :source :env-file
-       :path env-key-file}
+       (seq env-key-file)
+       {:key (read-key-file db-path env-key-file allow-insecure-key-file?)
+        :source :env-file
+        :path env-key-file}
 
-      (seq env-passphrase)
-      (passphrase-key db-path env-passphrase :env-passphrase)
+       (seq env-passphrase)
+       (passphrase-key db-path env-passphrase :env-passphrase)
 
-      (seq env-passphrase-file)
-      (assoc (passphrase-key db-path (read-passphrase-file db-path
-                                                           env-passphrase-file
-                                                           allow-insecure-key-file?)
-                             :env-passphrase-file)
-             :path env-passphrase-file)
+       (seq env-passphrase-file)
+       (assoc (passphrase-key db-path (read-passphrase-file db-path
+                                                            env-passphrase-file
+                                                            allow-insecure-key-file?)
+                              :env-passphrase-file)
+              :path env-passphrase-file)
 
-      :else
-      (if-let [provider-passphrase (provider-passphrase passphrase-provider provider-ctx)]
-        (passphrase-key db-path provider-passphrase :prompt-passphrase)
-        (throw (ex-info "No master key or passphrase available"
-                        {:supported-sources [:key-file
-                                             :passphrase
-                                             :passphrase-file
-                                             :XIA_MASTER_KEY
-                                             :XIA_MASTER_KEY_FILE
-                                             :XIA_MASTER_PASSPHRASE
-                                             :XIA_MASTER_PASSPHRASE_FILE
-                                             :passphrase-provider]
-                         :db-path db-path})))))))
+       :else
+       (if-let [provider-passphrase (provider-passphrase passphrase-provider provider-ctx)]
+         (passphrase-key db-path provider-passphrase :prompt-passphrase)
+         (throw (ex-info "No master key or passphrase available"
+                         {:supported-sources [:key-file
+                                              :passphrase
+                                              :passphrase-file
+                                              :XIA_MASTER_KEY
+                                              :XIA_MASTER_KEY_FILE
+                                              :XIA_MASTER_PASSPHRASE
+                                              :XIA_MASTER_PASSPHRASE_FILE
+                                              :passphrase-provider]
+                          :db-path db-path})))))))
 
 (defn configure!
   "Load or create the encryption key for the given DB path."
   ([db-path] (configure! db-path nil))
   ([db-path opts]
    (let [{:keys [key] :as resolved} (resolve-key db-path opts)]
-    (reset! key-state (assoc resolved :db-path db-path))
-    key)))
+     (reset! key-state (assoc resolved :db-path db-path))
+     key)))
 
 (defn current-key-source []
   (select-keys @key-state [:source :path :salt-path :db-path]))

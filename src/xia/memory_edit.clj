@@ -260,7 +260,7 @@
                                      :source-eid  (:source-eid candidate)})
                   (let [new-fact (first (filter #(= (normalize-text corrected-fact*)
                                                     (normalize-text (:content %)))
-                                               (memory/node-facts-with-eids (:node-eid candidate))))]
+                                                (memory/node-facts-with-eids (:node-eid candidate))))]
                     {:status         "corrected"
                      :entity_name    (:node-name candidate)
                      :retracted_fact (candidate->summary candidate)

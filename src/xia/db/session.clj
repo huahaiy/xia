@@ -51,7 +51,7 @@
   [deps session-id]
   (ffirst (q* deps '[:find ?e :in $ ?sid
                      :where [?e :session/id ?sid]]
-             session-id)))
+              session-id)))
 
 (defn- empty->nil
   [value]
@@ -127,7 +127,7 @@
   [deps {:keys [session-id topics slots episode-refs local-doc-refs autonomy-state]}]
   (let [session-eid* (ffirst (q* deps '[:find ?e :in $ ?sid
                                         :where [?e :session/id ?sid]]
-                                  session-id))]
+                                 session-id))]
     (when-not session-eid*
       (throw (ex-info "Cannot save WM snapshot: session not found"
                       {:session-id session-id})))
@@ -140,54 +140,54 @@
                         (assoc :wm/autonomy-state (json/write-json-str autonomy-state)))
           old-wm-eids (mapv first (q* deps '[:find ?e :in $ ?s
                                              :where [?e :wm/session ?s]]
-                                       session-eid*))
+                                      session-eid*))
           retracts    (mapv (fn [eid] [:db/retractEntity eid]) old-wm-eids)]
       (transact!* deps (into retracts [wm-tx]))
       (let [wm-eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :wm/id ?id]] wm-id))]
         (when (seq slots)
           (transact!*
-            deps
-            (mapv (fn [[_node-eid slot]]
-                    {:wm.slot/id        (random-uuid)
-                     :wm.slot/wm        wm-eid
-                     :wm.slot/node      (:node-eid slot)
-                     :wm.slot/relevance (float (:relevance slot))
-                     :wm.slot/pinned?   (boolean (:pinned? slot))
-                     :wm.slot/added-at  (java.util.Date.)})
-                  slots)))
+           deps
+           (mapv (fn [[_node-eid slot]]
+                   {:wm.slot/id        (random-uuid)
+                    :wm.slot/wm        wm-eid
+                    :wm.slot/node      (:node-eid slot)
+                    :wm.slot/relevance (float (:relevance slot))
+                    :wm.slot/pinned?   (boolean (:pinned? slot))
+                    :wm.slot/added-at  (java.util.Date.)})
+                 slots)))
         (when (seq episode-refs)
           (transact!*
-            deps
-            (mapv (fn [eref]
-                    {:wm.episode-ref/id        (random-uuid)
-                     :wm.episode-ref/wm        wm-eid
-                     :wm.episode-ref/episode   (:episode-eid eref)
-                     :wm.episode-ref/relevance (float (:relevance eref))})
-                  episode-refs)))
+           deps
+           (mapv (fn [eref]
+                   {:wm.episode-ref/id        (random-uuid)
+                    :wm.episode-ref/wm        wm-eid
+                    :wm.episode-ref/episode   (:episode-eid eref)
+                    :wm.episode-ref/relevance (float (:relevance eref))})
+                 episode-refs)))
         (when (seq local-doc-refs)
           (transact!*
-            deps
-            (keep (fn [dref]
-                    (when-let [doc-eid (ffirst
-                                         (q* deps '[:find ?e :in $ ?id
-                                                    :where [?e :local.doc/id ?id]]
-                                             (:doc-id dref)))]
-                      {:wm.local-doc-ref/id        (random-uuid)
-                       :wm.local-doc-ref/wm        wm-eid
-                       :wm.local-doc-ref/doc       doc-eid
-                       :wm.local-doc-ref/relevance (float (:relevance dref))}))
-                  local-doc-refs))))
+           deps
+           (keep (fn [dref]
+                   (when-let [doc-eid (ffirst
+                                       (q* deps '[:find ?e :in $ ?id
+                                                  :where [?e :local.doc/id ?id]]
+                                           (:doc-id dref)))]
+                     {:wm.local-doc-ref/id        (random-uuid)
+                      :wm.local-doc-ref/wm        wm-eid
+                      :wm.local-doc-ref/doc       doc-eid
+                      :wm.local-doc-ref/relevance (float (:relevance dref))}))
+                 local-doc-refs))))
       wm-id)))
 
 (defn load-wm-snapshot
   [deps session-id]
   (let [session-eid* (ffirst (q* deps '[:find ?e :in $ ?sid
                                         :where [?e :session/id ?sid]]
-                                  session-id))]
+                                 session-id))]
     (when session-eid*
       (when-let [wm-eid (ffirst (q* deps '[:find ?e :in $ ?s
                                            :where [?e :wm/session ?s]]
-                                     session-eid*))]
+                                    session-eid*))]
         (let [wm-entity (into {} (d/entity (d/db (conn* deps)) wm-eid))
               node-facts (fn [node-eid]
                            (->> (q* deps '[:find ?fact ?content ?confidence ?utility ?updated
@@ -198,7 +198,7 @@
                                            [?fact :kg.fact/confidence ?confidence]
                                            [(get-else $ ?fact :kg.fact/utility 0.5) ?utility]
                                            [?fact :kg.fact/updated-at ?updated]]
-                                     node-eid)
+                                    node-eid)
                                 (sort-by #(nth % 4) #(compare %2 %1))
                                 (mapv (fn [[fact-eid content confidence utility _]]
                                         {:eid fact-eid
@@ -214,7 +214,7 @@
                                                      [?to :kg.node/name ?to-name]
                                                      [?edge :kg.edge/type ?type]
                                                      [(get-else $ ?edge :kg.edge/label "") ?label]]
-                                            node-eid)
+                                              node-eid)
                                  incoming (q* deps '[:find ?edge ?from-name ?type ?label
                                                      :in $ ?to
                                                      :where
@@ -223,7 +223,7 @@
                                                      [?from :kg.node/name ?from-name]
                                                      [?edge :kg.edge/type ?type]
                                                      [(get-else $ ?edge :kg.edge/label "") ?label]]
-                                            node-eid)]
+                                              node-eid)]
                              {:outgoing (mapv (fn [[_ name type label]]
                                                 {:target name
                                                  :type type
@@ -265,7 +265,7 @@
                                            [?ref :wm.episode-ref/relevance ?relevance]
                                            [?episode :episode/summary ?summary]
                                            [?episode :episode/timestamp ?timestamp]]
-                                     wm-eid)
+                                    wm-eid)
                                 (mapv (fn [[episode-eid summary timestamp relevance]]
                                         {:episode-eid episode-eid
                                          :summary summary
@@ -284,7 +284,7 @@
                                              [(get-else $ ?doc :local.doc/media-type "") ?media-type]
                                              [(get-else $ ?doc :local.doc/summary "") ?summary]
                                              [(get-else $ ?doc :local.doc/preview "") ?preview]]
-                                       wm-eid)
+                                      wm-eid)
                                   (mapv (fn [[doc-id name media-type summary preview relevance]]
                                           {:doc-id doc-id
                                            :name (empty->nil name)
@@ -309,16 +309,16 @@
 (defn latest-session-episode
   [deps]
   (first
-    (sort-by :timestamp #(compare %2 %1)
-             (map (fn [[summary ctx ts]]
-                    {:summary   summary
-                     :context   (when-not (= "" ctx) ctx)
-                     :timestamp ts})
-                  (q* deps '[:find ?summary ?ctx ?ts
-                              :where
-                              [?e :episode/summary ?summary]
-                              [?e :episode/timestamp ?ts]
-                              [(get-else $ ?e :episode/context "") ?ctx]])))))
+   (sort-by :timestamp #(compare %2 %1)
+            (map (fn [[summary ctx ts]]
+                   {:summary   summary
+                    :context   (when-not (= "" ctx) ctx)
+                    :timestamp ts})
+                 (q* deps '[:find ?summary ?ctx ?ts
+                            :where
+                            [?e :episode/summary ?summary]
+                            [?e :episode/timestamp ?ts]
+                            [(get-else $ ?e :episode/context "") ?ctx]])))))
 
 (defn ensure-user-profile!
   [deps {:keys [id key name summary preferences]}]
@@ -332,24 +332,24 @@
     (if profile-eid
       (do
         (transact!*
-          deps
-          [(cond-> {:db/id profile-eid
-                    :user.profile/updated-at timestamp}
-             (some? key) (assoc :user.profile/key key)
-             (some? name) (assoc :user.profile/name name)
-             (some? summary) (assoc :user.profile/summary summary)
-             (some? preferences) (assoc :user.profile/preferences preferences))])
+         deps
+         [(cond-> {:db/id profile-eid
+                   :user.profile/updated-at timestamp}
+            (some? key) (assoc :user.profile/key key)
+            (some? name) (assoc :user.profile/name name)
+            (some? summary) (assoc :user.profile/summary summary)
+            (some? preferences) (assoc :user.profile/preferences preferences))])
         profile-id)
       (do
         (transact!*
-          deps
-          [(cond-> {:user.profile/id profile-id
-                    :user.profile/created-at timestamp
-                    :user.profile/updated-at timestamp}
-             (some? key) (assoc :user.profile/key key)
-             (some? name) (assoc :user.profile/name name)
-             (some? summary) (assoc :user.profile/summary summary)
-             (some? preferences) (assoc :user.profile/preferences preferences))])
+         deps
+         [(cond-> {:user.profile/id profile-id
+                   :user.profile/created-at timestamp
+                   :user.profile/updated-at timestamp}
+            (some? key) (assoc :user.profile/key key)
+            (some? name) (assoc :user.profile/name name)
+            (some? summary) (assoc :user.profile/summary summary)
+            (some? preferences) (assoc :user.profile/preferences preferences))])
         profile-id))))
 
 (defn get-user-profile
@@ -371,22 +371,22 @@
     (if workspace-eid*
       (do
         (transact!*
-          deps
-          [(cond-> {:db/id workspace-eid*
-                    :workspace/updated-at timestamp}
-             (some? name) (assoc :workspace/name name)
-             (some? preferences) (assoc :workspace/preferences preferences)
-             (some? constraints) (assoc :workspace/constraints constraints))])
+         deps
+         [(cond-> {:db/id workspace-eid*
+                   :workspace/updated-at timestamp}
+            (some? name) (assoc :workspace/name name)
+            (some? preferences) (assoc :workspace/preferences preferences)
+            (some? constraints) (assoc :workspace/constraints constraints))])
         workspace-id)
       (do
         (transact!*
-          deps
-          [(cond-> {:workspace/id workspace-id
-                    :workspace/created-at timestamp
-                    :workspace/updated-at timestamp}
-             (some? name) (assoc :workspace/name name)
-             (some? preferences) (assoc :workspace/preferences preferences)
-             (some? constraints) (assoc :workspace/constraints constraints))])
+         deps
+         [(cond-> {:workspace/id workspace-id
+                   :workspace/created-at timestamp
+                   :workspace/updated-at timestamp}
+            (some? name) (assoc :workspace/name name)
+            (some? preferences) (assoc :workspace/preferences preferences)
+            (some? constraints) (assoc :workspace/constraints constraints))])
         workspace-id))))
 
 (defn get-workspace
@@ -407,24 +407,24 @@
         workspace-eid* (when workspace-id
                          (workspace-eid deps (ensure-workspace! deps {:id workspace-id})))]
     (transact!*
-      deps
-      [(cond-> {:session/id      id
-                :session/channel channel
-                :session/worker? worker?
-                :session/active? active?}
-         user-profile-eid* (assoc :session/user-profile user-profile-eid*)
-         workspace-eid* (assoc :session/workspace workspace-eid*)
-         parent-session-id (assoc :session/parent-id parent-session-id)
-         (some? label) (assoc :session/label label)
-         (some? external-key) (assoc :session/external-key external-key)
-         (some? external-meta) (assoc :session/external-meta external-meta))])
+     deps
+     [(cond-> {:session/id      id
+               :session/channel channel
+               :session/worker? worker?
+               :session/active? active?}
+        user-profile-eid* (assoc :session/user-profile user-profile-eid*)
+        workspace-eid* (assoc :session/workspace workspace-eid*)
+        parent-session-id (assoc :session/parent-id parent-session-id)
+        (some? label) (assoc :session/label label)
+        (some? external-key) (assoc :session/external-key external-key)
+        (some? external-meta) (assoc :session/external-meta external-meta))])
     id))
 
 (defn find-session-by-external-key
   [deps external-key]
   (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?external-key
                                     :where [?e :session/external-key ?external-key]]
-                              external-key))]
+                             external-key))]
     (let [entity-map (raw-entity* deps eid)]
       {:id            (:session/id entity-map)
        :channel       (:session/channel entity-map)
@@ -479,10 +479,10 @@
                                       :session/user-profile
                                       (user-profile-eid deps current-profile-id)]))]
       (transact!*
-        deps
-        (into retracts
-              [(cond-> {:db/id eid}
-                 profile-eid* (assoc :session/user-profile profile-eid*))]))
+       deps
+       (into retracts
+             [(cond-> {:db/id eid}
+                profile-eid* (assoc :session/user-profile profile-eid*))]))
       true)))
 
 (defn save-session-workspace!
@@ -498,10 +498,10 @@
                                         :session/workspace
                                         (workspace-eid deps current-workspace-id)]))]
       (transact!*
-        deps
-        (into retracts
-              [(cond-> {:db/id eid}
-                 workspace-eid* (assoc :session/workspace workspace-eid*))]))
+       deps
+       (into retracts
+             [(cond-> {:db/id eid}
+                workspace-eid* (assoc :session/workspace workspace-eid*))]))
       true)))
 
 (defn list-sessions
@@ -535,7 +535,7 @@
   [deps session-id active?]
   (when-let [session-eid* (ffirst (q* deps '[:find ?e :in $ ?sid
                                              :where [?e :session/id ?sid]]
-                                       session-id))]
+                                      session-id))]
     (transact!* deps [{:db/id            session-eid*
                        :session/active? (boolean active?)}])
     true))
@@ -598,8 +598,8 @@
                                       [?session :session/id ?sid]
                                       [?doc :local.doc/session ?session]
                                       [?doc :local.doc/id ?doc-id]]
-                                session-id
-                                doc-ids)
+                               session-id
+                               doc-ids)
                            (map first)
                            set)]
         (filterv valid-ids doc-ids)))))
@@ -618,8 +618,8 @@
                                       [?session :session/id ?sid]
                                       [?artifact :artifact/session ?session]
                                       [?artifact :artifact/id ?artifact-id]]
-                                session-id
-                                artifact-ids*)
+                               session-id
+                               artifact-ids*)
                            (map first)
                            set)]
         (filterv valid-ids artifact-ids*)))))
@@ -634,7 +634,7 @@
                   [?doc :local.doc/id ?doc-id]
                   [(get-else $ ?doc :local.doc/name "") ?name]
                   [(get-else $ ?doc :local.doc/status :ready) ?status]]
-            message-eid)
+           message-eid)
        (mapv (fn [[doc-id name status]]
                {:id     doc-id
                 :name   (empty->nil name)
@@ -651,7 +651,7 @@
                   [(get-else $ ?artifact :artifact/name "") ?name]
                   [(get-else $ ?artifact :artifact/title "") ?title]
                   [(get-else $ ?artifact :artifact/status :ready) ?status]]
-            message-eid)
+           message-eid)
        (mapv (fn [[artifact-id name title status]]
                {:id     artifact-id
                 :name   (empty->nil name)
@@ -682,36 +682,36 @@
         doc-ids        (valid-session-local-doc-ids deps session-id local-doc-ids)
         artifact-ids*  (valid-session-artifact-ids deps session-id artifact-ids)]
     (transact!*
-      deps
-      (into
-        [(cond-> {:message/id             message-id
-                  :message/session        session-eid*
-                  :message/role           role
-                  :message/content        (or content "")
-                  :message/token-estimate (message-token-estimate {:role role
-                                                                   :content content
-                                                                   :tool-result tool-result})}
-           tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
-           (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
-           tool-id (assoc :message/tool-id tool-id)
-           tool-call-id (assoc :message/tool-call-id tool-call-id)
-           tool-name (assoc :message/tool-name tool-name)
-           (some? external-sender) (assoc :message/external-sender external-sender)
-           llm-call-id (assoc :message/llm-call-id llm-call-id)
-           provider-id (assoc :message/provider-id provider-id)
-           model (assoc :message/model model)
-           workload (assoc :message/workload workload))]
-        (concat
-          (map (fn [doc-id]
-                 {:message.local-doc-ref/id      (random-uuid)
-                  :message.local-doc-ref/message [:message/id message-id]
-                  :message.local-doc-ref/doc     [:local.doc/id doc-id]})
-               doc-ids)
-          (map (fn [artifact-id]
-                 {:message.artifact-ref/id       (random-uuid)
-                  :message.artifact-ref/message  [:message/id message-id]
-                  :message.artifact-ref/artifact [:artifact/id artifact-id]})
-               artifact-ids*))))
+     deps
+     (into
+      [(cond-> {:message/id             message-id
+                :message/session        session-eid*
+                :message/role           role
+                :message/content        (or content "")
+                :message/token-estimate (message-token-estimate {:role role
+                                                                 :content content
+                                                                 :tool-result tool-result})}
+         tool-calls (assoc :message/tool-calls (tool-calls-doc tool-calls))
+         (some? tool-result) (assoc :message/tool-result (tool-result-doc tool-result))
+         tool-id (assoc :message/tool-id tool-id)
+         tool-call-id (assoc :message/tool-call-id tool-call-id)
+         tool-name (assoc :message/tool-name tool-name)
+         (some? external-sender) (assoc :message/external-sender external-sender)
+         llm-call-id (assoc :message/llm-call-id llm-call-id)
+         provider-id (assoc :message/provider-id provider-id)
+         model (assoc :message/model model)
+         workload (assoc :message/workload workload))]
+      (concat
+       (map (fn [doc-id]
+              {:message.local-doc-ref/id      (random-uuid)
+               :message.local-doc-ref/message [:message/id message-id]
+               :message.local-doc-ref/doc     [:local.doc/id doc-id]})
+            doc-ids)
+       (map (fn [artifact-id]
+              {:message.artifact-ref/id       (random-uuid)
+               :message.artifact-ref/message  [:message/id message-id]
+               :message.artifact-ref/artifact [:artifact/id artifact-id]})
+            artifact-ids*))))
     message-id))
 
 (defn- empty->nil [s]
@@ -767,7 +767,7 @@
                   [?m :message/id ?mid]
                   [(get-else $ ?m :db/created-at 0) ?dca]
                   [(get-else $ ?m :message/token-estimate 0) ?tokens]]
-            session-id)
+           session-id)
        (map (fn [[eid mid created-at token-estimate]]
               {:eid eid
                :id mid
@@ -783,7 +783,7 @@
                                      :where
                                      [?s :session/id ?sid]
                                      [?m :message/session ?s]]
-                               session-id))]
+                              session-id))]
     (long count*)
     0))
 
@@ -952,7 +952,7 @@
                           [?e :llm.log/id _]
                           [?e :llm.log/created-at ?t]
                           [(< ?t ?cutoff)]]
-                  cutoff)]
+                   cutoff)]
     (when (seq old)
       (transact!* deps (mapv (fn [[eid]] [:db/retractEntity eid]) old)))))
 
@@ -986,7 +986,7 @@
                   [?m :message/id ?mid]
                   [?m :message/role ?role]
                   [(get-else $ ?m :db/created-at 0) ?created-at]]
-            call-id)
+           call-id)
        (sort-by (juxt #(nth % 3) first))
        (mapv (fn [[eid message-id role created-at]]
                (let [entity-map (raw-entity* deps eid)]
@@ -1164,7 +1164,7 @@
                    :where
                    [?e :audit.event/session-id ?sid]
                    [?e :audit.event/created-at ?created-at]]
-             session-id)
+            session-id)
         (sort-by (juxt second first))
         (take-last limit)
         (mapv (fn [[eid _]]

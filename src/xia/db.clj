@@ -304,7 +304,7 @@
                         (locking provider*
                           (or @provider*
                               (let [managed-spec (model-assets/ensure-managed-model!
-                                                   provider-spec)
+                                                  provider-spec)
                                     provider (d/new-llm-provider managed-spec)]
                                 (reset! provider* provider)
                                 provider)))))]
@@ -500,29 +500,29 @@
 (defn current-db-tx
   []
   (read-when-connected
-    #(some-> (d/db (conn))
-             :max-tx
-             long)))
+   #(some-> (d/db (conn))
+            :max-tx
+            long)))
 
 (defn schema-version
   []
   (read-when-connected
-    #(raw-schema-version (conn))))
+   #(raw-schema-version (conn))))
 
 (defn schema-resource-path
   []
   (read-when-connected
-    #(db-schema/stored-schema-resource-path (conn))))
+   #(db-schema/stored-schema-resource-path (conn))))
 
 (defn schema-applied-at
   []
   (read-when-connected
-    #(db-schema/stored-schema-applied-at (conn))))
+   #(db-schema/stored-schema-applied-at (conn))))
 
 (defn schema-migration-history
   []
   (read-when-connected []
-    #(db-schema/migration-history-value (conn))))
+                       #(db-schema/migration-history-value (conn))))
 
 (defn close! []
   (let [phase    (runtime-state/phase)
@@ -659,13 +659,13 @@
 
 (defn- encrypt-secret-attrs [record]
   (reduce-kv
-    (fn [acc k v]
-      (assoc acc k
-             (if (sensitive/encrypted-attr? k)
-               (crypto/encrypt v (attr-aad k))
-               v)))
-    record
-    record))
+   (fn [acc k v]
+     (assoc acc k
+            (if (sensitive/encrypted-attr? k)
+              (crypto/encrypt v (attr-aad k))
+              v)))
+   record
+   record))
 
 (defn- coerce-tx-item
   [item]
@@ -754,10 +754,10 @@
 (defn- db-config-value
   [k]
   (read-when-connected
-    #(let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
-       (if (sensitive/secret-config-key? k)
-         (some-> value (crypto/decrypt (config-aad k)))
-         value))))
+   #(let [value (ffirst (q '[:find ?v :in $ ?k :where [?e :config/key ?k] [?e :config/value ?v]] k))]
+      (if (sensitive/secret-config-key? k)
+        (some-> value (crypto/decrypt (config-aad k)))
+        value))))
 
 (defn- ensure-config-mutable!
   [k]
@@ -824,7 +824,7 @@
 
 (defn get-identity [k]
   (read-when-connected
-    #(ffirst (q '[:find ?v :in $ ?k :where [?e :identity/key ?k] [?e :identity/value ?v]] k))))
+   #(ffirst (q '[:find ?v :in $ ?k :where [?e :identity/key ?k] [?e :identity/value ?v]] k))))
 
 (def ^:private template-identity-keys
   [:name :role :description :personality :guidelines])
@@ -920,15 +920,15 @@
 (defn- decrypt-template-entity
   [entity-map skipped-secret-count]
   (reduce-kv
-    (fn [acc k v]
-      (if (keyword? k)
-        (let [value* (decrypt-template-secret-attr k v skipped-secret-count)]
-          (if (nil? value*)
-            acc
-            (assoc acc k value*)))
-        (assoc acc k v)))
-    {}
-    entity-map))
+   (fn [acc k v]
+     (if (keyword? k)
+       (let [value* (decrypt-template-secret-attr k v skipped-secret-count)]
+         (if (nil? value*)
+           acc
+           (assoc acc k value*)))
+       (assoc acc k v)))
+   {}
+   entity-map))
 
 (defn- template-provider-record
   [provider]
@@ -1070,33 +1070,33 @@
   [source-conn skipped-secret-count]
   (let [source-db  (d/db source-conn)
         identities (reduce
-                     (fn [acc identity-key]
-                       (if-let [value (ffirst (d/q '[:find ?v :in $ ?k
-                                                     :where
-                                                     [?e :identity/key ?k]
-                                                     [?e :identity/value ?v]]
-                                                   source-db
-                                                   identity-key))]
-                         (assoc acc identity-key value)
-                         acc))
-                     {}
-                     template-identity-keys)
+                    (fn [acc identity-key]
+                      (if-let [value (ffirst (d/q '[:find ?v :in $ ?k
+                                                    :where
+                                                    [?e :identity/key ?k]
+                                                    [?e :identity/value ?v]]
+                                                  source-db
+                                                  identity-key))]
+                        (assoc acc identity-key value)
+                        acc))
+                    {}
+                    template-identity-keys)
         configs    (reduce
-                     (fn [acc [config-key value]]
-                       (let [value* (decrypt-template-config-value config-key
-                                                                   value
-                                                                   skipped-secret-count)]
-                         (if (nil? value*)
-                           acc
-                           (assoc acc config-key value*))))
-                     {}
-                     (for [[config-key value] (d/q '[:find ?k ?v
-                                                     :where
-                                                     [?e :config/key ?k]
-                                                     [?e :config/value ?v]]
-                                                   source-db)
-                           :when (contains? template-config-keys config-key)]
-                       [config-key value]))
+                    (fn [acc [config-key value]]
+                      (let [value* (decrypt-template-config-value config-key
+                                                                  value
+                                                                  skipped-secret-count)]
+                        (if (nil? value*)
+                          acc
+                          (assoc acc config-key value*))))
+                    {}
+                    (for [[config-key value] (d/q '[:find ?k ?v
+                                                    :where
+                                                    [?e :config/key ?k]
+                                                    [?e :config/value ?v]]
+                                                  source-db)
+                          :when (contains? template-config-keys config-key)]
+                      [config-key value]))
         oauth-accounts (->> (source-db-entities source-db :oauth.account/id)
                             (map #(decrypt-template-entity % skipped-secret-count))
                             (map template-oauth-account-record)
@@ -1197,10 +1197,10 @@
 
 (defn get-provider [provider-id]
   (let [provider (runtime-overlay/merge-entity
-                   :provider
-                   (read-when-connected
-                     #(db-provider/get-provider (provider-deps) provider-id))
-                   provider-id)
+                  :provider
+                  (read-when-connected
+                   #(db-provider/get-provider (provider-deps) provider-id))
+                  provider-id)
         overlay-default-id (runtime-overlay/provider-default-id)]
     (cond-> provider
       (and provider overlay-default-id)
@@ -1209,9 +1209,9 @@
 
 (defn list-providers []
   (let [providers (runtime-overlay/merge-entities
-                    :provider
-                    (read-when-connected []
-                      #(db-provider/list-providers (provider-deps))))
+                   :provider
+                   (read-when-connected []
+                                        #(db-provider/list-providers (provider-deps))))
         overlay-default-id (runtime-overlay/provider-default-id)]
     (if overlay-default-id
       (mapv (fn [provider]
@@ -1516,11 +1516,11 @@
 
 (defn get-skill [skill-id]
   (read-when-connected
-    #(db-catalog/get-skill (catalog-deps) skill-id)))
+   #(db-catalog/get-skill (catalog-deps) skill-id)))
 
 (defn list-skills []
   (read-when-connected []
-    #(db-catalog/list-skills (catalog-deps))))
+                       #(db-catalog/list-skills (catalog-deps))))
 
 (defn remove-skill! [skill-id]
   (db-catalog/remove-skill! (catalog-deps) skill-id))
@@ -1558,16 +1558,16 @@
 
 (defn get-site-cred [site-id]
   (runtime-overlay/merge-entity
-    :site-cred
-    (read-when-connected
-      #(db-catalog/get-site-cred (catalog-deps) site-id))
-    site-id))
+   :site-cred
+   (read-when-connected
+    #(db-catalog/get-site-cred (catalog-deps) site-id))
+   site-id))
 
 (defn list-site-creds []
   (runtime-overlay/merge-entities
-    :site-cred
-    (read-when-connected []
-      #(db-catalog/list-site-creds (catalog-deps)))))
+   :site-cred
+   (read-when-connected []
+                        #(db-catalog/list-site-creds (catalog-deps)))))
 
 (defn remove-site-cred! [site-id]
   (ensure-overlay-entity-mutable! :site-cred site-id)
@@ -1588,16 +1588,16 @@
 
 (defn get-service [service-id]
   (runtime-overlay/merge-entity
-    :service
-    (read-when-connected
-      #(db-catalog/get-service (catalog-deps) service-id))
-    service-id))
+   :service
+   (read-when-connected
+    #(db-catalog/get-service (catalog-deps) service-id))
+   service-id))
 
 (defn list-services []
   (runtime-overlay/merge-entities
-    :service
-    (read-when-connected []
-      #(db-catalog/list-services (catalog-deps)))))
+   :service
+   (read-when-connected []
+                        #(db-catalog/list-services (catalog-deps)))))
 
 (defn remove-service! [service-id]
   (ensure-overlay-entity-mutable! :service service-id)
@@ -1643,16 +1643,16 @@
 
 (defn get-oauth-account [account-id]
   (runtime-overlay/merge-entity
-    :oauth-account
-    (read-when-connected
-      #(db-catalog/get-oauth-account (catalog-deps) account-id))
-    account-id))
+   :oauth-account
+   (read-when-connected
+    #(db-catalog/get-oauth-account (catalog-deps) account-id))
+   account-id))
 
 (defn list-oauth-accounts []
   (runtime-overlay/merge-entities
-    :oauth-account
-    (read-when-connected []
-      #(db-catalog/list-oauth-accounts (catalog-deps)))))
+   :oauth-account
+   (read-when-connected []
+                        #(db-catalog/list-oauth-accounts (catalog-deps)))))
 
 (defn remove-oauth-account! [account-id]
   (ensure-overlay-entity-mutable! :oauth-account account-id)

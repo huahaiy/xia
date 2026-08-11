@@ -81,8 +81,8 @@
        (reduce (fn [^long discount span]
                  (let [baseline (quot (long (count span)) 4)
                        adjusted (util/long-min baseline
-                                          (long (codeish-span-tokens span)))]
-                    (+ discount (- baseline adjusted))))
+                                               (long (codeish-span-tokens span)))]
+                   (+ discount (- baseline adjusted))))
                0)))
 
 (defn- heuristic-estimate-tokens
@@ -108,10 +108,10 @@
 (defn- new-token-estimate-cache
   ^Map []
   (java.util.Collections/synchronizedMap
-    (proxy [LinkedHashMap] [256 0.75 true]
-      (removeEldestEntry [^java.util.Map$Entry _eldest]
-        (> (.size ^LinkedHashMap this)
-           (long token-estimate-cache-max-size))))))
+   (proxy [LinkedHashMap] [256 0.75 true]
+     (removeEldestEntry [^java.util.Map$Entry _eldest]
+       (> (.size ^LinkedHashMap this)
+          (long token-estimate-cache-max-size))))))
 
 (defonce ^:private token-estimate-cache
   (new-token-estimate-cache))
@@ -444,16 +444,16 @@
 (defn- history-summary-text
   [messages]
   (transduce
-    (mapcat history-message->summary-lines)
-    (completing
-      (fn [^StringBuilder sb line]
-        (when (pos? (.length sb))
-          (.append sb "\n"))
-        (.append sb ^String line))
-      (fn [^StringBuilder sb]
-        (.toString sb)))
-    (StringBuilder.)
-    messages))
+   (mapcat history-message->summary-lines)
+   (completing
+    (fn [^StringBuilder sb line]
+      (when (pos? (.length sb))
+        (.append sb "\n"))
+      (.append sb ^String line))
+    (fn [^StringBuilder sb]
+      (.toString sb)))
+   (StringBuilder.)
+   messages))
 
 (defn- history-message->llm-message
   [{:keys [role content tool-calls tool-id tool-result]}]
@@ -487,21 +487,21 @@
   [message]
   (try
     (json/write-json-str
-      (cond-> {:role (history-role-name (:role message))}
-        (contains? message :content)
-        (assoc :content (:content message))
+     (cond-> {:role (history-role-name (:role message))}
+       (contains? message :content)
+       (assoc :content (:content message))
 
-        (contains? message :tool_calls)
-        (assoc :tool_calls (:tool_calls message))
+       (contains? message :tool_calls)
+       (assoc :tool_calls (:tool_calls message))
 
-        (contains? message "tool_calls")
-        (assoc :tool_calls (get message "tool_calls"))
+       (contains? message "tool_calls")
+       (assoc :tool_calls (get message "tool_calls"))
 
-        (contains? message :tool_call_id)
-        (assoc :tool_call_id (:tool_call_id message))
+       (contains? message :tool_call_id)
+       (assoc :tool_call_id (:tool_call_id message))
 
-        (contains? message "tool_call_id")
-        (assoc :tool_call_id (get message "tool_call_id"))))
+       (contains? message "tool_call_id")
+       (assoc :tool_call_id (get message "tool_call_id"))))
     (catch Exception _
       (str message))))
 
@@ -588,9 +588,9 @@
                                            (get-in call ["function" "name"])))
              "unknown-tool")
    :args (truncate-history-text
-           (history-summary-fragment (or (:arguments (:function call))
-                                         (get-in call ["function" "arguments"])))
-           archived-tool-args-max-chars)})
+          (history-summary-fragment (or (:arguments (:function call))
+                                        (get-in call ["function" "arguments"])))
+          archived-tool-args-max-chars)})
 
 (defn- tool-execution-line
   [{:keys [id name args]} result-text]
@@ -616,7 +616,7 @@
   (let [max-lines (long archived-tool-recap-max-lines)
         max-chars (long archived-tool-recap-max-chars)
         lines* (if (> (long (count lines)) max-lines)
-                 (into [] (take-last archived-tool-recap-max-lines) lines)
+                 (vec (take-last max-lines lines))
                  (vec lines))]
     (loop [acc []
            remaining (reverse lines*)
@@ -649,14 +649,14 @@
 
                 (= role* "tool")
                 (let [result-text (history-summary-fragment
-                                    (tool-result->content (:tool-result message)
-                                                          (:content message)))
+                                   (tool-result->content (:tool-result message)
+                                                         (:content message)))
                       line        (tool-execution-line
-                                    (get calls-by-id tool-id
-                                         {:id tool-id
-                                          :name "unknown-tool"
-                                          :args nil})
-                                    result-text)]
+                                   (get calls-by-id tool-id
+                                        {:id tool-id
+                                         :name "unknown-tool"
+                                         :args nil})
+                                   result-text)]
                   (recur (next remaining) calls-by-id (conj result-lines line)))
 
                 :else
@@ -669,7 +669,7 @@
   [existing-recap archived-messages]
   (let [delta-lines (tool-recap-lines (summarize-archived-tool-usage archived-messages))]
     (when-let [merged (seq (trim-tool-recap-lines
-                             (into (tool-recap-lines existing-recap) delta-lines)))]
+                            (into (tool-recap-lines existing-recap) delta-lines)))]
       (str/join "\n" merged))))
 
 (defn- summarize-history-text
@@ -729,28 +729,28 @@
 (defn- append-props-to-detail!
   [^StringBuilder sb m prefix]
   (reduce-kv
-    (fn [^StringBuilder sb k v]
-      (let [path (if prefix
-                   (str prefix "." (clojure.core/name k))
-                   (clojure.core/name k))]
-        (if (map? v)
-          (append-props-to-detail! sb v path)
-          (append-detail-fragment! sb (str path ": " v)))))
-    sb
-    m))
+   (fn [^StringBuilder sb k v]
+     (let [path (if prefix
+                  (str prefix "." (clojure.core/name k))
+                  (clojure.core/name k))]
+       (if (map? v)
+         (append-props-to-detail! sb v path)
+         (append-detail-fragment! sb (str path ": " v)))))
+   sb
+   m))
 
 (defn- flatten-props-into
   [acc m prefix]
   (reduce-kv
-    (fn [acc k v]
-      (let [path (if prefix
-                   (str prefix "." (clojure.core/name k))
-                   (clojure.core/name k))]
-        (if (map? v)
-          (flatten-props-into acc v path)
-          (conj! acc (str path ": " v)))))
-    acc
-    m))
+   (fn [acc k v]
+     (let [path (if prefix
+                  (str prefix "." (clojure.core/name k))
+                  (clojure.core/name k))]
+       (if (map? v)
+         (flatten-props-into acc v path)
+         (conj! acc (str path ": " v)))))
+   acc
+   m))
 
 (defn- flatten-props
   "Flatten a nested property map into key=value pairs for compact display.
@@ -801,8 +801,8 @@
                                           (str (clojure.core/name type) "→" target)))
                detail-builder
                (take 3 (:outgoing edges)))
-	       (let [detail (when (pos? (.length ^StringBuilder detail-builder))
-	                      (.toString ^StringBuilder detail-builder))]
+       (let [detail (when (pos? (.length ^StringBuilder detail-builder))
+                      (.toString ^StringBuilder detail-builder))]
          {:content        (str "- " name type-str
                                (when-not (str/blank? detail) (str ": " detail)))
           :used-fact-eids (into [] (keep :eid) selected-facts)
@@ -1065,62 +1065,62 @@
   ([session-id opts]
    (let [budget     (resolve-system-prompt-budget (resolve-context-provider opts))
          wm-context (or (wm/wm->context session-id)
-                       {:topics nil :entities [] :local-docs [] :episodes [] :turn-count 0})
+                        {:topics nil :entities [] :local-docs [] :episodes [] :turn-count 0})
          skills     (skill/skills-for-context wm-context)
 
         ;; P0: Identity (always included)
-        id-section (render-identity)
-        id-tokens  (long (estimate-tokens id-section))
+         id-section (render-identity)
+         id-tokens  (long (estimate-tokens id-section))
 
         ;; P0: Topic (always included)
-        topic-section (render-topic wm-context)
-        topic-tokens  (long (estimate-tokens (or topic-section "")))
+         topic-section (render-topic wm-context)
+         topic-tokens  (long (estimate-tokens (or topic-section "")))
 
         ;; Remaining budget for P1-P3
         ;; Allocate to highest priority first so lower priorities get cut first
-        remaining (- (budget-value budget :total) id-tokens topic-tokens)
+         remaining (- (budget-value budget :total) id-tokens topic-tokens)
 
         ;; P1: Entities (highest priority — cut last)
-        ent-budget  (util/long-min (budget-value budget :entities) (util/long-max 0 remaining))
-        ent-data    (render-entities-data (:entities wm-context) ent-budget)
-        ent-section (:content ent-data)
-        ent-tokens  (long (or (:tokens ent-data) 0))
-        remaining   (- remaining ent-tokens)
+         ent-budget  (util/long-min (budget-value budget :entities) (util/long-max 0 remaining))
+         ent-data    (render-entities-data (:entities wm-context) ent-budget)
+         ent-section (:content ent-data)
+         ent-tokens  (long (or (:tokens ent-data) 0))
+         remaining   (- remaining ent-tokens)
 
         ;; P2: Local documents
-        doc-budget  (util/long-min (budget-value budget :local-docs) (util/long-max 0 remaining))
-        doc-data    (render-local-docs-data (:local-docs wm-context) doc-budget)
-        doc-section (:content doc-data)
-        doc-tokens  (long (or (:tokens doc-data) 0))
-        remaining   (- remaining doc-tokens)
+         doc-budget  (util/long-min (budget-value budget :local-docs) (util/long-max 0 remaining))
+         doc-data    (render-local-docs-data (:local-docs wm-context) doc-budget)
+         doc-section (:content doc-data)
+         doc-tokens  (long (or (:tokens doc-data) 0))
+         remaining   (- remaining doc-tokens)
 
         ;; P3: Episodes
-        ep-budget  (util/long-min (budget-value budget :episodes) (util/long-max 0 remaining))
-        ep-data    (render-episodes-data (:episodes wm-context) ep-budget)
-        ep-section (:content ep-data)
-        ep-tokens  (long (or (:tokens ep-data) 0))
-        remaining  (- remaining ep-tokens)
+         ep-budget  (util/long-min (budget-value budget :episodes) (util/long-max 0 remaining))
+         ep-data    (render-episodes-data (:episodes wm-context) ep-budget)
+         ep-section (:content ep-data)
+         ep-tokens  (long (or (:tokens ep-data) 0))
+         remaining  (- remaining ep-tokens)
 
         ;; P4: Skills (lowest priority — cut first)
-        skill-budget  (util/long-min (budget-value budget :skills) (util/long-max 0 remaining))
-        skill-data    (render-skills-data skills skill-budget)
-        skill-section (:content skill-data)
-        skill-tokens  (long (or (:tokens skill-data) 0))
-        sections      [{:key :identity :content id-section}
-                       {:key :topic :content topic-section}
-                       {:key :entities :content ent-section}
-                       {:key :local-docs :content doc-section}
-                       {:key :episodes :content ep-section}
-                       {:key :skills :content skill-section}]
-        {:keys [sections prompt]} (recover-system-prompt sections (budget-value budget :total))
-        entities-retained? (section-present? sections :entities)]
-    {:prompt         prompt
-     :used-fact-eids (if entities-retained?
-                       (:used-fact-eids ent-data)
-                       [])
-     :used-fact-refs (if entities-retained?
-                       (:used-fact-refs ent-data)
-                       [])})))
+         skill-budget  (util/long-min (budget-value budget :skills) (util/long-max 0 remaining))
+         skill-data    (render-skills-data skills skill-budget)
+         skill-section (:content skill-data)
+         skill-tokens  (long (or (:tokens skill-data) 0))
+         sections      [{:key :identity :content id-section}
+                        {:key :topic :content topic-section}
+                        {:key :entities :content ent-section}
+                        {:key :local-docs :content doc-section}
+                        {:key :episodes :content ep-section}
+                        {:key :skills :content skill-section}]
+         {:keys [sections prompt]} (recover-system-prompt sections (budget-value budget :total))
+         entities-retained? (section-present? sections :entities)]
+     {:prompt         prompt
+      :used-fact-eids (if entities-retained?
+                        (:used-fact-eids ent-data)
+                        [])
+      :used-fact-refs (if entities-retained?
+                        (:used-fact-refs ent-data)
+                        [])})))
 
 (defn assemble-system-prompt
   ([session-id]
@@ -1189,7 +1189,7 @@
                                              {:tokens 0
                                               :kept '()}
                                              (rseq recap-prefix))))]
-               (into recap-kept live-kept)))]
+                 (into recap-kept live-kept)))]
        (let [recap-prefix (into [] (take-while recap-message?) messages*)
              live-history (subvec messages* (count recap-prefix))
              total-tokens (long (transduce (map estimate-history-message-tokens) + 0 messages*))
@@ -1223,13 +1223,13 @@
 (defn- bounded-history-fallback
   [recent-history budget {:keys [tool-recap-content recap-content history-archived?]}]
   (compact-history
-    (cond-> []
-      (seq tool-recap-content) (conj (tool-recap-message tool-recap-content))
-      (seq recap-content)      (conj (history-recap-message recap-content))
-      history-archived?        (conj (history-compaction-warning-message))
-      true                     (into recent-history))
-    budget
-    {:allow-summary? false}))
+   (cond-> []
+     (seq tool-recap-content) (conj (tool-recap-message tool-recap-content))
+     (seq recap-content)      (conj (history-recap-message recap-content))
+     history-archived?        (conj (history-compaction-warning-message))
+     true                     (into recent-history))
+   budget
+   {:allow-summary? false}))
 
 (defn- recent-history-message-limit
   [opts]
@@ -1246,10 +1246,10 @@
     (if (<= total recent-limit)
       {:messages (into [] (map history-message->llm-message)
                        (restore-history-tool-call-ids
-                         (db/session-messages-by-eids
-                          (into []
-                                (map :eid)
-                                (db/session-message-metadata-range session-id 0 total total)))))
+                        (db/session-messages-by-eids
+                         (into []
+                               (map :eid)
+                               (db/session-message-metadata-range session-id 0 total total)))))
        :history-recap-updated? false}
       (let [recent-start       (util/long-max 0 (- total recent-limit))
             recap-state        (db/session-history-recap session-id)
@@ -1276,7 +1276,7 @@
                                                                   total)
             recent-eids        (into [] (map :eid) recent-meta)
             recent-messages    (restore-history-tool-call-ids
-                                 (db/session-messages-by-eids recent-eids))
+                                (db/session-messages-by-eids recent-eids))
             recent-history     (into [] (map history-message->llm-message) recent-messages)]
         (if (and (not (seq new-recap-meta))
                  (not (seq new-tool-meta)))
@@ -1287,12 +1287,12 @@
            :history-recap-updated? false}
           (let [history-archived-messages (when (seq new-recap-meta)
                                             (restore-history-tool-call-ids
-                                              (db/session-messages-by-eids
-                                                (into [] (map :eid) new-recap-meta))))
+                                             (db/session-messages-by-eids
+                                              (into [] (map :eid) new-recap-meta))))
                 tool-archived-messages    (when (seq new-tool-meta)
                                             (restore-history-tool-call-ids
-                                              (db/session-messages-by-eids
-                                                (into [] (map :eid) new-tool-meta))))
+                                             (db/session-messages-by-eids
+                                              (into [] (map :eid) new-tool-meta))))
                 new-tool-recap            (or (when (seq tool-archived-messages)
                                                 (merge-tool-recap tool-recap-content
                                                                   tool-archived-messages))
@@ -1300,11 +1300,11 @@
             (try
               (let [new-recap (if (seq history-archived-messages)
                                 (summarize-history-text
-                                  (history-summary-text history-archived-messages)
-                                  recap-content
-                                  {:provider-id (:compaction-provider-id opts)
-                                    :workload    (or (:compaction-workload opts)
-                                                     :history-compaction)})
+                                 (history-summary-text history-archived-messages)
+                                 recap-content
+                                 {:provider-id (:compaction-provider-id opts)
+                                  :workload    (or (:compaction-workload opts)
+                                                   :history-compaction)})
                                 recap-content)]
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
@@ -1317,20 +1317,20 @@
                                  true                 (into recent-history))
                      :history-recap-updated? true})
                   {:messages (bounded-history-fallback recent-history
-                                                      history-budget
-                                                      {:tool-recap-content new-tool-recap
-                                                       :recap-content recap-content
-                                                       :history-archived? (seq history-archived-messages)})
+                                                       history-budget
+                                                       {:tool-recap-content new-tool-recap
+                                                        :recap-content recap-content
+                                                        :history-archived? (seq history-archived-messages)})
                    :history-recap-updated? false}))
               (catch Exception e
                 (log/warn "Failed to update session history recap:" (.getMessage e))
                 (when (seq new-tool-recap)
                   (db/save-session-tool-recap! session-id new-tool-recap recent-start))
                 {:messages (bounded-history-fallback recent-history
-                                                    history-budget
-                                                    {:tool-recap-content new-tool-recap
-                                                     :recap-content recap-content
-                                                     :history-archived? (seq history-archived-messages)})
+                                                     history-budget
+                                                     {:tool-recap-content new-tool-recap
+                                                      :recap-content recap-content
+                                                      :history-archived? (seq history-archived-messages)})
                  :history-recap-updated? false}))))))))
 
 ;; ============================================================================
@@ -1362,17 +1362,17 @@
            :compaction-provider-id compaction-provider-id
            :compaction-workload compaction-workload})
          compacted    (compact-history messages
-                                      budget
-                                      (cond-> {}
-                                        true
-                                        (assoc :allow-summary? (not history-recap-updated?))
+                                       budget
+                                       (cond-> {}
+                                         true
+                                         (assoc :allow-summary? (not history-recap-updated?))
 
-                                        compaction-provider-id
-                                        (assoc :provider-id compaction-provider-id)
+                                         compaction-provider-id
+                                         (assoc :provider-id compaction-provider-id)
 
-                                        (and (not compaction-provider-id)
-                                             compaction-workload)
-                                        (assoc :workload compaction-workload)))]
+                                         (and (not compaction-provider-id)
+                                              compaction-workload)
+                                         (assoc :workload compaction-workload)))]
      {:messages      (into [{:role "system" :content prompt}]
                            compacted)
       :used-fact-eids used-fact-eids

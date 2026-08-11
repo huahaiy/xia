@@ -262,10 +262,10 @@
                          :field field}))
 
         (re-find #"\s" text)
-      (throw (ex-info (str "plugin manifest " field " must not contain whitespace")
-                      {:type :plugin/invalid-manifest
-                       :field field
-                       :value value}))
+        (throw (ex-info (str "plugin manifest " field " must not contain whitespace")
+                        {:type :plugin/invalid-manifest
+                         :field field
+                         :value value}))
 
         :else
         (keyword text)))))
@@ -570,23 +570,23 @@
 (defn- hook-worker-thread
   [worker-id timeout-ms f result*]
   (let [runner (bound-fn*
-                 (fn []
-                   (binding [*timeout-state* {:timeout-ms timeout-ms
-                                              :deadline-nanos (+ (System/nanoTime)
-                                                                 (* 1000000
-                                                                    (long timeout-ms)))}]
-                     (try
-                       (deliver result* {:status :ok
-                                         :value (f)})
-                       (catch Throwable t
-                         (deliver result* {:status :error
-                                           :throwable t}))
-                       (finally
-                         (unregister-hook-worker! worker-id))))))]
+                (fn []
+                  (binding [*timeout-state* {:timeout-ms timeout-ms
+                                             :deadline-nanos (+ (System/nanoTime)
+                                                                (* 1000000
+                                                                   (long timeout-ms)))}]
+                    (try
+                      (deliver result* {:status :ok
+                                        :value (f)})
+                      (catch Throwable t
+                        (deliver result* {:status :error
+                                          :throwable t}))
+                      (finally
+                        (unregister-hook-worker! worker-id))))))]
     (doto (Thread. ^Runnable
-                   (reify Runnable
-                     (run [_]
-                       (runner)))
+           (reify Runnable
+             (run [_]
+               (runner)))
                    ^String (str "xia-plugin-hook-" (System/nanoTime)))
       (.setDaemon true))))
 

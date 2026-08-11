@@ -722,10 +722,10 @@
   (->> login-target-needles
        (mapcat (fn [needle]
                  (or (:elements (query-elements session-id
-                                               :kind :interactive
-                                               :visible-only true
-                                               :text-contains needle
-                                               :limit 20))
+                                                :kind :interactive
+                                                :visible-only true
+                                                :text-contains needle
+                                                :limit 20))
                      [])))
        (filter :selector)
        (reduce (fn [acc candidate]

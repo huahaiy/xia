@@ -282,12 +282,12 @@
                        (str/replace #"\.md$" ""))
           id       (keyword filename)]
       (import-skill-edn! {:id      id
-                           :name    filename
-                           :content content
-                           :source-format :xia-md
-                           :source-path (.getAbsolutePath file)
-                           :source-name (.getName file)
-                           :source-sha256 (content-sha256 content)}))
+                          :name    filename
+                          :content content
+                          :source-format :xia-md
+                          :source-path (.getAbsolutePath file)
+                          :source-name (.getName file)
+                          :source-sha256 (content-sha256 content)}))
 
     :else
     (throw (ex-info "Unsupported skill file format. Use .edn or .md" {:path path}))))
@@ -331,11 +331,11 @@
   [pattern]
   (try
     (let [eids (db/q '[:find ?e
-                        :in $ ?q
-                        :where
-                        [(idoc-match $ :skill/doc ?q) [[?e ?a ?v]]]
-                        [?e :skill/enabled? true]]
-                      pattern)]
+                       :in $ ?q
+                       :where
+                       [(idoc-match $ :skill/doc ?q) [[?e ?a ?v]]]
+                       [?e :skill/enabled? true]]
+                     pattern)]
       (mapv #(into {} (db/entity (first %))) eids))
     (catch Exception e
       (log/debug "Skill idoc-match failed:" (.getMessage e))

@@ -250,21 +250,21 @@
                                  :tool-count (:tool-count context)
                                  :summary (str "Running tool " func-name)
                                  :session-id (:session-id context)}}))
-  (let [result (tool/execute-tool tool-id args (assoc context
-                                                      :tool-call-id (get tool-call "id")
-                                                      :tool-name func-name))]
-    ((:throw-if-cancelled! deps) (:session-id context))
-    (log/debug "Tool call completed"
-               (merge {:func-name func-name
-                       :tool-id tool-id
-                       :tool-call-id (get tool-call "id")}
-                      (trace-context deps context)))
-    {:role "tool"
-     :tool_call_id (get tool-call "id")
-     :tool_name func-name
-     :result (sanitized-tool-result result)
-     :content (tool-result-content result)
-     :follow-up-messages (multimodal-follow-up-messages result context)})))
+    (let [result (tool/execute-tool tool-id args (assoc context
+                                                        :tool-call-id (get tool-call "id")
+                                                        :tool-name func-name))]
+      ((:throw-if-cancelled! deps) (:session-id context))
+      (log/debug "Tool call completed"
+                 (merge {:func-name func-name
+                         :tool-id tool-id
+                         :tool-call-id (get tool-call "id")}
+                        (trace-context deps context)))
+      {:role "tool"
+       :tool_call_id (get tool-call "id")
+       :tool_name func-name
+       :result (sanitized-tool-result result)
+       :content (tool-result-content result)
+       :follow-up-messages (multimodal-follow-up-messages result context)})))
 
 (defn- bind-original-tool-call-ids
   [deps prepared-calls tool-results]
@@ -327,8 +327,8 @@
                           calls)
             _ (when-let [session-id (:session-id context)]
                 ((:register-parallel-tool-futures! deps) session-id
-                                                   (:worker-token context)
-                                                   futures))
+                                                         (:worker-token context)
+                                                         futures))
             results (try
                       ((:await-futures! deps)
                        futures
@@ -349,8 +349,8 @@
                       (finally
                         (when-let [session-id (:session-id context)]
                           ((:clear-parallel-tool-futures! deps) session-id
-                                                             (:worker-token context)
-                                                             futures))))
+                                                                (:worker-token context)
+                                                                futures))))
             failures (keep #(when-let [t (:exception %)]
                               (assoc % :throwable t))
                            results)]

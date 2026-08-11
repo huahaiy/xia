@@ -277,20 +277,20 @@
   ([args]
    (run-playwright-cli! args {}))
   ([args {:keys [inherit-io?] :or {inherit-io? false}}]
-  (let [driver (Driver/ensureDriverInstalled (playwright-env) Boolean/FALSE)
-        pb (.createProcessBuilder driver)]
-    (.addAll (.command pb) args)
-    (if inherit-io?
-      (.inheritIO pb)
-      (.redirectErrorStream pb true))
-    (let [process (.start pb)
-          output  (when-not inherit-io?
-                    (read-process-output process))
-          exit    (.waitFor process)]
-      {:args (vec args)
-       :exit exit
-       :output output
-       :interactive? (boolean inherit-io?)}))))
+   (let [driver (Driver/ensureDriverInstalled (playwright-env) Boolean/FALSE)
+         pb (.createProcessBuilder driver)]
+     (.addAll (.command pb) args)
+     (if inherit-io?
+       (.inheritIO pb)
+       (.redirectErrorStream pb true))
+     (let [process (.start pb)
+           output  (when-not inherit-io?
+                     (read-process-output process))
+           exit    (.waitFor process)]
+       {:args (vec args)
+        :exit exit
+        :output output
+        :interactive? (boolean inherit-io?)}))))
 
 (defn- install-browser!
   []
@@ -315,15 +315,15 @@
        :status :unsupported-platform
        :message "Playwright system dependency installation is only supported on Linux."
        :platform platform}
-	      (let [interactive? (and (not dry-run)
-	                              (some? (System/console)))
-	            args (cond-> ["install-deps" browser-name]
-	                   dry-run (conj "--dry-run"))
-	            {:keys [exit] :as result} (run-playwright-cli! args {:inherit-io? interactive?})]
-	        (when-not (zero? (long exit))
-	          (throw (ex-info "Playwright system dependency installation failed."
-	                          (merge result
-	                                 {:backend backend-id
+      (let [interactive? (and (not dry-run)
+                              (some? (System/console)))
+            args (cond-> ["install-deps" browser-name]
+                   dry-run (conj "--dry-run"))
+            {:keys [exit] :as result} (run-playwright-cli! args {:inherit-io? interactive?})]
+        (when-not (zero? (long exit))
+          (throw (ex-info "Playwright system dependency installation failed."
+                          (merge result
+                                 {:backend backend-id
                                   :browser browser-name
                                   :supported? true
                                   :dry-run (boolean dry-run)
@@ -537,7 +537,7 @@
 (defn- page-result
   [session-id result]
   (assoc result :session-id session-id
-                :backend backend-id))
+         :backend backend-id))
 
 (defn- bytes->data-url
   [mime-type ^bytes data]
@@ -1267,16 +1267,16 @@
       (persist-session! ops session-id)
       (screenshot-result session-id page {:full-page full-page
                                           :detail detail})))
-	  (wait-for-page* [_ session-id {:keys [timeout-ms interval-ms selector text url-contains]
-	                                 :or {timeout-ms 10000
-	                                      interval-ms 500}}]
-	    (let [_sess (get-session ops session-id)
+  (wait-for-page* [_ session-id {:keys [timeout-ms interval-ms selector text url-contains]
+                                 :or {timeout-ms 10000
+                                      interval-ms 500}}]
+    (let [_sess (get-session ops session-id)
           session-atom (session-get session-id)
-	          ^Page page (current-page-or-throw session-id session-atom)
-	          timeout-ms* (long (clojure.core/max 0 (long timeout-ms)))
-	          interval-ms* (long (clojure.core/max 50 (long interval-ms)))
-	          condition? (or selector text url-contains)
-	          deadline (+ (now-ms) timeout-ms*)]
+          ^Page page (current-page-or-throw session-id session-atom)
+          timeout-ms* (long (clojure.core/max 0 (long timeout-ms)))
+          interval-ms* (long (clojure.core/max 50 (long interval-ms)))
+          condition? (or selector text url-contains)
+          deadline (+ (now-ms) timeout-ms*)]
       (if-not condition?
         (do
           (.waitForTimeout page (double timeout-ms*))
@@ -1334,35 +1334,35 @@
     (stop-runtime!)
     {:backend backend-id
      :status "closed"})
-	  (list-sessions* [_]
-	    (evict-expired! ops)
-	    (let [snapshot-map (into {}
-	                             (keep (fn [[session-id snapshot]]
-	                                     (when-not ((:snapshot-expired? ops) snapshot)
-	                                       (let [last-access-ms (long (or (get snapshot "last_access_ms")
-	                                                                      (get snapshot "updated_at_ms")
-	                                                                      0))]
-	                                       [session-id {:session-id session-id
-	                                                    :backend backend-id
-	                                                    :url (get snapshot "current_url")
-	                                                    :age-seconds (quot (- (now-ms) last-access-ms)
-	                                                                       1000)
-	                                                    :live? false
-	                                                    :resumable? true}])))
-	                                   (backend-snapshots ops)))]
-	      (->> (sessions-map)
-	           (reduce (fn [acc [session-id sess]]
-	                     (let [^Page page (current-page* sess)
-	                           state @sess
-	                           last-access-ms (long (:last-access state))]
-	                       (assoc acc session-id
-	                              {:session-id session-id
-	                               :backend backend-id
-	                               :url (when page (.url page))
-	                               :age-seconds (quot (- (now-ms)
-	                                                     last-access-ms)
-	                                                  1000)
-	                               :live? true
+  (list-sessions* [_]
+    (evict-expired! ops)
+    (let [snapshot-map (into {}
+                             (keep (fn [[session-id snapshot]]
+                                     (when-not ((:snapshot-expired? ops) snapshot)
+                                       (let [last-access-ms (long (or (get snapshot "last_access_ms")
+                                                                      (get snapshot "updated_at_ms")
+                                                                      0))]
+                                         [session-id {:session-id session-id
+                                                      :backend backend-id
+                                                      :url (get snapshot "current_url")
+                                                      :age-seconds (quot (- (now-ms) last-access-ms)
+                                                                         1000)
+                                                      :live? false
+                                                      :resumable? true}])))
+                                   (backend-snapshots ops)))]
+      (->> (sessions-map)
+           (reduce (fn [acc [session-id sess]]
+                     (let [^Page page (current-page* sess)
+                           state @sess
+                           last-access-ms (long (:last-access state))]
+                       (assoc acc session-id
+                              {:session-id session-id
+                               :backend backend-id
+                               :url (when page (.url page))
+                               :age-seconds (quot (- (now-ms)
+                                                     last-access-ms)
+                                                  1000)
+                               :live? true
                                :resumable? true})))
                    snapshot-map)
            vals

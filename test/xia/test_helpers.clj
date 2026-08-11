@@ -44,7 +44,7 @@
 
 (defn- temp-db-path []
   (str (Files/createTempDirectory "xia-test"
-         (into-array FileAttribute []))))
+                                  (into-array FileAttribute []))))
 
 (defn- escape-pdf-text
   [text]
@@ -153,11 +153,11 @@
 (defn- normalize-vector
   [values]
   (let [norm (Math/sqrt
-               (reduce (fn [sum value]
-                         (+ (double sum)
-                            (* (double value) (double value))))
-                       0.0
-                       values))]
+              (reduce (fn [sum value]
+                        (+ (double sum)
+                           (* (double value) (double value))))
+                      0.0
+                      values))]
     (if (pos? norm)
       (mapv #(float (/ (double %) norm)) values)
       values)))
@@ -165,10 +165,10 @@
 (defn- embed-text
   [text]
   (normalize-vector
-    (reduce (fn [values token]
-              (update values (token-slot token) + 1.0))
-            (vec (repeat test-embedding-dimensions 0.0))
-            (tokenize text))))
+   (reduce (fn [values token]
+             (update values (token-slot token) + 1.0))
+           (vec (repeat test-embedding-dimensions 0.0))
+           (tokenize text))))
 
 (defn- truncate-provider-item
   [item max-tokens]
@@ -345,30 +345,30 @@
           messaging-runtime     (messaging/make-runtime)
           db-runtime            (db/make-runtime)
           context               (runtime-context/make
-                                  {:xia/runtime-state-runtime {:runtime runtime-state-runtime}
-                                   :xia/retrieval-runtime     {:runtime retrieval-runtime}
-                                   :xia/oauth-runtime         {:runtime oauth-runtime}
-                                   :xia/browser-runtime       {:runtime browser-runtime}
-                                   :xia/async-runtime         {:runtime async-runtime}
-                                   :xia/prompt-runtime        {:runtime prompt-runtime}
-                                   :xia/fact-review-runtime   {:runtime fact-review-runtime}
-                                   :xia/agent-runtime         {:runtime agent-runtime}
-                                   :xia/bridge-runtime        {:runtime bridge-runtime}
-                                   :xia/http-runtime          {:runtime http-runtime}
-                                   :xia/instance-supervisor   {:runtime instance-runtime}
-                                   :xia/sci-runtime           {:runtime sci-runtime}
-                                   :xia/permission-runtime    {:runtime permission-runtime}
-                                   :xia/tool-runtime          {:runtime tool-runtime}
-                                   :xia/scheduler             {:runtime scheduler-runtime}
-                                   :xia/working-memory-runtime {:runtime wm-runtime}
-                                   :xia/llm-runtime           {:runtime llm-runtime}
-                                   :xia/checkpoint-runtime    {:runtime checkpoint-runtime}
-                                   :xia/hippocampus-runtime   {:runtime hippocampus-runtime}
-                                   :xia/local-ocr-runtime     {:runtime local-ocr-runtime}
-                                   :xia/service-runtime       {:runtime service-runtime}
-                                   :xia/web-runtime           {:runtime web-runtime}
-                                   :xia/messaging             {:runtime messaging-runtime}
-                                   :xia/db                    {:runtime db-runtime}})]
+                                 {:xia/runtime-state-runtime {:runtime runtime-state-runtime}
+                                  :xia/retrieval-runtime     {:runtime retrieval-runtime}
+                                  :xia/oauth-runtime         {:runtime oauth-runtime}
+                                  :xia/browser-runtime       {:runtime browser-runtime}
+                                  :xia/async-runtime         {:runtime async-runtime}
+                                  :xia/prompt-runtime        {:runtime prompt-runtime}
+                                  :xia/fact-review-runtime   {:runtime fact-review-runtime}
+                                  :xia/agent-runtime         {:runtime agent-runtime}
+                                  :xia/bridge-runtime        {:runtime bridge-runtime}
+                                  :xia/http-runtime          {:runtime http-runtime}
+                                  :xia/instance-supervisor   {:runtime instance-runtime}
+                                  :xia/sci-runtime           {:runtime sci-runtime}
+                                  :xia/permission-runtime    {:runtime permission-runtime}
+                                  :xia/tool-runtime          {:runtime tool-runtime}
+                                  :xia/scheduler             {:runtime scheduler-runtime}
+                                  :xia/working-memory-runtime {:runtime wm-runtime}
+                                  :xia/llm-runtime           {:runtime llm-runtime}
+                                  :xia/checkpoint-runtime    {:runtime checkpoint-runtime}
+                                  :xia/hippocampus-runtime   {:runtime hippocampus-runtime}
+                                  :xia/local-ocr-runtime     {:runtime local-ocr-runtime}
+                                  :xia/service-runtime       {:runtime service-runtime}
+                                  :xia/web-runtime           {:runtime web-runtime}
+                                  :xia/messaging             {:runtime messaging-runtime}
+                                  :xia/db                    {:runtime db-runtime}})]
       (runtime-context/with-runtime-context
         context
         #(do
@@ -378,35 +378,35 @@
                               {:passphrase-provider (constantly "xia-test-passphrase")}))))
       (try
         (runtime-context/with-runtime-context context f)
-      (finally
-        (runtime-context/with-runtime-context
-          context
-          #(do
-             (runtime-overlay/clear!)
-             (instance-supervisor/clear-runtime!)
-             (messaging/clear-runtime!)
-             (tool/clear-runtime!)
-             (checkpoint/clear-runtime!)
-             (hippo/clear-runtime!)
-             (local-ocr/clear-runtime!)
-             (sci-env/clear-runtime!)
-             (service/clear-runtime!)
-             (web/clear-runtime!)
-             (xia-llm/clear-runtime!)
-             (scheduler/clear-runtime!)
-             (playwright/clear-runtime!)
-             (oauth/clear-runtime!)
-             (retrieval-state/clear-runtime!)
-             (runtime-state/clear-runtime!)
-             (http/clear-runtime!)
-             (bridge/clear-runtime!)
-             (agent/clear-runtime!)
-             (fact-review/clear-runtime!)
-             (permission/clear-runtime!)
-             (prompt/clear-runtime!)
-             (async/clear-runtime!)
-             (wm/clear-runtime!)
-             (db/clear-runtime!))))))))
+        (finally
+          (runtime-context/with-runtime-context
+            context
+            #(do
+               (runtime-overlay/clear!)
+               (instance-supervisor/clear-runtime!)
+               (messaging/clear-runtime!)
+               (tool/clear-runtime!)
+               (checkpoint/clear-runtime!)
+               (hippo/clear-runtime!)
+               (local-ocr/clear-runtime!)
+               (sci-env/clear-runtime!)
+               (service/clear-runtime!)
+               (web/clear-runtime!)
+               (xia-llm/clear-runtime!)
+               (scheduler/clear-runtime!)
+               (playwright/clear-runtime!)
+               (oauth/clear-runtime!)
+               (retrieval-state/clear-runtime!)
+               (runtime-state/clear-runtime!)
+               (http/clear-runtime!)
+               (bridge/clear-runtime!)
+               (agent/clear-runtime!)
+               (fact-review/clear-runtime!)
+               (permission/clear-runtime!)
+               (prompt/clear-runtime!)
+               (async/clear-runtime!)
+               (wm/clear-runtime!)
+               (db/clear-runtime!))))))))
 
 (defn seed-node!
   "Helper: create a KG node and return its entity id."

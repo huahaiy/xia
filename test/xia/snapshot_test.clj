@@ -29,7 +29,7 @@
   (fn [f]
     (db/clear-runtime!)
     (let [context (runtime-context/make
-                    {:xia/db {:runtime (db/make-runtime)}})]
+                   {:xia/db {:runtime (db/make-runtime)}})]
       (try
         (runtime-context/with-runtime-context context f)
         (finally
@@ -51,34 +51,34 @@
                        (when (= "XIA_WORKSPACE_ROOT" k)
                          workspace-root))}
       (fn []
-      (write-file! workspace-file "known-good workspace")
-      (db/connect! db-path (connect-options))
-      (db/set-config! :user/name "known-good")
-      (let [manifest (snapshot/create-snapshot! :db-path db-path
-                                                :snapshot-root snapshot-root
-                                                :label "before risky work")]
-        (is (some? (:snapshot/id manifest)))
-        (is (= "before risky work" (:snapshot/label manifest)))
-        (is (true? (get-in manifest [:workspace :included?])))
-        (is (.isFile (io/file (:snapshot/path manifest) "db.xia")))
-        (is (.isFile (io/file (:snapshot/path manifest)
-                              "workspace/default/items/item-1/note.md")))
-
-        (db/set-config! :user/name "polluted")
-        (write-file! workspace-file "polluted workspace")
-        (db/close!)
-
-        (let [result (snapshot/restore-snapshot! (:snapshot/id manifest)
-                                                 :db-path db-path
-                                                 :snapshot-root snapshot-root
-                                                 :force? true)]
-          (is (= :restored (:status result)))
-          (is (string? (get-in result [:db :moved-aside])))
-          (is (string? (get-in result [:workspace :moved-aside]))))
-
+        (write-file! workspace-file "known-good workspace")
         (db/connect! db-path (connect-options))
-        (is (= "known-good" (db/get-config :user/name)))
-        (is (= "known-good workspace" (slurp workspace-file))))))))
+        (db/set-config! :user/name "known-good")
+        (let [manifest (snapshot/create-snapshot! :db-path db-path
+                                                  :snapshot-root snapshot-root
+                                                  :label "before risky work")]
+          (is (some? (:snapshot/id manifest)))
+          (is (= "before risky work" (:snapshot/label manifest)))
+          (is (true? (get-in manifest [:workspace :included?])))
+          (is (.isFile (io/file (:snapshot/path manifest) "db.xia")))
+          (is (.isFile (io/file (:snapshot/path manifest)
+                                "workspace/default/items/item-1/note.md")))
+
+          (db/set-config! :user/name "polluted")
+          (write-file! workspace-file "polluted workspace")
+          (db/close!)
+
+          (let [result (snapshot/restore-snapshot! (:snapshot/id manifest)
+                                                   :db-path db-path
+                                                   :snapshot-root snapshot-root
+                                                   :force? true)]
+            (is (= :restored (:status result)))
+            (is (string? (get-in result [:db :moved-aside])))
+            (is (string? (get-in result [:workspace :moved-aside]))))
+
+          (db/connect! db-path (connect-options))
+          (is (= "known-good" (db/get-config :user/name)))
+          (is (= "known-good workspace" (slurp workspace-file))))))))
 
 (deftest safety-snapshot-can-skip-shared-workspace
   (let [root           (temp-dir)
@@ -91,13 +91,13 @@
                        (when (= "XIA_WORKSPACE_ROOT" k)
                          workspace-root))}
       (fn []
-      (write-file! workspace-file "not snapshotted")
-      (db/connect! db-path (connect-options))
-      (db/set-config! :user/name "db-only")
-      (let [manifest (snapshot/create-snapshot! :db-path db-path
-                                                :snapshot-root snapshot-root
-                                                :label "db only"
-                                                :include-workspace? false)]
-        (is (= "db only" (:snapshot/label manifest)))
-        (is (false? (get-in manifest [:workspace :included?])))
-        (is (not (.exists (io/file (:snapshot/path manifest) "workspace")))))))))
+        (write-file! workspace-file "not snapshotted")
+        (db/connect! db-path (connect-options))
+        (db/set-config! :user/name "db-only")
+        (let [manifest (snapshot/create-snapshot! :db-path db-path
+                                                  :snapshot-root snapshot-root
+                                                  :label "db only"
+                                                  :include-workspace? false)]
+          (is (= "db only" (:snapshot/label manifest)))
+          (is (false? (get-in manifest [:workspace :included?])))
+          (is (not (.exists (io/file (:snapshot/path manifest) "workspace")))))))))

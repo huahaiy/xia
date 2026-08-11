@@ -57,7 +57,7 @@
     (with-redefs [xia.channel.messaging/slack-enabled? (constantly true)
                   xia.channel.messaging/valid-slack-signature? (constantly true)
                   xia.channel.messaging/handle-slack-event! (fn [payload]
-                                                             (reset! seen payload))]
+                                                              (reset! seen payload))]
       (let [response (http-messaging/handle-slack-events
                       (handler-deps)
                       {:headers {"x-slack-signature" "sig"

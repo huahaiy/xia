@@ -8,19 +8,19 @@
 
 (def ^:private read-bundled-resource
   (memoize
-    (fn [path]
-      (some-> (str "web/" path)
-              io/resource
-              slurp))))
+   (fn [path]
+     (some-> (str "web/" path)
+             io/resource
+             slurp))))
 
 (def ^:private read-bundled-resource-bytes
   (memoize
-    (fn [path]
-      (when-let [resource (some-> (str "web/" path) io/resource)]
-        (with-open [in (io/input-stream resource)
-                    out (ByteArrayOutputStream.)]
-          (io/copy in out)
-          (.toByteArray out))))))
+   (fn [path]
+     (when-let [resource (some-> (str "web/" path) io/resource)]
+       (with-open [in (io/input-stream resource)
+                   out (ByteArrayOutputStream.)]
+         (io/copy in out)
+         (.toByteArray out))))))
 
 (def ^:private web-dev-no-cache-headers
   {"Cache-Control" "no-store, no-cache, must-revalidate, max-age=0"

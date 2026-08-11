@@ -108,8 +108,8 @@
                           (secret/safe-set-config! :secret/stuff "nope"))))
   (testing "blocks privacy-boundary config writes"
     (is (= "false" (do
-                      (db/set-config! :llm/log-full-payloads? false)
-                      (secret/safe-get-config :llm/log-full-payloads?))))
+                     (db/set-config! :llm/log-full-payloads? false)
+                     (secret/safe-get-config :llm/log-full-payloads?))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"Access denied"
                           (secret/safe-set-config! :llm/log-full-payloads? true)))
@@ -132,19 +132,19 @@
 
   (testing "blocks direct api-key query"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :where [?e :llm.provider/api-key ?v]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :where [?e :llm.provider/api-key ?v]]))))
 
   (testing "blocks query with api-key in where clause"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?e :where
-                           [?e :llm.provider/api-key "sk-super-secret"]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?e :where
+                          [?e :llm.provider/api-key "sk-super-secret"]]))))
 
   (testing "blocks queries referencing credential namespace"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :where [?e :credential/token ?v]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :where [?e :credential/token ?v]]))))
 
   (testing "allows non-secret queries"
     (let [results (secret/safe-q '[:find ?name :where
@@ -154,14 +154,14 @@
 (deftest safe-q-blocks-pattern-based-secrets
   (testing "blocks queries with secret-like attribute names"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :where [?e :service/password ?v]])))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :where [?e :service/password ?v]])))
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :where [?e :service/api-key ?v]])))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :where [?e :service/api-key ?v]])))
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :where [?e :auth/oauth-token ?v]])))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :where [?e :auth/oauth-token ?v]])))))
 
 (deftest safe-q-blocks-indirect-attribute-access
   (db/transact! [{:service/id        :leak
@@ -173,16 +173,16 @@
 
   (testing "blocks wildcard-style attr scans"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?a ?v :where
-                           [?e :service/id :leak]
-                           [?e ?a ?v]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?a ?v :where
+                          [?e :service/id :leak]
+                          [?e ?a ?v]]))))
 
   (testing "blocks attr-position variables from :in"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :in $ ?attr :where [?e ?attr ?v]]
-                         :service/auth-key)))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :in $ ?attr :where [?e ?attr ?v]]
+                        :service/auth-key)))))
 
 (deftest safe-q-blocks-raw-config-secret-access
   (db/set-config! :oauth/google "refresh-token")
@@ -190,22 +190,22 @@
 
   (testing "blocks direct secret config key lookups"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?e :where
-                           [?e :config/key :oauth/google]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?e :where
+                          [?e :config/key :oauth/google]]))))
 
   (testing "blocks config key enumeration"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?k :where
-                           [?e :config/key ?k]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?k :where
+                          [?e :config/key ?k]]))))
 
   (testing "blocks raw config value reads even for non-secret keys"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?v :where
-                           [?e :config/key :user/name]
-                           [?e :config/value ?v]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?v :where
+                          [?e :config/key :user/name]
+                          [?e :config/value ?v]]))))
 
   (testing "safe-get-config remains the allowed path for non-secret config"
     (is (= "Alice" (secret/safe-get-config :user/name)))))
@@ -213,15 +213,15 @@
 (deftest safe-q-blocks-non-vector-and-symbol-built-secret-queries
   (testing "rejects non-vector query forms outright"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '(:find ?v :where [?e :llm.provider/api-key ?v])))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '(:find ?v :where [?e :llm.provider/api-key ?v])))))
 
   (testing "rejects secret-like symbols constructed dynamically"
     (let [attr  (symbol (str "llm.provider/" "api-key"))
           query [:find '?v :where ['?e attr '?v]]]
       (is (thrown-with-msg?
-            clojure.lang.ExceptionInfo #"Access denied"
-            (secret/safe-q query))))))
+           clojure.lang.ExceptionInfo #"Access denied"
+           (secret/safe-q query))))))
 
 (deftest safe-q-blocks-pull
   (db/transact! [{:llm.provider/id       :test
@@ -232,9 +232,9 @@
                   :llm.provider/default? true}])
 
   (is (thrown-with-msg?
-        clojure.lang.ExceptionInfo #"Access denied"
-        (secret/safe-q '[:find (pull ?e [*]) :where
-                         [?e :llm.provider/id :test]]))))
+       clojure.lang.ExceptionInfo #"Access denied"
+       (secret/safe-q '[:find (pull ?e [*]) :where
+                        [?e :llm.provider/id :test]]))))
 
 (deftest safe-q-blocks-computed-where-clauses
   (db/transact! [{:service/id        :leak
@@ -252,17 +252,17 @@
 
   (testing "blocks entity-returning Datalevin function clauses"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?entity :where
-                           [?e :service/id :leak]
-                           [(datalevin.core/entity $ ?e) ?entity]]))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?entity :where
+                          [?e :service/id :leak]
+                          [(datalevin.core/entity $ ?e) ?entity]]))))
 
   (testing "blocks non-secret computed clauses as part of the sandbox policy"
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?label :where
-                           [?e :llm.provider/name ?name]
-                           [(str ?name "-suffix") ?label]])))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?label :where
+                          [?e :llm.provider/name ?name]
+                          [(str ?name "-suffix") ?label]])))))
 
 (deftest safe-q-blocks-transcript-and-run-history-queries
   (let [sid         (db/create-session! :terminal)
@@ -288,13 +288,13 @@
                     :message/created-at  (java.util.Date.)}])
 
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?content :where [?m :message/content ?content]])))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?content :where [?m :message/content ?content]])))
 
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?result :where [?m :message/tool-result ?result]])))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?result :where [?m :message/tool-result ?result]])))
 
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo #"Access denied"
-          (secret/safe-q '[:find ?result :where [?run :schedule-run/result ?result]])))))
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?result :where [?run :schedule-run/result ?result]])))))

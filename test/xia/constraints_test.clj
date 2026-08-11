@@ -12,7 +12,7 @@
   (let [profile-id (db/ensure-user-profile!
                     {:key "primary"
                      :preferences {:model {:tier :user
-                                            :style :concise}
+                                           :style :concise}
                                    :user-only true}})
         session-id (db/create-session! :terminal
                                        {:user-profile-id profile-id})

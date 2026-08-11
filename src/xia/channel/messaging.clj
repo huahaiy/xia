@@ -1060,7 +1060,7 @@
               :external-message-id (str "imessage:" (get row "message_guid"))
               :user-message text
               :label (or (nonblank-str (get row "handle"))
-                          chat-guid)}))))
+                         chat-guid)}))))
       (catch Exception e
         (log/warn e "iMessage poll failed")))))
 

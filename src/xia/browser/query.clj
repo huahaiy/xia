@@ -73,10 +73,10 @@
   [needle & haystacks]
   (if-let [needle* (some-> needle str/lower-case not-empty)]
     (boolean
-      (some (fn [hay]
-              (when-let [hay* (some-> hay str str/lower-case not-empty)]
-                (str/includes? hay* needle*)))
-            haystacks))
+     (some (fn [hay]
+             (when-let [hay* (some-> hay str str/lower-case not-empty)]
+               (str/includes? hay* needle*)))
+           haystacks))
     true))
 
 (defn css-attr-escape

@@ -219,7 +219,7 @@
                               :as opts}]
   (let [agent-opts (dissoc opts :request-budget-guard :request-observer)]
     (binding [llm/*request-budget-guard* (or request-budget-guard
-                                            llm/*request-budget-guard*)
+                                             llm/*request-budget-guard*)
               llm/*request-observer* (or request-observer
                                          llm/*request-observer*)]
       (apply agent/process-message session-id user-message (mapcat identity agent-opts)))))

@@ -498,23 +498,23 @@
   (cond
     (not (map? response))
     (throw (malformed-response-ex
-             "LLM response must be a map"
-             (assoc request-info :response response)))
+            "LLM response must be a map"
+            (assoc request-info :response response)))
 
     (not (sequential? (get response "choices")))
     (throw (malformed-response-ex
-             "LLM response missing choices"
-             (assoc request-info :response response)))
+            "LLM response missing choices"
+            (assoc request-info :response response)))
 
     (not (map? (first (get response "choices"))))
     (throw (malformed-response-ex
-             "LLM response missing choices[0]"
-             (assoc request-info :response response)))
+            "LLM response missing choices[0]"
+            (assoc request-info :response response)))
 
     (not (map? (get-in response ["choices" 0 "message"])))
     (throw (malformed-response-ex
-             "LLM response missing choices[0].message"
-             (assoc request-info :response response)))
+            "LLM response missing choices[0].message"
+            (assoc request-info :response response)))
 
     :else
     (get-in response ["choices" 0 "message"])))
@@ -526,8 +526,8 @@
     (if (string? content)
       content
       (throw (malformed-response-ex
-               "LLM response missing text choices[0].message.content"
-               (assoc request-info :response response))))))
+              "LLM response missing text choices[0].message.content"
+              (assoc request-info :response response))))))
 
 (defn- tool-message!
   [response request-info]
@@ -537,12 +537,12 @@
     (when (and (contains? message "tool_calls")
                (not (sequential? tool-calls)))
       (throw (malformed-response-ex
-               "LLM response has invalid choices[0].message.tool_calls"
-               (assoc request-info :response response))))
+              "LLM response has invalid choices[0].message.tool_calls"
+              (assoc request-info :response response))))
     (when (and (nil? content) (not (seq tool-calls)))
       (throw (malformed-response-ex
-               "LLM response message has neither content nor tool_calls"
-               (assoc request-info :response response))))
+              "LLM response message has neither content nor tool_calls"
+              (assoc request-info :response response))))
     (cond-> message
       (contains? message "content") (assoc "content" (or content ""))
       (nil? content) (assoc "content" ""))))
@@ -608,8 +608,8 @@
                              (contains? message "content")
                              (assoc "content" content))
                            (throw (malformed-response-ex
-                                    "LLM response missing text choices[0].message.content"
-                                    (assoc request-info :response resp))))))]
+                                   "LLM response missing text choices[0].message.content"
+                                   (assoc request-info :response resp))))))]
     (if (instance? clojure.lang.IObj message)
       (with-meta message (merge (meta message) request-info))
       message)))
@@ -1000,7 +1000,7 @@
         usage       (usage->openai-usage (get response "usage"))]
     (cond-> {"choices"
              [{"finish_reason" (anthropic-stop-reason->finish-reason
-                                 (get response "stop_reason"))
+                                (get response "stop_reason"))
                "message" message}]}
       usage
       (assoc "usage" usage))))
@@ -1146,24 +1146,24 @@
                                               now
                                               rate-limit-window-ms)
         state (.computeIfAbsent provider-rate-limits* provider-id
-                (reify java.util.function.Function
-                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
+                                (reify java.util.function.Function
+                                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
     (rate-limit/consume-slot!
-      state
-      now
-      rate-limit-window-ms
-      limit
-      (fn []
-        (prompt/policy-decision! (task-policy/provider-rate-limit-policy
-                                  provider-id
-                                  workload
-                                  limit))
-        (ex-info (str "Rate limit exceeded for provider " (name provider-id)
-                      " (max " limit " requests/minute)")
-                 {:type        :llm/rate-limit
-                  :provider-id provider-id
-                  :workload    workload
-                  :limit       limit})))))
+     state
+     now
+     rate-limit-window-ms
+     limit
+     (fn []
+       (prompt/policy-decision! (task-policy/provider-rate-limit-policy
+                                 provider-id
+                                 workload
+                                 limit))
+       (ex-info (str "Rate limit exceeded for provider " (name provider-id)
+                     " (max " limit " requests/minute)")
+                {:type        :llm/rate-limit
+                 :provider-id provider-id
+                 :workload    workload
+                 :limit       limit})))))
 
 (defn- anthro-stream-tool-input->arguments
   [input]
@@ -1188,10 +1188,10 @@
 (defn- finalized-anthropic-stream-message
   [state]
   (finalized-stream-message
-    (update state :tool-calls
-            (fn [tool-calls]
-              (mapv finalize-stream-tool-call
-                    (remove nil? tool-calls))))))
+   (update state :tool-calls
+           (fn [tool-calls]
+             (mapv finalize-stream-tool-call
+                   (remove nil? tool-calls))))))
 
 (defn- handle-openai-stream-event!
   [stream-state {:keys [data]} opts provider-id workload]
@@ -1244,7 +1244,7 @@
                      "type" "function"
                      "function" {"name" (or (get block "name") "")
                                  "arguments" (anthro-stream-tool-input->arguments
-                                               (get block "input"))}})))
+                                              (get block "input"))}})))
 
         "content_block_delta"
         (let [index (long (or (get chunk "index") 0))
@@ -1275,7 +1275,7 @@
                     (get-in chunk ["delta" "stop_reason"])
                     (assoc :finish-reason
                            (anthropic-stop-reason->finish-reason
-                             (get-in chunk ["delta" "stop_reason"])))
+                            (get-in chunk ["delta" "stop_reason"])))
 
                     (usage->openai-usage (get chunk "usage"))
                     (assoc :usage (usage->openai-usage (get chunk "usage"))))))
@@ -1293,14 +1293,14 @@
                                  :done? false})]
     (try
       (let [stream-resp (http/request-events
-                          (assoc stream-req
-                                 :on-event
-                                 (fn [event]
-                                   (case provider-family
-                                     :anthropic
-                                     (handle-anthropic-stream-event! stream-state event opts provider-id workload)
+                         (assoc stream-req
+                                :on-event
+                                (fn [event]
+                                  (case provider-family
+                                    :anthropic
+                                    (handle-anthropic-stream-event! stream-state event opts provider-id workload)
 
-                                     (handle-openai-stream-event! stream-state event opts provider-id workload)))))]
+                                    (handle-openai-stream-event! stream-state event opts provider-id workload)))))]
         (when (and (:streamed? stream-resp)
                    (not (stream-complete? @stream-state)))
           (throw (incomplete-stream-ex provider-id workload @stream-state)))
@@ -1361,7 +1361,7 @@
                        :headers     (:headers resp)
                        :body        (:body resp)
                        :provider-id provider-id
-                        :workload    workload})))
+                       :workload    workload})))
     (let [response (if (:streamed? resp)
                      (or (:response resp)
                          (normalize-chat-response provider-family
@@ -1422,22 +1422,22 @@
                                       :workload    (:workload attempt)
                                       :duration-ms dur-ms
                                       :created-at  (java.util.Date.)}
-                              (:ok? result)
-                              (assoc :status :ok)
-                              (not (:ok? result))
-                              (assoc :status :error)
-                              full?
-                              (assoc :messages (json/write-json-str messages))
-                              (and full? (:ok? result))
-                              (assoc :response (json/write-json-str (:response result)))
-                              (and full? (not (:ok? result)))
-                              (assoc :error (str (:error result)))
-                              (and full? (some? (:tools opts)))
-                              (assoc :tools (json/write-json-str (:tools opts)))
-                              (get usage "prompt_tokens")
-                              (assoc :prompt-tokens (get usage "prompt_tokens"))
-                              (get usage "completion_tokens")
-                              (assoc :completion-tokens (get usage "completion_tokens")))]
+                               (:ok? result)
+                               (assoc :status :ok)
+                               (not (:ok? result))
+                               (assoc :status :error)
+                               full?
+                               (assoc :messages (json/write-json-str messages))
+                               (and full? (:ok? result))
+                               (assoc :response (json/write-json-str (:response result)))
+                               (and full? (not (:ok? result)))
+                               (assoc :error (str (:error result)))
+                               (and full? (some? (:tools opts)))
+                               (assoc :tools (json/write-json-str (:tools opts)))
+                               (get usage "prompt_tokens")
+                               (assoc :prompt-tokens (get usage "prompt_tokens"))
+                               (get usage "completion_tokens")
+                               (assoc :completion-tokens (get usage "completion_tokens")))]
             (submit-log-write! log-entry))
           (catch Exception e
             (log/debug e "Failed to build LLM call log entry")))
@@ -1465,8 +1465,8 @@
                                :workload    (:workload attempt)}
                               (let [cooldown-ms (retry-after-ms (some-> e ex-data :headers))
                                     health      (record-provider-failure! attempt-id
-                                                                         error-text
-                                                                         :cooldown-ms cooldown-ms)]
+                                                                          error-text
+                                                                          :cooldown-ms cooldown-ms)]
                                 {:error       e
                                  :retryable?  (retryable-llm-error? e)
                                  :delay-ms    (:cooldown-remaining-ms health)
@@ -1848,10 +1848,10 @@
        (map? value)
        (mapcat (fn [[k v]]
                  (concat
-                   (when (context-window-key? k)
-                     (when-let [parsed (parse-positive-long v)]
-                       [parsed]))
-                   (nested-context-window-values v (inc depth))))
+                  (when (context-window-key? k)
+                    (when-let [parsed (parse-positive-long v)]
+                      [parsed]))
+                  (nested-context-window-values v (inc depth))))
                value)
 
        (sequential? value)
@@ -1885,14 +1885,14 @@
                              (util/long-max 512)
                              (util/long-min recommended-context-input-max))
         max-system       (util/long-max recommended-min-system-budget
-                                   (- input-budget-cap recommended-min-history-budget))
+                                        (- input-budget-cap recommended-min-history-budget))
         system-target    (long (Math/round (* 0.25 (double input-budget-cap))))
         system-budget    (-> system-target
                              (util/long-max recommended-min-system-budget)
                              (util/long-min recommended-system-budget-max)
                              (util/long-min max-system))
         history-budget   (util/long-max recommended-min-history-budget
-                                   (- input-budget-cap system-budget))]
+                                        (- input-budget-cap system-budget))]
     {:system-prompt-budget system-budget
      :history-budget history-budget
      :input-budget-cap input-budget-cap}))

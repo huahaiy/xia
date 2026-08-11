@@ -75,7 +75,7 @@
                                        effective-value
                                        default-value)
    :raw              {:tenant tenant-raw
-                       :overlay overlay-raw-value}})
+                      :overlay overlay-raw-value}})
 
 (defn- tenant-config
   [config-key]

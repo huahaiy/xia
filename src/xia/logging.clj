@@ -33,11 +33,11 @@
     (ensure-parent-dir! log-file)
     (detach-file-appender!)
     (timbre/merge-config!
-      {:appenders
-       {file-appender-name
-        (assoc (timbre/spit-appender {:fname log-file
-                                      :append? true
-                                      :locking? true})
-               :enabled? true)}})
+     {:appenders
+      {file-appender-name
+       (assoc (timbre/spit-appender {:fname log-file
+                                     :append? true
+                                     :locking? true})
+              :enabled? true)}})
     {:path log-file
      :appender (name file-appender-name)}))

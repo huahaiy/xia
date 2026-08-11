@@ -9,7 +9,7 @@
 
 (defn- temp-db-path []
   (str (Files/createTempDirectory "xia-crypto-test"
-         (into-array FileAttribute []))
+                                  (into-array FileAttribute []))
        "/db"))
 
 (defn- bytes=
@@ -97,23 +97,23 @@
                   nil
                   (catch clojure.lang.ExceptionInfo e
                     e))]
-          (is (instance? clojure.lang.ExceptionInfo ex))
-          (is (= "Master passphrase provider returned a blank value"
-                 (.getMessage ^clojure.lang.ExceptionInfo ex)))
-          (is (= :passphrase-provider (:source (ex-data ex))))))))
+         (is (instance? clojure.lang.ExceptionInfo ex))
+         (is (= "Master passphrase provider returned a blank value"
+                (.getMessage ^clojure.lang.ExceptionInfo ex)))
+         (is (= :passphrase-provider (:source (ex-data ex))))))))
 
 (deftest db-connect-accepts-crypto-options
   (let [db-path (temp-db-path)]
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
       #(do
          (let [context (runtime-context/make
-                         {:xia/db {:runtime (db/make-runtime)}})]
+                        {:xia/db {:runtime (db/make-runtime)}})]
            (try
              (runtime-context/with-runtime-context
                context
                (fn []
                  (db/connect! db-path (th/test-connect-options
-                                        {:passphrase-provider (constantly "db-passphrase")}))
+                                       {:passphrase-provider (constantly "db-passphrase")}))
                  (is (= :prompt-passphrase (:source (crypto/current-key-source))))))
              (finally
                (runtime-context/with-runtime-context context db/clear-runtime!))))))))
@@ -121,7 +121,7 @@
 (deftest configure-accepts-explicit-key-file
   (let [db-path  (temp-db-path)
         key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
-                          (into-array FileAttribute [])))]
+                                            (into-array FileAttribute [])))]
     (spit key-file (encode-key 5))
     (maybe-set-owner-only-perms! key-file)
     (with-redefs-fn {#'xia.crypto/env-value (constantly nil)}
@@ -144,13 +144,13 @@
                   nil
                   (catch clojure.lang.ExceptionInfo e
                     e))]
-          (is (instance? clojure.lang.ExceptionInfo ex))
-          (is (= :inside-db-path (:reason (ex-data ex))))))))
+         (is (instance? clojure.lang.ExceptionInfo ex))
+         (is (= :inside-db-path (:reason (ex-data ex))))))))
 
 (deftest configure-rejects-insecure-key-file-permissions
   (let [db-path  (temp-db-path)
         key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
-                          (into-array FileAttribute [])))]
+                                            (into-array FileAttribute [])))]
     (spit key-file (encode-key 7))
     (if (posix-supported? key-file)
       (do
@@ -161,9 +161,9 @@
                       nil
                       (catch clojure.lang.ExceptionInfo e
                         e))]
-              (is (instance? clojure.lang.ExceptionInfo ex))
-              (is (= :insecure-permissions (:reason (ex-data ex))))
-              (is (= "rw-r-----" (:permissions (ex-data ex)))))))
+             (is (instance? clojure.lang.ExceptionInfo ex))
+             (is (= :insecure-permissions (:reason (ex-data ex))))
+             (is (= "rw-r-----" (:permissions (ex-data ex)))))))
       (testing "POSIX permissions unavailable"
         (is true)))))
 
@@ -185,7 +185,7 @@
 (deftest configure-allows-key-file-when-posix-perms-cannot-be-verified
   (let [db-path  (temp-db-path)
         key-file (str (Files/createTempFile "xia-crypto-key" ".txt"
-                          (into-array FileAttribute [])))]
+                                            (into-array FileAttribute [])))]
     (spit key-file (encode-key 9))
     (with-redefs-fn {#'xia.crypto/get-posix-file-permissions
                      (fn [_]

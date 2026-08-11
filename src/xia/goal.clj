@@ -318,8 +318,8 @@
              (when-let [criteria (seq (:goal/success-criteria contract))]
                (str "\nSuccess criteria:\n"
                     (str/join "\n" (map #(str "- " %) criteria))))
-           (when message*
-             (str "\n\nCurrent user turn: " message*))))
+             (when message*
+               (str "\n\nCurrent user turn: " message*))))
       user-message)))
 
 (defn attach-task!
@@ -358,7 +358,7 @@
             max-turns    (long (or (:max-turns goal) default-max-turns))
             complete?    (judge-complete? control autonomy-state)
             guardrail*   (or guardrail
-                              (when (= :resumable task-state) :resumable))
+                             (when (= :resumable task-state) :resumable))
             paused?      (or (= :paused task-state)
                              (contains? #{:paused :cancelled :stopped :interrupted
                                           :failed :stalled :restart-loop}

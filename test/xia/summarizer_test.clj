@@ -15,7 +15,7 @@
 
 (deftest chunk-prompt-is-xia-specific
   (let [prompt (summarizer/build-chunk-prompt
-                 "Atlas launch is scheduled for June 12. Priya owns readiness.")]
+                "Atlas launch is scheduled for June 12. Priya owns readiness.")]
     (is (str/includes? prompt "retrieval summary for Xia"))
     (is (str/includes? prompt "names, headings, dates, numbers, owners, statuses, decisions, risks"))
     (is (str/includes? prompt "Atlas launch is scheduled for June 12"))
@@ -23,8 +23,8 @@
 
 (deftest document-prompt-uses-document-purpose
   (let [prompt (summarizer/build-document-prompt
-                 "Chunk 1: Atlas launch is scheduled for June 12."
-                 :chunk-summaries)]
+                "Chunk 1: Atlas launch is scheduled for June 12."
+                :chunk-summaries)]
     (is (str/includes? prompt "document-level retrieval summary for Xia"))
     (is (str/includes? prompt "Evidence from document sections:"))
     (is (str/includes? prompt "Chunk 1: Atlas launch is scheduled for June 12."))

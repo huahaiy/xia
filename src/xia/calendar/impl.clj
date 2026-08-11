@@ -1331,7 +1331,7 @@
                                        :body (cond-> {"timeMin" time-min
                                                       "timeMax" time-max
                                                       "items"   (mapv (fn [id] {"id" id})
-                                                                       calendar-ids)}
+                                                                      calendar-ids)}
                                                (nonblank-str time-zone)
                                                (assoc "timeZone" (nonblank-str time-zone))))
           calendars*   (get-in response [:body "calendars"])]
@@ -1341,13 +1341,13 @@
        :time-max    time-max
        :time-zone   (nonblank-str time-zone)
        :calendars   (mapv (fn [id]
-                             {:calendar-id id
-                              :busy        (mapv (fn [entry]
-                                                   {:start (get entry "start")
-                                                    :end   (get entry "end")})
-                                                 (or (get-in calendars* [id "busy"]) []))
-                              :errors      (vec (or (get-in calendars* [id "errors"]) []))})
-                           calendar-ids)})))
+                            {:calendar-id id
+                             :busy        (mapv (fn [entry]
+                                                  {:start (get entry "start")
+                                                   :end   (get entry "end")})
+                                                (or (get-in calendars* [id "busy"]) []))
+                             :errors      (vec (or (get-in calendars* [id "errors"]) []))})
+                          calendar-ids)})))
 
 (defrecord MicrosoftCalendarBackend []
   CalendarBackend
@@ -1468,17 +1468,17 @@
        :time-max   time-max
        :time-zone  time-zone*
        :calendars  (mapv (fn [entry]
-                            {:calendar-id        (get entry "scheduleId")
-                             :availability-view  (get entry "availabilityView")
-                             :busy               (mapv (fn [item]
-                                                         {:status (get item "status")
-                                                          :start  (time-map (get item "start"))
-                                                          :end    (time-map (get item "end"))})
-                                                       (or (get entry "scheduleItems") []))
-                             :errors             (if-let [error (get entry "error")]
-                                                   [error]
-                                                   [])})
-                          values)})))
+                           {:calendar-id        (get entry "scheduleId")
+                            :availability-view  (get entry "availabilityView")
+                            :busy               (mapv (fn [item]
+                                                        {:status (get item "status")
+                                                         :start  (time-map (get item "start"))
+                                                         :end    (time-map (get item "end"))})
+                                                      (or (get entry "scheduleItems") []))
+                            :errors             (if-let [error (get entry "error")]
+                                                  [error]
+                                                  [])})
+                         values)})))
 
 (defn- calendar-service-provider
   [service]
@@ -1634,10 +1634,10 @@
                     :body (:body built)
                     :as :string)
     (assoc (first (ical-text->event-summaries "caldav-calendar"
-                                             service-id
-                                             (caldav-calendar-path calendar-id)
-                                             (:body built)
-                                             :event-path event-path))
+                                              service-id
+                                              (caldav-calendar-path calendar-id)
+                                              (:body built)
+                                              :event-path event-path))
            :status "created")))
 
 (defn- caldav-update-event*
@@ -1654,10 +1654,10 @@
                     :body (:body built)
                     :as :string)
     (assoc (first (ical-text->event-summaries "caldav-calendar"
-                                             service-id
-                                             (caldav-calendar-path calendar-id)
-                                             (:body built)
-                                             :event-path event-path))
+                                              service-id
+                                              (caldav-calendar-path calendar-id)
+                                              (:body built)
+                                              :event-path event-path))
            :status "updated")))
 
 (defn- busy-block
@@ -1753,14 +1753,14 @@
        :time-min   time-min
        :time-max   time-max
        :calendars  (mapv (fn [calendar-id]
-                            (let [events (calendar-list-events* service-id
-                                                                (assoc opts
-                                                                       :calendar-id calendar-id
-                                                                       :max-results 250))]
-                              {:calendar-id calendar-id
-                               :busy        (into [] (keep busy-block) events)
-                               :errors      []}))
-                          calendar-ids)})))
+                           (let [events (calendar-list-events* service-id
+                                                               (assoc opts
+                                                                      :calendar-id calendar-id
+                                                                      :max-results 250))]
+                             {:calendar-id calendar-id
+                              :busy        (into [] (keep busy-block) events)
+                              :errors      []}))
+                         calendar-ids)})))
 
 (def ^:private backends
   [(->GoogleCalendarBackend)

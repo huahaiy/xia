@@ -90,7 +90,7 @@
          workspace-tx          (some-> (:max-tx db-value) long)
          task-states           (task-state-index db-value)
          tenant-id             (or (some-> (db/current-instance-id) str)
-                                  paths/default-instance-id)
+                                   paths/default-instance-id)
          timezone-id          (str (ZoneId/systemDefault))
          rows                 (->> (schedule-records db-value)
                                    (map #(schedule-row % (get task-states (:id %))))

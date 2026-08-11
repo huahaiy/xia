@@ -374,35 +374,35 @@
   "Create a SCI evaluation context with xia APIs available."
   []
   (sci/init
-    {:namespaces {'clojure.core       sci-core-overrides
-                  'clojure.java.io    sci-io-overrides
-                  'clojure.java.shell sci-shell-overrides
-                  'clojure.repl       sci-repl-overrides
-                  'xia.memory         xia-memory-ns
-                  'xia.memory-edit    xia-memory-edit-ns
-                  'xia.working-memory xia-wm-ns
-                  'xia.skill          xia-skill-ns
-                  'xia.schedule       xia-schedule-ns
-                  'xia.scratch        xia-scratch-ns
-                  'xia.local-doc      xia-local-doc-ns
-                  'xia.artifact       xia-artifact-ns
-                  'xia.board          xia-board-ns
-                  'xia.cron           xia-cron-ns
-                  'xia.service        xia-service-ns
-                  'xia.peer           xia-peer-ns
-                  'xia.instance-supervisor xia-instance-supervisor-ns
-                  'xia.workspace      xia-workspace-ns
-                  'xia.email          xia-email-ns
-                  'xia.calendar       xia-calendar-ns
-                  'xia.web            xia-web-ns
-                  'xia.browser        xia-browser-ns
-                  'xia.agent          xia-agent-ns
-                  'xia.db             xia-db-ns
-                  'xia.sci-env        xia-sci-env-ns
-                  'xia.pipeline       xia-pipeline-ns}
-     :deny       denied-sci-symbols
-     :classes    {'java.util.Date java.util.Date
-                  'java.util.UUID java.util.UUID}}))
+   {:namespaces {'clojure.core       sci-core-overrides
+                 'clojure.java.io    sci-io-overrides
+                 'clojure.java.shell sci-shell-overrides
+                 'clojure.repl       sci-repl-overrides
+                 'xia.memory         xia-memory-ns
+                 'xia.memory-edit    xia-memory-edit-ns
+                 'xia.working-memory xia-wm-ns
+                 'xia.skill          xia-skill-ns
+                 'xia.schedule       xia-schedule-ns
+                 'xia.scratch        xia-scratch-ns
+                 'xia.local-doc      xia-local-doc-ns
+                 'xia.artifact       xia-artifact-ns
+                 'xia.board          xia-board-ns
+                 'xia.cron           xia-cron-ns
+                 'xia.service        xia-service-ns
+                 'xia.peer           xia-peer-ns
+                 'xia.instance-supervisor xia-instance-supervisor-ns
+                 'xia.workspace      xia-workspace-ns
+                 'xia.email          xia-email-ns
+                 'xia.calendar       xia-calendar-ns
+                 'xia.web            xia-web-ns
+                 'xia.browser        xia-browser-ns
+                 'xia.agent          xia-agent-ns
+                 'xia.db             xia-db-ns
+                 'xia.sci-env        xia-sci-env-ns
+                 'xia.pipeline       xia-pipeline-ns}
+    :deny       denied-sci-symbols
+    :classes    {'java.util.Date java.util.Date
+                 'java.util.UUID java.util.UUID}}))
 
 (defn- current-ctx
   []
@@ -527,7 +527,7 @@
 (defn- instrument-code-string
   [code-str]
   (let [reader (rt/indexing-push-back-reader
-                 (rt/string-push-back-reader code-str))]
+                (rt/string-push-back-reader code-str))]
     (binding [*print-meta* true]
       (loop [forms []]
         (let [form (tr/read {:eof reader-eof
@@ -607,27 +607,27 @@
 (defn- sci-worker-thread
   [worker-id stage timeout-ms f result*]
   (let [runner (bound-fn*
-                 (fn []
-                   (binding [*sci-timeout-state* {:stage stage
-                                                  :timeout-ms timeout-ms
-                                                  :deadline-nanos (+ (System/nanoTime)
-                                                                     (* 1000000
-                                                                        (long timeout-ms)))
-                                                  :counter (long-array 1)}]
-                     (try
-                       (deliver result* {:status :ok
-                                         :value  (f)})
-                       (catch Throwable t
-                         (deliver result* {:status :error
-                                           :throwable t}))
-                       (finally
-                         (unregister-sci-worker! worker-id))))))]
+                (fn []
+                  (binding [*sci-timeout-state* {:stage stage
+                                                 :timeout-ms timeout-ms
+                                                 :deadline-nanos (+ (System/nanoTime)
+                                                                    (* 1000000
+                                                                       (long timeout-ms)))
+                                                 :counter (long-array 1)}]
+                    (try
+                      (deliver result* {:status :ok
+                                        :value  (f)})
+                      (catch Throwable t
+                        (deliver result* {:status :error
+                                          :throwable t}))
+                      (finally
+                        (unregister-sci-worker! worker-id))))))]
     (doto (Thread.
-            ^Runnable
-            (reify Runnable
-              (run [_]
-                (runner)))
-            ^String (str "xia-sci-" (name stage) "-" (System/nanoTime)))
+           ^Runnable
+           (reify Runnable
+             (run [_]
+               (runner)))
+           ^String (str "xia-sci-" (name stage) "-" (System/nanoTime)))
       (.setDaemon true))))
 
 (defn- interrupt-sci-worker!

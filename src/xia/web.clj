@@ -15,15 +15,15 @@
             [xia.runtime-context :as runtime-context]
             [xia.ssrf :as ssrf]
             [xia.util :as util])
-   (:import [org.jsoup Jsoup]
-            [org.jsoup.nodes Document Element TextNode]
-            [org.jsoup.select Elements]
-            [java.io BufferedInputStream ByteArrayOutputStream IOException OutputStreamWriter]
-            [java.net InetAddress InetSocketAddress Socket URI URLEncoder URLDecoder]
-            [java.nio.charset Charset StandardCharsets]
-            [java.util.concurrent ConcurrentHashMap]
-            [java.util.concurrent.atomic AtomicLong]
-            [javax.net.ssl SNIHostName SSLParameters SSLSocket SSLSocketFactory]))
+  (:import [org.jsoup Jsoup]
+           [org.jsoup.nodes Document Element TextNode]
+           [org.jsoup.select Elements]
+           [java.io BufferedInputStream ByteArrayOutputStream IOException OutputStreamWriter]
+           [java.net InetAddress InetSocketAddress Socket URI URLEncoder URLDecoder]
+           [java.nio.charset Charset StandardCharsets]
+           [java.util.concurrent ConcurrentHashMap]
+           [java.util.concurrent.atomic AtomicLong]
+           [javax.net.ssl SNIHostName SSLParameters SSLSocket SSLSocketFactory]))
 
 (def ^:private user-agent "Xia/0.1 (personal AI assistant)")
 (def ^:private max-body-bytes (* 1 1024 1024)) ; 1 MB
@@ -111,17 +111,17 @@
                                              now
                                              rate-limit-window-ms)
         state (.computeIfAbsent (rate-limits) host
-                (reify java.util.function.Function
-                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
+                                (reify java.util.function.Function
+                                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
     (rate-limit/consume-slot!
-      state
-      now
-      rate-limit-window-ms
-      rate-limit-max
-      (fn []
-        (ex-info (str "Rate limit exceeded for " host
-                      " (max " rate-limit-max " requests/minute)")
-                 {:host host})))))
+     state
+     now
+     rate-limit-window-ms
+     rate-limit-max
+     (fn []
+       (ex-info (str "Rate limit exceeded for " host
+                     " (max " rate-limit-max " requests/minute)")
+                {:host host})))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP fetch
@@ -420,8 +420,8 @@
                               resolution)
              status (:status resp)
              location (get-in resp [:headers "location"])]
-           (if (and (#{301 302 303 307 308} status) (seq location))
-             (do
+         (if (and (#{301 302 303 307 308} status) (seq location))
+           (do
              (when (>= (long redirects) (long max-redirects))
                (throw (ex-info "Too many redirects"
                                {:url current-url :redirects redirects})))
@@ -439,11 +439,11 @@
 (def ^:private noise-selectors
   "CSS selectors for elements to remove before extraction."
   (str/join ", "
-    ["script" "style" "noscript" "iframe"
-     "nav" "footer" ".nav" ".footer" ".sidebar" ".menu"
-     ".ad" ".ads" ".advert" ".advertisement" ".banner"
-     ".cookie-banner" ".popup" ".modal"
-     "[role=navigation]" "[role=banner]" "[aria-hidden=true]"]))
+            ["script" "style" "noscript" "iframe"
+             "nav" "footer" ".nav" ".footer" ".sidebar" ".menu"
+             ".ad" ".ads" ".advert" ".advertisement" ".banner"
+             ".cookie-banner" ".popup" ".modal"
+             "[role=navigation]" "[role=banner]" "[aria-hidden=true]"]))
 
 (def ^:private main-content-selectors
   "CSS selectors to try for main content, in priority order."
@@ -457,13 +457,13 @@
   ^Element [^Document doc]
   (or
     ;; Try known content selectors
-    (some (fn [sel]
-            (let [^Elements els (.select doc ^String sel)]
-              (when (pos? (.size els))
-                (.first els))))
-          main-content-selectors)
+   (some (fn [sel]
+           (let [^Elements els (.select doc ^String sel)]
+             (when (pos? (.size els))
+               (.first els))))
+         main-content-selectors)
     ;; Fallback: body
-    (.body doc)))
+   (.body doc)))
 
 (defn- escape-markdown-text
   [text]
@@ -504,7 +504,7 @@
                             (.append sb "\n")
                             (.append sb prefix)
                             (.append sb (escape-markdown-text
-                                          (str/trim (.text li))))))))
+                                         (str/trim (.text li))))))))
 
                   ;; List items handled by parent ul/ol
                   "li" nil
@@ -563,7 +563,7 @@
                               (dotimes [c (.size cells)]
                                 (when (pos? c) (.append sb " | "))
                                 (.append sb (escape-markdown-text
-                                              (str/trim (.text ^Element (.get cells c))))))
+                                             (str/trim (.text ^Element (.get cells c))))))
                               (.append sb " |\n")
                               ;; Header separator after first row
                               (when (and (zero? r) (pos? (.size (.select row "th"))))
@@ -583,9 +583,9 @@
 
                   ;; Div, section, article — recurse
                   ("div" "section" "article" "span" "em" "strong"
-                   "b" "i" "mark" "small" "sub" "sup" "body"
-                   "header" "figure" "figcaption" "details" "summary"
-                   "dl" "dt" "dd" "time" "abbr")
+                         "b" "i" "mark" "small" "sub" "sup" "body"
+                         "header" "figure" "figcaption" "details" "summary"
+                         "dl" "dt" "dd" "time" "abbr")
                   (walk-children el depth)
 
                   ;; Everything else — just get the text
@@ -695,8 +695,8 @@
       (when-not (<= 200 status 299)
         (throw (ex-info (str "HTTP " status) {:url url :status status})))
       (let [content-type (or (get headers "content-type")
-                            (get headers "Content-Type")
-                            "")]
+                             (get headers "Content-Type")
+                             "")]
         (if (or (str/includes? content-type "text/html")
                 (str/includes? content-type "application/xhtml"))
           ;; HTML response — parse and extract
@@ -818,15 +818,15 @@
 (defn- parse-ddg-html-result
   [^Element result-el]
   (let [^Element title-el (select-first-any result-el
-                                   ["a.result__a"
-                                    ".result__title a"
-                                    "h2 a"
-                                    "a[href]"])
+                                            ["a.result__a"
+                                             ".result__title a"
+                                             "h2 a"
+                                             "a[href]"])
         ^Element snip-el  (select-first-any result-el
-                                   [".result__snippet"
-                                    ".result__body"
-                                    ".result__extras__snippet"
-                                    ".result__content"])
+                                            [".result__snippet"
+                                             ".result__body"
+                                             ".result__extras__snippet"
+                                             ".result__content"])
         title    (some-> title-el .text str/trim)
         raw-href (some-> title-el (.attr "href"))
         url      (some-> raw-href extract-ddg-url str/trim)
@@ -1038,16 +1038,16 @@
       (let [^String base-url (or final-url url)
             ^Document doc  (Jsoup/parse ^String body ^String base-url)
             data (reduce-kv
-                   (fn [m k sel]
-                     (let [^Elements els (.select doc ^String sel)]
-                       (assoc m k
-                         (mapv (fn [^Element el]
-                                 (if (= "a" (str/lower-case (.tagName el)))
-                                   {:text (.text el) :href (.absUrl el "href")}
-                                   (.text el)))
-                               els))))
-                   {}
-                   selectors)]
+                  (fn [m k sel]
+                    (let [^Elements els (.select doc ^String sel)]
+                      (assoc m k
+                             (mapv (fn [^Element el]
+                                     (if (= "a" (str/lower-case (.tagName el)))
+                                       {:text (.text el) :href (.absUrl el "href")}
+                                       (.text el)))
+                                   els))))
+                  {}
+                  selectors)]
         {:success? true
          :url      (or final-url url)
          :data     data}))

@@ -92,12 +92,12 @@
 (defn with-session
   [deps session-id f]
   (with-existing-session
-   deps
-   session-id
-   (fn []
-     (let [touch! (fn
-                    ([] (touch-rest-session! deps session-id))
-                    ([response]
-                     (touch-rest-session! deps session-id)
-                     response))]
-       (f touch!)))))
+    deps
+    session-id
+    (fn []
+      (let [touch! (fn
+                     ([] (touch-rest-session! deps session-id))
+                     ([response]
+                      (touch-rest-session! deps session-id)
+                      response))]
+        (f touch!)))))

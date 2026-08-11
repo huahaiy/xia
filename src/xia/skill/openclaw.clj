@@ -155,8 +155,8 @@
              (assoc acc k (parse-frontmatter-value k raw-v)))
            (throw (ex-info "Unsupported OpenClaw frontmatter line"
                            {:line line}))))))
-    {}
-    (str/split-lines (or frontmatter ""))))
+   {}
+   (str/split-lines (or frontmatter ""))))
 
 (defn- nested-key-hits
   [value]
@@ -188,14 +188,14 @@
         ignored-fields (sort (set/intersection present-keys ignored-frontmatter-keys))
         metadata-hits  (nested-key-hits (get metadata "metadata"))
         warnings       (vec (concat
-                              (map #(str "Ignored unsupported frontmatter field `" % "`.") ignored-fields)
-                              (when-not strict?
-                                (map #(str "Ignored unknown frontmatter field `" % "`.") unknown-keys))))
+                             (map #(str "Ignored unsupported frontmatter field `" % "`.") ignored-fields)
+                             (when-not strict?
+                               (map #(str "Ignored unknown frontmatter field `" % "`.") unknown-keys))))
         errors         (vec (concat
-                              (map #(str "Unsupported OpenClaw frontmatter field `" % "`.") rejected-keys)
-                              (map #(str "Blocked OpenClaw metadata key `" % "`.") metadata-hits)
-                              (when strict?
-                                (map #(str "Unknown OpenClaw frontmatter field `" % "`.") unknown-keys))))]
+                             (map #(str "Unsupported OpenClaw frontmatter field `" % "`.") rejected-keys)
+                             (map #(str "Blocked OpenClaw metadata key `" % "`.") metadata-hits)
+                             (when strict?
+                               (map #(str "Unknown OpenClaw frontmatter field `" % "`.") unknown-keys))))]
     {:warnings warnings
      :errors errors
      :ignored-fields ignored-fields}))
@@ -277,7 +277,7 @@
       (when-not (zip-path? source)
         (throw (ex-info "Remote OpenClaw import only supports zip URLs"
                         {:source-url source})))
-        (let [tmp-zip (File/createTempFile "xia-openclaw" ".zip")
+      (let [tmp-zip (File/createTempFile "xia-openclaw" ".zip")
             unpacked (do
                        (io/copy (ByteArrayInputStream. body) tmp-zip)
                        (with-open [in (io/input-stream tmp-zip)]
@@ -327,7 +327,7 @@
 (defn- relative-path
   [^File root ^File file]
   (normalize-entry-name
-    (str (.relativize (.toPath root) (.toPath file)))))
+   (str (.relativize (.toPath root) (.toPath file)))))
 
 (defn- supported-resource-file?
   [^File file]
@@ -357,9 +357,9 @@
         oversized (filterv #(> (long (:size-bytes %)) (long max-resource-bytes)) resources)
         total-bytes (transduce (map #(long (:size-bytes %))) + 0 resources)
         errors (vec (concat
-                      (map #(str "Bundled resource `" (:path %) "` exceeds the per-file size limit.") oversized)
-                      (when (> (long total-bytes) (long max-total-resource-bytes))
-                        [(str "Bundled resources exceed the total size limit (" max-total-resource-bytes " bytes).")])))
+                     (map #(str "Bundled resource `" (:path %) "` exceeds the per-file size limit.") oversized)
+                     (when (> (long total-bytes) (long max-total-resource-bytes))
+                       [(str "Bundled resources exceed the total size limit (" max-total-resource-bytes " bytes).")])))
         warnings (when-not strict?
                    (mapv (fn [resource]
                            (str "Skipped bundled resource `" (:path resource) "` because it exceeds the import limits."))

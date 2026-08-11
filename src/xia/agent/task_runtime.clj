@@ -1321,12 +1321,12 @@
                                            :runtime-op :resume
                                            :turn-reservation-token reservation-token)
                            ((:process-message deps) session-id
-                            message*
-                            :channel channel
-                            :task-id task-id
-                            :runtime-op :resume
-                            :persist-message? false
-                            :turn-reservation-token reservation-token))
+                                                    message*
+                                                    :channel channel
+                                                    :task-id task-id
+                                                    :runtime-op :resume
+                                                    :persist-message? false
+                                                    :turn-reservation-token reservation-token))
                          (finally
                            ((:clear-session-turn-reservation! deps)
                             session-id
@@ -1432,12 +1432,12 @@
                                        :session-id session-id
                                        :timeout-ms timeout-ms})))))
                 ((:process-message deps) session-id
-                 message*
-                 :channel channel
-                 :task-id task-id
-                 :runtime-op :steer
-                 :interrupting-turn-id interrupting-turn-id
-                 :turn-reservation-token reservation-token)
+                                         message*
+                                         :channel channel
+                                         :task-id task-id
+                                         :runtime-op :steer
+                                         :interrupting-turn-id interrupting-turn-id
+                                         :turn-reservation-token reservation-token)
                 (finally
                   ((:clear-session-turn-reservation! deps)
                    session-id
@@ -1571,12 +1571,12 @@
                                                             :resource-session-id parent-session-id
                                                             :tool-context tool-context)
                                             ((:process-message deps) child-session-id
-                                             message*
-                                             :channel :branch
-                                             :task-id child-task-id
-                                             :runtime-op :fork
-                                             :resource-session-id parent-session-id
-                                             :tool-context tool-context)))}))]
+                                                                     message*
+                                                                     :channel :branch
+                                                                     :task-id child-task-id
+                                                                     :runtime-op :fork
+                                                                     :resource-session-id parent-session-id
+                                                                     :tool-context tool-context)))}))]
           (record-task-control-turn! task-id
                                      :fork
                                      (str "Forked child task: " title))

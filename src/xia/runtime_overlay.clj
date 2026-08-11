@@ -236,10 +236,10 @@
       (throw (ex-info "Runtime overlay :config-overrides values must be literal override values."
                       {:config-key config-key
                        :value value})))
-      (when (secret-ref? value)
-        (when-not (sensitive/secret-config-key? config-key)
-          (throw (ex-info "Runtime overlay secret refs are only allowed for secret config keys."
-                          {:config-key config-key})))
+    (when (secret-ref? value)
+      (when-not (sensitive/secret-config-key? config-key)
+        (throw (ex-info "Runtime overlay secret refs are only allowed for secret config keys."
+                        {:config-key config-key})))
       (resolve-secret-ref value {:config-key config-key})))
   (doseq [[config-key value] (:bounded-config overlay)]
     (when (secret-ref? value)
@@ -287,39 +287,39 @@
       (throw (ex-info "Runtime overlay may mark at most one provider as default."
                       {:provider-ids provider-default-ids})))
     (reduce
-      (fn [acc entity]
-        (let [[kind identity-attr] (entity-kind-entry entity)
-              entity-id            (get entity identity-attr)]
-          (-> acc
-              (update-in [:entities kind entity-id] #(merge (or % {}) entity))
-              (update-in [:entity-order kind]
-                         (fn [ids]
-                           (let [ids* (or ids [])]
-                             (if (some #{entity-id} ids*)
-                               ids*
-                               (conj (vec ids*) entity-id))))))))
-      (let [literal-overrides (into {}
-                                    (map (fn [[config-key value]]
-                                           [config-key (normalize-config-override-entry value)]))
-                                    (:config-overrides overlay))
-            bounded-overrides (into {}
-                                    (map (fn [[config-key value]]
-                                           [config-key (normalize-bounded-config-entry value)]))
-                                    (:bounded-config overlay))]
-        {:overlay/schema-version current-overlay-schema-version
-         :source-overlay/schema-version source-schema-version
-         :tenant/id (:tenant/id overlay)
-         :runtime/id (:runtime/id overlay)
-         :generated-at (:generated-at overlay)
-         :overlay/requires-db-schema-version current-db-schema-version
-         :snapshot/id (:snapshot/id overlay)
-         :literal-config-overrides literal-overrides
-         :bounded-config bounded-overrides
-         :config-overrides (merge literal-overrides bounded-overrides)
-         :forced-keys (:forced-keys overlay)
-         :tx-data (:tx-data overlay)
-         :provider-default-id (first provider-default-ids)})
-      (:tx-data overlay))))
+     (fn [acc entity]
+       (let [[kind identity-attr] (entity-kind-entry entity)
+             entity-id            (get entity identity-attr)]
+         (-> acc
+             (update-in [:entities kind entity-id] #(merge (or % {}) entity))
+             (update-in [:entity-order kind]
+                        (fn [ids]
+                          (let [ids* (or ids [])]
+                            (if (some #{entity-id} ids*)
+                              ids*
+                              (conj (vec ids*) entity-id))))))))
+     (let [literal-overrides (into {}
+                                   (map (fn [[config-key value]]
+                                          [config-key (normalize-config-override-entry value)]))
+                                   (:config-overrides overlay))
+           bounded-overrides (into {}
+                                   (map (fn [[config-key value]]
+                                          [config-key (normalize-bounded-config-entry value)]))
+                                   (:bounded-config overlay))]
+       {:overlay/schema-version current-overlay-schema-version
+        :source-overlay/schema-version source-schema-version
+        :tenant/id (:tenant/id overlay)
+        :runtime/id (:runtime/id overlay)
+        :generated-at (:generated-at overlay)
+        :overlay/requires-db-schema-version current-db-schema-version
+        :snapshot/id (:snapshot/id overlay)
+        :literal-config-overrides literal-overrides
+        :bounded-config bounded-overrides
+        :config-overrides (merge literal-overrides bounded-overrides)
+        :forced-keys (:forced-keys overlay)
+        :tx-data (:tx-data overlay)
+        :provider-default-id (first provider-default-ids)})
+     (:tx-data overlay))))
 
 (defn- activate-overlay!
   [overlay source-path]
@@ -330,9 +330,9 @@
                              validate-overlay!
                              (normalize-overlay source-schema-version))
           overlay-state  (assoc normalized
-                           :overlay/source-path (some-> source-path str str/trim not-empty)
-                           :overlay/loaded-at-ms (System/currentTimeMillis)
-                           :overlay/reload-count (inc (long (or (:overlay/reload-count previous) 0))))]
+                                :overlay/source-path (some-> source-path str str/trim not-empty)
+                                :overlay/loaded-at-ms (System/currentTimeMillis)
+                                :overlay/reload-count (inc (long (or (:overlay/reload-count previous) 0))))]
       (reset! overlay-atom overlay-state)
       (log/info "Activated runtime overlay" (:snapshot/id overlay-state))
       overlay-state)))

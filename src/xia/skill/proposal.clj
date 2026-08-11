@@ -532,9 +532,9 @@
   (->> (get-in task [:contract :skills])
        (keep (fn [ref]
                (let [skill-id (normalize-skill-id (or (:id ref)
-                                                       (:skill-id ref)
-                                                       (get ref "id")
-                                                       (get ref "skill_id")))]
+                                                      (:skill-id ref)
+                                                      (get ref "id")
+                                                      (get ref "skill_id")))]
                  (when-let [saved (and skill-id (db/get-skill skill-id))]
                    {:id skill-id
                     :name (:skill/name saved)
@@ -590,8 +590,8 @@
      :risk (or (value-of proposal :risk) :medium)
      :source (cond-> {:generator :llm-skill-reflection}
                existing (assoc :skill {:id (name (:id existing))
-                                        :version (:version existing)
-                                        :content-sha256 (:content-sha256 existing)}))
+                                       :version (:version existing)
+                                       :content-sha256 (:content-sha256 existing)}))
      :evidence {:task-id (str task-id)}}))
 
 (defn generate-proposals-for-task!

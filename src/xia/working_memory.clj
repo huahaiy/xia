@@ -139,64 +139,64 @@
 (defn- update-session-wm!
   [session-id f]
   (run-session-op! session-id
-    (fn [sid]
-      (when sid
-        (let [wm-state-atom* (wm-state-atom)
-              states @wm-state-atom*]
-          (when-let [wm (get states sid)]
-            (let [now        (current-time-ms)
-                  schedule?  (atom false)
-                  updated    (cond-> (-> (f wm)
-                                         (assoc :last-active-at-ms now)
-                                         (assoc :prompt-cache-version
-                                                (inc (long (or (:prompt-cache-version wm) 0)))))
-                               (not *suppress-snapshot-scheduling?*)
-                               (-> (assoc :last-dirty-at-ms now)
-                                   ((fn [next-wm]
-                                      (if (:snapshot-task-scheduled? next-wm)
-                                        next-wm
-                                        (do
-                                          (reset! schedule? true)
-                                          (assoc next-wm :snapshot-task-scheduled? true)))))))]
-              (reset! wm-state-atom* (assoc states sid updated))
-              (when @schedule?
-                (when-not (async/submit-background!
-                           "wm-snapshot"
-                           #(loop []
-                              (let [wm-state (get-wm sid)]
-                                (when wm-state
-                                  (let [dirty-at         (long (or (:last-dirty-at-ms wm-state) 0))
-                                        last-snapshot-at (long (or (:last-snapshot-at-ms wm-state) 0))
-                                        debounce-at      (+ dirty-at (snapshot-debounce-ms))
-                                        interval-at      (if (pos? last-snapshot-at)
-                                                           (+ last-snapshot-at (snapshot-interval-ms))
-                                                           Long/MAX_VALUE)
-                                        due-at           (long (min debounce-at interval-at))
-                                        now*             (current-time-ms)
-                                        delay-ms         (max 0 (- due-at now*))]
-                                    (if (or (zero? dirty-at) (zero? delay-ms))
-                                      (snapshot! sid)
-                                      (do
-                                        (sleep-ms! delay-ms)
-                                        (recur))))))))
-                  (run-session-op! sid
-                    (fn [sid*]
-                      (swap! wm-state-atom* update sid*
-                             #(when %
-                                (assoc % :snapshot-task-scheduled? false)))))))
-              updated)))))))
+                   (fn [sid]
+                     (when sid
+                       (let [wm-state-atom* (wm-state-atom)
+                             states @wm-state-atom*]
+                         (when-let [wm (get states sid)]
+                           (let [now        (current-time-ms)
+                                 schedule?  (atom false)
+                                 updated    (cond-> (-> (f wm)
+                                                        (assoc :last-active-at-ms now)
+                                                        (assoc :prompt-cache-version
+                                                               (inc (long (or (:prompt-cache-version wm) 0)))))
+                                              (not *suppress-snapshot-scheduling?*)
+                                              (-> (assoc :last-dirty-at-ms now)
+                                                  ((fn [next-wm]
+                                                     (if (:snapshot-task-scheduled? next-wm)
+                                                       next-wm
+                                                       (do
+                                                         (reset! schedule? true)
+                                                         (assoc next-wm :snapshot-task-scheduled? true)))))))]
+                             (reset! wm-state-atom* (assoc states sid updated))
+                             (when @schedule?
+                               (when-not (async/submit-background!
+                                          "wm-snapshot"
+                                          #(loop []
+                                             (let [wm-state (get-wm sid)]
+                                               (when wm-state
+                                                 (let [dirty-at         (long (or (:last-dirty-at-ms wm-state) 0))
+                                                       last-snapshot-at (long (or (:last-snapshot-at-ms wm-state) 0))
+                                                       debounce-at      (+ dirty-at (snapshot-debounce-ms))
+                                                       interval-at      (if (pos? last-snapshot-at)
+                                                                          (+ last-snapshot-at (snapshot-interval-ms))
+                                                                          Long/MAX_VALUE)
+                                                       due-at           (long (min debounce-at interval-at))
+                                                       now*             (current-time-ms)
+                                                       delay-ms         (max 0 (- due-at now*))]
+                                                   (if (or (zero? dirty-at) (zero? delay-ms))
+                                                     (snapshot! sid)
+                                                     (do
+                                                       (sleep-ms! delay-ms)
+                                                       (recur))))))))
+                                 (run-session-op! sid
+                                                  (fn [sid*]
+                                                    (swap! wm-state-atom* update sid*
+                                                           #(when %
+                                                              (assoc % :snapshot-task-scheduled? false)))))))
+                             updated)))))))
 
 (defn- update-session-wm-bookkeeping!
   [session-id f]
   (run-session-op! session-id
-    (fn [sid]
-      (when sid
-        (let [wm-state-atom* (wm-state-atom)
-              states @wm-state-atom*]
-          (when-let [wm (get states sid)]
-            (let [updated (f wm)]
-              (reset! wm-state-atom* (assoc states sid updated))
-              updated)))))))
+                   (fn [sid]
+                     (when sid
+                       (let [wm-state-atom* (wm-state-atom)
+                             states @wm-state-atom*]
+                         (when-let [wm (get states sid)]
+                           (let [updated (f wm)]
+                             (reset! wm-state-atom* (assoc states sid updated))
+                             updated)))))))
 
 (def ^:private default-config
   {:max-slots             15
@@ -285,33 +285,33 @@ Rules:
    (extract-search-terms nil message))
   ([session-id message]
    (let [;; Tokenize and clean
-        words (into []
-                    (comp (remove str/blank?)
-                          (remove #(< (count %) 2)))
-                    (str/split (str/lower-case message) #"[^\w'-]+"))
+         words (into []
+                     (comp (remove str/blank?)
+                           (remove #(< (count %) 2)))
+                     (str/split (str/lower-case message) #"[^\w'-]+"))
         ;; Filter stopwords
-        meaningful (into [] (remove stopwords) words)
+         meaningful (into [] (remove stopwords) words)
         ;; Extract capitalized words from original message (proper nouns)
-        proper-nouns (into [] (map str/lower-case)
-                           (or (re-seq #"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*" message)
-                               []))
+         proper-nouns (into [] (map str/lower-case)
+                            (or (re-seq #"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*" message)
+                                []))
         ;; Include active entity names from WM
-        wm-names (when-let [wm (session-wm session-id)]
-                   (let [slot-names (into []
-                                          (comp (map :name)
-                                                (remove nil?)
-                                                (map str/lower-case))
-                                          (vals (:slots wm)))
-                         doc-names  (into []
-                                          (comp (map :name)
-                                                (remove nil?)
-                                                (map str/lower-case))
-                                          (:local-doc-refs wm))]
-                     (into slot-names doc-names)))
+         wm-names (when-let [wm (session-wm session-id)]
+                    (let [slot-names (into []
+                                           (comp (map :name)
+                                                 (remove nil?)
+                                                 (map str/lower-case))
+                                           (vals (:slots wm)))
+                          doc-names  (into []
+                                           (comp (map :name)
+                                                 (remove nil?)
+                                                 (map str/lower-case))
+                                           (:local-doc-refs wm))]
+                      (into slot-names doc-names)))
         ;; Combine, deduplicate
-        all-terms (into []
-                        (comp cat (distinct) (take 20))
-                        [proper-nouns meaningful wm-names])]
+         all-terms (into []
+                         (comp cat (distinct) (take 20))
+                         [proper-nouns meaningful wm-names])]
      all-terms)))
 
 ;; ============================================================================
@@ -396,7 +396,7 @@ Rules:
   ([slots node-eid name type relevance turn-count node-data]
    (merge-node-into-slot slots node-eid name type relevance turn-count node-data nil))
   ([slots node-eid name type relevance turn-count node-data
-   {:keys [boost-existing? refresh-existing?]
+    {:keys [boost-existing? refresh-existing?]
      :or {boost-existing? true
           refresh-existing? false}}]
    (if-let [existing (get slots node-eid)]
@@ -445,14 +445,14 @@ Rules:
 (defn- lowest-ranked-ref-entry
   [selected]
   (reduce-kv
-    (fn [lowest ref-id ref]
-      (if (or (nil? lowest)
-              (< (double (ref-relevance ref))
-                 (double (ref-relevance (second lowest)))))
-        [ref-id ref]
-        lowest))
-    nil
-    selected))
+   (fn [lowest ref-id ref]
+     (if (or (nil? lowest)
+             (< (double (ref-relevance ref))
+                (double (ref-relevance (second lowest)))))
+       [ref-id ref]
+       lowest))
+   nil
+   selected))
 
 (defn- merge-bounded-refs
   [existing-refs new-refs ref-id-key max-count]
@@ -534,119 +534,119 @@ Rules:
   ([session-id search-results expanded-nodes {:keys [boost-existing? refresh-existing?]
                                               :or {boost-existing? true
                                                    refresh-existing? false}}]
-  (let [merge-opts          {:boost-existing? boost-existing?
-                             :refresh-existing? refresh-existing?}
-        preloaded-node-data (preload-merge-node-data (some-> (session-wm session-id) :slots)
-                                                     search-results
-                                                     expanded-nodes
-                                                     :refresh-existing? refresh-existing?)]
-    (update-session-wm! session-id
-      (fn [wm]
-        (let [turn (:turn-count wm)
+   (let [merge-opts          {:boost-existing? boost-existing?
+                              :refresh-existing? refresh-existing?}
+         preloaded-node-data (preload-merge-node-data (some-> (session-wm session-id) :slots)
+                                                      search-results
+                                                      expanded-nodes
+                                                      :refresh-existing? refresh-existing?)]
+     (update-session-wm! session-id
+                         (fn [wm]
+                           (let [turn (:turn-count wm)
             ;; Merge direct search hits at high relevance
-            slots-with-nodes
-            (reduce (fn [slots {:keys [eid name type]}]
-                      (merge-node-into-slot slots
-                                            eid
-                                            name
-                                            type
-                                            0.8
-                                            turn
-                                            (some-> (get preloaded-node-data eid) :slot-data)
-                                            merge-opts))
-                    (:slots wm)
-                    (:nodes search-results))
+                                 slots-with-nodes
+                                 (reduce (fn [slots {:keys [eid name type]}]
+                                           (merge-node-into-slot slots
+                                                                 eid
+                                                                 name
+                                                                 type
+                                                                 0.8
+                                                                 turn
+                                                                 (some-> (get preloaded-node-data eid) :slot-data)
+                                                                 merge-opts))
+                                         (:slots wm)
+                                         (:nodes search-results))
             ;; Merge nodes found via fact search
-            slots-with-fact-nodes
-            (reduce (fn [slots {:keys [node-eid]}]
-	                      (let [{:keys [name type slot-data]} (get preloaded-node-data node-eid)
-                                in-slots? (contains? slots node-eid)]
-                            (if (and in-slots?
-                                     (not refresh-existing?)
-                                     boost-existing?)
+                                 slots-with-fact-nodes
+                                 (reduce (fn [slots {:keys [node-eid]}]
+                                           (let [{:keys [name type slot-data]} (get preloaded-node-data node-eid)
+                                                 in-slots? (contains? slots node-eid)]
+                                             (if (and in-slots?
+                                                      (not refresh-existing?)
+                                                      boost-existing?)
 	                          ;; Boost existing slot
-	                          (update-in slots [node-eid :relevance]
-	                                     #(boost-relevance % 0.3))
-                              (merge-node-into-slot
-                               slots node-eid
-                               (or name (get-in slots [node-eid :name]))
-                               (or type (get-in slots [node-eid :type]))
-                               0.6 turn
-                               slot-data
-                               merge-opts))))
-                    slots-with-nodes
-                    (:facts search-results))
+                                               (update-in slots [node-eid :relevance]
+                                                          #(boost-relevance % 0.3))
+                                               (merge-node-into-slot
+                                                slots node-eid
+                                                (or name (get-in slots [node-eid :name]))
+                                                (or type (get-in slots [node-eid :type]))
+                                                0.6 turn
+                                                slot-data
+                                                merge-opts))))
+                                         slots-with-nodes
+                                         (:facts search-results))
             ;; Merge expanded (one-hop) nodes at lower relevance
-            slots-with-expanded
-            (reduce (fn [slots [eid {:keys [name type]}]]
-                      (if (and (contains? slots eid)
-                               (not refresh-existing?))
-                        slots ; already in WM from direct search
-                        (merge-node-into-slot slots
-                                              eid
-                                              name
-                                              type
-                                              0.3
-                                              turn
-                                              (some-> (get preloaded-node-data eid) :slot-data)
-                                              merge-opts)))
-                    slots-with-fact-nodes
-                    expanded-nodes)
+                                 slots-with-expanded
+                                 (reduce (fn [slots [eid {:keys [name type]}]]
+                                           (if (and (contains? slots eid)
+                                                    (not refresh-existing?))
+                                             slots ; already in WM from direct search
+                                             (merge-node-into-slot slots
+                                                                   eid
+                                                                   name
+                                                                   type
+                                                                   0.3
+                                                                   turn
+                                                                   (some-> (get preloaded-node-data eid) :slot-data)
+                                                                   merge-opts)))
+                                         slots-with-fact-nodes
+                                         expanded-nodes)
             ;; Merge episode refs
-            max-refs (get-in wm [:config :max-episode-refs])
-            new-refs (into [] (map (fn [{:keys [eid summary timestamp]}]
-                                     {:episode-eid eid
-                                      :summary     summary
-                                      :timestamp   timestamp
-                                      :relevance   0.7}))
-                           (:episodes search-results))
-            merged-refs (merge-bounded-refs (:episode-refs wm)
-                                            new-refs
-                                            :episode-eid
-                                            max-refs)
-            max-doc-refs (get-in wm [:config :max-local-doc-refs])
-            new-doc-refs (into [] (map-indexed
-	                                    (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
-	                                      {:doc-id         id
-	                                       :name           name
-	                                       :media-type     media-type
-	                                       :summary        summary
-	                                       :preview        preview
-	                                       :matched-chunks matched-chunks
-	                                       :relevance      (clojure.core/max 0.45
-	                                                                         (- 0.8 (* (double idx) 0.1)))}))
-                               (:local-docs search-results))
-            merged-doc-refs (merge-bounded-refs (:local-doc-refs wm)
-                                                new-doc-refs
-                                                :doc-id
-                                                max-doc-refs)]
-        (assoc wm
-               :slots        slots-with-expanded
-               :episode-refs merged-refs
-               :local-doc-refs merged-doc-refs)))))))
+                                 max-refs (get-in wm [:config :max-episode-refs])
+                                 new-refs (into [] (map (fn [{:keys [eid summary timestamp]}]
+                                                          {:episode-eid eid
+                                                           :summary     summary
+                                                           :timestamp   timestamp
+                                                           :relevance   0.7}))
+                                                (:episodes search-results))
+                                 merged-refs (merge-bounded-refs (:episode-refs wm)
+                                                                 new-refs
+                                                                 :episode-eid
+                                                                 max-refs)
+                                 max-doc-refs (get-in wm [:config :max-local-doc-refs])
+                                 new-doc-refs (into [] (map-indexed
+                                                        (fn [idx {:keys [id name media-type summary preview matched-chunks]}]
+                                                          {:doc-id         id
+                                                           :name           name
+                                                           :media-type     media-type
+                                                           :summary        summary
+                                                           :preview        preview
+                                                           :matched-chunks matched-chunks
+                                                           :relevance      (clojure.core/max 0.45
+                                                                                             (- 0.8 (* (double idx) 0.1)))}))
+                                                    (:local-docs search-results))
+                                 merged-doc-refs (merge-bounded-refs (:local-doc-refs wm)
+                                                                     new-doc-refs
+                                                                     :doc-id
+                                                                     max-doc-refs)]
+                             (assoc wm
+                                    :slots        slots-with-expanded
+                                    :episode-refs merged-refs
+                                    :local-doc-refs merged-doc-refs)))))))
 
 (defn- decay-slot-map
   ([slots factor]
    (decay-slot-map slots factor nil))
   ([slots factor current-turn]
    (reduce-kv
-     (fn [acc eid slot]
-       (assoc acc eid
-              (if (or (:pinned? slot)
-                      (and (some? current-turn)
-                           (= (long current-turn)
-                              (long (or (:added-turn slot) -1)))))
-                slot
-                (update slot :relevance #(* (double %) (double factor))))))
-     {}
-     slots)))
+    (fn [acc eid slot]
+      (assoc acc eid
+             (if (or (:pinned? slot)
+                     (and (some? current-turn)
+                          (= (long current-turn)
+                             (long (or (:added-turn slot) -1)))))
+               slot
+               (update slot :relevance #(* (double %) (double factor))))))
+    {}
+    slots)))
 
 (defn- prune-slot-map
   [slots threshold max-slots]
   (->> slots
-	       (filter (fn [[_ slot]]
-	                 (or (:pinned? slot)
-	                     (>= (double (:relevance slot)) (double threshold)))))
+       (filter (fn [[_ slot]]
+                 (or (:pinned? slot)
+                     (>= (double (:relevance slot)) (double threshold)))))
        (sort-by (fn [[_ slot]] (:relevance slot)) >)
        (take max-slots)
        (into {})))
@@ -657,13 +657,13 @@ Rules:
    (decay-slots! nil))
   ([session-id]
    (run-session-op! session-id
-     (fn [sid]
-       (update-session-wm! sid
-         (fn [wm]
-           (let [factor       (get-in wm [:config :decay-factor])
-                 current-turn (:turn-count wm)]
-             (update wm :slots
-                     #(decay-slot-map % factor current-turn)))))))))
+                    (fn [sid]
+                      (update-session-wm! sid
+                                          (fn [wm]
+                                            (let [factor       (get-in wm [:config :decay-factor])
+                                                  current-turn (:turn-count wm)]
+                                              (update wm :slots
+                                                      #(decay-slot-map % factor current-turn)))))))))
 
 (defn evict-slots!
   "Remove slots below the eviction threshold. Enforce max capacity."
@@ -671,13 +671,13 @@ Rules:
    (evict-slots! nil))
   ([session-id]
    (run-session-op! session-id
-     (fn [sid]
-       (update-session-wm! sid
-        (fn [wm]
-          (let [threshold (get-in wm [:config :eviction-threshold])
-                max-slots (get-in wm [:config :max-slots])
-                filtered  (prune-slot-map (:slots wm) threshold max-slots)]
-            (assoc wm :slots filtered))))))))
+                    (fn [sid]
+                      (update-session-wm! sid
+                                          (fn [wm]
+                                            (let [threshold (get-in wm [:config :eviction-threshold])
+                                                  max-slots (get-in wm [:config :max-slots])
+                                                  filtered  (prune-slot-map (:slots wm) threshold max-slots)]
+                                              (assoc wm :slots filtered))))))))
 
 ;; ============================================================================
 ;; Topic Tracking
@@ -689,34 +689,34 @@ Rules:
    (update-topics! nil))
   ([session-id]
    (run-session-op! session-id
-     (fn [sid]
-       (let [wm       (session-wm sid)
-             entities (str/join ", " (into [] (comp (map :name) (remove nil?))
-                                           (vals (:slots wm))))
-             local-docs (str/join ", " (into [] (comp (map :name) (remove nil?))
-                                             (:local-doc-refs wm)))
-             episodes (str/join "; " (into [] (comp (map :summary) (remove nil?))
-                                            (:episode-refs wm)))
-             prompt   (str "Current entities in focus: " entities
-                           "\nRelevant local documents: " local-docs
-                           "\nRecent relevant episodes: " episodes
-                           "\n\nSummarize the current conversation focus in ONE sentence.")]
-         (when wm
-           (try
-             (let [summary (llm/chat-simple
-                             [{:role "system"
-                               :content "You are a topic summarizer. Return exactly ONE sentence describing the current conversation focus. Be specific and concise."}
-                              {:role "user" :content prompt}]
-                             :workload :topic-summary)]
-               (update-session-wm! sid
-                 (fn [current-wm]
-                   (assoc current-wm
-                          :prev-topics (:topics current-wm)
-                          :topics      (str/trim summary)
-                          :topic-turn  (:turn-count current-wm))))
-                (log/debug "Updated topic summary:" summary))
-             (catch Exception e
-               (log/warn "Failed to update topic summary:" (.getMessage e))))))))))
+                    (fn [sid]
+                      (let [wm       (session-wm sid)
+                            entities (str/join ", " (into [] (comp (map :name) (remove nil?))
+                                                          (vals (:slots wm))))
+                            local-docs (str/join ", " (into [] (comp (map :name) (remove nil?))
+                                                            (:local-doc-refs wm)))
+                            episodes (str/join "; " (into [] (comp (map :summary) (remove nil?))
+                                                          (:episode-refs wm)))
+                            prompt   (str "Current entities in focus: " entities
+                                          "\nRelevant local documents: " local-docs
+                                          "\nRecent relevant episodes: " episodes
+                                          "\n\nSummarize the current conversation focus in ONE sentence.")]
+                        (when wm
+                          (try
+                            (let [summary (llm/chat-simple
+                                           [{:role "system"
+                                             :content "You are a topic summarizer. Return exactly ONE sentence describing the current conversation focus. Be specific and concise."}
+                                            {:role "user" :content prompt}]
+                                           :workload :topic-summary)]
+                              (update-session-wm! sid
+                                                  (fn [current-wm]
+                                                    (assoc current-wm
+                                                           :prev-topics (:topics current-wm)
+                                                           :topics      (str/trim summary)
+                                                           :topic-turn  (:turn-count current-wm))))
+                              (log/debug "Updated topic summary:" summary))
+                            (catch Exception e
+                              (log/warn "Failed to update topic summary:" (.getMessage e))))))))))
 
 (defn- schedule-topic-update!
   [session-id]
@@ -817,25 +817,25 @@ Rules:
   [entries]
   (let [user-msg  (str "Fact-use review items:\n\n"
                        (transduce
-                         (map-indexed
-                           (fn [idx {:keys [fact user-message assistant-response explicitly-used?]}]
-                             (let [{:keys [content confidence utility]} fact]
-                               (str "Fact " idx
-                                    "\nUser message: " (or user-message "")
-                                    "\nAssistant response: " (or assistant-response "")
-                                    "\nContent: " content
-                                    "\nExplicitly used: " (if explicitly-used? "yes" "no")
-                                    "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
-                                    "\nUtility: " (format "%.3f" (double (or utility 0.5)))))))
-                         (completing
-                           (fn [^StringBuilder sb fact-text]
-                             (when (pos? (.length sb))
-                               (.append sb "\n\n---\n\n"))
-                             (.append sb ^String fact-text))
-                           (fn [^StringBuilder sb]
-                             (.toString sb)))
-                         (StringBuilder.)
-                         entries))
+                        (map-indexed
+                         (fn [idx {:keys [fact user-message assistant-response explicitly-used?]}]
+                           (let [{:keys [content confidence utility]} fact]
+                             (str "Fact " idx
+                                  "\nUser message: " (or user-message "")
+                                  "\nAssistant response: " (or assistant-response "")
+                                  "\nContent: " content
+                                  "\nExplicitly used: " (if explicitly-used? "yes" "no")
+                                  "\nConfidence: " (format "%.3f" (double (or confidence 0.0)))
+                                  "\nUtility: " (format "%.3f" (double (or utility 0.5)))))))
+                        (completing
+                         (fn [^StringBuilder sb fact-text]
+                           (when (pos? (.length sb))
+                             (.append sb "\n\n---\n\n"))
+                           (.append sb ^String fact-text))
+                         (fn [^StringBuilder sb]
+                           (.toString sb)))
+                        (StringBuilder.)
+                        entries))
         defaults  (fact-utility-defaults (map :fact entries))
         explicit  (reduce (fn [scores {:keys [fact explicitly-used?]}]
                             (if explicitly-used?
@@ -853,27 +853,27 @@ Rules:
       {}
       (try
         (let [response (llm/chat-simple
-                         [{:role "system" :content fact-utility-prompt}
-                          {:role "user" :content user-msg}]
-                         :workload :fact-utility)
+                        [{:role "system" :content fact-utility-prompt}
+                         {:role "user" :content user-msg}]
+                        :workload :fact-utility)
               parsed   (json/read-json response)]
           (let [observed
                 (reduce
-                  (fn [scores entry]
-                    (let [idx (get entry "index")]
-                      (if (and (number? idx)
-                               (<= 0 (long idx))
-                               (< (long idx) (count entries)))
-                        (let [fact-eid (:eid (:fact (nth entries (long idx))))
-                              utility  (normalize-fact-utility (get entry "utility"))]
-                          (update scores fact-eid
-                                  (fn [existing]
-                                    (if (nil? existing)
-                                      utility
-                                      (max (double existing) utility)))))
-                        scores)))
-                  {}
-                  (get parsed "facts" []))]
+                 (fn [scores entry]
+                   (let [idx (get entry "index")]
+                     (if (and (number? idx)
+                              (<= 0 (long idx))
+                              (< (long idx) (count entries)))
+                       (let [fact-eid (:eid (:fact (nth entries (long idx))))
+                             utility  (normalize-fact-utility (get entry "utility"))]
+                         (update scores fact-eid
+                                 (fn [existing]
+                                   (if (nil? existing)
+                                     utility
+                                     (max (double existing) utility)))))
+                       scores)))
+                 {}
+                 (get parsed "facts" []))]
             (merge defaults observed explicit)))
         (catch Exception e
           (log/warn "Failed to rate fact utility batch:" (.getMessage e))
@@ -988,8 +988,8 @@ Rules:
       :else
       (do
         (update-session-wm! session-id
-          #(assoc % :pending-topic-shift {:search-terms (vec search-terms)
-                                          :turn-count (:turn-count %)}))
+                            #(assoc % :pending-topic-shift {:search-terms (vec search-terms)
+                                                            :turn-count (:turn-count %)}))
         false))))
 
 ;; ============================================================================
@@ -1001,25 +1001,25 @@ Rules:
    Called when a significant topic shift is detected."
   [session-id channel search-terms]
   (run-session-op! session-id
-    (fn [sid]
-      (let [wm (session-wm sid)]
-        (log/info "Topic shift detected — auto-segmenting episode")
+                   (fn [sid]
+                     (let [wm (session-wm sid)]
+                       (log/info "Topic shift detected — auto-segmenting episode")
         ;; Record current episode with WM topics as context
-        (memory/record-episode!
-          {:type       :conversation
-           :summary    (or (:topics wm) "Conversation segment")
-           :context    (str "Topic: " (:topics wm))
-           :channel    channel
-           :session-id sid})
+                       (memory/record-episode!
+                        {:type       :conversation
+                         :summary    (or (:topics wm) "Conversation segment")
+                         :context    (str "Topic: " (:topics wm))
+                         :channel    channel
+                         :session-id sid})
         ;; Reset topic tracking for new segment
-        (update-session-wm! sid
-          (fn [wm]
-            (assoc wm
-                   :prev-topics         (:topics wm)
-                   :topics              nil
-                   :topic-shift-baseline (normalized-topic-shift-baseline search-terms)
-                   :pending-topic-shift nil
-                   :topic-turn          (:turn-count wm))))))))
+                       (update-session-wm! sid
+                                           (fn [wm]
+                                             (assoc wm
+                                                    :prev-topics         (:topics wm)
+                                                    :topics              nil
+                                                    :topic-shift-baseline (normalized-topic-shift-baseline search-terms)
+                                                    :pending-topic-shift nil
+                                                    :topic-turn          (:turn-count wm))))))))
 
 ;; ============================================================================
 ;; Per-turn Update (orchestrator)
@@ -1038,49 +1038,49 @@ Rules:
                                          boost-existing? true
                                          refresh-existing? false}}]
   (run-session-op! session-id
-    (fn [sid]
-      (when (session-wm sid)
-        (when increment-turn?
-          (update-session-wm! sid #(update % :turn-count inc)))
-        (let [terms   (extract-search-terms sid user-message)
-              results (search-knowledge sid terms user-message resource-session-id)]
-          (when results
-            (let [matched-eids (mapv :eid (:nodes results))
-                  expanded     (when (seq matched-eids)
-                                 (expand-graph matched-eids))]
-              (merge-results! sid
-                              results
-                              expanded
-                              {:boost-existing? boost-existing?
-                               :refresh-existing? refresh-existing?})
-              (when decay-slots?
-                (update-session-wm! sid
-                  (fn [wm]
-                    (let [factor       (get-in wm [:config :decay-factor])
-                          threshold    (get-in wm [:config :eviction-threshold])
-                          max-slots    (get-in wm [:config :max-slots])
-                          current-turn (:turn-count wm)
-                          decayed      (decay-slot-map (:slots wm) factor current-turn)
-                          filtered     (prune-slot-map decayed threshold max-slots)]
-                      (assoc wm :slots filtered)))))))
-          (when topic-maintenance?
-            (let [wm (session-wm sid)]
-              (when (and wm
-                         (seq terms))
-                (if (> (long (:turn-count wm)) 3)
-                  (when (should-auto-segment? sid terms)
-                    (auto-segment! sid channel terms))
-                  (update-session-wm! sid
-                                      #(cond-> %
-                                         (normalized-topic-shift-baseline terms)
-                                         (assoc :topic-shift-baseline
-                                                (normalized-topic-shift-baseline terms))))))
-              (when wm
-                (let [interval    (get-in wm [:config :topic-update-interval])
-                      turns-since (- (long (:turn-count wm)) (long (:topic-turn wm)))]
-                  (when (and interval (>= turns-since (long interval)))
-                    (schedule-topic-update! sid))))))
-          (get-wm sid))))))
+                   (fn [sid]
+                     (when (session-wm sid)
+                       (when increment-turn?
+                         (update-session-wm! sid #(update % :turn-count inc)))
+                       (let [terms   (extract-search-terms sid user-message)
+                             results (search-knowledge sid terms user-message resource-session-id)]
+                         (when results
+                           (let [matched-eids (mapv :eid (:nodes results))
+                                 expanded     (when (seq matched-eids)
+                                                (expand-graph matched-eids))]
+                             (merge-results! sid
+                                             results
+                                             expanded
+                                             {:boost-existing? boost-existing?
+                                              :refresh-existing? refresh-existing?})
+                             (when decay-slots?
+                               (update-session-wm! sid
+                                                   (fn [wm]
+                                                     (let [factor       (get-in wm [:config :decay-factor])
+                                                           threshold    (get-in wm [:config :eviction-threshold])
+                                                           max-slots    (get-in wm [:config :max-slots])
+                                                           current-turn (:turn-count wm)
+                                                           decayed      (decay-slot-map (:slots wm) factor current-turn)
+                                                           filtered     (prune-slot-map decayed threshold max-slots)]
+                                                       (assoc wm :slots filtered)))))))
+                         (when topic-maintenance?
+                           (let [wm (session-wm sid)]
+                             (when (and wm
+                                        (seq terms))
+                               (if (> (long (:turn-count wm)) 3)
+                                 (when (should-auto-segment? sid terms)
+                                   (auto-segment! sid channel terms))
+                                 (update-session-wm! sid
+                                                     #(cond-> %
+                                                        (normalized-topic-shift-baseline terms)
+                                                        (assoc :topic-shift-baseline
+                                                               (normalized-topic-shift-baseline terms))))))
+                             (when wm
+                               (let [interval    (get-in wm [:config :topic-update-interval])
+                                     turns-since (- (long (:turn-count wm)) (long (:topic-turn wm)))]
+                                 (when (and interval (>= turns-since (long interval)))
+                                   (schedule-topic-update! sid))))))
+                         (get-wm sid))))))
 
 (defn update-wm!
   "Per-turn working memory update. Runs the full retrieval pipeline:
@@ -1122,73 +1122,73 @@ Rules:
   "Create a new working memory for a session."
   [session-id]
   (run-session-op! session-id
-    (fn [sid]
-        (let [wm {:session-id      sid
-                :topics          nil
-                :prev-topics     nil
-                :prompt-cache-version 0
-                :last-active-at-ms (current-time-ms)
-                :last-snapshot-at-ms 0
-                :last-dirty-at-ms nil
-                :snapshot-task-scheduled? false
-                :topic-shift-baseline nil
-                :pending-topic-shift nil
-                :autonomy-state  nil
-                :turn-count      0
-                :topic-turn      0
-                :slots           {}
-                :episode-refs    []
-                :local-doc-refs  []
-                :config          default-config}]
-        (swap! (wm-state-atom) assoc sid wm)
-        wm))))
+                   (fn [sid]
+                     (let [wm {:session-id      sid
+                               :topics          nil
+                               :prev-topics     nil
+                               :prompt-cache-version 0
+                               :last-active-at-ms (current-time-ms)
+                               :last-snapshot-at-ms 0
+                               :last-dirty-at-ms nil
+                               :snapshot-task-scheduled? false
+                               :topic-shift-baseline nil
+                               :pending-topic-shift nil
+                               :autonomy-state  nil
+                               :turn-count      0
+                               :topic-turn      0
+                               :slots           {}
+                               :episode-refs    []
+                               :local-doc-refs  []
+                               :config          default-config}]
+                       (swap! (wm-state-atom) assoc sid wm)
+                       wm))))
 
 (defn- restore-snapshot!
   [session-id]
   (run-session-op! session-id
-    (fn [sid]
-      (when-let [snapshot (db/load-wm-snapshot sid)]
-        (binding [*suppress-snapshot-scheduling?* true]
-          (update-session-wm! sid
-            (fn [wm]
-              (cond-> wm
-                (contains? snapshot :topics)
-                (assoc :topics (:topics snapshot))
+                   (fn [sid]
+                     (when-let [snapshot (db/load-wm-snapshot sid)]
+                       (binding [*suppress-snapshot-scheduling?* true]
+                         (update-session-wm! sid
+                                             (fn [wm]
+                                               (cond-> wm
+                                                 (contains? snapshot :topics)
+                                                 (assoc :topics (:topics snapshot))
 
-                (contains? snapshot :autonomy-state)
-                (assoc :autonomy-state (some-> (:autonomy-state snapshot)
-                                               autonomous/normalize-state))
+                                                 (contains? snapshot :autonomy-state)
+                                                 (assoc :autonomy-state (some-> (:autonomy-state snapshot)
+                                                                                autonomous/normalize-state))
 
-                (contains? snapshot :slots)
-                (assoc :slots (or (:slots snapshot) {}))
+                                                 (contains? snapshot :slots)
+                                                 (assoc :slots (or (:slots snapshot) {}))
 
-                (contains? snapshot :episode-refs)
-                (assoc :episode-refs (vec (or (:episode-refs snapshot) [])))
+                                                 (contains? snapshot :episode-refs)
+                                                 (assoc :episode-refs (vec (or (:episode-refs snapshot) [])))
 
-                (contains? snapshot :local-doc-refs)
-                (assoc :local-doc-refs (vec (or (:local-doc-refs snapshot) [])))
+                                                 (contains? snapshot :local-doc-refs)
+                                                 (assoc :local-doc-refs (vec (or (:local-doc-refs snapshot) [])))
 
-                :always
-                (assoc :last-snapshot-at-ms (some-> (:updated-at snapshot)
-                                                    ^java.util.Date
-                                                    .getTime
-                                                    long
-                                                    (or 0))
-                       :last-dirty-at-ms nil
-                       :snapshot-task-scheduled? false)))))
-        (get-wm sid)))))
+                                                 :always
+                                                 (assoc :last-snapshot-at-ms (some-> (:updated-at snapshot)
+                                                                                     ^java.util.Date
+                                                                                     .getTime
+                                                                                     long
+                                                                                     (or 0))
+                                                        :last-dirty-at-ms nil
+                                                        :snapshot-task-scheduled? false)))))
+                       (get-wm sid)))))
 
 (defn ensure-wm!
   "Return working memory for the session, creating and warm-starting it if needed."
   [session-id]
   (run-session-op! session-id
-    (fn [sid]
-      (or (get-wm sid)
-          (do
-            (create-wm! sid)
-            (when-not (restore-snapshot! sid)
-              (warm-start! sid))
-            (get-wm sid))))))
+                   (fn [sid]
+                     (or (get-wm sid)
+                         (do
+                           (create-wm! sid)
+                           (when-not (restore-snapshot! sid)
+                             (warm-start! sid))
+                           (get-wm sid))))))
 
 (defn warm-start!
   "Pre-populate WM from the previous session's topic summary.
@@ -1197,21 +1197,21 @@ Rules:
    (warm-start! nil))
   ([session-id]
    (run-session-op! session-id
-     (fn [sid]
-       (when sid
-         (when (session-wm sid)
-           (let [last-episode (db/latest-session-episode)]
-             (when-let [prev-context (or (:context last-episode)
-                                         (:summary last-episode))]
-               (log/info "Warm start from previous session:" prev-context)
-               (update-session-wm! sid #(assoc % :prev-topics prev-context))
-               (let [terms (extract-search-terms sid prev-context)
-                     results (search-knowledge sid terms prev-context)]
-                 (when results
-                   (let [matched-eids (mapv :eid (:nodes results))
-                         expanded (when (seq matched-eids) (expand-graph matched-eids))]
-                     (merge-results! sid results expanded)))))))
-         (get-wm sid))))))
+                    (fn [sid]
+                      (when sid
+                        (when (session-wm sid)
+                          (let [last-episode (db/latest-session-episode)]
+                            (when-let [prev-context (or (:context last-episode)
+                                                        (:summary last-episode))]
+                              (log/info "Warm start from previous session:" prev-context)
+                              (update-session-wm! sid #(assoc % :prev-topics prev-context))
+                              (let [terms (extract-search-terms sid prev-context)
+                                    results (search-knowledge sid terms prev-context)]
+                                (when results
+                                  (let [matched-eids (mapv :eid (:nodes results))
+                                        expanded (when (seq matched-eids) (expand-graph matched-eids))]
+                                    (merge-results! sid results expanded)))))))
+                        (get-wm sid))))))
 
 (defn get-wm
   "Return current working memory state."
@@ -1229,17 +1229,17 @@ Rules:
 (defn set-autonomy-state!
   [session-id autonomy-state]
   (run-session-op! session-id
-    (fn [sid]
-      (update-session-wm! sid
-        #(assoc % :autonomy-state (some-> autonomy-state
-                                          autonomous/normalize-state))))))
+                   (fn [sid]
+                     (update-session-wm! sid
+                                         #(assoc % :autonomy-state (some-> autonomy-state
+                                                                           autonomous/normalize-state))))))
 
 (defn clear-autonomy-state!
   [session-id]
   (run-session-op! session-id
-    (fn [sid]
-      (update-session-wm! sid
-        #(assoc % :autonomy-state nil)))))
+                   (fn [sid]
+                     (update-session-wm! sid
+                                         #(assoc % :autonomy-state nil)))))
 
 (defn clear-wm!
   "Clear working memory (on session end)."
@@ -1248,9 +1248,9 @@ Rules:
      (reset! wm-state-atom* {})))
   ([session-id]
    (run-session-op! session-id
-     (fn [sid]
-       (when sid
-         (swap! (wm-state-atom) dissoc sid))))))
+                    (fn [sid]
+                      (when sid
+                        (swap! (wm-state-atom) dissoc sid))))))
 
 ;; ============================================================================
 ;; Pinning
@@ -1261,18 +1261,18 @@ Rules:
    (pin! nil node-eid))
   ([session-id node-eid]
    (run-session-op! session-id
-     (fn [sid]
-       (update-session-wm! sid
-         #(assoc-in % [:slots node-eid :pinned?] true))))))
+                    (fn [sid]
+                      (update-session-wm! sid
+                                          #(assoc-in % [:slots node-eid :pinned?] true))))))
 
 (defn unpin!
   ([node-eid]
    (unpin! nil node-eid))
   ([session-id node-eid]
    (run-session-op! session-id
-     (fn [sid]
-       (update-session-wm! sid
-         #(assoc-in % [:slots node-eid :pinned?] false))))))
+                    (fn [sid]
+                      (update-session-wm! sid
+                                          #(assoc-in % [:slots node-eid :pinned?] false))))))
 
 ;; ============================================================================
 ;; Export for context assembly
@@ -1284,35 +1284,35 @@ Rules:
    (wm->context nil))
   ([session-id]
    (when-let [wm (session-wm session-id)]
-    {:topics       (:topics wm)
-     :autonomy     (:autonomy-state wm)
-     :entities     (into []
-                         (map (fn [{:keys [name type facts edges properties relevance pinned?]}]
-                                {:name       name
-                                 :type       type
-                                 :facts      facts
-                                 :edges      edges
-                                 :properties properties
-                                 :relevance  relevance
-                                 :pinned?    pinned?}))
-                         (sort-by :relevance > (vals (:slots wm))))
-     :episodes     (into []
-                         (map (fn [{:keys [summary timestamp relevance]}]
-                                {:summary   summary
-                                 :timestamp timestamp
-                                 :relevance relevance}))
-                         (sort-by :relevance > (:episode-refs wm)))
-     :local-docs   (into []
-                         (map (fn [{:keys [doc-id name media-type summary preview matched-chunks relevance]}]
-                                {:id             doc-id
-                                 :name           name
-                                 :media-type     media-type
-                                 :summary        summary
-                                 :preview        preview
-                                 :matched-chunks matched-chunks
-                                 :relevance      relevance}))
-                         (sort-by :relevance > (:local-doc-refs wm)))
-     :turn-count   (:turn-count wm)})))
+     {:topics       (:topics wm)
+      :autonomy     (:autonomy-state wm)
+      :entities     (into []
+                          (map (fn [{:keys [name type facts edges properties relevance pinned?]}]
+                                 {:name       name
+                                  :type       type
+                                  :facts      facts
+                                  :edges      edges
+                                  :properties properties
+                                  :relevance  relevance
+                                  :pinned?    pinned?}))
+                          (sort-by :relevance > (vals (:slots wm))))
+      :episodes     (into []
+                          (map (fn [{:keys [summary timestamp relevance]}]
+                                 {:summary   summary
+                                  :timestamp timestamp
+                                  :relevance relevance}))
+                          (sort-by :relevance > (:episode-refs wm)))
+      :local-docs   (into []
+                          (map (fn [{:keys [doc-id name media-type summary preview matched-chunks relevance]}]
+                                 {:id             doc-id
+                                  :name           name
+                                  :media-type     media-type
+                                  :summary        summary
+                                  :preview        preview
+                                  :matched-chunks matched-chunks
+                                  :relevance      relevance}))
+                          (sort-by :relevance > (:local-doc-refs wm)))
+      :turn-count   (:turn-count wm)})))
 
 (defn prompt-cache-version
   ([]
@@ -1332,20 +1332,20 @@ Rules:
    (snapshot! nil))
   ([session-id]
    (run-session-op! session-id
-     (fn [sid]
-       (when-let [wm (session-wm sid)]
-         (let [saved-at-ms (current-time-ms)]
-         (try
-           (db/save-wm-snapshot! wm)
-           (update-session-wm-bookkeeping! sid
-             #(assoc %
-                     :last-snapshot-at-ms saved-at-ms
-                     :last-dirty-at-ms nil
-                     :snapshot-task-scheduled? false))
-           (catch Exception e
-             (update-session-wm-bookkeeping! sid
-               #(assoc % :snapshot-task-scheduled? false))
-             (log/warn "Failed to save WM snapshot:" (.getMessage e))))))))))
+                    (fn [sid]
+                      (when-let [wm (session-wm sid)]
+                        (let [saved-at-ms (current-time-ms)]
+                          (try
+                            (db/save-wm-snapshot! wm)
+                            (update-session-wm-bookkeeping! sid
+                                                            #(assoc %
+                                                                    :last-snapshot-at-ms saved-at-ms
+                                                                    :last-dirty-at-ms nil
+                                                                    :snapshot-task-scheduled? false))
+                            (catch Exception e
+                              (update-session-wm-bookkeeping! sid
+                                                              #(assoc % :snapshot-task-scheduled? false))
+                              (log/warn "Failed to save WM snapshot:" (.getMessage e))))))))))
 
 (defn snapshot-all!
   "Persist every currently live working-memory session to DB."
@@ -1382,32 +1382,32 @@ Rules:
 (defn- maybe-reap-stale-session-wm!
   [session-id now-ms]
   (run-session-op! session-id
-    (fn [sid]
-      (when-let [wm (session-wm sid)]
-        (when (and (stale-session-wm? wm now-ms)
-                   (not (session-protected-from-reap? sid)))
-          (let [dirty? (some? (:last-dirty-at-ms wm))]
-            (when dirty?
-              (snapshot! sid))
-            (let [wm* (session-wm sid)]
-              (cond
-                (nil? wm*)
-                false
+                   (fn [sid]
+                     (when-let [wm (session-wm sid)]
+                       (when (and (stale-session-wm? wm now-ms)
+                                  (not (session-protected-from-reap? sid)))
+                         (let [dirty? (some? (:last-dirty-at-ms wm))]
+                           (when dirty?
+                             (snapshot! sid))
+                           (let [wm* (session-wm sid)]
+                             (cond
+                               (nil? wm*)
+                               false
 
-                (some? (:last-dirty-at-ms wm*))
-                (do
-                  (log/warn "Skipping stale WM reap because snapshot did not complete"
-                            {:session-id sid})
-                  false)
+                               (some? (:last-dirty-at-ms wm*))
+                               (do
+                                 (log/warn "Skipping stale WM reap because snapshot did not complete"
+                                           {:session-id sid})
+                                 false)
 
-                :else
-                (let [idle-ms (- now-ms (long (or (:last-active-at-ms wm*) 0)))]
-                  (clear-wm! sid)
-                  (log/info "Reaped stale working memory"
-                            {:session-id sid
-                             :idle-ms idle-ms
-                             :dirty? dirty?})
-                  true)))))))))
+                               :else
+                               (let [idle-ms (- now-ms (long (or (:last-active-at-ms wm*) 0)))]
+                                 (clear-wm! sid)
+                                 (log/info "Reaped stale working memory"
+                                           {:session-id sid
+                                            :idle-ms idle-ms
+                                            :dirty? dirty?})
+                                 true)))))))))
 
 (defn- reap-stale-working-memories!
   []

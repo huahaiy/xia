@@ -143,45 +143,45 @@
     :artifact/unsupported-kind
     :artifact/invalid-bytes
     :artifact/invalid-bytes-base64
-   :artifact/invalid-csv-rows
-   :artifact/session-required
-   :artifact/session-not-found
-   :artifact/not-found
-   :local-doc/invalid-session-id
-   :local-doc/session-required
-   :local-doc/session-not-found
-   :local-doc/unsupported-format
-   :workspace/invalid-workspace-id
-   :workspace/invalid-item-id
-   :workspace/invalid-source-type
-   :workspace/session-required
-   :workspace/not-found
-   :workspace/source-not-found
-   :workspace/payload-missing
-   :workspace/missing-content
-   :email/invalid-body
-   :email/invalid-attachment-bytes
-   :email/invalid-attachment-bytes-base64
-   :email/missing-attachment-content
-   :email/attachment-artifact-not-found
-   :email/missing-message-id
-   :email/missing-draft-id
-   :calendar/missing-event-id
-   :calendar/missing-time-range
-   :calendar/missing-summary
-   :calendar/missing-event-time
-   :calendar/unsupported-recurrence
-   :calendar/read-only-backend
-   :calendar/event-not-found
-   :instance-supervisor/capability-disabled
-   :instance-supervisor/command-unavailable
-   :instance-supervisor/invalid-instance-id
-   :instance-supervisor/invalid-template-instance
-   :instance-supervisor/invalid-bind
-   :instance-supervisor/invalid-port
-   :instance-supervisor/instance-conflict
-   :instance-supervisor/already-running
-   :instance-supervisor/not-found})
+    :artifact/invalid-csv-rows
+    :artifact/session-required
+    :artifact/session-not-found
+    :artifact/not-found
+    :local-doc/invalid-session-id
+    :local-doc/session-required
+    :local-doc/session-not-found
+    :local-doc/unsupported-format
+    :workspace/invalid-workspace-id
+    :workspace/invalid-item-id
+    :workspace/invalid-source-type
+    :workspace/session-required
+    :workspace/not-found
+    :workspace/source-not-found
+    :workspace/payload-missing
+    :workspace/missing-content
+    :email/invalid-body
+    :email/invalid-attachment-bytes
+    :email/invalid-attachment-bytes-base64
+    :email/missing-attachment-content
+    :email/attachment-artifact-not-found
+    :email/missing-message-id
+    :email/missing-draft-id
+    :calendar/missing-event-id
+    :calendar/missing-time-range
+    :calendar/missing-summary
+    :calendar/missing-event-time
+    :calendar/unsupported-recurrence
+    :calendar/read-only-backend
+    :calendar/event-not-found
+    :instance-supervisor/capability-disabled
+    :instance-supervisor/command-unavailable
+    :instance-supervisor/invalid-instance-id
+    :instance-supervisor/invalid-template-instance
+    :instance-supervisor/invalid-bind
+    :instance-supervisor/invalid-port
+    :instance-supervisor/instance-conflict
+    :instance-supervisor/already-running
+    :instance-supervisor/not-found})
 
 (defn- expected-tool-input-error?
   [^Throwable e]
@@ -557,37 +557,37 @@
   "Install bundled tool definitions and refresh existing bundled definitions."
   []
   (reduce
-    (fn [installed-count resource-path]
-      (let [resource (io/resource resource-path)
-            _        (when-not resource
-                       (throw (ex-info "Bundled tool resource missing from classpath"
-                                       {:resource-path resource-path})))
-            data     (some-> resource slurp edn/read-string)
-            _        (when (nil? data)
-                       (throw (ex-info "Bundled tool resource was empty"
-                                       {:resource-path resource-path})))
-            defs (if (vector? data) data [data])]
-        (+ (long installed-count)
-           (reduce
-             (fn [count* tool-def]
-               (let [desired (bundled-tool-install-map tool-def)
-                     id      (:id desired)]
-                 (if-let [tool (db/get-tool id)]
-                   (do
-                     (when (bundled-tool-refresh-needed?
-                             (installed-tool-install-map tool)
-                             desired)
-                       (db/install-tool! desired)
-                       (when (contains? @(registry) id)
-                         (load-tool! id)))
-                     count*)
-                   (do
-                     (import-tool! tool-def)
-                     (inc count*)))))
-             0
-             defs))))
-    0
-    bundled-tool-resources))
+   (fn [installed-count resource-path]
+     (let [resource (io/resource resource-path)
+           _        (when-not resource
+                      (throw (ex-info "Bundled tool resource missing from classpath"
+                                      {:resource-path resource-path})))
+           data     (some-> resource slurp edn/read-string)
+           _        (when (nil? data)
+                      (throw (ex-info "Bundled tool resource was empty"
+                                      {:resource-path resource-path})))
+           defs (if (vector? data) data [data])]
+       (+ (long installed-count)
+          (reduce
+           (fn [count* tool-def]
+             (let [desired (bundled-tool-install-map tool-def)
+                   id      (:id desired)]
+               (if-let [tool (db/get-tool id)]
+                 (do
+                   (when (bundled-tool-refresh-needed?
+                          (installed-tool-install-map tool)
+                          desired)
+                     (db/install-tool! desired)
+                     (when (contains? @(registry) id)
+                       (load-tool! id)))
+                   count*)
+                 (do
+                   (import-tool! tool-def)
+                   (inc count*)))))
+           0
+           defs))))
+   0
+   bundled-tool-resources))
 
 ;; ---------------------------------------------------------------------------
 ;; OpenAI function-calling format
@@ -616,9 +616,9 @@
              (let [wm-context (when-let [session-id (:session-id context)]
                                 (wm/wm->context session-id))]
                (->> (concat
-                      (tokenize (:user-message context))
-                      (tokenize (:topics wm-context))
-                      (mapcat (comp tokenize :name) (:entities wm-context)))
+                     (tokenize (:user-message context))
+                     (tokenize (:topics wm-context))
+                     (mapcat (comp tokenize :name) (:entities wm-context)))
                     set)))
            (tool-match-score [tool terms]
              (let [tag-matches  (count (set/intersection (tool-tags tool) terms))
@@ -694,78 +694,78 @@
   ([tool-id arguments context]
    (if-let [{:keys [tool handler handler-kind]} (get @(registry) tool-id)]
      (if (fn? handler)
-        (try
-          (let [tool-name       (or (:tool/name tool) (name tool-id))
-                handler-context (assoc context
-                                       :tool-id tool-id
-                                       :tool-name tool-name)]
-            (binding [prompt/*interaction-context* handler-context
-                      pipeline/*tool-context*      handler-context
-                      pipeline/*tool-invoker*      execute-pipeline-tool
-                      wm/*session-id*              (or (:resource-session-id context)
-                                                       (:session-id context))]
-              (let [{:keys [allowed? error policy mode] :as execution-decision}
-                    (permission/authorize-tool! tool arguments handler-context)]
-                (if allowed?
-                  (let [hook-context (assoc handler-context
-                                            :arguments arguments)
-                        pre-results  (plugin/run-hooks! :pre-tool hook-context)
-                        blocked      (plugin/blocked-by-pre-tool-hook pre-results)]
-                    (if blocked
-                      (do
-                        (audit-entry! context tool-id tool arguments
-                                      {:status          "blocked"
-                                       :approval-policy (name policy)
-                                       :approval-mode   (name mode)
-                                       :error           (:reason blocked)})
-                        (approval-error tool-id (:reason blocked)))
-                      (do
-                        (prompt/status! {:state    :running
-                                         :phase    :tool
-                                         :message  (str "Running tool " tool-name)
-                                         :tool-id  tool-id
-                                         :tool-name tool-name})
-                        (try
-                          (let [result (normalize-tool-result tool-id
-                                                              (invoke-handler handler-kind handler arguments))]
-                            (plugin/run-hooks! :post-tool
-                                               (assoc hook-context
-                                                      :status :success
-                                                      :result result))
-                            (audit-entry! context tool-id tool arguments
-                                          {:status          "success"
-                                           :approval-policy (name policy)
-                                           :approval-mode   (name mode)})
-                            (prompt/status! {:state    :running
-                                             :phase    :tool
-                                             :message  (str "Finished tool " tool-name)
-                                             :tool-id  tool-id
-                                             :tool-name tool-name})
-                            result)
-                          (catch Exception e
-                            (plugin/run-hooks! :post-tool
-                                               (assoc hook-context
-                                                      :status :error
-                                                      :error (.getMessage e)))
-                            (audit-entry! context tool-id tool arguments
-                                          {:status          "error"
-                                           :approval-policy (name policy)
-                                           :approval-mode   (name mode)
-                                           :error           (.getMessage e)})
-                            (throw e))))))
-                  (do
-                    (audit-entry! context tool-id tool arguments
-                                  {:status          "blocked"
-                                   :approval-policy (name policy)
-                                   :approval-mode   (name mode)
-                                   :error           error})
-                    (prompt/status! {:state    :running
-                                     :phase    :approval
-                                     :message  (str "Skipped tool " tool-name
-                                                    ": " error)
-                                     :tool-id  tool-id
-                                     :tool-name tool-name})
-                    (approval-error tool-id error))))))
+       (try
+         (let [tool-name       (or (:tool/name tool) (name tool-id))
+               handler-context (assoc context
+                                      :tool-id tool-id
+                                      :tool-name tool-name)]
+           (binding [prompt/*interaction-context* handler-context
+                     pipeline/*tool-context*      handler-context
+                     pipeline/*tool-invoker*      execute-pipeline-tool
+                     wm/*session-id*              (or (:resource-session-id context)
+                                                      (:session-id context))]
+             (let [{:keys [allowed? error policy mode] :as execution-decision}
+                   (permission/authorize-tool! tool arguments handler-context)]
+               (if allowed?
+                 (let [hook-context (assoc handler-context
+                                           :arguments arguments)
+                       pre-results  (plugin/run-hooks! :pre-tool hook-context)
+                       blocked      (plugin/blocked-by-pre-tool-hook pre-results)]
+                   (if blocked
+                     (do
+                       (audit-entry! context tool-id tool arguments
+                                     {:status          "blocked"
+                                      :approval-policy (name policy)
+                                      :approval-mode   (name mode)
+                                      :error           (:reason blocked)})
+                       (approval-error tool-id (:reason blocked)))
+                     (do
+                       (prompt/status! {:state    :running
+                                        :phase    :tool
+                                        :message  (str "Running tool " tool-name)
+                                        :tool-id  tool-id
+                                        :tool-name tool-name})
+                       (try
+                         (let [result (normalize-tool-result tool-id
+                                                             (invoke-handler handler-kind handler arguments))]
+                           (plugin/run-hooks! :post-tool
+                                              (assoc hook-context
+                                                     :status :success
+                                                     :result result))
+                           (audit-entry! context tool-id tool arguments
+                                         {:status          "success"
+                                          :approval-policy (name policy)
+                                          :approval-mode   (name mode)})
+                           (prompt/status! {:state    :running
+                                            :phase    :tool
+                                            :message  (str "Finished tool " tool-name)
+                                            :tool-id  tool-id
+                                            :tool-name tool-name})
+                           result)
+                         (catch Exception e
+                           (plugin/run-hooks! :post-tool
+                                              (assoc hook-context
+                                                     :status :error
+                                                     :error (.getMessage e)))
+                           (audit-entry! context tool-id tool arguments
+                                         {:status          "error"
+                                          :approval-policy (name policy)
+                                          :approval-mode   (name mode)
+                                          :error           (.getMessage e)})
+                           (throw e))))))
+                 (do
+                   (audit-entry! context tool-id tool arguments
+                                 {:status          "blocked"
+                                  :approval-policy (name policy)
+                                  :approval-mode   (name mode)
+                                  :error           error})
+                   (prompt/status! {:state    :running
+                                    :phase    :approval
+                                    :message  (str "Skipped tool " tool-name
+                                                   ": " error)
+                                    :tool-id  tool-id
+                                    :tool-name tool-name})
+                   (approval-error tool-id error))))))
          (catch Exception e
            (let [cancelled? (cancelled-tool-error? e)
                  message    (if cancelled?
@@ -783,9 +783,9 @@
                          "message" (.getMessage e))
 
                (expected-tool-input-error? e)
-             (log/warn "Tool execution rejected invalid input:" tool-id
-                       "type" (some-> e ex-data :type)
-                       "message" (.getMessage e))
+               (log/warn "Tool execution rejected invalid input:" tool-id
+                         "type" (some-> e ex-data :type)
+                         "message" (.getMessage e))
                :else
                (log/error e "Tool execution failed:" tool-id))
              {:error message})))

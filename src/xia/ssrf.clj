@@ -65,7 +65,7 @@
              private-network? (boolean (some private-ip? addrs))]
          (when (empty? addrs)
            (throw (UnknownHostException.
-                    (str "Host did not resolve to any addresses: " host))))
+                   (str "Host did not resolve to any addresses: " host))))
          (when (and (not allow-private-network?) private-network?)
            (throw (ex-info "Access to private/internal network addresses is blocked"
                            {:url url

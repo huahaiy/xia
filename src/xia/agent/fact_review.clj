@@ -178,7 +178,7 @@
                         distinct
                         vec)]
     (when (and (seq fact-eids*)
-             (seq assistant-response))
+               (seq assistant-response))
       (wm/apply-explicit-fact-utility! explicit-fact-eids)
       (wm/apply-fact-utility-heuristic! fact-eids* assistant-response)
       (enqueue-fact-utility-review! session-id

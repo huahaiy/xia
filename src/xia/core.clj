@@ -474,7 +474,7 @@
       (fn []
         (if (some #{:xia/http} root-keys)
           (http/register-command-shutdown-handler!
-            (fn [] (stop-runtime! options)))
+           (fn [] (stop-runtime! options)))
           (http/clear-command-shutdown-handler!))))))
 
 (defn- mark-runtime-stopped-if-installed!
@@ -486,8 +486,8 @@
   "Start Xia in non-blocking server mode for REPL-driven development."
   [{:keys [bind port web-dev] :as options}]
   (let [options* (apply-run-defaults
-                   (merge {:mode "server"}
-                          options))
+                  (merge {:mode "server"}
+                         options))
         bind*    (or bind (:bind options*))
         port*    (or port (:port options*))]
     (try
@@ -580,10 +580,10 @@
         (if (pack/archive-path? argument)
           (let [archive (pack/open-archive! argument)]
             (apply-run-defaults
-              (assoc options*
-                     :db (:db-path archive)
-                     :archive-context archive
-                     :crypto-opts (:crypto-opts archive))))
+             (assoc options*
+                    :db (:db-path archive)
+                    :archive-context archive
+                    :crypto-opts (:crypto-opts archive))))
           (throw (ex-info "Unrecognized positional argument"
                           {:argument argument})))))))
 
@@ -620,11 +620,11 @@
   [cleanup]
   (let [^String hook-name "xia-shutdown"
         hook (Thread.
-               ^Runnable
-               (reify Runnable
-                 (run [_]
-                   (cleanup)))
-               hook-name)]
+              ^Runnable
+              (reify Runnable
+                (run [_]
+                  (cleanup)))
+              hook-name)]
     (.addShutdownHook (Runtime/getRuntime) hook)
     hook))
 

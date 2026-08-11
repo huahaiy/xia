@@ -277,7 +277,7 @@
           (command-route-response req
                                   (fn [_req]
                                     (handle-clear-goal (second (or command-session-goal-clear-match
-                                                                    command-session-goal-match))
+                                                                   command-session-goal-match))
                                                        :command)))
 
           (and (= method :get) command-prompt-match)
@@ -498,19 +498,19 @@
 
           (and (= method :get) workspace-download-match)
           (protected-route-response req #(handle-download-workspace-item
-                                           (second workspace-download-match)
-                                           req))
+                                          (second workspace-download-match)
+                                          req))
 
           (and (= method :get) (= uri "/knowledge/nodes"))
           (protected-route-response req #(handle-search-knowledge-nodes req))
 
           (and (= method :get) knowledge-node-facts-match)
           (protected-route-response req #(handle-list-knowledge-node-facts
-                                           (second knowledge-node-facts-match)))
+                                          (second knowledge-node-facts-match)))
 
           (and (= method :delete) knowledge-fact-match)
           (protected-route-response req #(handle-delete-knowledge-fact
-                                           (second knowledge-fact-match)))
+                                          (second knowledge-fact-match)))
 
           (and (= method :get) (= uri "/admin/config"))
           (protected-route-response req #(http-admin/handle-admin-config (admin-handler-deps) req))
@@ -617,41 +617,41 @@
 
           (and (= method :post) admin-skill-proposal-llm-review-match)
           (protected-route-response req #(http-admin/handle-llm-review-skill-proposal
-                                           (admin-handler-deps)
-                                           (second admin-skill-proposal-llm-review-match)
-                                           req))
+                                          (admin-handler-deps)
+                                          (second admin-skill-proposal-llm-review-match)
+                                          req))
 
           (and (= method :post) admin-skill-proposal-approve-match)
           (protected-route-response req #(http-admin/handle-approve-skill-proposal
-                                           (admin-handler-deps)
-                                           (second admin-skill-proposal-approve-match)
-                                           req))
+                                          (admin-handler-deps)
+                                          (second admin-skill-proposal-approve-match)
+                                          req))
 
           (and (= method :post) admin-skill-proposal-reject-match)
           (protected-route-response req #(http-admin/handle-reject-skill-proposal
-                                           (admin-handler-deps)
-                                           (second admin-skill-proposal-reject-match)
-                                           req))
+                                          (admin-handler-deps)
+                                          (second admin-skill-proposal-reject-match)
+                                          req))
 
           (and (= method :post) (= uri "/admin/plugins"))
           (protected-route-response req #(http-admin/handle-save-plugin (admin-handler-deps) req))
 
           (and (= method :post) admin-plugin-enable-match)
           (protected-route-response req #(http-admin/handle-enable-plugin
-                                           (admin-handler-deps)
-                                           (second admin-plugin-enable-match)
-                                           true))
+                                          (admin-handler-deps)
+                                          (second admin-plugin-enable-match)
+                                          true))
 
           (and (= method :post) admin-plugin-disable-match)
           (protected-route-response req #(http-admin/handle-enable-plugin
-                                           (admin-handler-deps)
-                                           (second admin-plugin-disable-match)
-                                           false))
+                                          (admin-handler-deps)
+                                          (second admin-plugin-disable-match)
+                                          false))
 
           (and (= method :post) admin-skill-update-check-match)
           (protected-route-response req #(http-admin/handle-check-skill-update
-                                           (admin-handler-deps)
-                                           (second admin-skill-update-check-match)))
+                                          (admin-handler-deps)
+                                          (second admin-skill-update-check-match)))
 
           (and (= method :delete) admin-site-match)
           (protected-route-response req #(http-admin/handle-delete-site (admin-handler-deps)

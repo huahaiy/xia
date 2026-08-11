@@ -171,35 +171,35 @@
                   (if wm-ctx
                     (do (when (:topics wm-ctx)
                           (println (str "  Topic: " (:topics wm-ctx))))
-                      (when-let [autonomy (:autonomy wm-ctx)]
-                        (when-let [stack (seq (:stack autonomy))]
-                          (println "  Execution stack:")
-                          (doseq [{:keys [title progress-status next-step]} stack]
-                            (println (str "    [" (some-> progress-status name) "] " title
-                                          (when next-step
-                                            (str " -> " next-step)))))
-                          (println)))
-                      (println)
-                      (if (seq (:entities wm-ctx))
-                        (do (println "  Active entities:")
-                          (doseq [e (:entities wm-ctx)]
-                            (println (str "    " (:name e)
-                                          " (" (name (:type e)) ")"
-                                          " [relevance=" (format "%.2f" (double (:relevance e)))
-                                          (when (:pinned? e) " pinned")
-                                          "]"))))
-                        (println "  (no active entities)"))
-                      (println)
-                      (if (seq (:episodes wm-ctx))
-                        (do (println "  Relevant episodes:")
-                          (doseq [ep (:episodes wm-ctx)]
-                            (println (str "    • " (:summary ep)))))
-                        (println "  (no relevant episodes)"))
-                      (println)
-                      (let [prompt (context/assemble-system-prompt session-id)]
-                        (println (str "  System prompt: ~"
-                                      (context/estimate-tokens prompt)
-                                      " tokens"))))
+                        (when-let [autonomy (:autonomy wm-ctx)]
+                          (when-let [stack (seq (:stack autonomy))]
+                            (println "  Execution stack:")
+                            (doseq [{:keys [title progress-status next-step]} stack]
+                              (println (str "    [" (some-> progress-status name) "] " title
+                                            (when next-step
+                                              (str " -> " next-step)))))
+                            (println)))
+                        (println)
+                        (if (seq (:entities wm-ctx))
+                          (do (println "  Active entities:")
+                              (doseq [e (:entities wm-ctx)]
+                                (println (str "    " (:name e)
+                                              " (" (name (:type e)) ")"
+                                              " [relevance=" (format "%.2f" (double (:relevance e)))
+                                              (when (:pinned? e) " pinned")
+                                              "]"))))
+                          (println "  (no active entities)"))
+                        (println)
+                        (if (seq (:episodes wm-ctx))
+                          (do (println "  Relevant episodes:")
+                              (doseq [ep (:episodes wm-ctx)]
+                                (println (str "    • " (:summary ep)))))
+                          (println "  (no relevant episodes)"))
+                        (println)
+                        (let [prompt (context/assemble-system-prompt session-id)]
+                          (println (str "  System prompt: ~"
+                                        (context/estimate-tokens prompt)
+                                        " tokens"))))
                     (println "  (no working memory active)")))
                 (println)
                 (recur))

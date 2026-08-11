@@ -50,9 +50,9 @@
       (is (= "cumulative LLM call budget (1/1)"
              (limits/budget-summary status))))
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo
-          #"Reached the cumulative LLM call budget"
-          (limits/throw-if-exhausted! budget-state)))
+         clojure.lang.ExceptionInfo
+         #"Reached the cumulative LLM call budget"
+         (limits/throw-if-exhausted! budget-state)))
     (try
       (limits/throw-if-exhausted! budget-state)
       (is false "Expected limit exhaustion")
@@ -64,7 +64,7 @@
 (deftest log-usage-persists-sanitized-ledger-entry
   (db/set-config! :limits/model-prices
                   (pr-str {[:openai "gpt-test"] {:input-usd-per-1m 1.0
-                                                  :output-usd-per-1m 2.0}}))
+                                                 :output-usd-per-1m 2.0}}))
   (let [session-id #uuid "00000000-0000-0000-0000-000000000003"
         task-id #uuid "00000000-0000-0000-0000-000000000004"
         response (with-meta {"usage" {"prompt_tokens" 100
@@ -117,9 +117,9 @@
                                 "completion_tokens" 1}
                         :duration-ms 5})
     (is (thrown-with-msg?
-          clojure.lang.ExceptionInfo
-          #"session LLM call ceiling"
-          (limits/throw-if-policy-exhausted! {:session-id session-id})))
+         clojure.lang.ExceptionInfo
+         #"session LLM call ceiling"
+         (limits/throw-if-policy-exhausted! {:session-id session-id})))
     (try
       (limits/throw-if-policy-exhausted! {:session-id session-id})
       (is false "Expected persistent session limit exhaustion")

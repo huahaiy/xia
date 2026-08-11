@@ -19,9 +19,9 @@
                                                :arguments arguments
                                                :context context})
                             {"results" [{"title" "Alpha"
-                                          "snippet" "Hidden intermediate text"}
-                                         {"title" "Beta"
-                                          "snippet" "More hidden text"}]})})))
+                                         "snippet" "Hidden intermediate text"}
+                                        {"title" "Beta"
+                                         "snippet" "More hidden text"}]})})))
     (is (= [{:tool-id :web-search
              :arguments {"query" "xia"}
              :context {}}]

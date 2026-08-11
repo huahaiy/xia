@@ -28,21 +28,21 @@
                                  (remove #(= provider-id (:llm.provider/id %)))
                                  (filter #(= :api-key (llm/provider-credential-source %))))]
     (or
-      (when (and template-id normalized-base-url)
-        (unique-provider-api-key
-          (filter #(and (= template-id (:llm.provider/template %))
-                        (= normalized-base-url
-                           (common/normalize-base-url (:llm.provider/base-url %))))
-                  providers)))
-      (when template-id
-        (unique-provider-api-key
-          (filter #(= template-id (:llm.provider/template %))
-                  providers)))
-      (when normalized-base-url
-        (unique-provider-api-key
-          (filter #(= normalized-base-url
-                      (common/normalize-base-url (:llm.provider/base-url %)))
-                  providers))))))
+     (when (and template-id normalized-base-url)
+       (unique-provider-api-key
+        (filter #(and (= template-id (:llm.provider/template %))
+                      (= normalized-base-url
+                         (common/normalize-base-url (:llm.provider/base-url %))))
+                providers)))
+     (when template-id
+       (unique-provider-api-key
+        (filter #(= template-id (:llm.provider/template %))
+                providers)))
+     (when normalized-base-url
+       (unique-provider-api-key
+        (filter #(= normalized-base-url
+                    (common/normalize-base-url (:llm.provider/base-url %)))
+                providers))))))
 
 (defn- parse-provider-workloads
   [value]
@@ -189,7 +189,7 @@
   [deps req]
   (try
     (let [{:keys [base-url api-key auth-header]} (provider-request-context
-                                                   (common/read-body deps req))]
+                                                  (common/read-body deps req))]
       (when-not (common/nonblank-str base-url)
         (throw (ex-info "base_url is required" {:type :http/bad-request})))
       (let [models (llm/fetch-provider-models {:base-url    base-url
@@ -221,23 +221,23 @@
                                                 :auth-header auth-header
                                                 :model       model-id})]
         (common/json-response
-          deps
-          200
-          {:model (cond-> {:id            id
-                           :vision        (boolean vision?)
-                           :vision_source (some-> vision-source name)}
-                    context-window
-                    (assoc :context_window context-window
-                           :context_window_source (some-> context-window-source name))
+         deps
+         200
+         {:model (cond-> {:id            id
+                          :vision        (boolean vision?)
+                          :vision_source (some-> vision-source name)}
+                   context-window
+                   (assoc :context_window context-window
+                          :context_window_source (some-> context-window-source name))
 
-                    recommended-system-prompt-budget
-                    (assoc :recommended_system_prompt_budget recommended-system-prompt-budget)
+                   recommended-system-prompt-budget
+                   (assoc :recommended_system_prompt_budget recommended-system-prompt-budget)
 
-                    recommended-history-budget
-                    (assoc :recommended_history_budget recommended-history-budget)
+                   recommended-history-budget
+                   (assoc :recommended_history_budget recommended-history-budget)
 
-                    recommended-input-budget-cap
-                    (assoc :recommended_input_budget_cap recommended-input-budget-cap))})))
+                   recommended-input-budget-cap
+                   (assoc :recommended_input_budget_cap recommended-input-budget-cap))})))
     (catch clojure.lang.ExceptionInfo e
       (common/exception-response deps e))
     (catch Exception e
@@ -282,28 +282,28 @@
           workloads                  (when (contains? data "workloads")
                                        (parse-provider-workloads (get data "workloads")))
           system-prompt-budget       (common/parse-optional-positive-long
-                                       (get data "system_prompt_budget")
-                                       "system_prompt_budget")
+                                      (get data "system_prompt_budget")
+                                      "system_prompt_budget")
           history-budget             (common/parse-optional-positive-long
-                                       (get data "history_budget")
-                                       "history_budget")
+                                      (get data "history_budget")
+                                      "history_budget")
           context-window             (common/parse-optional-positive-long
-                                       (get data "context_window")
-                                       "context_window")
+                                      (get data "context_window")
+                                      "context_window")
           context-window-source      (when-let [source (common/nonblank-str (get data "context_window_source"))]
                                        (keyword source))
           recommended-system-budget  (common/parse-optional-positive-long
-                                       (get data "recommended_system_prompt_budget")
-                                       "recommended_system_prompt_budget")
+                                      (get data "recommended_system_prompt_budget")
+                                      "recommended_system_prompt_budget")
           recommended-history-budget (common/parse-optional-positive-long
-                                       (get data "recommended_history_budget")
-                                       "recommended_history_budget")
+                                      (get data "recommended_history_budget")
+                                      "recommended_history_budget")
           recommended-input-budget   (common/parse-optional-positive-long
-                                       (get data "recommended_input_budget_cap")
-                                       "recommended_input_budget_cap")
+                                      (get data "recommended_input_budget_cap")
+                                      "recommended_input_budget_cap")
           rate-limit-per-minute      (common/parse-optional-positive-long
-                                       (get data "rate_limit_per_minute")
-                                       "rate_limit_per_minute")
+                                      (get data "rate_limit_per_minute")
+                                      "rate_limit_per_minute")
           make-default               (true? (get data "default"))
           has-default?               (some? (db/get-default-provider))
           reused-api-key             (when reuse-api-key-provider-id

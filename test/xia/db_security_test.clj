@@ -195,19 +195,19 @@
 
 (deftest schedule-run-payloads-are-stored-in-plaintext-at-rest
   (schedule/create-schedule!
-    {:id :security-hist
-     :spec {:minute #{0} :hour #{9}}
-     :type :tool
-     :tool-id :x})
+   {:id :security-hist
+    :spec {:minute #{0} :hour #{9}}
+    :type :tool
+    :tool-id :x})
   (schedule/record-run! :security-hist
-    {:started-at  (java.util.Date.)
-     :finished-at (java.util.Date.)
-     :status      :error
-     :actions     [{:tool-id "service-call"
-                    :status "blocked"
-                    :arguments {"endpoint" "/gmail/v1/messages"}}]
-     :result      "{\"records\":[\"secret\"]}"
-     :error       "token leak"})
+                        {:started-at  (java.util.Date.)
+                         :finished-at (java.util.Date.)
+                         :status      :error
+                         :actions     [{:tool-id "service-call"
+                                        :status "blocked"
+                                        :arguments {"endpoint" "/gmail/v1/messages"}}]
+                         :result      "{\"records\":[\"secret\"]}"
+                         :error       "token leak"})
   (let [eid     (ffirst (db/q '[:find ?e :where
                                 [?e :schedule-run/schedule-id :security-hist]]))
         raw     (raw-entity eid)

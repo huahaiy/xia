@@ -60,13 +60,13 @@
 (def ^:private blocked-ident-pattern
   "Regex matching attribute or key names that sandboxed code cannot query."
   (re-pattern
-    (str "(?i)"
-         (str/join "|"
-                   ["api.key" "api-key" "apikey"
-                    "password" "passwd"
-                    "secret" "credential"
-                    "token" "oauth"
-                    "private.key" "private-key"]))))
+   (str "(?i)"
+        (str/join "|"
+                  ["api.key" "api-key" "apikey"
+                   "password" "passwd"
+                   "secret" "credential"
+                   "token" "oauth"
+                   "private.key" "private-key"]))))
 
 (defn- named-ident?
   [value]

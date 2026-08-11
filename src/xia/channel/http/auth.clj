@@ -340,14 +340,12 @@
         method (:request-method req)]
     (cond
       (and (= method :post)
-           (#{
-              "/chat"
+           (#{"/chat"
               "/command/chat"} uri))
       :chat
 
       (and (= method :post)
-           (#{
-              "/sessions"
+           (#{"/sessions"
               "/command/sessions"} uri))
       :session-create
 

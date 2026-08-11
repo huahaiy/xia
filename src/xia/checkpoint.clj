@@ -241,10 +241,10 @@
            checkpoint-id*  (or checkpoint-id (str "ckpt_" (UUID/randomUUID)))
            db-snapshot*    (or db-snapshot @(db/conn))
            workspace-tx    (some-> (:max-tx db-snapshot*) long)
-          staging-root* (ensure-directory! (checkpoint-directory staging-root))
-          ^Path staging-root-path (Paths/get ^String staging-root*
-                                             (make-array String 0))
-          stage-path*   (str (Files/createTempDirectory
+           staging-root* (ensure-directory! (checkpoint-directory staging-root))
+           ^Path staging-root-path (Paths/get ^String staging-root*
+                                              (make-array String 0))
+           stage-path*   (str (Files/createTempDirectory
                                staging-root-path
                                checkpoint-prefix
                                (make-array FileAttribute 0)))
@@ -259,15 +259,15 @@
                                                  (into-array String [checkpoint-ready-name])))
                ready-at          (Instant/now)
                manifest          (checkpoint-manifest {:checkpoint-id checkpoint-id*
-                                                      :created-at created-at*
-                                                      :ready-at ready-at
-                                                      :staged-path stage-path*
-                                                      :staged-db-path staged-db-path
-                                                      :manifest-path manifest-path
-                                                      :ready-marker-path ready-marker-path
-                                                      :source-db-path source-db-path*
-                                                      :support-files support-files
-                                                      :workspace-tx workspace-tx})]
+                                                       :created-at created-at*
+                                                       :ready-at ready-at
+                                                       :staged-path stage-path*
+                                                       :staged-db-path staged-db-path
+                                                       :manifest-path manifest-path
+                                                       :ready-marker-path ready-marker-path
+                                                       :source-db-path source-db-path*
+                                                       :support-files support-files
+                                                       :workspace-tx workspace-tx})]
            (spit manifest-path (pr-str manifest))
            (spit ready-marker-path (str checkpoint-id* "\n"))
            manifest)
@@ -322,8 +322,8 @@
                             :error "checkpoint creation is shutting down"})))
          (swap! (checkpoint-state-atom) assoc-in [:statuses checkpoint-id] request))
        (if-let [task (async/submit-background!
-                       (str "managed checkpoint " checkpoint-id)
-                       #(run-checkpoint-task! request created-at {:staging-root staging-root*}))]
+                      (str "managed checkpoint " checkpoint-id)
+                      #(run-checkpoint-task! request created-at {:staging-root staging-root*}))]
          (do
            (locking (checkpoint-lock)
              (swap! (checkpoint-state-atom) assoc-in [:tasks checkpoint-id] task))

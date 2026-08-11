@@ -200,7 +200,7 @@
                                                                [parent child]))
                            :run-task-spec! (fn [child-task-id & {:as opts}]
                                              (wm/create-wm! (:session-id
-                                                            (db/get-task child-task-id)))
+                                                             (db/get-task child-task-id)))
                                              (swap! runs conj
                                                     (assoc opts
                                                            :task-id child-task-id))

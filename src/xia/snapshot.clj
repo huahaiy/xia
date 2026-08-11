@@ -231,7 +231,7 @@
            (filter #(.isDirectory ^File %))
            (keep (fn [^File dir]
                    (when-let [manifest (read-manifest-file
-                                         (io/file dir manifest-name))]
+                                        (io/file dir manifest-name))]
                      (assoc manifest
                             :snapshot/path (.getAbsolutePath dir)))))
            (sort-by :snapshot/created-at #(compare %2 %1))

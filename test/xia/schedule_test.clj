@@ -43,11 +43,11 @@
   (schedule/create-schedule!
    {:id :audit-safe :spec {:minute #{0} :hour #{9}} :type :tool :tool-id :x})
   (schedule/record-run! :audit-safe
-    {:started-at  (java.util.Date.)
-     :finished-at (java.util.Date.)
-     :status      :error
-     :actions     [{:tool-id "browser-login" :status "blocked"}]
-     :error       "sensitive failure"})
+                        {:started-at  (java.util.Date.)
+                         :finished-at (java.util.Date.)
+                         :status      :error
+                         :actions     [{:tool-id "browser-login" :status "blocked"}]
+                         :error       "sensitive failure"})
   (let [run (first (schedule/safe-schedule-history :audit-safe 1))]
     (is (= :error (:status run)))
     (is (not (contains? run :actions)))

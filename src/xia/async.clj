@@ -212,10 +212,10 @@
        (prepare-shutdown!)
        (let [deadline-ms (+ (System/currentTimeMillis) (long timeout-ms))
              results     (doall
-                           (for [[kind exec] (executor-snapshot runtime)
-                                 :let [remaining-ms (max 1 (- deadline-ms
-                                                              (System/currentTimeMillis)))]]
-                             (await-executor! kind exec remaining-ms)))]
+                          (for [[kind exec] (executor-snapshot runtime)
+                                :let [remaining-ms (max 1 (- deadline-ms
+                                                             (System/currentTimeMillis)))]]
+                            (await-executor! kind exec remaining-ms)))]
          (every? true? results)))
      true)))
 

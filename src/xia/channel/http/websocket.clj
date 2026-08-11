@@ -92,40 +92,40 @@
   ((:protected-route-response deps)
    req
    #(http/as-channel req
-      {:on-open
-       (fn [ch]
-         (let [{:keys [session-id]} (bridge/create-session! :websocket)
-               sid session-id]
-           (swap! (:ws-sessions-atom deps) assoc ch sid)
-           (log/info "WebSocket connected, session:" sid)
-           (send-json! ch {:type "connected" :session-id (str sid)})))
+                     {:on-open
+                      (fn [ch]
+                        (let [{:keys [session-id]} (bridge/create-session! :websocket)
+                              sid session-id]
+                          (swap! (:ws-sessions-atom deps) assoc ch sid)
+                          (log/info "WebSocket connected, session:" sid)
+                          (send-json! ch {:type "connected" :session-id (str sid)})))
 
-       :on-receive
-       (fn [ch msg]
-         (if-let [sid (get @(:ws-sessions-atom deps) ch)]
-           (if-let [{:keys [retry-after-ms]} (active-receive-failure deps sid)]
-             (send-error! ch
-                          "Previous WebSocket request failed; wait before retrying."
-                          :retry_after_ms retry-after-ms)
-             (let [data (try
-                          (json/read-json msg)
-                          (catch Exception e
-                            (send-error! ch (http-common/throwable-message deps e))
-                            ::invalid-message))]
-               (when-not (= ::invalid-message data)
-                 (try
-                   (let [text     (get data "message" (get data "content" msg))
-                         response (bridge/send-message! sid text :channel :websocket)]
-                     (clear-receive-failure! deps sid)
-                     (send-json! ch {:type    "message"
-                                     :role    "assistant"
-                                     :content response}))
-                   (catch Throwable t
-                     (handle-receive-failure! deps ch sid t)
-                     (when (instance? Error t)
-                       (throw t)))))))
-           (send-error! ch "Session not found")))
+                      :on-receive
+                      (fn [ch msg]
+                        (if-let [sid (get @(:ws-sessions-atom deps) ch)]
+                          (if-let [{:keys [retry-after-ms]} (active-receive-failure deps sid)]
+                            (send-error! ch
+                                         "Previous WebSocket request failed; wait before retrying."
+                                         :retry_after_ms retry-after-ms)
+                            (let [data (try
+                                         (json/read-json msg)
+                                         (catch Exception e
+                                           (send-error! ch (http-common/throwable-message deps e))
+                                           ::invalid-message))]
+                              (when-not (= ::invalid-message data)
+                                (try
+                                  (let [text     (get data "message" (get data "content" msg))
+                                        response (bridge/send-message! sid text :channel :websocket)]
+                                    (clear-receive-failure! deps sid)
+                                    (send-json! ch {:type    "message"
+                                                    :role    "assistant"
+                                                    :content response}))
+                                  (catch Throwable t
+                                    (handle-receive-failure! deps ch sid t)
+                                    (when (instance? Error t)
+                                      (throw t)))))))
+                          (send-error! ch "Session not found")))
 
-       :on-close
-       (fn [ch _status]
-         (finalize-session! deps ch))})))
+                      :on-close
+                      (fn [ch _status]
+                        (finalize-session! deps ch))})))

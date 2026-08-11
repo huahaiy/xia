@@ -107,7 +107,7 @@
           trash-folder           (or (common/nonblank-str (get data "trash_folder"))
                                      (:service/trash-folder existing))
           rate-limit-per-minute  (common/parse-optional-positive-long (get data "rate_limit_per_minute")
-                                                                       "rate_limit_per_minute")
+                                                                      "rate_limit_per_minute")
           allow-private-network? (when (contains? data "allow_private_network")
                                    (true? (get data "allow_private_network")))
           autonomous-approved?   (when (contains? data "autonomous_approved")

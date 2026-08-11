@@ -315,13 +315,13 @@
 
 (deftest local-cookie-auth-ignores-spoofed-forwarded-headers
   (let [base (local-cookie-req "10.0.0.10" {"x-forwarded-for" "127.0.0.1"
-                                           "x-real-ip" "127.0.0.1"
-                                           "x-forwarded-host" "localhost"
-                                           "x-forwarded-proto" "http"})]
+                                            "x-real-ip" "127.0.0.1"
+                                            "x-forwarded-host" "localhost"
+                                            "x-forwarded-proto" "http"})]
     (let [resp (protected-response base)]
       (is (not= 200 (:status resp)) "spoofed X-Forwarded-For must not bypass loopback check")))
   (let [base (local-cookie-req "10.0.0.10" {"x-forwarded-for" "127.0.0.1, 10.0.0.10"
-                                           "origin" "http://localhost:3008"})]
+                                            "origin" "http://localhost:3008"})]
     (let [resp (protected-response base)]
       (is (not= 200 (:status resp)) "spoofed forwarded list must not bypass"))))
 
@@ -357,25 +357,25 @@
 
 (deftest bind-validation-refuses-wildcard-without-managed-proxy
   (without-command-token-env
-    #(do
-       (is (thrown? clojure.lang.ExceptionInfo
-                    (http-auth/validate-bind-host! "0.0.0.0")))
-       (is (thrown? clojure.lang.ExceptionInfo
-                    (http-auth/validate-bind-host! "::")))
-       (is (thrown? clojure.lang.ExceptionInfo
-                    (http-auth/validate-bind-host! "[::]")))
-       (is (thrown? clojure.lang.ExceptionInfo
-                    (http-auth/validate-bind-host! nil)))
-       (is (thrown? clojure.lang.ExceptionInfo
-                    (http-auth/validate-bind-host! "")))
-       (is (thrown? clojure.lang.ExceptionInfo
-                    (http-auth/validate-bind-host! "127.0.0.999")))
-       (is (= "127.0.0.1" (http-auth/validate-bind-host! "127.0.0.1")))
-       (is (= "::1" (http-auth/validate-bind-host! "::1")))
-       (is (false? (http-auth/non-loopback-bind? "localhost")))
-       (is (.isLoopbackAddress
-            (java.net.InetAddress/getByName
-             (http-auth/validate-bind-host! "localhost")))))))
+   #(do
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (http-auth/validate-bind-host! "0.0.0.0")))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (http-auth/validate-bind-host! "::")))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (http-auth/validate-bind-host! "[::]")))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (http-auth/validate-bind-host! nil)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (http-auth/validate-bind-host! "")))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (http-auth/validate-bind-host! "127.0.0.999")))
+      (is (= "127.0.0.1" (http-auth/validate-bind-host! "127.0.0.1")))
+      (is (= "::1" (http-auth/validate-bind-host! "::1")))
+      (is (false? (http-auth/non-loopback-bind? "localhost")))
+      (is (.isLoopbackAddress
+           (java.net.InetAddress/getByName
+            (http-auth/validate-bind-host! "localhost")))))))
 
 (deftest bind-validation-allows-wildcard-when-managed-proxy-enabled
   (let [secret-file (temp-secret-file "proxy-secret")]
@@ -398,10 +398,10 @@
 
 (deftest bind-validation-allows-command-authenticated-remote-mode
   (without-command-token-env
-    #(do
-       (db/set-config! :secret/command-channel-token "command-secret")
-       (is (= "0.0.0.0" (http-auth/validate-bind-host! "0.0.0.0")))
-       (is (= "::" (http-auth/validate-bind-host! "::"))))))
+   #(do
+      (db/set-config! :secret/command-channel-token "command-secret")
+      (is (= "0.0.0.0" (http-auth/validate-bind-host! "0.0.0.0")))
+      (is (= "::" (http-auth/validate-bind-host! "::"))))))
 
 (deftest bind-validation-allows-loopback-range
   (is (= "127.0.0.2" (http-auth/validate-bind-host! "127.0.0.2")))

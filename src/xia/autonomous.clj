@@ -488,11 +488,11 @@
         next-step (assoc :next-step next-step)
         reason (assoc :reason reason)
         agenda (assoc :agenda agenda)
-      kind (assoc :kind kind)
-      child-task-id (assoc :child-task-id child-task-id)
-      compressed? (assoc :compressed? true)
-      compressed-count (assoc :compressed-count compressed-count)
-      compressed-preview (assoc :compressed-preview compressed-preview)))))
+        kind (assoc :kind kind)
+        child-task-id (assoc :child-task-id child-task-id)
+        compressed? (assoc :compressed? true)
+        compressed-count (assoc :compressed-count compressed-count)
+        compressed-preview (assoc :compressed-preview compressed-preview)))))
 
 (defn- compressed-frame?
   [frame]
@@ -657,7 +657,7 @@
         derived-next-step  (when-not (next-step-present? control)
                              (let [parent-next (:next-step parent-tip)]
                                (when (or (str/blank? parent-next)
-                                 (matching-task? parent-next (:title child-tip)))
+                                         (matching-task? parent-next (:title child-tip)))
                                  (first-actionable-agenda-item effective-agenda))))
         derived-progress   (when-not (progress-status-present? control)
                              (case pop-completion-status
@@ -946,15 +946,15 @@
         next-step (assoc :next-step next-step)
         reason (assoc :reason reason)
         agenda (assoc :agenda agenda)
-      (or (:kind control*)
-          (:kind existing*))
-      (assoc :kind (or (:kind control*)
-                       (:kind existing*)))
+        (or (:kind control*)
+            (:kind existing*))
+        (assoc :kind (or (:kind control*)
+                         (:kind existing*)))
 
-      (or (:child-task-id control*)
-          (:child-task-id existing*))
-      (assoc :child-task-id (or (:child-task-id control*)
-                                (:child-task-id existing*)))))))
+        (or (:child-task-id control*)
+            (:child-task-id existing*))
+        (assoc :child-task-id (or (:child-task-id control*)
+                                  (:child-task-id existing*)))))))
 
 (defn apply-control
   [state control]
@@ -1420,31 +1420,31 @@
                                   (get parsed "goal-complete")
                                   (:goal-complete parsed)))
         current-focus (truncate-agenda-item
-                        (or (get parsed "current_focus")
-                            (:current_focus parsed)
-                            (get parsed "current-focus")
-                            (:current-focus parsed)))
+                       (or (get parsed "current_focus")
+                           (:current_focus parsed)
+                           (get parsed "current-focus")
+                           (:current-focus parsed)))
         used-facts (or (normalize-used-fact-refs
-                         (first-present parsed
-                                        ["used_facts"
-                                         :used_facts
-                                         "used-facts"
-                                         :used-facts]))
+                        (first-present parsed
+                                       ["used_facts"
+                                        :used_facts
+                                        "used-facts"
+                                        :used-facts]))
                        [])
         raw-progress-status (first-present parsed
-                                          ["progress_status"
-                                           :progress_status
-                                           "progress-status"
-                                           :progress-status])
+                                           ["progress_status"
+                                            :progress_status
+                                            "progress-status"
+                                            :progress-status])
         stack-action   (normalize-stack-action
-                         (or (get parsed "stack_action")
-                             (:stack_action parsed)
-                             (get parsed "stack-action")
-                             (:stack-action parsed)))
+                        (or (get parsed "stack_action")
+                            (:stack_action parsed)
+                            (get parsed "stack-action")
+                            (:stack-action parsed)))
         agenda     (normalize-agenda (or (get parsed "agenda")
                                          (:agenda parsed)))
         progress-status (or (normalize-progress-status
-                              raw-progress-status)
+                             raw-progress-status)
                             (derive-progress-status status
                                                     goal-complete?
                                                     agenda))]

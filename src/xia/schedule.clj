@@ -319,9 +319,9 @@
                                  :trigger {:kind :schedule
                                            :schedule-id id}
                                  :execution {:mode (case type
-                                                      :tool :deterministic
-                                                      :prompt :agent
-                                                      :hybrid)}})]
+                                                     :tool :deterministic
+                                                     :prompt :agent
+                                                     :hybrid)}})]
     (if existing-task
       (do
         (db/update-task! existing-task-id
@@ -381,15 +381,15 @@
         state-eid   (schedule-state-eid schedule-id)
         task-id     (or (:task-id start-state) (:task-id state))]
     (db/transact!
-      (retract-state-attrs
-       [(cond-> {:schedule.state/schedule-id schedule-id
-                 :schedule.state/status :running}
-          task-id (assoc :schedule.state/task-id task-id)
-          (:phase start-state) (assoc :schedule.state/phase (:phase start-state)))]
-       state-eid
-       (into [:schedule.state/backoff-until
-              :schedule.state/last-policy]
-             obsolete-schedule-execution-attrs)))
+     (retract-state-attrs
+      [(cond-> {:schedule.state/schedule-id schedule-id
+                :schedule.state/status :running}
+         task-id (assoc :schedule.state/task-id task-id)
+         (:phase start-state) (assoc :schedule.state/phase (:phase start-state)))]
+      state-eid
+      (into [:schedule.state/backoff-until
+             :schedule.state/last-policy]
+            obsolete-schedule-execution-attrs)))
     (task-state schedule-id)))
 
 (defn record-task-success!
@@ -398,18 +398,18 @@
   (let [now       (java.util.Date.)
         state-eid (schedule-state-eid schedule-id)]
     (db/transact!
-      (retract-state-attrs
-       [{:schedule.state/schedule-id schedule-id
-         :schedule.state/status :success
-         :schedule.state/phase :complete
-         :schedule.state/last-success-at now
-         :schedule.state/consecutive-failures 0
-         :schedule.state/last-error ""
-         :schedule.state/last-failure-signature ""}]
-       state-eid
-       (into [:schedule.state/backoff-until
-              :schedule.state/last-policy]
-             obsolete-schedule-execution-attrs)))
+     (retract-state-attrs
+      [{:schedule.state/schedule-id schedule-id
+        :schedule.state/status :success
+        :schedule.state/phase :complete
+        :schedule.state/last-success-at now
+        :schedule.state/consecutive-failures 0
+        :schedule.state/last-error ""
+        :schedule.state/last-failure-signature ""}]
+      state-eid
+      (into [:schedule.state/backoff-until
+             :schedule.state/last-policy]
+            obsolete-schedule-execution-attrs)))
     (task-state schedule-id)))
 
 (defn record-task-failure!
@@ -428,23 +428,23 @@
                                               :now now})
         paused?             (= :pause mode)]
     (db/transact!
-      (cond-> (retract-state-attrs
-               [(cond-> {:schedule.state/schedule-id schedule-id
-                         :schedule.state/status (if paused? :paused :backoff)
-                         :schedule.state/phase :error
-                         :schedule.state/last-failure-at now
-                         :schedule.state/last-error error-message
-                         :schedule.state/last-failure-signature signature
-                         :schedule.state/last-policy (policy-doc policy)
-                         :schedule.state/consecutive-failures consecutive-failures}
-                  backoff-until (assoc :schedule.state/backoff-until backoff-until))
-                (cond-> {:schedule/id schedule-id}
-                  paused? (assoc :schedule/enabled? false)
-                  backoff-until (assoc :schedule/next-run backoff-until))]
-               state-eid
-               obsolete-schedule-execution-attrs)
-        (and paused? state-eid)
-        (into (attr-retractions state-eid [:schedule.state/backoff-until]))))
+     (cond-> (retract-state-attrs
+              [(cond-> {:schedule.state/schedule-id schedule-id
+                        :schedule.state/status (if paused? :paused :backoff)
+                        :schedule.state/phase :error
+                        :schedule.state/last-failure-at now
+                        :schedule.state/last-error error-message
+                        :schedule.state/last-failure-signature signature
+                        :schedule.state/last-policy (policy-doc policy)
+                        :schedule.state/consecutive-failures consecutive-failures}
+                 backoff-until (assoc :schedule.state/backoff-until backoff-until))
+               (cond-> {:schedule/id schedule-id}
+                 paused? (assoc :schedule/enabled? false)
+                 backoff-until (assoc :schedule/next-run backoff-until))]
+              state-eid
+              obsolete-schedule-execution-attrs)
+       (and paused? state-eid)
+       (into (attr-retractions state-eid [:schedule.state/backoff-until]))))
     (task-state schedule-id)))
 
 (defn- recovery-source
@@ -585,18 +585,18 @@
     (let [now      (java.util.Date.)
           next-run (cron/next-run spec now)]
       (db/transact!
-        [(cond-> {:schedule/id          id
-                  :schedule/name        (or name (clojure.core/name id))
-                  :schedule/spec        (pr-str spec)
-                  :schedule/type        type
-                  :schedule/trusted?    (if (nil? trusted?) true (boolean trusted?))
-                  :schedule/enabled?    true
-                  :schedule/created-at  now}
-           description (assoc :schedule/description description)
-           next-run    (assoc :schedule/next-run next-run)
-           tool-id     (assoc :schedule/tool-id tool-id)
-           tool-args   (assoc :schedule/tool-args tool-args)
-           prompt      (assoc :schedule/prompt prompt))])
+       [(cond-> {:schedule/id          id
+                 :schedule/name        (or name (clojure.core/name id))
+                 :schedule/spec        (pr-str spec)
+                 :schedule/type        type
+                 :schedule/trusted?    (if (nil? trusted?) true (boolean trusted?))
+                 :schedule/enabled?    true
+                 :schedule/created-at  now}
+          description (assoc :schedule/description description)
+          next-run    (assoc :schedule/next-run next-run)
+          tool-id     (assoc :schedule/tool-id tool-id)
+          tool-args   (assoc :schedule/tool-args tool-args)
+          prompt      (assoc :schedule/prompt prompt))])
       (log/info "Created schedule:" (clojure.core/name id)
                 "spec:" (cron/describe spec))
       {:id id :spec spec :next-run next-run})))
@@ -689,11 +689,11 @@
                                             :schedule/description (or description "")})]
                                         (remove nil?)
                                         vec)
-                                     (schedule-timing-tx schedule-id
-                                                         current-record
-                                                         next-run
-                                                         (when-not timing-reset?
-                                                           (:schedule/reserved-next-run current-record))))
+                                   (schedule-timing-tx schedule-id
+                                                       current-record
+                                                       next-run
+                                                       (when-not timing-reset?
+                                                         (:schedule/reserved-next-run current-record))))
                        (= type :tool)
                        (conj (cond-> {:schedule/id      schedule-id
                                       :schedule/tool-id tool-id}
@@ -730,8 +730,8 @@
   [schedule-id]
   ;; Remove run history
   (let [run-eids (db/q '[:find ?e :in $ ?sid
-                          :where [?e :schedule-run/schedule-id ?sid]]
-                        schedule-id)]
+                         :where [?e :schedule-run/schedule-id ?sid]]
+                       schedule-id)]
     (when (seq run-eids)
       (db/transact! (mapv (fn [[eid]] [:db/retractEntity eid]) run-eids))))
   ;; Remove task state
@@ -739,8 +739,8 @@
     (db/transact! [[:db/retractEntity state-eid]]))
   ;; Remove schedule
   (when-let [eid (ffirst (db/q '[:find ?e :in $ ?id
-                                  :where [?e :schedule/id ?id]]
-                                schedule-id))]
+                                 :where [?e :schedule/id ?id]]
+                               schedule-id))]
     (db/transact! [[:db/retractEntity eid]])
     (log/info "Removed schedule:" (clojure.core/name schedule-id)))
   {:status "removed" :id schedule-id})
@@ -794,21 +794,21 @@
   "Record a schedule execution result."
   [schedule-id {:keys [started-at finished-at status result error actions meta]}]
   (db/transact!
-    [(cond-> {:schedule-run/id          (random-uuid)
-              :schedule-run/schedule-id schedule-id
-              :schedule-run/started-at  started-at
-              :schedule-run/status      status}
-       finished-at (assoc :schedule-run/finished-at finished-at)
-       result      (assoc :schedule-run/result
-                          (if (> (count (str result)) 4000)
-                            (subs (str result) 0 4000)
-                            (str result)))
-       error       (assoc :schedule-run/error
-                          (if (> (count (str error)) 2000)
-                            (subs (str error) 0 2000)
-                            (str error)))
-       (some? actions) (assoc :schedule-run/actions (actions-doc actions))
-       (some? meta) (assoc :schedule-run/meta (meta-doc meta)))])
+   [(cond-> {:schedule-run/id          (random-uuid)
+             :schedule-run/schedule-id schedule-id
+             :schedule-run/started-at  started-at
+             :schedule-run/status      status}
+      finished-at (assoc :schedule-run/finished-at finished-at)
+      result      (assoc :schedule-run/result
+                         (if (> (count (str result)) 4000)
+                           (subs (str result) 0 4000)
+                           (str result)))
+      error       (assoc :schedule-run/error
+                         (if (> (count (str error)) 2000)
+                           (subs (str error) 0 2000)
+                           (str error)))
+      (some? actions) (assoc :schedule-run/actions (actions-doc actions))
+      (some? meta) (assoc :schedule-run/meta (meta-doc meta)))])
   ;; Update schedule's last-run and next-run
   (let [now             (java.util.Date.)
         current-record  (or (schedule-record schedule-id)
@@ -826,11 +826,11 @@
   ([schedule-id] (schedule-history schedule-id 10))
   ([schedule-id limit]
    (let [runs (db/q '[:find ?e ?started
-                       :in $ ?sid
-                       :where
-                       [?e :schedule-run/schedule-id ?sid]
-                       [?e :schedule-run/started-at ?started]]
-                     schedule-id)]
+                      :in $ ?sid
+                      :where
+                      [?e :schedule-run/schedule-id ?sid]
+                      [?e :schedule-run/started-at ?started]]
+                    schedule-id)]
      (->> runs
           (sort-by second #(compare %2 %1))
           (take limit)
@@ -860,11 +860,11 @@
   "Keep only the most recent `keep-count` runs per schedule."
   [schedule-id keep-count]
   (let [runs (db/q '[:find ?e ?started
-                      :in $ ?sid
-                      :where
-                      [?e :schedule-run/schedule-id ?sid]
-                      [?e :schedule-run/started-at ?started]]
-                    schedule-id)
+                     :in $ ?sid
+                     :where
+                     [?e :schedule-run/schedule-id ?sid]
+                     [?e :schedule-run/started-at ?started]]
+                   schedule-id)
         to-remove (->> runs
                        (sort-by second #(compare %2 %1))
                        (drop keep-count))]
@@ -879,12 +879,12 @@
   "Find all enabled schedules whose next-run is at or before `now`."
   [^java.util.Date now]
   (let [eids (db/q '[:find ?e
-                      :in $ ?now
-                      :where
-                      [?e :schedule/enabled? true]
-                      [?e :schedule/next-run ?next]
-                      [(<= ?next ?now)]]
-                    now)]
+                     :in $ ?now
+                     :where
+                     [?e :schedule/enabled? true]
+                     [?e :schedule/next-run ?next]
+                     [(<= ?next ?now)]]
+                   now)]
     (mapv (fn [[eid]]
             (let [e (into {} (db/entity eid))]
               {:id        (:schedule/id e)

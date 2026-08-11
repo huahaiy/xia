@@ -143,7 +143,7 @@
     (if (zero? remaining)
       cooldown
       (recur (util/long-min (long max-cooldown-ms)
-                       (* 2 cooldown))
+                            (* 2 cooldown))
              (dec remaining)))))
 
 (defn- provider-health-entry
@@ -196,9 +196,9 @@
              (let [previous             (get state provider-id)
                    consecutive-failures (inc (long (or (:consecutive-failures previous) 0)))
                    cooldown-ms          (util/long-max (long (or cooldown-ms 0))
-                                                  (provider-cooldown-ms base-cooldown-ms
-                                                                        max-cooldown-ms
-                                                                        consecutive-failures))]
+                                                       (provider-cooldown-ms base-cooldown-ms
+                                                                             max-cooldown-ms
+                                                                             consecutive-failures))]
                (assoc state provider-id
                       {:consecutive-failures consecutive-failures
                        :cooldown-until-ms   (+ timestamp cooldown-ms)

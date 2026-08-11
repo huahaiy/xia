@@ -268,13 +268,13 @@
                    doc
                    (assoc :skill/doc doc))
         tx-data  (vec
-                   (concat
-                     (for [tag (:skill/tags existing)
-                           :when (not (contains? new-tags tag))]
-                       [:db/retract eid :skill/tags tag])
-                     (when (and clear-doc? eid (contains? existing :skill/doc))
-                       [[:db/retract eid :skill/doc (:skill/doc existing)]])
-                     [base-map]))]
+                  (concat
+                   (for [tag (:skill/tags existing)
+                         :when (not (contains? new-tags tag))]
+                     [:db/retract eid :skill/tags tag])
+                   (when (and clear-doc? eid (contains? existing :skill/doc))
+                     [[:db/retract eid :skill/doc (:skill/doc existing)]])
+                   [base-map]))]
     (transact!* deps tx-data)))
 
 (def ^:private skill-usage-attrs
@@ -343,7 +343,7 @@
                         :where
                         [?e :skill/tags ?tag]
                         [?e :skill/enabled? true]]
-                  tags)]
+                 tags)]
     (mapv #(raw-entity* deps (first %)) eids)))
 
 (defn save-site-cred!
@@ -434,10 +434,10 @@
         allow-private-network?     (or (:service/allow-private-network? service)
                                        (:allow-private-network? service))
         base-url                   (validate-service-base-url! base-url
-                                                              allow-private-network?
-                                                              {:base-url base-url
-                                                               :smtp-url smtp-url
-                                                               :email-backend email-backend})
+                                                               allow-private-network?
+                                                               {:base-url base-url
+                                                                :smtp-url smtp-url
+                                                                :email-backend email-backend})
         eid                        (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :service/id ?id]] id))
         current                    (when eid (raw-entity* deps eid))
         rate-limit-per-minute      (or (:service/rate-limit-per-minute service)
@@ -452,10 +452,10 @@
                                              :service/auth-type (or auth-type :bearer)
                                              :service/auth-key  (or auth-key "")
                                              :service/autonomous-approved? (if (some? autonomous-approved?)
-                                                                            autonomous-approved?
-                                                                            (if (contains? current :service/autonomous-approved?)
-                                                                              (:service/autonomous-approved? current)
-                                                                              true))
+                                                                             autonomous-approved?
+                                                                             (if (contains? current :service/autonomous-approved?)
+                                                                               (:service/autonomous-approved? current)
+                                                                               true))
                                              :service/enabled?  (if (nil? enabled?) true enabled?)}]
                                      email-backend
                                      (update 0 assoc :service/email-backend email-backend)
@@ -932,12 +932,12 @@
 (defn oauth-account-in-use?
   [deps account-id]
   (boolean
-    (ffirst
-      (q* deps '[:find ?e :in $ ?id
-                 :where
-                 (or [?e :service/oauth-account ?id]
-                     [?e :llm.provider/oauth-account ?id])]
-          account-id))))
+   (ffirst
+    (q* deps '[:find ?e :in $ ?id
+               :where
+               (or [?e :service/oauth-account ?id]
+                   [?e :llm.provider/oauth-account ?id])]
+        account-id))))
 
 (declare get-tool)
 
@@ -981,48 +981,48 @@
         output-schema*   (or output-schema output_schema)
         output-examples* (or output-examples output_examples)]
     (transact!*
-      deps
-      [(cond-> {:tool/id           id
-                :tool/name         (or name
-                                       (:tool/name existing)
-                                       (clojure.core/name id))
-                :tool/description  (or description
-                                       (:tool/description existing)
-                                       "")
-                :tool/tags         (or tags
-                                       (:tool/tags existing)
-                                       #{})
-                :tool/parameters   (or parameters
-                                       (:tool/parameters existing)
-                                       {})
-                :tool/handler      (or handler
-                                       (:tool/handler existing)
-                                       "")
-                :tool/handler-var  (or handler-var*
-                                       (:tool/handler-var existing)
-                                       "")
-                :tool/approval     (or approval
-                                       (:tool/approval existing)
-                                       :auto)
-                :tool/enabled?     (if (some? enabled?)
-                                     enabled?
-                                     (if (contains? existing :tool/enabled?)
-                                       (:tool/enabled? existing)
-                                       true))
-                :tool/installed-at (or installed-at
-                                       (:tool/installed-at existing)
-                                       (java.util.Date.))}
-         (some? execution-mode)
-         (assoc :tool/execution-mode execution-mode)
+     deps
+     [(cond-> {:tool/id           id
+               :tool/name         (or name
+                                      (:tool/name existing)
+                                      (clojure.core/name id))
+               :tool/description  (or description
+                                      (:tool/description existing)
+                                      "")
+               :tool/tags         (or tags
+                                      (:tool/tags existing)
+                                      #{})
+               :tool/parameters   (or parameters
+                                      (:tool/parameters existing)
+                                      {})
+               :tool/handler      (or handler
+                                      (:tool/handler existing)
+                                      "")
+               :tool/handler-var  (or handler-var*
+                                      (:tool/handler-var existing)
+                                      "")
+               :tool/approval     (or approval
+                                      (:tool/approval existing)
+                                      :auto)
+               :tool/enabled?     (if (some? enabled?)
+                                    enabled?
+                                    (if (contains? existing :tool/enabled?)
+                                      (:tool/enabled? existing)
+                                      true))
+               :tool/installed-at (or installed-at
+                                      (:tool/installed-at existing)
+                                      (java.util.Date.))}
+        (some? execution-mode)
+        (assoc :tool/execution-mode execution-mode)
 
-         (some? output-schema*)
-         (assoc :tool/output-schema (tool-output-storage-value output-schema*))
+        (some? output-schema*)
+        (assoc :tool/output-schema (tool-output-storage-value output-schema*))
 
-         (some? outputs)
-         (assoc :tool/outputs (tool-output-storage-value outputs))
+        (some? outputs)
+        (assoc :tool/outputs (tool-output-storage-value outputs))
 
-         (some? output-examples*)
-         (assoc :tool/output-examples (tool-output-storage-value output-examples*)))])))
+        (some? output-examples*)
+        (assoc :tool/output-examples (tool-output-storage-value output-examples*)))])))
 
 (defn get-tool
   [deps tool-id]

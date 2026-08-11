@@ -633,7 +633,7 @@
                 (mapcat (fn [[field value]]
                           (case field
                             (:max-attempts :attempts :max-retries :retries
-                             :delay-ms :initial-delay-ms :max-delay-ms)
+                                           :delay-ms :initial-delay-ms :max-delay-ms)
                             (literal-positive-integer-errors step
                                                              field
                                                              (conj path field)

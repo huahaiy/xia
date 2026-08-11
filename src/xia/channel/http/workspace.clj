@@ -108,136 +108,136 @@
 (defn handle-list-scratch-pads
   [deps session-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (touch!
-      (http-common/json-response deps 200
-                                 {:session_id session-id
-                                  :pads       (into [] (map #(scratch-metadata->body deps %))
+    deps
+    session-id
+    (fn [touch!]
+      (touch!
+       (http-common/json-response deps 200
+                                  {:session_id session-id
+                                   :pads       (into [] (map #(scratch-metadata->body deps %))
                                                      (scratch/list-pads {:scope :session
                                                                          :session-id session-id}))})))))
 
 (defn handle-create-scratch-pad
   [deps session-id req]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (let [data (or (http-common/read-body deps req) {})
-           pad  (scratch/create-pad! {:scope      :session
-                                      :session-id session-id
-                                      :title      (get data "title")
-                                      :content    (get data "content")
-                                      :mime       (get data "mime")})]
-      (touch!
-       (http-common/json-response deps 201 {:session_id session-id
-                                            :pad        (scratch-pad->body deps pad)}))))))
+    deps
+    session-id
+    (fn [touch!]
+      (let [data (or (http-common/read-body deps req) {})
+            pad  (scratch/create-pad! {:scope      :session
+                                       :session-id session-id
+                                       :title      (get data "title")
+                                       :content    (get data "content")
+                                       :mime       (get data "mime")})]
+        (touch!
+         (http-common/json-response deps 201 {:session_id session-id
+                                              :pad        (scratch-pad->body deps pad)}))))))
 
 (defn handle-get-scratch-pad
   [deps session-id pad-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-let [pad (session-scratch-pad session-id pad-id)]
-       (touch!
-        (http-common/json-response deps 200 {:session_id session-id
-                                             :pad        (scratch-pad->body deps pad)}))
-       (http-common/json-response deps 404 {:error "scratch pad not found"})))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-let [pad (session-scratch-pad session-id pad-id)]
+        (touch!
+         (http-common/json-response deps 200 {:session_id session-id
+                                              :pad        (scratch-pad->body deps pad)}))
+        (http-common/json-response deps 404 {:error "scratch pad not found"})))))
 
 (defn handle-save-scratch-pad
   [deps session-id pad-id req]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-scratch-pad session-id pad-id)
-       (http-common/json-response deps 404 {:error "scratch pad not found"})
-       (let [data    (or (http-common/read-body deps req) {})
-             updates (cond-> {}
-                       (contains? data "title")            (assoc :title (get data "title"))
-                       (contains? data "content")          (assoc :content (get data "content"))
-                       (contains? data "mime")             (assoc :mime (get data "mime"))
-                       (contains? data "expected_version") (assoc :expected-version
-                                                                  (get data "expected_version")))]
-         (try
-           (touch!)
-           (http-common/json-response
-            deps
-            200
-            {:session_id session-id
-             :pad        (scratch-pad->body deps (scratch/save-pad! pad-id updates))})
-           (catch clojure.lang.ExceptionInfo e
-             (let [{:keys [type]} (ex-data e)]
-               (case type
-                 :scratch/version-conflict
-                 (http-common/json-response deps 409
-                                            {:error "scratch pad version conflict"
-                                             :details (select-keys (ex-data e)
-                                                                   [:expected-version :actual-version])})
-                 :scratch/not-found
-                 (http-common/json-response deps 404 {:error "scratch pad not found"})
-                 (http-common/json-response deps 400 {:error (.getMessage e)}))))))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-scratch-pad session-id pad-id)
+        (http-common/json-response deps 404 {:error "scratch pad not found"})
+        (let [data    (or (http-common/read-body deps req) {})
+              updates (cond-> {}
+                        (contains? data "title")            (assoc :title (get data "title"))
+                        (contains? data "content")          (assoc :content (get data "content"))
+                        (contains? data "mime")             (assoc :mime (get data "mime"))
+                        (contains? data "expected_version") (assoc :expected-version
+                                                                   (get data "expected_version")))]
+          (try
+            (touch!)
+            (http-common/json-response
+             deps
+             200
+             {:session_id session-id
+              :pad        (scratch-pad->body deps (scratch/save-pad! pad-id updates))})
+            (catch clojure.lang.ExceptionInfo e
+              (let [{:keys [type]} (ex-data e)]
+                (case type
+                  :scratch/version-conflict
+                  (http-common/json-response deps 409
+                                             {:error "scratch pad version conflict"
+                                              :details (select-keys (ex-data e)
+                                                                    [:expected-version :actual-version])})
+                  :scratch/not-found
+                  (http-common/json-response deps 404 {:error "scratch pad not found"})
+                  (http-common/json-response deps 400 {:error (.getMessage e)}))))))))))
 
 (defn handle-edit-scratch-pad
   [deps session-id pad-id req]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-scratch-pad session-id pad-id)
-       (http-common/json-response deps 404 {:error "scratch pad not found"})
-       (let [data      (or (http-common/read-body deps req) {})
-             operation (if (map? (get data "operation"))
-                         (get data "operation")
-                         data)
-             edit      (cond-> {:op (get operation "op")}
-                         (contains? operation "text")             (assoc :text (get operation "text"))
-                         (contains? operation "separator")        (assoc :separator (get operation "separator"))
-                         (contains? operation "match")            (assoc :match (get operation "match"))
-                         (contains? operation "replacement")      (assoc :replacement (get operation "replacement"))
-                         (contains? operation "occurrence")       (assoc :occurrence (get operation "occurrence"))
-                         (contains? operation "offset")           (assoc :offset (get operation "offset"))
-                         (contains? operation "start_line")       (assoc :start-line (get operation "start_line"))
-                         (contains? operation "end_line")         (assoc :end-line (get operation "end_line"))
-                         (contains? data "expected_version")      (assoc :expected-version
-                                                                         (get data "expected_version"))
-                         (contains? operation "expected_version") (assoc :expected-version
-                                                                         (get operation "expected_version")))]
-         (try
-           (touch!)
-           (http-common/json-response
-            deps
-            200
-            {:session_id session-id
-             :pad        (scratch-pad->body deps (scratch/edit-pad! pad-id edit))})
-           (catch clojure.lang.ExceptionInfo e
-             (let [{:keys [type]} (ex-data e)]
-               (case type
-                 :scratch/version-conflict
-                 (http-common/json-response deps 409
-                                            {:error "scratch pad version conflict"
-                                             :details (select-keys (ex-data e)
-                                                                   [:expected-version :actual-version])})
-                 :scratch/not-found
-                 (http-common/json-response deps 404 {:error "scratch pad not found"})
-                 (http-common/json-response deps 400 {:error (.getMessage e)}))))))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-scratch-pad session-id pad-id)
+        (http-common/json-response deps 404 {:error "scratch pad not found"})
+        (let [data      (or (http-common/read-body deps req) {})
+              operation (if (map? (get data "operation"))
+                          (get data "operation")
+                          data)
+              edit      (cond-> {:op (get operation "op")}
+                          (contains? operation "text")             (assoc :text (get operation "text"))
+                          (contains? operation "separator")        (assoc :separator (get operation "separator"))
+                          (contains? operation "match")            (assoc :match (get operation "match"))
+                          (contains? operation "replacement")      (assoc :replacement (get operation "replacement"))
+                          (contains? operation "occurrence")       (assoc :occurrence (get operation "occurrence"))
+                          (contains? operation "offset")           (assoc :offset (get operation "offset"))
+                          (contains? operation "start_line")       (assoc :start-line (get operation "start_line"))
+                          (contains? operation "end_line")         (assoc :end-line (get operation "end_line"))
+                          (contains? data "expected_version")      (assoc :expected-version
+                                                                          (get data "expected_version"))
+                          (contains? operation "expected_version") (assoc :expected-version
+                                                                          (get operation "expected_version")))]
+          (try
+            (touch!)
+            (http-common/json-response
+             deps
+             200
+             {:session_id session-id
+              :pad        (scratch-pad->body deps (scratch/edit-pad! pad-id edit))})
+            (catch clojure.lang.ExceptionInfo e
+              (let [{:keys [type]} (ex-data e)]
+                (case type
+                  :scratch/version-conflict
+                  (http-common/json-response deps 409
+                                             {:error "scratch pad version conflict"
+                                              :details (select-keys (ex-data e)
+                                                                    [:expected-version :actual-version])})
+                  :scratch/not-found
+                  (http-common/json-response deps 404 {:error "scratch pad not found"})
+                  (http-common/json-response deps 400 {:error (.getMessage e)}))))))))))
 
 (defn handle-delete-scratch-pad
   [deps session-id pad-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-scratch-pad session-id pad-id)
-       (http-common/json-response deps 404 {:error "scratch pad not found"})
-       (do
-         (scratch/delete-pad! pad-id)
-         (touch!
-          (http-common/json-response deps 200 {:status "deleted"
-                                               :session_id session-id
-                                               :pad_id pad-id})))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-scratch-pad session-id pad-id)
+        (http-common/json-response deps 404 {:error "scratch pad not found"})
+        (do
+          (scratch/delete-pad! pad-id)
+          (touch!
+           (http-common/json-response deps 200 {:status "deleted"
+                                                :session_id session-id
+                                                :pad_id pad-id})))))))
 
 (defn- parse-local-doc-upload
   [entry]
@@ -304,7 +304,7 @@
         uploads (or (get params "documents")
                     (get params :documents)
                     (get params "documents[]")
-                    (get params :documents[]))]
+                    (get params :documents []))]
     (->> (cond
            (sequential? uploads) uploads
            (some? uploads)       [uploads]
@@ -327,119 +327,119 @@
 (defn handle-list-local-docs
   [deps session-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (touch!
-      (http-common/json-response deps 200
-                                 {:session_id session-id
-                                  :documents  (into [] (map #(local-doc-metadata->body deps %))
-                                                    (local-doc/list-docs session-id))})))))
+    deps
+    session-id
+    (fn [touch!]
+      (touch!
+       (http-common/json-response deps 200
+                                  {:session_id session-id
+                                   :documents  (into [] (map #(local-doc-metadata->body deps %))
+                                                     (local-doc/list-docs session-id))})))))
 
 (defn handle-create-local-docs
   [deps session-id req]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (let [uploads (local-doc-upload-entries deps req)]
-       (if-not (seq uploads)
-         (http-common/json-response deps 400 {:error "missing local documents"})
-         (let [{:keys [documents errors]}
-               (reduce (fn [acc upload]
-                         (try
-                           (update acc :documents conj
-                                   (local-doc-metadata->body
-                                    deps
-                                    (local-doc/save-upload!
-                                     {:session-id   session-id
-                                      :name         (:name upload)
-                                      :media-type   (:media-type upload)
-                                      :size-bytes   (:size-bytes upload)
-                                      :source       (:source upload)
-                                      :bytes        (:bytes upload)
-                                      :bytes-base64 (:bytes-base64 upload)
-                                      :ocr-mode     (:ocr-mode upload)
-                                      :text         (:text upload)})))
-                           (catch clojure.lang.ExceptionInfo e
-                             (let [failed-doc (try
-                                                (local-doc/save-failed-upload!
-                                                 {:session-id   session-id
-                                                  :name         (:name upload)
-                                                  :media-type   (:media-type upload)
-                                                  :size-bytes   (:size-bytes upload)
-                                                  :source       (:source upload)
-                                                  :bytes        (:bytes upload)
-                                                  :bytes-base64 (:bytes-base64 upload)
-                                                  :ocr-mode     (:ocr-mode upload)
-                                                  :text         (:text upload)}
-                                                 e)
-                                                (catch Exception _
-                                                  nil))]
-                               (cond-> (update acc :errors conj (local-doc-error->body deps upload e))
-                                 failed-doc
-                                 (update :documents conj (local-doc-metadata->body deps failed-doc)))))))
-                       {:documents [] :errors []}
-                       uploads)
-               status (if (seq documents) 201 400)]
-           (touch!
-            (http-common/json-response deps status
-                                       {:session_id session-id
-                                        :documents  documents
-                                        :errors     errors}))))))))
+    deps
+    session-id
+    (fn [touch!]
+      (let [uploads (local-doc-upload-entries deps req)]
+        (if-not (seq uploads)
+          (http-common/json-response deps 400 {:error "missing local documents"})
+          (let [{:keys [documents errors]}
+                (reduce (fn [acc upload]
+                          (try
+                            (update acc :documents conj
+                                    (local-doc-metadata->body
+                                     deps
+                                     (local-doc/save-upload!
+                                      {:session-id   session-id
+                                       :name         (:name upload)
+                                       :media-type   (:media-type upload)
+                                       :size-bytes   (:size-bytes upload)
+                                       :source       (:source upload)
+                                       :bytes        (:bytes upload)
+                                       :bytes-base64 (:bytes-base64 upload)
+                                       :ocr-mode     (:ocr-mode upload)
+                                       :text         (:text upload)})))
+                            (catch clojure.lang.ExceptionInfo e
+                              (let [failed-doc (try
+                                                 (local-doc/save-failed-upload!
+                                                  {:session-id   session-id
+                                                   :name         (:name upload)
+                                                   :media-type   (:media-type upload)
+                                                   :size-bytes   (:size-bytes upload)
+                                                   :source       (:source upload)
+                                                   :bytes        (:bytes upload)
+                                                   :bytes-base64 (:bytes-base64 upload)
+                                                   :ocr-mode     (:ocr-mode upload)
+                                                   :text         (:text upload)}
+                                                  e)
+                                                 (catch Exception _
+                                                   nil))]
+                                (cond-> (update acc :errors conj (local-doc-error->body deps upload e))
+                                  failed-doc
+                                  (update :documents conj (local-doc-metadata->body deps failed-doc)))))))
+                        {:documents [] :errors []}
+                        uploads)
+                status (if (seq documents) 201 400)]
+            (touch!
+             (http-common/json-response deps status
+                                        {:session_id session-id
+                                         :documents  documents
+                                         :errors     errors}))))))))
 
 (defn handle-get-local-doc
   [deps session-id doc-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-let [doc (session-local-doc session-id doc-id)]
-       (touch!
-        (http-common/json-response deps 200 {:session_id session-id
-                                             :document   (local-doc->body deps doc)}))
-       (http-common/json-response deps 404 {:error "local document not found"})))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-let [doc (session-local-doc session-id doc-id)]
+        (touch!
+         (http-common/json-response deps 200 {:session_id session-id
+                                              :document   (local-doc->body deps doc)}))
+        (http-common/json-response deps 404 {:error "local document not found"})))))
 
 (defn handle-delete-local-doc
   [deps session-id doc-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-local-doc session-id doc-id)
-       (http-common/json-response deps 404 {:error "local document not found"})
-       (do
-         (local-doc/delete-doc! session-id doc-id)
-         (touch!
-          (http-common/json-response deps 200 {:status "deleted"
-                                               :session_id session-id
-                                               :doc_id doc-id})))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-local-doc session-id doc-id)
+        (http-common/json-response deps 404 {:error "local document not found"})
+        (do
+          (local-doc/delete-doc! session-id doc-id)
+          (touch!
+           (http-common/json-response deps 200 {:status "deleted"
+                                                :session_id session-id
+                                                :doc_id doc-id})))))))
 
 (defn handle-create-local-doc-scratch-pad
   [deps session-id doc-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-local-doc session-id doc-id)
-       (http-common/json-response deps 404 {:error "local document not found"})
-       (let [{:keys [pad]} (local-doc/create-scratch-pad-from-doc! session-id doc-id)]
-         (touch!
-          (http-common/json-response deps 201 {:session_id session-id
-                                               :pad        (scratch-pad->body deps pad)})))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-local-doc session-id doc-id)
+        (http-common/json-response deps 404 {:error "local document not found"})
+        (let [{:keys [pad]} (local-doc/create-scratch-pad-from-doc! session-id doc-id)]
+          (touch!
+           (http-common/json-response deps 201 {:session_id session-id
+                                                :pad        (scratch-pad->body deps pad)})))))))
 
 (defn handle-create-artifact-scratch-pad
   [deps session-id artifact-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-artifact session-id artifact-id)
-       (http-common/json-response deps 404 {:error "artifact not found"})
-       (let [{:keys [pad]} (artifact/create-scratch-pad-from-artifact! session-id artifact-id)]
-         (touch!
-          (http-common/json-response deps 201 {:session_id session-id
-                                               :pad        (scratch-pad->body deps pad)})))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-artifact session-id artifact-id)
+        (http-common/json-response deps 404 {:error "artifact not found"})
+        (let [{:keys [pad]} (artifact/create-scratch-pad-from-artifact! session-id artifact-id)]
+          (touch!
+           (http-common/json-response deps 201 {:session_id session-id
+                                                :pad        (scratch-pad->body deps pad)})))))))
 
 (defn- artifact-create-spec
   [deps data]
@@ -483,69 +483,69 @@
 (defn handle-list-artifacts
   [deps session-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (touch!
-      (http-common/json-response deps 200
-                                 {:session_id session-id
-                                  :artifacts  (into [] (map #(artifact-metadata->body deps %))
-                                                    (artifact/list-artifacts session-id))})))))
+    deps
+    session-id
+    (fn [touch!]
+      (touch!
+       (http-common/json-response deps 200
+                                  {:session_id session-id
+                                   :artifacts  (into [] (map #(artifact-metadata->body deps %))
+                                                     (artifact/list-artifacts session-id))})))))
 
 (defn handle-create-artifact
   [deps session-id req]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (try
-       (let [data    (or (http-common/read-body deps req) {})
-             created (artifact/create-artifact! (assoc (artifact-create-spec deps data)
-                                                       :session-id session-id))]
-         (touch!
-          (http-common/json-response deps 201 {:session_id session-id
-                                               :artifact   (artifact->body deps created)})))
-       (catch clojure.lang.ExceptionInfo e
-         (http-common/json-response deps (or (:status (ex-data e)) 400)
-                                    {:error (.getMessage e)}))))))
+    deps
+    session-id
+    (fn [touch!]
+      (try
+        (let [data    (or (http-common/read-body deps req) {})
+              created (artifact/create-artifact! (assoc (artifact-create-spec deps data)
+                                                        :session-id session-id))]
+          (touch!
+           (http-common/json-response deps 201 {:session_id session-id
+                                                :artifact   (artifact->body deps created)})))
+        (catch clojure.lang.ExceptionInfo e
+          (http-common/json-response deps (or (:status (ex-data e)) 400)
+                                     {:error (.getMessage e)}))))))
 
 (defn handle-get-artifact
   [deps session-id artifact-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-let [artifact (session-artifact session-id artifact-id)]
-       (touch!
-        (http-common/json-response deps 200 {:session_id session-id
-                                             :artifact   (artifact->body deps artifact)}))
-       (http-common/json-response deps 404 {:error "artifact not found"})))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-let [artifact (session-artifact session-id artifact-id)]
+        (touch!
+         (http-common/json-response deps 200 {:session_id session-id
+                                              :artifact   (artifact->body deps artifact)}))
+        (http-common/json-response deps 404 {:error "artifact not found"})))))
 
 (defn handle-download-artifact
   [deps session-id artifact-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-let [{:keys [name media-type bytes]} (artifact/artifact-download-data session-id artifact-id)]
-       (touch!
-        (http-common/download-response deps name media-type (or bytes (byte-array 0))))
-       (http-common/json-response deps 404 {:error "artifact not found"})))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-let [{:keys [name media-type bytes]} (artifact/artifact-download-data session-id artifact-id)]
+        (touch!
+         (http-common/download-response deps name media-type (or bytes (byte-array 0))))
+        (http-common/json-response deps 404 {:error "artifact not found"})))))
 
 (defn handle-delete-artifact
   [deps session-id artifact-id]
   (http-common/with-session
-   deps
-   session-id
-   (fn [touch!]
-     (if-not (session-artifact session-id artifact-id)
-       (http-common/json-response deps 404 {:error "artifact not found"})
-       (do
-         (artifact/delete-artifact! session-id artifact-id)
-         (touch!
-          (http-common/json-response deps 200 {:status "deleted"
-                                               :session_id session-id
-                                               :artifact_id artifact-id})))))))
+    deps
+    session-id
+    (fn [touch!]
+      (if-not (session-artifact session-id artifact-id)
+        (http-common/json-response deps 404 {:error "artifact not found"})
+        (do
+          (artifact/delete-artifact! session-id artifact-id)
+          (touch!
+           (http-common/json-response deps 200 {:status "deleted"
+                                                :session_id session-id
+                                                :artifact_id artifact-id})))))))
 
 (defn handle-list-workspace-items
   [deps req]
@@ -555,8 +555,8 @@
           top          (http-common/parse-optional-positive-long deps (get params "top") "top")
           items        (workspace/list-items :workspace-id workspace-id :top top)]
       (http-common/json-response deps 200
-                      {:workspace_id (or workspace-id paths/default-workspace-id)
-                       :items        (into [] (map #(workspace-item->body deps %)) items)}))
+                                 {:workspace_id (or workspace-id paths/default-workspace-id)
+                                  :items        (into [] (map #(workspace-item->body deps %)) items)}))
     (catch clojure.lang.ExceptionInfo e
       (http-common/exception-response deps e))))
 

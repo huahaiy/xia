@@ -22,7 +22,7 @@
   (let [provider-id                (or id (:llm.provider/id provider))
         provider-eid               (ffirst (q* deps '[:find ?e :in $ ?id
                                                       :where [?e :llm.provider/id ?id]]
-                                            provider-id))
+                                               provider-id))
         template-id                (or (:llm.provider/template provider)
                                        (:template provider))
         access-mode                (or (:llm.provider/access-mode provider)
@@ -36,7 +36,7 @@
         browser-session            (or (:llm.provider/browser-session provider)
                                        (:browser-session provider))
         workloads                  (some-> (or (:llm.provider/workloads provider)
-                                              (:workloads provider))
+                                               (:workloads provider))
                                            set)
         system-prompt-budget       (or (:llm.provider/system-prompt-budget provider)
                                        (:system-prompt-budget provider))
@@ -249,7 +249,7 @@
 (defn delete-provider!
   [deps provider-id]
   (when-let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :llm.provider/id ?id]]
-                               provider-id))]
+                             provider-id))]
     (transact!* deps [[:db/retractEntity eid]])))
 
 (defn get-default-provider
@@ -262,7 +262,7 @@
 (defn get-provider
   [deps provider-id]
   (let [eid (ffirst (q* deps '[:find ?e :in $ ?id :where [?e :llm.provider/id ?id]]
-                           provider-id))]
+                        provider-id))]
     (when eid
       (decrypt-entity* deps (raw-entity* deps eid)))))
 

@@ -47,8 +47,8 @@
                                :parent-task-id parent-task-id}))
         meta*            (merge (cond-> {:trigger {:kind :branch}
                                          :execution {:mode :agent}}
-                           parent-task-id
-                           (assoc-in [:trigger :parent-task-id] parent-task-id))
+                                  parent-task-id
+                                  (assoc-in [:trigger :parent-task-id] parent-task-id))
                                 meta)
         task-id          (db/create-task!
                           (cond-> {:session-id child-session-id

@@ -146,11 +146,11 @@
    (backup-due? (Instant/now)))
   ([now]
    (boolean
-     (and (enabled?)
-          (not (running?))
-          (let [due-at (next-due-at now)]
-            (or (nil? due-at)
-                (not (.isAfter ^Instant due-at ^Instant now))))))))
+    (and (enabled?)
+         (not (running?))
+         (let [due-at (next-due-at now)]
+           (or (nil? due-at)
+               (not (.isAfter ^Instant due-at ^Instant now))))))))
 
 (defn admin-body
   []
@@ -235,8 +235,8 @@
   (let [timestamp (.format ^DateTimeFormatter backup-name-formatter ^java.time.temporal.TemporalAccessor (Instant/now))
         suffix    (subs (str (UUID/randomUUID)) 0 8)]
     (.getAbsolutePath
-      (io/file backup-dir
-               (str managed-backup-prefix timestamp "-" suffix ".xia")))))
+     (io/file backup-dir
+              (str managed-backup-prefix timestamp "-" suffix ".xia")))))
 
 (defn run-backup!
   "Create a portable backup archive from a safe LMDB copy of the live DB.
@@ -287,8 +287,7 @@
                                :started-at nil})
             (when-let [stage-root @stage-root*]
               (delete-tree! stage-root)))))
-      {:status :running}
-      )))
+      {:status :running})))
 
 (defn run-scheduled-backup!
   []

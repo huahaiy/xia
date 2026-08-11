@@ -409,7 +409,7 @@
                   :source-session-id (:session-id artifact*)
                   :kind              (:kind artifact*)
                   :media-type        (or (:media-type artifact*)
-                                          "application/octet-stream")
+                                         "application/octet-stream")
                   :meta              (:meta artifact*)
                   :preview           (:preview artifact*)
                   :text-derived?     false}

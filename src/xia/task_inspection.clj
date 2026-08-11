@@ -335,15 +335,15 @@
                             (:progress_status current-tip)
                             (some-> (:progress-status checkpoint) keyword->str))
         spec-fields     (select-keys task-spec-progress
-                                      [:progress_source
-                                       :task_spec_status
-                                       :current_step_id
-                                       :current_step_kind
-                                       :step_count
-                                       :completed_count
-                                       :failed_count
-                                       :pause_reason
-                                       :waiting_for])]
+                                     [:progress_source
+                                      :task_spec_status
+                                      :current_step_id
+                                      :current_step_kind
+                                      :step_count
+                                      :completed_count
+                                      :failed_count
+                                      :pause_reason
+                                      :waiting_for])]
     (cond-> (merge {:task_state (keyword->str task-state)}
                    spec-fields)
       (:phase runtime) (assoc :phase (keyword->str (:phase runtime)))
@@ -364,7 +364,7 @@
              :summary (truncate-text* opts (or (:summary request)
                                                (:message runtime)
                                                (:summary task))
-                                     240)}
+                                      240)}
       (get-in request [:data :label]) (assoc :label (get-in request [:data :label]))
       (contains? (:data request) :masked) (assoc :masked (boolean (get-in request [:data :masked])))
       (:created-at request) (assoc :requested_at (instant->str* opts (:created-at request))))))
@@ -377,7 +377,7 @@
                :summary (truncate-text* opts (or (:summary request)
                                                  (:message runtime)
                                                  (:summary task))
-                                       240)}
+                                        240)}
         (:tool-name data) (assoc :tool_name (:tool-name data))
         (:tool-id data) (assoc :tool_id (:tool-id data))
         (:policy data) (assoc :policy (:policy data))
@@ -403,14 +403,14 @@
                :summary (truncate-text* opts (or (:error task)
                                                  (:summary task)
                                                  "Task failed")
-                                       240)}
+                                        240)}
         (:error task) (assoc :error (truncate-text* opts (:error task) 240)))
 
       (= :paused task-state)
       (cond-> {:kind "paused"
                :summary (truncate-text* opts (or (:summary task)
                                                  "Task paused")
-                                       240)}
+                                        240)}
         resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240))
         (:stop-reason task) (assoc :stop_reason (keyword->str (:stop-reason task))))
 
@@ -418,7 +418,7 @@
       (cond-> {:kind "resumable"
                :summary (truncate-text* opts (or (:summary task)
                                                  "Task can be resumed")
-                                       240)}
+                                        240)}
         resume-hint (assoc :resume_hint (truncate-text* opts resume-hint 240)))
 
       :else
@@ -441,11 +441,11 @@
 (defn- budget-summary
   [budget]
   (str (:llm-call-count budget 0)
-      " calls, "
-      (:total-tokens budget 0)
-      " tokens, "
-      (limits/format-duration-ms (:llm-total-duration-ms budget 0))
-      " runtime"))
+       " calls, "
+       (:total-tokens budget 0)
+       " tokens, "
+       (limits/format-duration-ms (:llm-total-duration-ms budget 0))
+       " runtime"))
 
 (defn- budget-body
   [task]
@@ -591,8 +591,8 @@
       (cond-> {:status (keyword->str (:status task-spec))
                :step_count (count steps)
                :completed_count (count (filter #(contains? #{:success :skipped}
-                                                            (:status %))
-                                                steps))
+                                                           (:status %))
+                                               steps))
                :failed_count (count (filter #(= :failed (:status %)) steps))}
         (:current-step-id task-spec) (assoc :current_step_id (name (:current-step-id task-spec)))
         (:pause-reason task-spec) (assoc :pause_reason (keyword->str (:pause-reason task-spec)))
@@ -627,9 +627,9 @@
         sources* (:sources envelope)]
     {:precedence (mapv name (:precedence envelope))
      :resolved   (reduce (fn [acc key-name]
-                            (update acc key-name #(some-> % str)))
-                          (:resolved sources*)
-                          [:session-id :task-id :user-profile-id])
+                           (update acc key-name #(some-> % str)))
+                         (:resolved sources*)
+                         [:session-id :task-id :user-profile-id])
      :effective  (truncate-envelope-value opts (:effective envelope))}))
 
 (defn task-inspection
@@ -667,17 +667,17 @@
          operating-envelope    (operating-envelope-body opts task)
          executor-details      (executor-details-body current-tip stack-summary*)
          base                  (cond-> {:executor_details executor-details
-                                         :last_checkpoint (checkpoint-body opts task)
-                                         :current_state (current-state-body opts
-                                                                            task
-                                                                            runtime
-                                                                            current-tip
-                                                                            checkpoint
-                                                                            task-spec-progress)
-                                         :attention (attention-body opts task runtime items budget)
-                                         :budget budget
-                                         :operating_envelope operating-envelope
-                                         :counts (counts-body turns items)}
+                                        :last_checkpoint (checkpoint-body opts task)
+                                        :current_state (current-state-body opts
+                                                                           task
+                                                                           runtime
+                                                                           current-tip
+                                                                           checkpoint
+                                                                           task-spec-progress)
+                                        :attention (attention-body opts task runtime items budget)
+                                        :budget budget
+                                        :operating_envelope operating-envelope
+                                        :counts (counts-body turns items)}
                                  task-spec (assoc :task_spec task-spec))]
      (if compact?
        (cond-> base

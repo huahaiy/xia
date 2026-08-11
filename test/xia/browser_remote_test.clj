@@ -10,9 +10,9 @@
 (defn- temp-secret-file
   [payload]
   (let [path (str (java.nio.file.Files/createTempFile
-                    "xia-remote-browser-token"
-                    ".txt"
-                    (make-array java.nio.file.attribute.FileAttribute 0)))]
+                   "xia-remote-browser-token"
+                   ".txt"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))]
     (spit (io/file path) payload)
     path))
 

@@ -107,13 +107,13 @@
                             :decay_half_life_days (some-> (get-in resolutions [:decay-half-life-ms :source]) name)
                             :retained_count (some-> (get-in resolutions [:retained-decayed-count :source]) name)}
      :config_resolution    {:full_resolution_days (config-resolution->admin-body
-                                                    (:full-resolution-ms resolutions)
-                                                    days-value)
+                                                   (:full-resolution-ms resolutions)
+                                                   days-value)
                             :decay_half_life_days (config-resolution->admin-body
-                                                    (:decay-half-life-ms resolutions)
-                                                    days-value)
+                                                   (:decay-half-life-ms resolutions)
+                                                   days-value)
                             :retained_count (config-resolution->admin-body
-                                              (:retained-decayed-count resolutions))}}))
+                                             (:retained-decayed-count resolutions))}}))
 
 (defn- knowledge-decay->admin-body
   []
@@ -134,16 +134,16 @@
                                                      (:grace-period-ms resolutions)
                                                      days-value)
                                  :half_life_days (config-resolution->admin-body
-                                                   (:half-life-ms resolutions)
-                                                   days-value)
+                                                  (:half-life-ms resolutions)
+                                                  days-value)
                                  :min_confidence (config-resolution->admin-body
-                                                   (:min-confidence resolutions))
+                                                  (:min-confidence resolutions))
                                  :maintenance_interval_days (config-resolution->admin-body
-                                                              (:maintenance-step-ms resolutions)
-                                                              days-value)
+                                                             (:maintenance-step-ms resolutions)
+                                                             days-value)
                                  :archive_after_bottom_days (config-resolution->admin-body
-                                                              (:archive-after-bottom-ms resolutions)
-                                                              days-value)}}))
+                                                             (:archive-after-bottom-ms resolutions)
+                                                             days-value)}}))
 
 (defn- memory-consolidation->admin-body
   []
@@ -159,7 +159,7 @@
      :config_resolution            {:recent_history_message_limit (config-resolution->admin-body
                                                                    (:recent-history-message-limit resolutions))
                                     :history_budget (config-resolution->admin-body
-                                                      (:history-budget resolutions))}}))
+                                                     (:history-budget resolutions))}}))
 
 (defn- llm-logging->admin-body
   []
@@ -188,15 +188,15 @@
                                  :chunk_summary_max_tokens (some-> (get-in resolutions [:chunk-summary-max-tokens :source]) name)
                                  :doc_summary_max_tokens (some-> (get-in resolutions [:document-summary-max-tokens :source]) name)}
      :config_resolution         {:model_summaries_enabled (config-resolution->admin-body
-                                                            (:enabled resolutions))
+                                                           (:enabled resolutions))
                                  :model_summary_backend (config-resolution->admin-body
-                                                          (:backend resolutions))
+                                                         (:backend resolutions))
                                  :model_summary_provider_id (config-resolution->admin-body
-                                                              (:provider-id resolutions))
+                                                             (:provider-id resolutions))
                                  :chunk_summary_max_tokens (config-resolution->admin-body
-                                                             (:chunk-summary-max-tokens resolutions))
+                                                            (:chunk-summary-max-tokens resolutions))
                                  :doc_summary_max_tokens (config-resolution->admin-body
-                                                           (:document-summary-max-tokens resolutions))}}))
+                                                          (:document-summary-max-tokens resolutions))}}))
 
 (defn- local-doc-ocr->admin-body
   []
@@ -208,15 +208,15 @@
                      :timeout_ms (some-> (get-in resolutions [:timeout-ms :source]) name)
                      :max_tokens (some-> (get-in resolutions [:max-tokens :source]) name)}
            :config_resolution {:enabled (config-resolution->admin-body
-                                          (:enabled resolutions))
+                                         (:enabled resolutions))
                                :model_backend (config-resolution->admin-body
-                                                (:backend resolutions))
+                                               (:backend resolutions))
                                :external_provider_id (config-resolution->admin-body
-                                                       (:provider-id resolutions))
+                                                      (:provider-id resolutions))
                                :timeout_ms (config-resolution->admin-body
-                                             (:timeout-ms resolutions))
+                                            (:timeout-ms resolutions))
                                :max_tokens (config-resolution->admin-body
-                                             (:max-tokens resolutions))})))
+                                            (:max-tokens resolutions))})))
 
 (defn- database-backup->admin-body
   [deps]
@@ -238,13 +238,13 @@
                          :interval_hours (some-> (get-in resolutions [:interval-hours :source]) name)
                          :retain_count (some-> (get-in resolutions [:retain-count :source]) name)}
      :config_resolution {:enabled (config-resolution->admin-body
-                                    (:enabled resolutions))
+                                   (:enabled resolutions))
                          :directory (config-resolution->admin-body
-                                      (:directory resolutions))
+                                     (:directory resolutions))
                          :interval_hours (config-resolution->admin-body
-                                           (:interval-hours resolutions))
+                                          (:interval-hours resolutions))
                          :retain_count (config-resolution->admin-body
-                                         (:retain-count resolutions))}}))
+                                        (:retain-count resolutions))}}))
 
 (defn- web-search->admin-body
   []
@@ -282,8 +282,8 @@
                                   :playwright_browsers_path (some-> (get-in resolutions [:playwright :browsers-path :source]) name)
                                   :playwright_channel (some-> (get-in resolutions [:playwright :channel :source]) name)}
      :config_resolution          {:configured_default_backend (config-resolution->admin-body
-                                                                (:backend-default resolutions)
-                                                                admin-config-value)
+                                                               (:backend-default resolutions)
+                                                               admin-config-value)
                                   :remote {:enabled (config-resolution->admin-body (get-in resolutions [:remote :enabled]))
                                            :base_url (config-resolution->admin-body (get-in resolutions [:remote :base-url]))
                                            :token_file (secret-resolution->admin-body (get-in resolutions [:remote :token-file]))

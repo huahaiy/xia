@@ -134,9 +134,9 @@
   [headers header-name]
   (let [target (some-> header-name map-key-name str/lower-case)]
     (boolean
-      (some (fn [[k _]]
-              (= target (some-> k map-key-name str/lower-case)))
-            (or headers {})))))
+     (some (fn [[k _]]
+             (= target (some-> k map-key-name str/lower-case)))
+           (or headers {})))))
 
 (defn- inject-auth
   "Add authentication to a request map based on the service's auth-type."
@@ -248,21 +248,21 @@
                                               now
                                               rate-limit-window-ms)
         state (.computeIfAbsent (service-rate-limits) service-id
-                (reify java.util.function.Function
-                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
+                                (reify java.util.function.Function
+                                  (apply [_ _] (atom {:timestamps [] :cleaned now}))))]
     (rate-limit/consume-slot!
-      state
-      now
-      rate-limit-window-ms
-      limit
-      (fn []
-        (prompt/policy-decision! (task-policy/service-rate-limit-policy
-                                  service-id
-                                  limit))
-        (ex-info (str "Rate limit exceeded for service " (name service-id)
-                      " (max " limit " requests/minute)")
-                 {:service-id service-id
-                  :limit      limit})))))
+     state
+     now
+     rate-limit-window-ms
+     limit
+     (fn []
+       (prompt/policy-decision! (task-policy/service-rate-limit-policy
+                                 service-id
+                                 limit))
+       (ex-info (str "Rate limit exceeded for service " (name service-id)
+                     " (max " limit " requests/minute)")
+                {:service-id service-id
+                 :limit      limit})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Service resolution

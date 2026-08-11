@@ -30,16 +30,16 @@
   [{:keys [type summary context participants channel session-id importance]}]
   (let [result
         (db/transact!
-          [(cond-> {:episode/id         (random-uuid)
-                    :episode/type       (or type :conversation)
-                    :episode/summary    (or summary "")
-                    :episode/timestamp  (java.util.Date.)
-                    :episode/processed? false}
-             context      (assoc :episode/context context)
-             participants (assoc :episode/participants participants)
-             channel      (assoc :episode/channel (name channel))
-             importance   (assoc :episode/importance (float importance))
-             session-id   (assoc :episode/session-id (str session-id)))])]
+         [(cond-> {:episode/id         (random-uuid)
+                   :episode/type       (or type :conversation)
+                   :episode/summary    (or summary "")
+                   :episode/timestamp  (java.util.Date.)
+                   :episode/processed? false}
+            context      (assoc :episode/context context)
+            participants (assoc :episode/participants participants)
+            channel      (assoc :episode/channel (name channel))
+            importance   (assoc :episode/importance (float importance))
+            session-id   (assoc :episode/session-id (str session-id)))])]
     (retrieval-state/bump-knowledge!)
     result))
 
@@ -260,33 +260,33 @@
 (defn- sort-episodes-by-decay-score
   [episodes ^java.util.Date as-of retention-config]
   (sort
-    (fn [a b]
-      (let [score-a (episode-decay-score a as-of retention-config)
-            score-b (episode-decay-score b as-of retention-config)
-            importance-a (normalize-importance (:importance a))
-            importance-b (normalize-importance (:importance b))
-            ts-a (.getTime ^java.util.Date (:timestamp a))
-            ts-b (.getTime ^java.util.Date (:timestamp b))]
-        (cond
-          (not= score-a score-b)
-          (compare score-b score-a)
+   (fn [a b]
+     (let [score-a (episode-decay-score a as-of retention-config)
+           score-b (episode-decay-score b as-of retention-config)
+           importance-a (normalize-importance (:importance a))
+           importance-b (normalize-importance (:importance b))
+           ts-a (.getTime ^java.util.Date (:timestamp a))
+           ts-b (.getTime ^java.util.Date (:timestamp b))]
+       (cond
+         (not= score-a score-b)
+         (compare score-b score-a)
 
-          (not= importance-a importance-b)
-          (compare importance-b importance-a)
+         (not= importance-a importance-b)
+         (compare importance-b importance-a)
 
-          :else
-          (compare ts-b ts-a))))
-    episodes))
+         :else
+         (compare ts-b ts-a))))
+   episodes))
 
 (defn- retained-episodes-for-group
   [episodes ^java.util.Date as-of retention-config]
   (let [fresh (remove #(decayed-episode? % as-of retention-config) episodes)
         older (filter #(decayed-episode? % as-of retention-config) episodes)]
     (vec
-      (concat
-        fresh
-        (->> (sort-episodes-by-decay-score older as-of retention-config)
-             (take (:retained-decayed-count retention-config)))))))
+     (concat
+      fresh
+      (->> (sort-episodes-by-decay-score older as-of retention-config)
+           (take (:retained-decayed-count retention-config)))))))
 
 (defn- prunable-processed-episodes
   [episodes ^java.util.Date as-of retention-config]
@@ -313,14 +313,14 @@
                                      :where [?e :kg.edge/source ?episode]]
                                    episode-eid))]
     (vec
-      (concat
-        (map (fn [fact-eid]
-               [:db/retract fact-eid :kg.fact/source episode-eid])
-             fact-eids)
-        (map (fn [edge-eid]
-               [:db/retract edge-eid :kg.edge/source episode-eid])
-             edge-eids)
-        [[:db/retractEntity episode-eid]]))))
+     (concat
+      (map (fn [fact-eid]
+             [:db/retract fact-eid :kg.fact/source episode-eid])
+           fact-eids)
+      (map (fn [edge-eid]
+             [:db/retract edge-eid :kg.edge/source episode-eid])
+           edge-eids)
+      [[:db/retractEntity episode-eid]]))))
 
 (defn processed-episode-prune-plan
   "Return the prune transaction and affected episodes for processed episodes.
@@ -333,8 +333,8 @@
   ([^java.util.Date as-of {:keys [exclude-eids]}]
    (let [retention-config (episode-retention-settings)
          cutoff-ms        (util/long-max 0 (- (.getTime as-of)
-                                         (long (or (:full-resolution-ms retention-config)
-                                                   0))))
+                                              (long (or (:full-resolution-ms retention-config)
+                                                        0))))
          cutoff           (java.util.Date. cutoff-ms)
          excluded         (set exclude-eids)
          to-remove        (->> (prunable-processed-episodes (processed-episodes cutoff)
@@ -375,12 +375,12 @@
   [{:keys [name type properties]}]
   (let [id (random-uuid)]
     (db/transact!
-      [(cond-> {:kg.node/id         id
-                :kg.node/name       name
-                :kg.node/type       (or type :concept)
-                :kg.node/created-at (java.util.Date.)
-                :kg.node/updated-at (java.util.Date.)}
-         properties (assoc :kg.node/properties properties))])
+     [(cond-> {:kg.node/id         id
+               :kg.node/name       name
+               :kg.node/type       (or type :concept)
+               :kg.node/created-at (java.util.Date.)
+               :kg.node/updated-at (java.util.Date.)}
+        properties (assoc :kg.node/properties properties))])
     (retrieval-state/bump-knowledge!)
     id))
 
@@ -497,14 +497,14 @@
   [{:keys [from-eid to-eid type label weight source-eid]}]
   (let [id (random-uuid)]
     (db/transact!
-      [(cond-> {:kg.edge/id         id
-                :kg.edge/from       from-eid
-                :kg.edge/to         to-eid
-                :kg.edge/type       (or type :related-to)
-                :kg.edge/created-at (java.util.Date.)}
-         label      (assoc :kg.edge/label label)
-         weight     (assoc :kg.edge/weight weight)
-         source-eid (assoc :kg.edge/source source-eid))])
+     [(cond-> {:kg.edge/id         id
+               :kg.edge/from       from-eid
+               :kg.edge/to         to-eid
+               :kg.edge/type       (or type :related-to)
+               :kg.edge/created-at (java.util.Date.)}
+        label      (assoc :kg.edge/label label)
+        weight     (assoc :kg.edge/weight weight)
+        source-eid (assoc :kg.edge/source source-eid))])
     (retrieval-state/bump-knowledge!)
     id))
 
@@ -512,22 +512,22 @@
   "Get all edges connected to a node (outgoing and incoming)."
   [node-eid]
   (let [outgoing (db/q '[:find ?edge ?to-name ?type ?label
-                          :in $ ?from
-                          :where
-                          [?edge :kg.edge/from ?from]
-                          [?edge :kg.edge/to ?to]
-                          [?to :kg.node/name ?to-name]
-                          [?edge :kg.edge/type ?type]
-                          [(get-else $ ?edge :kg.edge/label "") ?label]]
+                         :in $ ?from
+                         :where
+                         [?edge :kg.edge/from ?from]
+                         [?edge :kg.edge/to ?to]
+                         [?to :kg.node/name ?to-name]
+                         [?edge :kg.edge/type ?type]
+                         [(get-else $ ?edge :kg.edge/label "") ?label]]
                        node-eid)
         incoming (db/q '[:find ?edge ?from-name ?type ?label
-                          :in $ ?to
-                          :where
-                          [?edge :kg.edge/to ?to]
-                          [?edge :kg.edge/from ?from]
-                          [?from :kg.node/name ?from-name]
-                          [?edge :kg.edge/type ?type]
-                          [(get-else $ ?edge :kg.edge/label "") ?label]]
+                         :in $ ?to
+                         :where
+                         [?edge :kg.edge/to ?to]
+                         [?edge :kg.edge/from ?from]
+                         [?from :kg.node/name ?from-name]
+                         [?edge :kg.edge/type ?type]
+                         [(get-else $ ?edge :kg.edge/label "") ?label]]
                        node-eid)]
     {:outgoing (mapv (fn [[_ name type label]]
                        {:target name :type type :label (empty->nil label)})
@@ -629,15 +629,15 @@
   (let [now (java.util.Date.)]
     (let [result
           (db/transact!
-            [(cond-> {:kg.fact/id         (random-uuid)
-                      :kg.fact/node       node-eid
-                      :kg.fact/content    content
-                      :kg.fact/confidence (or confidence 1.0)
-                      :kg.fact/utility    (float (normalize-fact-utility utility))
-                      :kg.fact/created-at now
-                      :kg.fact/updated-at now
-                      :kg.fact/decayed-at now}
-               source-eid (assoc :kg.fact/source source-eid))])]
+           [(cond-> {:kg.fact/id         (random-uuid)
+                     :kg.fact/node       node-eid
+                     :kg.fact/content    content
+                     :kg.fact/confidence (or confidence 1.0)
+                     :kg.fact/utility    (float (normalize-fact-utility utility))
+                     :kg.fact/created-at now
+                     :kg.fact/updated-at now
+                     :kg.fact/decayed-at now}
+              source-eid (assoc :kg.fact/source source-eid))])]
       (retrieval-state/bump-knowledge!)
       result)))
 
@@ -730,8 +730,8 @@
 (defn- default-candidate-pool-size
   ^long [top]
   (util/long-max (long minimum-candidate-pool-size)
-            (* (long default-candidate-pool-multiplier)
-               (long top))))
+                 (* (long default-candidate-pool-multiplier)
+                    (long top))))
 
 (defn- candidate-pool-size
   [kind top]
@@ -753,13 +753,13 @@
       (try
         (->> (builtins/fulltext dbv query opts)
              (map-indexed
-	               (fn [idx tuple]
-	                 (let [[eid attr value score] (vec tuple)]
-	                   {:eid       eid
-	                    :attr      attr
-	                    :value     value
-	                    :lex-score (double score)
-	                    :lex-rank  (indexed-rank idx)})))
+              (fn [idx tuple]
+                (let [[eid attr value score] (vec tuple)]
+                  {:eid       eid
+                   :attr      attr
+                   :value     value
+                   :lex-score (double score)
+                   :lex-rank  (indexed-rank idx)})))
              vec)
         (catch Exception _
           [])))))
@@ -775,13 +775,13 @@
       (try
         (->> (builtins/embedding-neighbors dbv query opts)
              (map-indexed
-	               (fn [idx tuple]
-	                 (let [[eid attr value distance] (vec tuple)]
-	                   {:eid          eid
-	                    :attr         attr
-	                    :value        value
-	                    :sem-distance (double distance)
-	                    :sem-rank     (indexed-rank idx)})))
+              (fn [idx tuple]
+                (let [[eid attr value distance] (vec tuple)]
+                  {:eid          eid
+                   :attr         attr
+                   :value        value
+                   :sem-distance (double distance)
+                   :sem-rank     (indexed-rank idx)})))
              vec)
         (catch Exception _
           [])))))
@@ -880,13 +880,13 @@
 (defn- episode-result
   [eid]
   (let [e (into {} (d/entity (d/db (db/conn)) eid))]
-     {:eid        eid
-      :summary    (:episode/summary e)
-      :context    (:episode/context e)
-      :timestamp  (:episode/timestamp e)
-      :importance (double (or (:episode/importance e)
-                              (:default-importance
-                                default-episode-retention-config)))}))
+    {:eid        eid
+     :summary    (:episode/summary e)
+     :context    (:episode/context e)
+     :timestamp  (:episode/timestamp e)
+     :importance (double (or (:episode/importance e)
+                             (:default-importance
+                              default-episode-retention-config)))}))
 
 (defn- edge-result
   [eid]
@@ -922,12 +922,12 @@
                      query opts))
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-               (fn [idx [eid attr value score]]
-                 {:eid       eid
-                  :attr      attr
-                  :value     value
-                  :lex-score (double score)
-                  :lex-rank  (indexed-rank idx)}))
+              (fn [idx [eid attr value score]]
+                {:eid       eid
+                 :attr      attr
+                 :value     value
+                 :lex-score (double score)
+                 :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -957,12 +957,12 @@
                      query opts))
              (sort-by #(double (nth % 3)))
              (map-indexed
-               (fn [idx [eid attr value distance]]
-                 {:eid          eid
-                  :attr         attr
-                  :value        value
-                  :sem-distance (double distance)
-                  :sem-rank     (indexed-rank idx)}))
+              (fn [idx [eid attr value distance]]
+                {:eid          eid
+                 :attr         attr
+                 :value        value
+                 :sem-distance (double distance)
+                 :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -994,12 +994,12 @@
                      query opts))
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-               (fn [idx [eid attr value score]]
-                 {:eid       eid
-                  :attr      attr
-                  :value     value
-                  :lex-score (double score)
-                  :lex-rank  (indexed-rank idx)}))
+              (fn [idx [eid attr value score]]
+                {:eid       eid
+                 :attr      attr
+                 :value     value
+                 :lex-score (double score)
+                 :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -1031,12 +1031,12 @@
                      query opts))
              (sort-by #(double (nth % 3)))
              (map-indexed
-               (fn [idx [eid attr value distance]]
-                 {:eid          eid
-                  :attr         attr
-                  :value        value
-                  :sem-distance (double distance)
-                  :sem-rank     (indexed-rank idx)}))
+              (fn [idx [eid attr value distance]]
+                {:eid          eid
+                 :attr         attr
+                 :value        value
+                 :sem-distance (double distance)
+                 :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -1077,12 +1077,12 @@
     (update acc (:doc-eid doc)
             (fn [candidate]
               (let [current (or candidate doc)]
-	                (-> current
-	                    (merge doc)
-	                    (assoc :doc-rrf-score (double-max (double (or (:doc-rrf-score current) 0.0))
-	                                                      (double (:rrf-score doc-hit)))
-	                           :doc-lex-score (update-best-score (:doc-lex-score current)
-	                                                             (:lex-score doc-hit))
+                (-> current
+                    (merge doc)
+                    (assoc :doc-rrf-score (double-max (double (or (:doc-rrf-score current) 0.0))
+                                                      (double (:rrf-score doc-hit)))
+                           :doc-lex-score (update-best-score (:doc-lex-score current)
+                                                             (:lex-score doc-hit))
                            :doc-sem-distance (update-best-distance (:doc-sem-distance current)
                                                                    (:sem-distance doc-hit))
                            :direct-doc-hit? true)))))))
@@ -1124,7 +1124,7 @@
 (defn- finalize-local-doc-candidate
   [{:keys [chunk-hits doc-rrf-score chunk-rrf-score summary preview] :as candidate}]
   (let [matched-chunks (into [] (map #(select-keys % [:id :index :summary :preview]))
-                            (or chunk-hits []))
+                             (or chunk-hits []))
         total-score    (+ (* 0.8 (double (or doc-rrf-score 0.0)))
                           (* 1.2 (double (or chunk-rrf-score 0.0))))]
     (-> candidate
@@ -1202,12 +1202,12 @@
                      query opts))
              (sort-by #(double (nth % 3)) >)
              (map-indexed
-               (fn [idx [eid attr value score]]
-                 {:eid       eid
-                  :attr      attr
-                  :value     value
-                  :lex-score (double score)
-                  :lex-rank  (indexed-rank idx)}))
+              (fn [idx [eid attr value score]]
+                {:eid       eid
+                 :attr      attr
+                 :value     value
+                 :lex-score (double score)
+                 :lex-rank  (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -1237,12 +1237,12 @@
                      query opts))
              (sort-by #(double (nth % 3)))
              (map-indexed
-               (fn [idx [eid attr value distance]]
-                 {:eid          eid
-                  :attr         attr
-                  :value        value
-                  :sem-distance (double distance)
-                  :sem-rank     (indexed-rank idx)}))
+              (fn [idx [eid attr value distance]]
+                {:eid          eid
+                 :attr         attr
+                 :value        value
+                 :sem-distance (double distance)
+                 :sem-rank     (indexed-rank idx)}))
              vec)
         (catch Exception _
           [])))))
@@ -1425,17 +1425,17 @@
   (let [knowledge (recall-knowledge)
         episodes  (recent-episodes 5)]
     (str
-      (when (seq knowledge)
-        (str "## What you know\n"
-             (clojure.string/join
-               "\n"
-               (for [[type names] knowledge]
-                 (str "- " (name type) ": "
-                      (clojure.string/join ", " names))))
-             "\n\n"))
-      (when (seq episodes)
-        (str "## Recent interactions\n"
-             (clojure.string/join
-               "\n"
-               (map #(str "- " (:summary %)) episodes))
-             "\n\n")))))
+     (when (seq knowledge)
+       (str "## What you know\n"
+            (clojure.string/join
+             "\n"
+             (for [[type names] knowledge]
+               (str "- " (name type) ": "
+                    (clojure.string/join ", " names))))
+            "\n\n"))
+     (when (seq episodes)
+       (str "## Recent interactions\n"
+            (clojure.string/join
+             "\n"
+             (map #(str "- " (:summary %)) episodes))
+            "\n\n")))))

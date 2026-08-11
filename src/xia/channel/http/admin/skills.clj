@@ -266,7 +266,7 @@
    deps
    200
    {:skill_proposals (mapv #(proposal->body deps %)
-                            (skill-proposal/list-proposals))}))
+                           (skill-proposal/list-proposals))}))
 
 (defn handle-create-skill-proposal
   [deps req]

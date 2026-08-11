@@ -52,8 +52,8 @@
                 (log/error e "Command shutdown handler failed"))))
           (http-common/json-response deps 202 {:status "stopping"}))
         (http-common/json-response deps 409
-                        (assoc (idle-body deps)
-                               :error "runtime must be draining and idle before shutdown"))))
+                                   (assoc (idle-body deps)
+                                          :error "runtime must be draining and idle before shutdown"))))
     (http-common/json-response deps 503 {:error "shutdown control unavailable"})))
 
 (defn handle-runtime-status
@@ -93,9 +93,9 @@
   (let [body         (or (http-common/read-body deps req) {})
         staging-root (http-common/nonblank-str deps (get body "staging_root"))
         checkpoint*  (checkpoint/submit-online-checkpoint!
-                       (cond-> {}
-                         staging-root
-                         (assoc :staging-root staging-root)))]
+                      (cond-> {}
+                        staging-root
+                        (assoc :staging-root staging-root)))]
     (http-common/json-response deps 202 checkpoint*)))
 
 (defn handle-get-checkpoint
@@ -119,8 +119,8 @@
 (defn handle-list-snapshots
   [deps _req]
   (http-common/json-response deps 200
-                  {:snapshots (mapv snapshot-body
-                                     (snapshot/list-snapshots))}))
+                             {:snapshots (mapv snapshot-body
+                                               (snapshot/list-snapshots))}))
 
 (defn handle-create-snapshot
   [deps req]

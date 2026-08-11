@@ -62,16 +62,16 @@
   (async/submit-background!
    label
    #(with-worker-session!
-     (cond-> {:deps deps
-              :parent-session-id parent-session-id
-              :child-session-id child-session-id
-              :log-context log-context
-              :deactivate-message deactivate-message
-              :clear-autonomy-message clear-autonomy-message
-              :clear-memory-message clear-memory-message}
-       (some? clear-autonomy?) (assoc :clear-autonomy? clear-autonomy?)
-       (some? clear-memory?) (assoc :clear-memory? clear-memory?))
-     run)))
+      (cond-> {:deps deps
+               :parent-session-id parent-session-id
+               :child-session-id child-session-id
+               :log-context log-context
+               :deactivate-message deactivate-message
+               :clear-autonomy-message clear-autonomy-message
+               :clear-memory-message clear-memory-message}
+        (some? clear-autonomy?) (assoc :clear-autonomy? clear-autonomy?)
+        (some? clear-memory?) (assoc :clear-memory? clear-memory?))
+      run)))
 
 (defn mark-worker-unavailable!
   [{:keys [child-task-id child-session-id summary error log-context deactivate-message]}]
@@ -220,8 +220,8 @@
     (cond-> {:task-id child-task-id
              :status (:status child-result)
              :outputs (task-spec-outputs runtime-key
-                                          (or (:state child-result)
-                                              child-task))}
+                                         (or (:state child-result)
+                                             child-task))}
       (:summary child-result) (assoc :summary (:summary child-result))
       (:turn-id child-result) (assoc :turn-id (:turn-id child-result))
       (:error child-result) (assoc :error (:error child-result)))))

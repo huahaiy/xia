@@ -365,8 +365,8 @@
                                        (string? content*)    (json/read-json content*)
                                        (present? spec :content) content*
                                        :else                 (throw (ex-info "missing artifact data"
-                                                                            {:type :artifact/missing-content
-                                                                             :field "data"})))]
+                                                                             {:type :artifact/missing-content
+                                                                              :field "data"})))]
                         (json/write-json-str value {:indent-str "  "}))
 
                       :csv
@@ -508,7 +508,7 @@
 (defn- session-eid
   [session-id]
   (ffirst (db/q '[:find ?e :in $ ?sid :where [?e :session/id ?sid]]
-                 session-id)))
+                session-id)))
 
 (defn- session-channel
   [session-eid]
@@ -520,7 +520,7 @@
 (defn- artifact-eid
   [artifact-id]
   (ffirst (db/q '[:find ?e :in $ ?id :where [?e :artifact/id ?id]]
-                 artifact-id)))
+                artifact-id)))
 
 (defn- artifact-session-id
   [eid]
@@ -718,9 +718,9 @@
   [query & {:keys [top fts-query] :or {top 5}}]
   (let [top*           (max 1 (long (or top 5)))
         global-results (memory/search-artifacts nil
-                                               query
-                                               :top top*
-                                               :fts-query fts-query)]
+                                                query
+                                                :top top*
+                                                :fts-query fts-query)]
     (->> global-results
          (map (fn [result]
                 (if-let [artifact (get-artifact (:id result))]
@@ -890,38 +890,38 @@
                         (store-blob! (random-uuid) default-blob-codec bytes))]
       (try
         (db/transact!
-          [(cond-> {:artifact/id         artifact-id
-                    :artifact/session    session-eid*
-                    :artifact/name       name
-                    :artifact/title      title
-                    :artifact/kind       kind
-                    :artifact/media-type media-type
-                    :artifact/extension  extension
-                    :artifact/source     source
-                    :artifact/status     :ready
-                    :artifact/size-bytes size-bytes
-                    :artifact/sha256     sha256
-                    :artifact/preview    preview}
-             text
-             (assoc :artifact/text text)
+         [(cond-> {:artifact/id         artifact-id
+                   :artifact/session    session-eid*
+                   :artifact/name       name
+                   :artifact/title      title
+                   :artifact/kind       kind
+                   :artifact/media-type media-type
+                   :artifact/extension  extension
+                   :artifact/source     source
+                   :artifact/status     :ready
+                   :artifact/size-bytes size-bytes
+                   :artifact/sha256     sha256
+                   :artifact/preview    preview}
+            text
+            (assoc :artifact/text text)
 
-             blob-info
-             (assoc :artifact/blob-id (:blob-id blob-info)
-                    :artifact/blob-codec (:blob-codec blob-info)
-                    :artifact/compressed-size-bytes (:compressed-size-bytes blob-info))
+            blob-info
+            (assoc :artifact/blob-id (:blob-id blob-info)
+                   :artifact/blob-codec (:blob-codec blob-info)
+                   :artifact/compressed-size-bytes (:compressed-size-bytes blob-info))
 
-             (some? meta)
-             (assoc :artifact/meta meta))
-           (create-episode {:session-id session-id*
-                            :session-channel channel
-                            :name name
-                            :title title
-                            :kind kind
-                            :media-type media-type
-                            :size-bytes size-bytes
-                            :sha256 sha256
-                            :preview preview
-                            :artifact-id artifact-id})])
+            (some? meta)
+            (assoc :artifact/meta meta))
+          (create-episode {:session-id session-id*
+                           :session-channel channel
+                           :name name
+                           :title title
+                           :kind kind
+                           :media-type media-type
+                           :size-bytes size-bytes
+                           :sha256 sha256
+                           :preview preview
+                           :artifact-id artifact-id})])
         (artifact-from-eid (artifact-eid artifact-id))
         (catch Exception e
           (when blob-info
@@ -933,10 +933,10 @@
    (create-scratch-pad-from-artifact! (require-session-id) artifact-id))
   ([session-id artifact-id]
    (let [session-id*  (normalize-session-id session-id)
-        session-eid* (session-eid session-id*)
-        artifact-id* (normalize-artifact-id artifact-id)
-        artifact     (get-session-artifact session-id* artifact-id*)
-        channel      (session-channel session-eid*)]
+         session-eid* (session-eid session-id*)
+         artifact-id* (normalize-artifact-id artifact-id)
+         artifact     (get-session-artifact session-id* artifact-id*)
+         channel      (session-channel session-eid*)]
      (when-not session-eid*
        (throw (session-not-found-ex session-id*)))
      (when-not artifact
@@ -947,7 +947,7 @@
            pad     (scratch/create-pad! {:scope      :session
                                          :session-id (str session-id*)
                                          :title      (or (:title artifact)
-                                                          (:name artifact))
+                                                         (:name artifact))
                                          :content    content})]
        (try
          (db/transact! [(scratch-pad-episode {:session-id session-id*

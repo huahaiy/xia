@@ -212,9 +212,9 @@
   (let [output   (run-step-output run-result step-id)
         error    (run-step-error run-result step-id)
         summary  (run-step-summary run-result
-                                    step-id
-                                    (when summary-fallback-fn
-                                      (summary-fallback-fn run-result)))
+                                   step-id
+                                   (when summary-fallback-fn
+                                     (summary-fallback-fn run-result)))
         success? (and (run-success? run-result)
                       (nil? error))
         failure  (or error

@@ -48,7 +48,7 @@
 (defn- db-root-entry [^File root ^File file]
   (if (.isDirectory root)
     (str "db/" (normalize-entry-name
-                 (str (.relativize (.toPath root) (.toPath file)))))
+                (str (.relativize (.toPath root) (.toPath file)))))
     "db"))
 
 (defn- db-entries [db-path]
@@ -159,7 +159,7 @@
         parent       (or (.getParentFile archive-file)
                          (.getAbsoluteFile (io/file ".")))]
     (.getAbsolutePath
-      (io/file parent (str "." (.getName archive-file) ".open")))))
+     (io/file parent (str "." (.getName archive-file) ".open")))))
 
 (defn- manifest-path
   [root-path]
@@ -221,11 +221,11 @@
                                    manifest-entry))
         (with-open [in (.getInputStream zip entry)]
           (edn/read-string
-            (String. ^bytes (copy-limited-bytes! in
-                                                 max-manifest-bytes
-                                                 :manifest-bytes
-                                                 manifest-entry)
-                     StandardCharsets/UTF_8)))))))
+           (String. ^bytes (copy-limited-bytes! in
+                                                max-manifest-bytes
+                                                :manifest-bytes
+                                                manifest-entry)
+                    StandardCharsets/UTF_8)))))))
 
 (defn- delete-tree!
   [path]
@@ -357,7 +357,7 @@
               (let [n (.read in buffer)]
                 (when (pos? n)
                   (let [entry-bytes* (account-expanded-bytes!
-                                       state n limits entry-name entry-bytes)]
+                                      state n limits entry-name entry-bytes)]
                     (when (and (= manifest-entry entry-name)
                                (> entry-bytes* max-manifest-bytes))
                       (archive-limit-exceeded! :manifest-bytes
@@ -382,14 +382,14 @@
         root-file    (io/file dest-root)
         root-existed? (.exists ^File root-file)
         limits       {:max-entries (positive-long-option
-                                     (or max-entries default-max-archive-entries)
-                                     :max-entries)
+                                    (or max-entries default-max-archive-entries)
+                                    :max-entries)
                       :max-entry-bytes (positive-long-option
-                                         (or max-entry-bytes default-max-archive-entry-bytes)
-                                         :max-entry-bytes)
+                                        (or max-entry-bytes default-max-archive-entry-bytes)
+                                        :max-entry-bytes)
                       :max-expanded-bytes (positive-long-option
-                                            (or max-expanded-bytes default-max-archive-expanded-bytes)
-                                            :max-expanded-bytes)}
+                                           (or max-expanded-bytes default-max-archive-expanded-bytes)
+                                           :max-expanded-bytes)}
         state        (atom {:entries 0 :bytes 0})]
     (when-not (.exists ^File archive-file)
       (throw (ex-info "Archive does not exist" {:archive archive-path})))

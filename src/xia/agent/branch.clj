@@ -98,8 +98,8 @@
                  :session-active? false
                  :state :running
                  :meta (cond-> {:branch-worker true
-                                 :parent-session-id parent-session-id
-                                 :resource-session-id resource-session-id*}
+                                :parent-session-id parent-session-id
+                                :resource-session-id resource-session-id*}
                          (some? objective)
                          (assoc :objective objective))})
         child-session-id (:session-id worker)
@@ -109,61 +109,61 @@
                             :parent-session-id parent-session-id}
                            branch-trace)]
     (child-orch/with-worker-session!
-     {:deps deps
-      :parent-session-id parent-session-id
-      :child-session-id child-session-id
-      :log-context log-context
-      :deactivate-message "Failed to deactivate branch worker session"
-      :clear-autonomy-message "Failed to clear branch worker autonomy state"
-      :clear-memory-message "Failed to clear branch worker working memory"
-      :clear-autonomy? true}
-     (fn []
-       (try
-         ((:throw-if-runtime-stopping! deps) child-session-id)
-         ((:throw-if-cancelled! deps) child-session-id)
-         (wm/create-wm! child-session-id)
-         (let [tool-context* (child-orch/branch-worker-tool-context
-                              parent-session-id
-                              resource-session-id*
-                              branch-trace
-                              tool-context)
-               run-result (if-let [run-task-spec! (:run-task-spec! deps)]
-                            (run-task-spec! child-task-id
-                                            :message prompt*
-                                            :channel :branch
-                                            :runtime-op :start
-                                            :operation :branch-spawn
-                                            :provider-id provider-id
-                                            :resource-session-id resource-session-id*
-                                            :max-tool-rounds max-tool-rounds
-                                            :tool-context tool-context*)
-                            ((:process-message deps) child-session-id
-                             prompt*
-                             :channel :branch
-                             :task-id child-task-id
-                             :runtime-op :start
-                             :provider-id provider-id
-                             :resource-session-id resource-session-id*
-                             :max-tool-rounds max-tool-rounds
-                             :tool-context tool-context*))
-               wm-context (wm/wm->context child-session-id)]
-           (child-orch/normalize-branch-worker-result
-            {:trace branch-trace
-             :task task
-             :child-task-id child-task-id
-             :child-session-id child-session-id
-             :run-result run-result
-             :topics (:topics wm-context)}))
-         (catch Throwable t
-           (log/error t "Branch task failed" log-context)
-           (child-orch/normalize-branch-worker-result
-            {:trace branch-trace
-             :task task
-             :child-task-id child-task-id
-             :child-session-id child-session-id
-             :run-result {:status :failed}
-             :error (.getMessage t)
-             :error-detail ((:throwable-detail deps) t)})))))))
+      {:deps deps
+       :parent-session-id parent-session-id
+       :child-session-id child-session-id
+       :log-context log-context
+       :deactivate-message "Failed to deactivate branch worker session"
+       :clear-autonomy-message "Failed to clear branch worker autonomy state"
+       :clear-memory-message "Failed to clear branch worker working memory"
+       :clear-autonomy? true}
+      (fn []
+        (try
+          ((:throw-if-runtime-stopping! deps) child-session-id)
+          ((:throw-if-cancelled! deps) child-session-id)
+          (wm/create-wm! child-session-id)
+          (let [tool-context* (child-orch/branch-worker-tool-context
+                               parent-session-id
+                               resource-session-id*
+                               branch-trace
+                               tool-context)
+                run-result (if-let [run-task-spec! (:run-task-spec! deps)]
+                             (run-task-spec! child-task-id
+                                             :message prompt*
+                                             :channel :branch
+                                             :runtime-op :start
+                                             :operation :branch-spawn
+                                             :provider-id provider-id
+                                             :resource-session-id resource-session-id*
+                                             :max-tool-rounds max-tool-rounds
+                                             :tool-context tool-context*)
+                             ((:process-message deps) child-session-id
+                                                      prompt*
+                                                      :channel :branch
+                                                      :task-id child-task-id
+                                                      :runtime-op :start
+                                                      :provider-id provider-id
+                                                      :resource-session-id resource-session-id*
+                                                      :max-tool-rounds max-tool-rounds
+                                                      :tool-context tool-context*))
+                wm-context (wm/wm->context child-session-id)]
+            (child-orch/normalize-branch-worker-result
+             {:trace branch-trace
+              :task task
+              :child-task-id child-task-id
+              :child-session-id child-session-id
+              :run-result run-result
+              :topics (:topics wm-context)}))
+          (catch Throwable t
+            (log/error t "Branch task failed" log-context)
+            (child-orch/normalize-branch-worker-result
+             {:trace branch-trace
+              :task task
+              :child-task-id child-task-id
+              :child-session-id child-session-id
+              :run-result {:status :failed}
+              :error (.getMessage t)
+              :error-detail ((:throwable-detail deps) t)})))))))
 
 (defn- branch-entry-id
   [idx]
@@ -193,9 +193,9 @@
             :concurrency max-parallel
             :output-step :run-branch
             :branches (mapv (fn [idx branch-task]
-                               (branch-parallel-entry idx branch-task timeout-ms))
-                             (range)
-                             branch-tasks)}]})
+                              (branch-parallel-entry idx branch-task timeout-ms))
+                            (range)
+                            branch-tasks)}]})
 
 (defn- branch-worker-executor
   [deps parent-session-id

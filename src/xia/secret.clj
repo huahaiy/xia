@@ -138,8 +138,8 @@
     true
     (let [sections (split-query-sections query)]
       (boolean
-        (or (unsafe-form? (get sections :find))
-            (some unsafe-where-clause? (get sections :where)))))))
+       (or (unsafe-form? (get sections :find))
+           (some unsafe-where-clause? (get sections :where)))))))
 
 (defn safe-q
   "Restricted Datalog query for the SCI sandbox.

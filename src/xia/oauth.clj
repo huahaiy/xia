@@ -301,16 +301,16 @@
                           (nonblank-str callback-url))
         auth-params   (or (parse-json-map (:oauth.account/auth-params account)) {})
         auth-url      (append-query-params
-                        (:oauth.account/authorize-url account)
-                        (merge {"response_type" "code"
-                                "client_id" (:oauth.account/client-id account)
-                                "redirect_uri" redirect-uri
-                                "state" state
-                                "code_challenge" (pkce-challenge verifier)
-                                "code_challenge_method" "S256"}
-                               (when-let [scopes (nonblank-str (:oauth.account/scopes account))]
-                                 {"scope" scopes})
-                               (into {} (map (fn [[k v]] [(name k) v]) auth-params))))]
+                       (:oauth.account/authorize-url account)
+                       (merge {"response_type" "code"
+                               "client_id" (:oauth.account/client-id account)
+                               "redirect_uri" redirect-uri
+                               "state" state
+                               "code_challenge" (pkce-challenge verifier)
+                               "code_challenge_method" "S256"}
+                              (when-let [scopes (nonblank-str (:oauth.account/scopes account))]
+                                {"scope" scopes})
+                              (into {} (map (fn [[k v]] [(name k) v]) auth-params))))]
     (when-not redirect-uri
       (throw (ex-info "OAuth redirect URI is required"
                       {:account-id account-id})))

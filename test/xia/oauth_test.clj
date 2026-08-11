@@ -26,29 +26,29 @@
   (let [now       (System/currentTimeMillis)
         refreshed (atom [])]
     (db/register-oauth-account!
-      (oauth-account :approved-expiring
-                     :autonomous-approved? true
-                     :access-token "old-access"
-                     :refresh-token "refresh-a"
-                     :expires-at (Date. (- now 1000))))
+     (oauth-account :approved-expiring
+                    :autonomous-approved? true
+                    :access-token "old-access"
+                    :refresh-token "refresh-a"
+                    :expires-at (Date. (- now 1000))))
     (db/register-oauth-account!
-      (oauth-account :approved-fresh
-                     :autonomous-approved? true
-                     :access-token "fresh-access"
-                     :refresh-token "refresh-b"
-                     :expires-at (Date. (+ now 3600000))))
+     (oauth-account :approved-fresh
+                    :autonomous-approved? true
+                    :access-token "fresh-access"
+                    :refresh-token "refresh-b"
+                    :expires-at (Date. (+ now 3600000))))
     (db/register-oauth-account!
-      (oauth-account :unapproved-expiring
-                     :autonomous-approved? false
-                     :access-token "old-access"
-                     :refresh-token "refresh-c"
-                     :expires-at (Date. (- now 1000))))
+     (oauth-account :unapproved-expiring
+                    :autonomous-approved? false
+                    :access-token "old-access"
+                    :refresh-token "refresh-c"
+                    :expires-at (Date. (- now 1000))))
     (db/register-oauth-account!
-      (oauth-account :approved-without-refresh
-                     :autonomous-approved? true
-                     :access-token "old-access"
-                     :refresh-token nil
-                     :expires-at (Date. (- now 1000))))
+     (oauth-account :approved-without-refresh
+                    :autonomous-approved? true
+                    :access-token "old-access"
+                    :refresh-token nil
+                    :expires-at (Date. (- now 1000))))
     (with-redefs [xia.oauth/refresh-account! (fn [account-id]
                                                (swap! refreshed conj account-id)
                                                (db/get-oauth-account account-id))]
@@ -62,11 +62,11 @@
 (deftest refresh-autonomous-accounts-records-per-account-failures
   (let [now (System/currentTimeMillis)]
     (db/register-oauth-account!
-      (oauth-account :approved-expiring
-                     :autonomous-approved? true
-                     :access-token "old-access"
-                     :refresh-token "refresh-a"
-                     :expires-at (Date. (- now 1000))))
+     (oauth-account :approved-expiring
+                    :autonomous-approved? true
+                    :access-token "old-access"
+                    :refresh-token "refresh-a"
+                    :expires-at (Date. (- now 1000))))
     (with-redefs [xia.oauth/refresh-account! (fn [_account-id]
                                                (throw (ex-info "refresh failed" {:type :test})))]
       (let [result (oauth/refresh-autonomous-accounts! {:force? true})]

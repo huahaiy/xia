@@ -25,10 +25,10 @@
             [xia.runtime-state :as runtime-state]
             [xia.session-lifecycle :as session-life])
   (:import [java.net BindException]
-    [java.security SecureRandom]
-    [java.util Base64]
-    [java.util.concurrent ConcurrentHashMap Executors ScheduledExecutorService TimeUnit]
-    [java.util.concurrent.atomic AtomicLong]))
+           [java.security SecureRandom]
+           [java.util Base64]
+           [java.util.concurrent ConcurrentHashMap Executors ScheduledExecutorService TimeUnit]
+           [java.util.concurrent.atomic AtomicLong]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -81,8 +81,8 @@
    current runtime through one compatibility point."
   [runtime f]
   (let [context (runtime-context/merge-contexts
-                  (runtime-context/current)
-                  (:runtime-context runtime))]
+                 (runtime-context/current)
+                 (:runtime-context runtime))]
     (binding [*runtime* runtime]
       (runtime-context/with-runtime-context context f))))
 
@@ -938,11 +938,11 @@
 (defn- port-bind-conflict?
   [^Throwable error]
   (boolean
-    (some (fn [^Throwable cause]
-            (or (instance? BindException cause)
-                (str/includes? (str/lower-case (or (.getMessage cause) ""))
-                               "address already in use")))
-          (take-while some? (iterate #(some-> ^Throwable % .getCause) error)))))
+   (some (fn [^Throwable cause]
+           (or (instance? BindException cause)
+               (str/includes? (str/lower-case (or (.getMessage cause) ""))
+                              "address already in use")))
+         (take-while some? (iterate #(some-> ^Throwable % .getCause) error)))))
 
 (defn- start-server-with-port-fallback
   [runtime bind-host requested-port]

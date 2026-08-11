@@ -38,7 +38,7 @@
                        (assoc :content-available? true
                               :content-included? true
                               :content-bytes-base64 (.encodeToString (Base64/getEncoder)
-                                                                      ^bytes bytes)))]})
+                                                                     ^bytes bytes)))]})
     (backend-send-message [_ _ _ _ _ _] (unsupported))
     (backend-delete-message [_ _ _ _] (unsupported))
     (backend-update-message [_ _ _ _] (unsupported))

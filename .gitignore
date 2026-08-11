@@ -2,11 +2,13 @@ target/
 .cpcache/
 .lein-env
 .lein-failures
+.eastwood
 .nrepl-port
 *.jar
 *.class
 *.log
 .xia/
+node_modules/
 
 # IDE
 .idea/

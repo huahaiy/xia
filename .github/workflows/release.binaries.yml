@@ -10,6 +10,9 @@ on:
 permissions:
   contents: write
 
+env:
+  GRAALVM_VERSION: "25.1.3"
+
 jobs:
   test:
     name: JVM Tests
@@ -17,26 +20,26 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "21.0.8+9"
 
       - name: Set up Leiningen
-        uses: DeLaGuardo/setup-clojure@13
+        uses: DeLaGuardo/setup-clojure@13.6.1
         with:
-          lein: latest
+          lein: "2.11.2"
 
       - name: Cache Leiningen dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.m2/repository
             ~/.lein/self-installs
-          key: lein-${{ runner.os }}-${{ hashFiles('project.clj') }}
+          key: lein-${{ runner.os }}-java-21.0.8-lein-2.11.2-${{ hashFiles('build/dependencies.edn', 'project.clj') }}
           restore-keys: |
             lein-${{ runner.os }}-
 
@@ -64,47 +67,41 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: linux-arm64
             binary-name: xia
-          - runner: windows-latest
+          - runner: windows-2025
             target: windows-amd64
             binary-name: xia.exe
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Leiningen
-        uses: DeLaGuardo/setup-clojure@13
+        uses: DeLaGuardo/setup-clojure@13.6.1
         with:
-          lein: latest
+          lein: "2.11.2"
 
       - name: Cache Leiningen dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.m2/repository
             ~/.lein/self-installs
-          key: lein-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('project.clj') }}
+          key: lein-${{ runner.os }}-${{ matrix.target }}-graal-${{ env.GRAALVM_VERSION }}-lein-2.11.2-${{ hashFiles('build/dependencies.edn', 'project.clj', 'resources/META-INF/native-image/**') }}
           restore-keys: |
             lein-${{ runner.os }}-${{ matrix.target }}-
             lein-${{ runner.os }}-
 
       - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
+        uses: graalvm/setup-graalvm@v1.6.3
         with:
           distribution: graalvm
-          java-version: "25"
+          java-version: ${{ env.GRAALVM_VERSION }}
           components: native-image
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Visual Studio shell
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@v1.13.0
 
       - name: Prefetch dependencies
         run: lein with-profile -user,-dev,+release deps
@@ -171,7 +168,7 @@ jobs:
           Set-Content -Path "${{ steps.names.outputs.archive }}.sha256" -Value "$hash  ${{ steps.names.outputs.archive }}"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -188,7 +185,7 @@ jobs:
 
     steps:
       - name: Download packaged binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           pattern: release-*
           merge-multiple: true
