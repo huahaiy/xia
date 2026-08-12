@@ -57,7 +57,6 @@ if errorlevel 1 set "NATIVE_IMAGE_CMD=native-image"
 
 call %NATIVE_IMAGE_CMD% ^
   --verbose ^
-  --future-defaults=all ^
   -H:+AddAllCharsets ^
   -Djava.awt.headless=true ^
   "-J-Xmx%NATIVE_IMAGE_HEAP%" ^

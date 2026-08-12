@@ -600,11 +600,13 @@
     (fn []
       (when (compare-and-set! ran? false true)
         (with-current-runtime-context
-          #(do
-             (runtime-state/mark-stopping!)
+          #(let [runtime-state-installed? (runtime-state/installed?)]
+             (when runtime-state-installed?
+               (runtime-state/mark-stopping!))
              (try
                (try
-                 (http/clear-command-shutdown-handler!)
+                 (when (current-http-runtime)
+                   (http/clear-command-shutdown-handler!))
                  (halt-runtime!)
                  (catch Exception e
                    (log/error e "Failed to halt Xia runtime during shutdown")))
@@ -614,7 +616,8 @@
                    (log/error e "Failed to save archive during shutdown")
                    (println (str "Archive save failed: " (.getMessage e)))))
                (finally
-                 (runtime-state/mark-stopped!)))))))))
+                 (when runtime-state-installed?
+                   (runtime-state/mark-stopped!))))))))))
 
 (defn- register-shutdown-hook!
   [cleanup]
