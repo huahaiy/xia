@@ -59,6 +59,8 @@ call %NATIVE_IMAGE_CMD% ^
   --verbose ^
   -H:+AddAllCharsets ^
   -Djava.awt.headless=true ^
+  "-H:IncludeResources=driver/package.*" ^
+  "-H:IncludeResources=driver/win32_x64.*" ^
   "-J-Xmx%NATIVE_IMAGE_HEAP%" ^
   %PGO_FLAG% ^
   -H:TempDirectory=target/native-tmp ^

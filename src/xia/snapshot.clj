@@ -92,7 +92,7 @@
     (and (not= source-path target-path)
          (.startsWith ^Path target-path ^Path source-path))))
 
-(defn- copy-options
+(defn- ^"[Ljava.nio.file.CopyOption;" copy-options
   []
   (into-array java.nio.file.CopyOption
               [StandardCopyOption/REPLACE_EXISTING]))
@@ -107,12 +107,14 @@
                         {:source source
                          :target target})))
       (doseq [^File file (file-seq source-file)]
-        (let [source-path (.toPath file)]
+        (let [^Path source-path (.toPath file)]
           (when (Files/isSymbolicLink source-path)
             (throw (ex-info "Refusing to snapshot a symbolic link."
                             {:source (.getAbsolutePath file)})))
-          (let [relative    (.relativize (.toPath source-file) source-path)
-                target-path (.resolve (.toPath target-file) relative)]
+          (let [^Path source-root (.toPath source-file)
+                ^Path target-root (.toPath target-file)
+                ^Path relative    (.relativize source-root source-path)
+                ^Path target-path (.resolve target-root relative)]
             (if (.isDirectory file)
               (Files/createDirectories target-path (make-array FileAttribute 0))
               (do

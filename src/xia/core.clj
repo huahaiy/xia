@@ -13,6 +13,7 @@
             [xia.paths :as paths]
             [xia.logging :as logging]
             [xia.pack :as pack]
+            [xia.production-smoke :as production-smoke]
             [xia.snapshot :as snapshot]
             [xia.runtime-context :as runtime-context]
             [xia.runtime-state :as runtime-state]
@@ -68,6 +69,13 @@
    ["-f" "--force" "Move existing DB/workspace paths aside during restore"]
    ["-h" "--help" "Show help"]])
 
+(def smoke-cli-options
+  [["-i" "--instance ID" "Instance id for the disposable smoke-test DB"]
+   ["-d" "--db PATH" "Disposable database path"]
+   ["-o" "--output PATH" "Write machine-readable smoke results"]
+   [nil "--skip-browser" "Skip the Playwright check (local diagnosis only)"]
+   ["-h" "--help" "Show help"]])
+
 (defn- print-help [summary]
   (println)
   (println "Xia — your portable personal assistant")
@@ -84,6 +92,7 @@
   (println "  xia pack backup.xia     Create a portable archive at a specific path")
   (println "  xia snapshot create before-upgrade")
   (println "  xia snapshot restore SNAPSHOT_ID --force")
+  (println "  xia smoke --db /tmp/disposable-db")
   (println "  xia --mode terminal     Start terminal mode")
   (println "  xia --mode server       Start HTTP/WebSocket server only")
   (println "  xia --mode both         Start both terminal and server")
@@ -126,6 +135,17 @@
   (println "  xia snapshot restore SNAPSHOT_ID --force")
   (println "  xia snapshot create before-risky-work --no-workspace")
   (println "  xia snapshot restore /path/to/snapshot-dir --db /path/to/db --force"))
+
+(defn- print-smoke-help [summary]
+  (println)
+  (println "`xia smoke` — verify the packaged application against disposable state")
+  (println)
+  (println "Usage: xia smoke --db PATH [options]")
+  (println)
+  (println "WARNING: the database is mutated and must be disposable.")
+  (println)
+  (println "Options:")
+  (println summary))
 
 (defn- local-ui-url [bind port]
   (str "http://"
@@ -665,6 +685,49 @@
         (doseq [req (:restore-requires result)]
           (println (str "restore: " req)))))))
 
+(defn- run-production-smoke!
+  [args]
+  (let [{:keys [options arguments errors summary]} (parse-opts args smoke-cli-options)]
+    (cond
+      (:help options)
+      (print-smoke-help summary)
+
+      errors
+      (do (doseq [e errors] (println "Error:" e))
+          (print-smoke-help summary)
+          (System/exit 1))
+
+      (seq arguments)
+      (do (println "Error: smoke accepts no positional arguments")
+          (print-smoke-help summary)
+          (System/exit 1))
+
+      (nil? (:db options))
+      (do (println "Error: smoke requires an explicit disposable --db path")
+          (print-smoke-help summary)
+          (System/exit 1))
+
+      :else
+      (let [options* (apply-run-defaults (assoc options :mode "server"))
+            cleanup  (make-cleanup options*)]
+        (try
+          (initialize-runtime! options* base-runtime-root-keys)
+          (with-current-runtime-context
+            #(do
+               (runtime-state/mark-starting!)
+               (runtime-state/mark-running!)
+               (let [result (production-smoke/run-smoke!
+                             :output (:output options)
+                             :skip-browser? (:skip-browser options))]
+                 (println (str "Production smoke passed: task "
+                               (get-in result [:task :task-id])))
+                 result)))
+          (finally
+            (cleanup)
+            ;; The smoke command is finite, so stop Clojure's shared worker
+            ;; pools after the Xia-owned runtime has shut down.
+            (shutdown-agents)))))))
+
 (defn- print-snapshot-summary!
   [snapshot*]
   (println (str (:snapshot/id snapshot*)
@@ -756,11 +819,17 @@
 
 (defn -main [& args]
   (let [[command & rest-args] args]
-    (if (#{"pack" "snapshot"} command)
+    (if (#{"pack" "snapshot" "smoke"} command)
       (try
-        (if (= "pack" command)
-          (run-pack! rest-args)
-          (run-snapshot! rest-args))
+        (case command
+          "pack" (run-pack! rest-args)
+          "snapshot" (run-snapshot! rest-args)
+          "smoke" (do
+                    (run-production-smoke! rest-args)
+                    ;; Datalevin's global cached query-plan pool has no public
+                    ;; lifecycle hook and otherwise holds a successful finite
+                    ;; CLI process open until its 60-second idle timeout.
+                    (System/exit 0)))
         (catch Exception e
           (log/error e "Command failed")
           (println (str "Command failed: " (.getMessage e)))

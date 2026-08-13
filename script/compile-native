@@ -30,9 +30,29 @@ lein clean
 mkdir -p "$ROOT_DIR/target/native-tmp/.tmp" "$ROOT_DIR/target/native-image"
 
 NATIVE_IMAGE_HEAP="${XIA_NATIVE_IMAGE_HEAP:-10g}"
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64|Darwin:aarch64)
+    PLAYWRIGHT_DRIVER_PLATFORM="mac-arm64"
+    ;;
+  Darwin:x86_64)
+    PLAYWRIGHT_DRIVER_PLATFORM="mac"
+    ;;
+  Linux:arm64|Linux:aarch64)
+    PLAYWRIGHT_DRIVER_PLATFORM="linux-arm64"
+    ;;
+  Linux:x86_64|Linux:amd64)
+    PLAYWRIGHT_DRIVER_PLATFORM="linux"
+    ;;
+  *)
+    echo "Unsupported native build platform for Playwright: $(uname -s) $(uname -m)"
+    exit 1
+    ;;
+esac
 NATIVE_IMAGE_FLAGS=(
   -H:+AddAllCharsets
   -Djava.awt.headless=true
+  "-H:IncludeResources=driver/package.*"
+  "-H:IncludeResources=driver/${PLAYWRIGHT_DRIVER_PLATFORM}.*"
   "-J-Xmx${NATIVE_IMAGE_HEAP}"
 )
 

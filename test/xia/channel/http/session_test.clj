@@ -1,5 +1,6 @@
 (ns xia.channel.http.session-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [org.httpkit.server :as http]
             [xia.bridge :as bridge]
             [xia.channel.http.interaction :as http-interaction]
             [xia.channel.http.session :as http-session]
@@ -132,3 +133,37 @@
     (is (= {:status 400
             :body {:error "invalid task id"}}
            (http-session/handle-get-task-approval deps* "not-a-uuid")))))
+
+(deftest task-event-stream-opens-with-a-nonempty-sse-comment
+  (let [session-id (db/create-session! :http)
+        task-id    (db/create-task! {:session-id session-id
+                                     :channel :http
+                                     :type :task
+                                     :state :completed
+                                     :title "Completed task"})
+        sends      (atom [])
+        deps*      {:json-response (fn [status body]
+                                     {:status status :body body})
+                    :parse-query-string (constantly {})
+                    :register-task-runtime-stream-subscriber!
+                    (fn [_task-id _subscriber-id _callback])
+                    :task-runtime-events-after
+                    (fn [_task-id after]
+                      {:next-index after :events []})
+                    :unregister-task-runtime-stream-subscriber!
+                    (fn [_task-id _subscriber-id])}]
+    (with-redefs [http/as-channel (fn [_req callbacks]
+                                    ((:on-open callbacks) ::channel))
+                  http/send! (fn [channel payload close?]
+                               (swap! sends conj [channel payload close?]))]
+      (http-session/handle-get-task-event-stream
+       deps*
+       (str task-id)
+       {:query-string "" :headers {}}))
+    (let [[channel response close?] (first @sends)]
+      (is (= ::channel channel))
+      (is (= 200 (:status response)))
+      (is (= "text/event-stream; charset=utf-8"
+             (get-in response [:headers "content-type"])))
+      (is (= ": connected\n\n" (:body response)))
+      (is (false? close?)))))

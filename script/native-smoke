@@ -1,0 +1,189 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BINARY="${1:-$ROOT_DIR/target/native-image/xia}"
+SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xia-native-smoke.XXXXXX")"
+DB_PATH="$SMOKE_ROOT/db"
+RESTORED_DB_PATH="$SMOKE_ROOT/restored-db"
+SNAPSHOT_ROOT="$SMOKE_ROOT/snapshots"
+ARCHIVE_PATH="$SMOKE_ROOT/native-smoke.xia"
+RESULT_PATH="$SMOKE_ROOT/result.env"
+COOKIE_PATH="$SMOKE_ROOT/cookies.txt"
+SERVER_PID=""
+
+fail() {
+  echo "native smoke failed: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  if [ "${XIA_NATIVE_SMOKE_KEEP:-0}" = "1" ]; then
+    echo "native smoke state retained at $SMOKE_ROOT"
+  else
+    rm -rf "$SMOKE_ROOT"
+  fi
+}
+
+trap cleanup EXIT
+
+[ -x "$BINARY" ] || fail "native binary is not executable: $BINARY"
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required to reserve a loopback port"
+
+export XIA_MASTER_KEY="${XIA_NATIVE_SMOKE_MASTER_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}"
+export XIA_WORKSPACE_ROOT="$SMOKE_ROOT/workspace"
+
+pick_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+wait_for_health() {
+  local base_url="$1"
+  local log_path="$2"
+  local attempts=0
+  while [ "$attempts" -lt 120 ]; do
+    if curl --fail --silent --show-error "$base_url/health" >"$SMOKE_ROOT/health.json" 2>/dev/null; then
+      grep -q '"status":"ok"' "$SMOKE_ROOT/health.json" || fail "unexpected health response"
+      return 0
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      sed -n '1,240p' "$log_path" >&2
+      fail "server exited before becoming healthy"
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.5
+  done
+  sed -n '1,240p' "$log_path" >&2
+  fail "server did not become healthy"
+}
+
+start_server() {
+  local state_path="$1"
+  local log_path="$2"
+  local port
+  port="$(pick_port)"
+  if [[ "$state_path" == *.xia ]]; then
+    "$BINARY" "$state_path" --mode server --bind 127.0.0.1 --port "$port" >"$log_path" 2>&1 &
+  else
+    "$BINARY" --db "$state_path" --mode server --bind 127.0.0.1 --port "$port" >"$log_path" 2>&1 &
+  fi
+  SERVER_PID=$!
+  SERVER_BASE_URL="http://127.0.0.1:$port"
+  wait_for_health "$SERVER_BASE_URL" "$log_path"
+}
+
+stop_server() {
+  local log_path="$1"
+  local exit_code=0
+  kill -TERM "$SERVER_PID"
+  wait "$SERVER_PID" || exit_code=$?
+  SERVER_PID=""
+  if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 143 ]; then
+    sed -n '1,240p' "$log_path" >&2
+    fail "server exited with status $exit_code"
+  fi
+  grep -q 'Server stopped' "$log_path" || fail "HTTP server did not report a clean stop"
+  grep -q 'Closing database' "$log_path" || fail "database did not report a clean close"
+}
+
+assert_result() {
+  local expected="$1"
+  grep -qx "$expected" "$RESULT_PATH" || fail "missing smoke result: $expected"
+}
+
+echo "Running packaged runtime checks"
+RUNTIME_LOG="$SMOKE_ROOT/runtime.log"
+if ! "$BINARY" smoke --db "$DB_PATH" --output "$RESULT_PATH" >"$RUNTIME_LOG" 2>&1; then
+  sed -n '1,260p' "$RUNTIME_LOG" >&2
+  fail "packaged runtime checks failed"
+fi
+grep -q 'Production smoke passed' "$RUNTIME_LOG" || fail "smoke command did not finish cleanly"
+
+grep -Eq '^schema_version=[1-9][0-9]*$' "$RESULT_PATH" || fail "invalid schema version result"
+assert_result "ciphertext_prefix=enc:v1:"
+assert_result "sci_blocked=4"
+assert_result "permission_handler_ran=false"
+assert_result "task_status=completed"
+assert_result "browser_status=ok"
+
+TASK_ID="$(sed -n 's/^task_id=//p' "$RESULT_PATH")"
+[ -n "$TASK_ID" ] || fail "smoke command did not publish a task id"
+[ -f "$DB_PATH/data.mdb" ] || fail "Datalevin data.mdb was not created"
+[ -f "$DB_PATH/lock.mdb" ] || fail "Datalevin lock.mdb was not created"
+
+echo "Running HTTP, auth, task, and SSE checks"
+SERVER_LOG="$SMOKE_ROOT/server.log"
+start_server "$DB_PATH" "$SERVER_LOG"
+
+curl --fail --silent --show-error --dump-header "$SMOKE_ROOT/home.headers" \
+  --output "$SMOKE_ROOT/home.html" "$SERVER_BASE_URL/"
+grep -qi '^Content-Security-Policy:' "$SMOKE_ROOT/home.headers" || fail "home response has no CSP"
+grep -q 'id="hero-name"' "$SMOKE_ROOT/home.html" || fail "packaged home page is incomplete"
+
+REMOTE_STATUS="$(curl --silent --show-error --output "$SMOKE_ROOT/remote-bootstrap.json" \
+  --write-out '%{http_code}' --header 'Origin: https://remote.example' \
+  "$SERVER_BASE_URL/local-session")"
+[ "$REMOTE_STATUS" = "403" ] || fail "remote-style local bootstrap returned $REMOTE_STATUS"
+
+curl --fail --silent --show-error --cookie-jar "$COOKIE_PATH" \
+  --header "Origin: $SERVER_BASE_URL" \
+  --header "Referer: $SERVER_BASE_URL/" \
+  "$SERVER_BASE_URL/local-session" >"$SMOKE_ROOT/local-bootstrap.json"
+
+curl --fail --silent --show-error --cookie "$COOKIE_PATH" \
+  --header "Origin: $SERVER_BASE_URL" \
+  "$SERVER_BASE_URL/tasks/$TASK_ID" >"$SMOKE_ROOT/task.json"
+grep -q '"state":"completed"' "$SMOKE_ROOT/task.json" || fail "completed task was not returned over HTTP"
+
+curl --fail --silent --show-error --cookie "$COOKIE_PATH" \
+  --header "Origin: $SERVER_BASE_URL" \
+  "$SERVER_BASE_URL/tasks/$TASK_ID/events" >"$SMOKE_ROOT/task-events.json"
+grep -q 'task.completed' "$SMOKE_ROOT/task-events.json" || fail "task completion event was not persisted"
+
+SSE_EXIT=0
+curl --silent --no-buffer --max-time 2 \
+  --dump-header "$SMOKE_ROOT/sse.headers" \
+  --output "$SMOKE_ROOT/sse.body" \
+  --cookie "$COOKIE_PATH" \
+  --header "Origin: $SERVER_BASE_URL" \
+  "$SERVER_BASE_URL/tasks/$TASK_ID/stream?after=0" || SSE_EXIT=$?
+[ "$SSE_EXIT" -eq 0 ] || [ "$SSE_EXIT" -eq 28 ] || fail "SSE request failed with status $SSE_EXIT"
+grep -qi '^content-type: text/event-stream' "$SMOKE_ROOT/sse.headers" || fail "SSE content type is missing"
+grep -q ': connected' "$SMOKE_ROOT/sse.body" || fail "SSE connection marker is missing"
+
+stop_server "$SERVER_LOG"
+
+echo "Reopening the same native database"
+REOPEN_LOG="$SMOKE_ROOT/reopen.log"
+start_server "$DB_PATH" "$REOPEN_LOG"
+curl --fail --silent --show-error "$SERVER_BASE_URL/health" >/dev/null
+stop_server "$REOPEN_LOG"
+
+echo "Checking snapshot restore"
+SNAPSHOT_OUTPUT="$("$BINARY" snapshot create native-smoke --db "$DB_PATH" \
+  --snapshot-root "$SNAPSHOT_ROOT" --no-workspace)"
+SNAPSHOT_ID="$(printf '%s\n' "$SNAPSHOT_OUTPUT" | sed -n 's/^snapshot created //p')"
+[ -n "$SNAPSHOT_ID" ] || fail "snapshot command did not return an id"
+"$BINARY" snapshot restore "$SNAPSHOT_ID" --db "$RESTORED_DB_PATH" \
+  --snapshot-root "$SNAPSHOT_ROOT" --no-workspace --force >"$SMOKE_ROOT/restore.log"
+RESTORE_LOG="$SMOKE_ROOT/restored-server.log"
+start_server "$RESTORED_DB_PATH" "$RESTORE_LOG"
+curl --fail --silent --show-error "$SERVER_BASE_URL/health" >/dev/null
+stop_server "$RESTORE_LOG"
+
+echo "Checking portable archive open and save"
+"$BINARY" pack "$ARCHIVE_PATH" --db "$DB_PATH" >"$SMOKE_ROOT/pack.log"
+[ -s "$ARCHIVE_PATH" ] || fail "portable archive was not created"
+ARCHIVE_LOG="$SMOKE_ROOT/archive-server.log"
+start_server "$ARCHIVE_PATH" "$ARCHIVE_LOG"
+curl --fail --silent --show-error "$SERVER_BASE_URL/health" >/dev/null
+stop_server "$ARCHIVE_LOG"
+[ -s "$ARCHIVE_PATH" ] || fail "portable archive was not saved on shutdown"
+
+echo "Production native smoke passed"

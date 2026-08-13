@@ -1198,12 +1198,11 @@
                                 :headers {"content-type" "text/event-stream; charset=utf-8"
                                           "cache-control" "no-store"
                                           "connection" "keep-alive"}
-                                :body    ""} false)
+                                :body    ": connected\n\n"} false)
                 (register-task-runtime-stream-subscriber!*
                  deps uuid subscriber-id send-event!)
                 (doseq [event (:events (task-live-events-after deps uuid @last-sent))]
-                  (send-event! event))
-                (http/send! ch ": connected\n\n" false)))
+                  (send-event! event))))
 
             :on-close
             (fn [_ch _status]

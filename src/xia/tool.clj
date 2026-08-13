@@ -25,6 +25,7 @@
             [xia.prompt :as prompt]
             [xia.runtime-context :as runtime-context]
             [xia.sci-env :as sci-env]
+            [xia.tool.builtin]
             [xia.working-memory :as wm]))
 
 ;; ---------------------------------------------------------------------------

@@ -534,6 +534,33 @@
             (try (.close ^Playwright playwright) (catch Exception _))
             (throw e)))))))
 
+(defn production-smoke!
+  "Launch the packaged Playwright runtime and inspect an in-memory page.
+
+   This operational check is used by `xia smoke`; it performs no navigation
+   and is not part of the SCI browser API."
+  []
+  (let [{:keys [browser browser-executable]} (ensure-runtime!)
+        context (.newContext ^Browser browser)
+        page    (.newPage ^BrowserContext context)]
+    (try
+      (.setContent ^Page page
+                   (str "<!doctype html><html><head>"
+                        "<title>Xia native smoke</title></head>"
+                        "<body><main id=\"xia-native-smoke\">ready</main></body></html>"))
+      (let [title (.title ^Page page)
+            text  (.textContent ^Page page "#xia-native-smoke")]
+        (when-not (and (= "Xia native smoke" title)
+                       (= "ready" text))
+          (throw (ex-info "Playwright production smoke page did not render as expected."
+                          {:title title :text text})))
+        {:status :ok
+         :title title
+         :text text
+         :browser-executable (some-> browser-executable str)})
+      (finally
+        (.close ^BrowserContext context)))))
+
 (defn- page-result
   [session-id result]
   (assoc result :session-id session-id
