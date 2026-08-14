@@ -52,7 +52,10 @@ Defaults:
 - macOS / Linux installs to `~/.local/bin/xia`
 - Windows installs to `%LOCALAPPDATA%\Programs\Xia\bin\xia.exe`
 - each installer downloads the matching native release zip from GitHub Releases
-- if a checksum sidecar is published, the installer verifies it before install
+- installers require and verify the release archive's SHA-256 sidecar before
+  extracting or installing anything
+- every release ZIP includes `SBOM.cdx.json`, and the same target-specific
+  CycloneDX 1.6 SBOM is published as a separate release asset
 
 To pin a specific version on macOS / Linux:
 

@@ -1,0 +1,75 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$#" -ne 4 ]; then
+  printf >&2 'Usage: generate-sbom <version> <target> <native-binary> <output.cdx.json>\n'
+  exit 2
+fi
+
+version="$1"
+target="$2"
+binary_path="$3"
+output_path="$4"
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+work_dir="${XIA_SBOM_WORK_DIR:-target/sbom/work-$target}"
+case "$work_dir" in
+  /*) ;;
+  *) work_dir="$repo_root/$work_dir" ;;
+esac
+case "$binary_path" in
+  /*) ;;
+  *) binary_path="$repo_root/$binary_path" ;;
+esac
+case "$output_path" in
+  /*) ;;
+  *) output_path="$repo_root/$output_path" ;;
+esac
+
+case "$output_path" in
+  *.json) ;;
+  *)
+    printf >&2 'SBOM output path must end in .json: %s\n' "$output_path"
+    exit 2
+    ;;
+esac
+if [ ! -f "$binary_path" ]; then
+  printf >&2 'Native binary does not exist: %s\n' "$binary_path"
+  exit 1
+fi
+
+mkdir -p "$work_dir" "$(dirname -- "$output_path")"
+pom_path="$work_dir/pom.xml"
+case "$pom_path" in
+  "$repo_root"/*) pom_relative="${pom_path#"$repo_root"/}" ;;
+  *)
+    printf >&2 'SBOM work directory must be inside the Xia checkout: %s\n' "$work_dir"
+    exit 2
+    ;;
+esac
+(
+  cd "$repo_root"
+  lein with-profile -user,-dev,+release pom "$pom_relative"
+)
+node "$repo_root/script/sbom-metadata.mjs" prepare-pom "$pom_path" "$version"
+
+output_dir="$(CDPATH= cd -- "$(dirname -- "$output_path")" && pwd)"
+output_file="$(basename -- "$output_path")"
+output_name="${output_file%.json}"
+maven_command="${XIA_MAVEN:-mvn}"
+"$maven_command" -B \
+  -f "$pom_path" \
+  org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom \
+  -DprojectType=application \
+  -DschemaVersion=1.6 \
+  -DincludeBomSerialNumber=false \
+  -DincludeTestScope=false \
+  -DoutputFormat=json \
+  -DoutputName="$output_name" \
+  -DoutputDirectory="$output_dir" \
+  -Dcyclonedx.skipAttach=true
+
+source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" log -1 --format=%ct)}"
+node "$repo_root/script/sbom-metadata.mjs" finalize \
+  "$output_path" "$pom_path" "$version" "$target" "$binary_path" "$source_date_epoch"
+printf 'Generated and verified %s\n' "$output_path"

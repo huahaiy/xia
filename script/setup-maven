@@ -1,0 +1,67 @@
+#!/bin/sh
+
+set -eu
+
+MAVEN_VERSION="3.9.16"
+MAVEN_ARCHIVE_SHA256="80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb"
+MAVEN_ARCHIVE="apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+MAVEN_URL="https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/${MAVEN_ARCHIVE}"
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+tools_dir="${1:-target/build-tools}"
+case "$tools_dir" in
+  /*) ;;
+  *) tools_dir="$repo_root/$tools_dir" ;;
+esac
+
+maven_home="$tools_dir/apache-maven-${MAVEN_VERSION}"
+if [ ! -x "$maven_home/bin/mvn" ]; then
+  mkdir -p "$tools_dir"
+  archive_path="$tools_dir/.${MAVEN_ARCHIVE}.$$"
+  extract_dir="$tools_dir/.maven-setup.$$"
+  cleanup() {
+    rm -f "$archive_path"
+    rm -rf "$extract_dir"
+  }
+  trap cleanup EXIT INT TERM
+
+  if [ -e "$maven_home" ]; then
+    printf >&2 'Incomplete Maven installation already exists: %s\n' "$maven_home"
+    printf >&2 'Remove that directory and retry.\n'
+    exit 1
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$MAVEN_URL" -o "$archive_path"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$archive_path" "$MAVEN_URL"
+  else
+    printf >&2 'Missing required command: curl or wget\n'
+    exit 1
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_hash="$(sha256sum "$archive_path" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual_hash="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
+  else
+    printf >&2 'Missing required command: sha256sum or shasum\n'
+    exit 1
+  fi
+  if [ "$actual_hash" != "$MAVEN_ARCHIVE_SHA256" ]; then
+    printf >&2 'Apache Maven archive checksum verification failed.\n'
+    printf >&2 'Expected: %s\n' "$MAVEN_ARCHIVE_SHA256"
+    printf >&2 'Actual:   %s\n' "$actual_hash"
+    exit 1
+  fi
+
+  mkdir -p "$extract_dir"
+  tar -xzf "$archive_path" -C "$extract_dir"
+  if [ ! -x "$extract_dir/apache-maven-${MAVEN_VERSION}/bin/mvn" ]; then
+    printf >&2 'Verified Apache Maven archive did not contain bin/mvn.\n'
+    exit 1
+  fi
+  mv "$extract_dir/apache-maven-${MAVEN_VERSION}" "$maven_home"
+fi
+
+printf '%s\n' "$maven_home"

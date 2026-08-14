@@ -59,21 +59,6 @@ download_file() {
   fi
 }
 
-download_optional_file() {
-  url="$1"
-  dest="$2"
-  if have_cmd curl; then
-    curl -fsSL \
-      -H "User-Agent: xia-installer" \
-      "$url" \
-      -o "$dest" >/dev/null 2>&1
-  elif have_cmd wget; then
-    wget -qO "$dest" "$url" >/dev/null 2>&1
-  else
-    return 1
-  fi
-}
-
 extract_zip() {
   archive="$1"
   dest="$2"
@@ -96,7 +81,41 @@ sha256_file() {
   elif have_cmd shasum; then
     shasum -a 256 "$file" | awk '{print $1}'
   else
-    printf '%s' ""
+    printf >&2 'Missing required command: sha256sum or shasum\n'
+    return 1
+  fi
+}
+
+verify_archive_checksum() {
+  archive_path="$1"
+  checksum_path="$2"
+  archive_name="$3"
+
+  if [ ! -r "$checksum_path" ]; then
+    printf >&2 'Required checksum file is missing for %s\n' "$archive_name"
+    return 1
+  fi
+
+  expected_hash="$(awk 'NR == 1 {print $1}' "$checksum_path")"
+  case "$expected_hash" in
+    ''|*[!0-9A-Fa-f]*)
+      printf >&2 'Invalid SHA-256 checksum file for %s\n' "$archive_name"
+      return 1
+      ;;
+  esac
+  if [ "${#expected_hash}" -ne 64 ]; then
+    printf >&2 'Invalid SHA-256 checksum file for %s\n' "$archive_name"
+    return 1
+  fi
+
+  actual_hash="$(sha256_file "$archive_path")" || return 1
+  expected_hash="$(printf '%s' "$expected_hash" | tr '[:upper:]' '[:lower:]')"
+  actual_hash="$(printf '%s' "$actual_hash" | tr '[:upper:]' '[:lower:]')"
+  if [ "$expected_hash" != "$actual_hash" ]; then
+    printf >&2 'Checksum verification failed for %s\n' "$archive_name"
+    printf >&2 'Expected: %s\n' "$expected_hash"
+    printf >&2 'Actual:   %s\n' "$actual_hash"
+    return 1
   fi
 }
 
@@ -148,6 +167,11 @@ resolve_version() {
   printf '%s' "$release_tag"
 }
 
+# Tests source the verification functions without running the installer.
+if [ "${XIA_INSTALL_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --version)
@@ -193,22 +217,12 @@ EXTRACT_DIR="${TMPDIR_XIA}/extract"
 printf 'Downloading Xia %s for %s...\n' "$RESOLVED_VERSION" "$TARGET"
 download_file "$ARCHIVE_URL" "$ARCHIVE_PATH"
 
-if download_optional_file "$CHECKSUM_URL" "$CHECKSUM_PATH"; then
-  expected_hash="$(awk 'NR==1 {print $1}' "$CHECKSUM_PATH")"
-  actual_hash="$(sha256_file "$ARCHIVE_PATH")"
-  if [ -z "$actual_hash" ]; then
-    printf 'Checksum file downloaded, but no SHA-256 tool is available. Skipping verification.\n'
-  elif [ "$expected_hash" != "$actual_hash" ]; then
-    printf >&2 'Checksum verification failed for %s\n' "$ARCHIVE"
-    printf >&2 'Expected: %s\n' "$expected_hash"
-    printf >&2 'Actual:   %s\n' "$actual_hash"
-    exit 1
-  else
-    printf 'Verified archive checksum.\n'
-  fi
-else
-  printf 'Checksum asset not found for %s. Skipping verification.\n' "$ARCHIVE"
+if ! download_file "$CHECKSUM_URL" "$CHECKSUM_PATH"; then
+  printf >&2 'Required checksum asset could not be downloaded for %s\n' "$ARCHIVE"
+  exit 1
 fi
+verify_archive_checksum "$ARCHIVE_PATH" "$CHECKSUM_PATH" "$ARCHIVE"
+printf 'Verified archive checksum.\n'
 
 mkdir -p "$EXTRACT_DIR"
 extract_zip "$ARCHIVE_PATH" "$EXTRACT_DIR"
