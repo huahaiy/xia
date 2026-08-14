@@ -302,6 +302,41 @@
 (def ^:private xia-pipeline-ns
   {'run! pipeline/run!})
 
+(def ^:private xia-api-namespaces
+  "The complete Xia-owned API surface visible to untrusted SCI handlers.
+
+   Keep this as the single authority used by both `make-ctx` and the audit
+   manifest below. Adding an entry here is a security-boundary change and must
+   be accompanied by an in-repo sandbox matrix test."
+  {'xia.memory             xia-memory-ns
+   'xia.memory-edit        xia-memory-edit-ns
+   'xia.working-memory     xia-wm-ns
+   'xia.skill              xia-skill-ns
+   'xia.schedule           xia-schedule-ns
+   'xia.scratch            xia-scratch-ns
+   'xia.local-doc          xia-local-doc-ns
+   'xia.artifact           xia-artifact-ns
+   'xia.board              xia-board-ns
+   'xia.cron               xia-cron-ns
+   'xia.service            xia-service-ns
+   'xia.peer               xia-peer-ns
+   'xia.instance-supervisor xia-instance-supervisor-ns
+   'xia.workspace          xia-workspace-ns
+   'xia.email              xia-email-ns
+   'xia.calendar           xia-calendar-ns
+   'xia.web                xia-web-ns
+   'xia.browser            xia-browser-ns
+   'xia.agent              xia-agent-ns
+   'xia.db                 xia-db-ns
+   'xia.sci-env            xia-sci-env-ns
+   'xia.pipeline           xia-pipeline-ns})
+
+(def ^:private blocked-xia-api-symbols
+  (into #{}
+        (map (fn [api-name]
+               (symbol "xia.memory" (name api-name))))
+        (keys xia-memory-write-blocked-ns)))
+
 (def ^:private sci-core-overrides
   {'slurp       (blocked-sci-fn 'clojure.core/slurp)
    'spit        (blocked-sci-fn 'clojure.core/spit)
@@ -370,36 +405,39 @@
     clojure.repl/source
     clojure.repl/source-fn])
 
+(defn sci-api-manifest
+  "Return the auditable SCI exposure manifest used by sandbox regression tests.
+
+   `:apis` contains every Xia-qualified symbol installed in the context and
+   distinguishes callable APIs from compatibility names that intentionally
+   throw. `:denied-symbols` contains host-access symbols explicitly denied by
+   the context. This host-side function is not itself exposed to SCI."
+  []
+  {:apis
+   (->> xia-api-namespaces
+        (mapcat (fn [[ns-sym api-map]]
+                  (map (fn [api-name]
+                         (let [api-symbol (symbol (str ns-sym) (name api-name))]
+                           {:symbol api-symbol
+                            :access (if (contains? blocked-xia-api-symbols api-symbol)
+                                      :blocked
+                                      :allowed)}))
+                       (keys api-map))))
+        (sort-by (comp str :symbol))
+        vec)
+   :denied-symbols (->> denied-sci-symbols
+                        (sort-by str)
+                        vec)})
+
 (defn make-ctx
   "Create a SCI evaluation context with xia APIs available."
   []
   (sci/init
-   {:namespaces {'clojure.core       sci-core-overrides
-                 'clojure.java.io    sci-io-overrides
-                 'clojure.java.shell sci-shell-overrides
-                 'clojure.repl       sci-repl-overrides
-                 'xia.memory         xia-memory-ns
-                 'xia.memory-edit    xia-memory-edit-ns
-                 'xia.working-memory xia-wm-ns
-                 'xia.skill          xia-skill-ns
-                 'xia.schedule       xia-schedule-ns
-                 'xia.scratch        xia-scratch-ns
-                 'xia.local-doc      xia-local-doc-ns
-                 'xia.artifact       xia-artifact-ns
-                 'xia.board          xia-board-ns
-                 'xia.cron           xia-cron-ns
-                 'xia.service        xia-service-ns
-                 'xia.peer           xia-peer-ns
-                 'xia.instance-supervisor xia-instance-supervisor-ns
-                 'xia.workspace      xia-workspace-ns
-                 'xia.email          xia-email-ns
-                 'xia.calendar       xia-calendar-ns
-                 'xia.web            xia-web-ns
-                 'xia.browser        xia-browser-ns
-                 'xia.agent          xia-agent-ns
-                 'xia.db             xia-db-ns
-                 'xia.sci-env        xia-sci-env-ns
-                 'xia.pipeline       xia-pipeline-ns}
+   {:namespaces (merge {'clojure.core       sci-core-overrides
+                        'clojure.java.io    sci-io-overrides
+                        'clojure.java.shell sci-shell-overrides
+                        'clojure.repl       sci-repl-overrides}
+                       xia-api-namespaces)
     :deny       denied-sci-symbols
     :classes    {'java.util.Date java.util.Date
                  'java.util.UUID java.util.UUID}}))

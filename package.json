@@ -3,9 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "check": "npm run check:syntax && npm run lint && npm run test:sbom",
-    "check:syntax": "node --check resources/web/app.js && node --check resources/web/oauth-callback.js && node --check resources/web/theme-init.js && node --check resources/web/web-dev.js && node --check script/sbom-metadata.mjs",
+    "check": "npm run check:syntax && npm run lint && npm run test:sbom && npm run test:release",
+    "check:syntax": "node --check resources/web/app.js && node --check resources/web/oauth-callback.js && node --check resources/web/theme-init.js && node --check resources/web/web-dev.js && node --check script/sbom-metadata.mjs && node --check script/release-canary.mjs",
     "test:sbom": "node --test test/sbom_metadata_test.mjs",
+    "test:release": "node --test test/release_*_test.mjs",
     "lint": "eslint resources/web/app.js resources/web/oauth-callback.js resources/web/theme-init.js resources/web/web-dev.js"
   },
   "devDependencies": {

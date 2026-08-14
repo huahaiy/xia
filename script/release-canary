@@ -1,0 +1,111 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ASSET_DIR="${1:-}"
+VERSION="${2:-}"
+CANARY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xia-release-canary.XXXXXX")"
+TARGETS=(macos-arm64 linux-amd64 linux-arm64 windows-amd64)
+
+fail() {
+  echo "release canary failed: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [ "${XIA_RELEASE_CANARY_KEEP:-0}" = "1" ]; then
+    echo "release canary state retained at $CANARY_ROOT"
+  else
+    rm -rf "$CANARY_ROOT"
+  fi
+}
+
+trap cleanup EXIT
+
+[ -n "$ASSET_DIR" ] || fail "usage: script/release-canary <asset-directory> <version>"
+[ -n "$VERSION" ] || fail "usage: script/release-canary <asset-directory> <version>"
+[[ "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] \
+  || fail "release version cannot be used safely in an asset filename: $VERSION"
+[ -d "$ASSET_DIR" ] || fail "asset directory does not exist: $ASSET_DIR"
+[ -n "${GITHUB_REPOSITORY:-}" ] || fail "GITHUB_REPOSITORY is required for provenance verification"
+[ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN is required for provenance verification"
+command -v node >/dev/null 2>&1 || fail "node is required"
+command -v unzip >/dev/null 2>&1 || fail "unzip is required"
+command -v gh >/dev/null 2>&1 || fail "GitHub CLI is required"
+
+node "$ROOT_DIR/script/release-canary.mjs" verify-assets "$ASSET_DIR" "$VERSION"
+
+SIGNER_WORKFLOW="$GITHUB_REPOSITORY/.github/workflows/release.binaries.yml"
+for target in "${TARGETS[@]}"; do
+  stem="xia-$VERSION-$target"
+  bundle="$ASSET_DIR/$stem.provenance.sigstore.json"
+  for subject in "$stem.zip" "$stem.zip.sha256" "$stem.cdx.json"; do
+    gh attestation verify \
+      "$ASSET_DIR/$subject" \
+      --repo "$GITHUB_REPOSITORY" \
+      --bundle "$bundle" \
+      --signer-workflow "$SIGNER_WORKFLOW"
+  done
+done
+
+validate_archive_entries() {
+  local archive="$1"
+  local folder="$2"
+  local binary="$3"
+  local entries="$CANARY_ROOT/archive.entries"
+  local files="$CANARY_ROOT/archive.files"
+  local expected="$CANARY_ROOT/archive.expected"
+  local archive_bytes
+  local unpacked_bytes
+
+  archive_bytes="$(wc -c <"$archive")"
+  [ "$archive_bytes" -le 536870912 ] || fail "archive exceeds the 512 MiB canary limit: $archive"
+  unzip -tq "$archive" >/dev/null || fail "archive integrity check failed: $archive"
+  unpacked_bytes="$(unzip -l "$archive" | awk 'END {print $1}')"
+  [[ "$unpacked_bytes" =~ ^[0-9]+$ ]] || fail "could not determine unpacked archive size: $archive"
+  [ "$unpacked_bytes" -le 1073741824 ] || fail "archive exceeds the 1 GiB unpacked canary limit: $archive"
+  unzip -Z1 "$archive" >"$entries" || fail "could not list archive: $archive"
+  : >"$files"
+  while IFS= read -r entry; do
+    case "$entry" in
+      "$folder/")
+        ;;
+      "$folder/$binary"|"$folder/LICENSE"|"$folder/README.md"|"$folder/SBOM.cdx.json")
+        printf '%s\n' "$entry" >>"$files"
+        ;;
+      *)
+        fail "archive contains an unexpected or unsafe entry: $entry"
+        ;;
+    esac
+  done <"$entries"
+  printf '%s\n' \
+    "$folder/$binary" \
+    "$folder/LICENSE" \
+    "$folder/README.md" \
+    "$folder/SBOM.cdx.json" | LC_ALL=C sort >"$expected"
+  LC_ALL=C sort "$files" >"$files.sorted"
+  cmp -s "$expected" "$files.sorted" || fail "archive file set is incomplete or duplicated: $archive"
+}
+
+for target in "${TARGETS[@]}"; do
+  stem="xia-$VERSION-$target"
+  archive="$ASSET_DIR/$stem.zip"
+  binary="xia"
+  if [ "$target" = "windows-amd64" ]; then
+    binary="xia.exe"
+  fi
+  [ -f "$archive" ] || fail "missing release archive: $archive"
+  validate_archive_entries "$archive" "$stem" "$binary"
+  mkdir -p "$CANARY_ROOT/extracted/$target"
+  unzip -q "$archive" -d "$CANARY_ROOT/extracted/$target"
+done
+
+node "$ROOT_DIR/script/release-canary.mjs" verify-packages \
+  "$ASSET_DIR" "$CANARY_ROOT/extracted" "$VERSION"
+
+echo "Running packaged Linux production smoke"
+bash "$ROOT_DIR/script/native-smoke" \
+  "$CANARY_ROOT/extracted/linux-amd64/xia-$VERSION-linux-amd64/xia"
+
+echo "Release canary passed for Xia $VERSION"

@@ -56,12 +56,27 @@ Defaults:
   extracting or installing anything
 - every release ZIP includes `SBOM.cdx.json`, and the same target-specific
   CycloneDX 1.6 SBOM is published as a separate release asset
+- every ZIP, checksum, and standalone SBOM has signed GitHub build provenance;
+  the matching Sigstore bundle is also published as a release asset
 
 To pin a specific version on macOS / Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huahaiy/xia/main/script/install.sh | sh -s -- --version v0.1.0
 ```
+
+To verify that a downloaded release archive was produced by Xia's release
+workflow, install the GitHub CLI and run:
+
+```bash
+gh attestation verify xia-v0.1.0-macos-arm64.zip \
+  --repo huahaiy/xia \
+  --signer-workflow huahaiy/xia/.github/workflows/release.binaries.yml
+```
+
+This verifies the Sigstore signature, artifact digest, source repository, and
+signing workflow. The `.provenance.sigstore.json` release asset preserves the
+same verification bundle for auditing and offline-verification workflows.
 
 ## Quick Start
 
