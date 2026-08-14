@@ -15,6 +15,7 @@
             [clojure.tools.reader :as tr]
             [clojure.tools.reader.reader-types :as rt]
             [sci.core :as sci]
+            [sci.interrupt :as sci-interrupt]
             [taoensso.timbre :as log]
             [xia.artifact :as artifact]
             [xia.board :as board]
@@ -108,11 +109,19 @@
   []
   (when-let [{:keys [^long deadline-nanos ^long timeout-ms stage ^longs counter]}
              *sci-timeout-state*]
-    (let [n (aget counter 0)]
+    (let [n            (aget counter 0)
+          interrupted? (.isInterrupted (Thread/currentThread))]
       (aset ^longs counter 0 (unchecked-inc n))
-      (when (and (zero? (bit-and n (long sci-timeout-check-interval-mask)))
-                 (>= (System/nanoTime) deadline-nanos))
-        (throw (sci-timeout-ex stage timeout-ms)))))
+      (when (or interrupted?
+                (and (zero? (bit-and n (long sci-timeout-check-interval-mask)))
+                     (>= (System/nanoTime) deadline-nanos)))
+        ;; SCI's private interrupt marker cannot be swallowed by a sandboxed
+        ;; `try`/`catch`. A normal ex-info here would let hostile code catch the
+        ;; deadline and continue occupying a worker indefinitely.
+        (sci-interrupt/interrupt!
+         (str "SCI " (name stage) " timed out after " timeout-ms " ms")
+         {:stage stage
+          :timeout-ms timeout-ms}))))
   nil)
 
 (defn- blocked-sci-fn
@@ -338,7 +347,17 @@
         (keys xia-memory-write-blocked-ns)))
 
 (def ^:private sci-core-overrides
-  {'slurp       (blocked-sci-fn 'clojure.core/slurp)
+  {;; Dynamic evaluation and host input are unnecessary for handlers. Keeping
+   ;; them out also ensures all executable source passes through Xia's reader
+   ;; and timeout instrumentation before SCI sees it.
+   'eval        (blocked-sci-fn 'clojure.core/eval)
+   'load-string (blocked-sci-fn 'clojure.core/load-string)
+   'read        (blocked-sci-fn 'clojure.core/read)
+   'read-line   (blocked-sci-fn 'clojure.core/read-line)
+   ;; `bean` invokes JavaBean introspection in host Clojure and can expose
+   ;; reflection objects that SCI interop correctly refuses to return directly.
+   'bean        (blocked-sci-fn 'clojure.core/bean)
+   'slurp       (blocked-sci-fn 'clojure.core/slurp)
    'spit        (blocked-sci-fn 'clojure.core/spit)
    'load-file   (blocked-sci-fn 'clojure.core/load-file)
    'load-reader (blocked-sci-fn 'clojure.core/load-reader)
@@ -376,7 +395,20 @@
    'source-fn (blocked-sci-fn 'clojure.repl/source-fn)})
 
 (def ^:private denied-sci-symbols
-  '[slurp
+  '[agent
+    bean
+    eval
+    future
+    future-call
+    load-string
+    pmap
+    promise
+    read
+    read-line
+    send
+    send-off
+    shutdown-agents
+    slurp
     spit
     load-file
     load-reader
@@ -433,7 +465,10 @@
   "Create a SCI evaluation context with xia APIs available."
   []
   (sci/init
-   {:namespaces (merge {'clojure.core       sci-core-overrides
+   {:interrupt-fn check-timeout!
+    :namespaces (merge {'clojure.core       (merge sci-interrupt/clojure-core
+                                                   sci-core-overrides)
+                        'clojure.string     sci-interrupt/clojure-string
                         'clojure.java.io    sci-io-overrides
                         'clojure.java.shell sci-shell-overrides
                         'clojure.repl       sci-repl-overrides}
@@ -566,7 +601,11 @@
   [code-str]
   (let [reader (rt/indexing-push-back-reader
                 (rt/string-push-back-reader code-str))]
-    (binding [*print-meta* true]
+    ;; tools.reader defaults *read-eval* to true. This parses untrusted handler
+    ;; source before SCI, so leaving the default enabled would execute `#=` in
+    ;; host Clojure and bypass the sandbox completely.
+    (binding [*print-meta* true
+              tr/*read-eval* false]
       (loop [forms []]
         (let [form (tr/read {:eof reader-eof
                              :read-cond :allow

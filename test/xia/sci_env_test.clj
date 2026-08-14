@@ -1,6 +1,7 @@
 (ns xia.sci-env-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [xia.db :as db]
+            [xia.policy :as task-policy]
             [xia.sci-env :as sci-env]
             [xia.test-helpers :refer [seed-node! with-test-db]]))
 
@@ -189,7 +190,9 @@
      :hidden #{workspace-dir}}})
 
 (def ^:private expected-denied-symbols
-  '#{all-ns
+  '#{agent
+     all-ns
+     bean
      clojure.java.io/delete-file
      clojure.java.io/file
      clojure.java.io/input-stream
@@ -202,18 +205,29 @@
      clojure.java.shell/with-sh-env
      clojure.repl/source
      clojure.repl/source-fn
+     eval
      find-ns
      find-var
+     future
+     future-call
      load-file
      load-reader
+     load-string
      ns-aliases
      ns-interns
      ns-map
      ns-publics
      ns-refers
      ns-resolve
+     pmap
+     promise
+     read
+     read-line
      requiring-resolve
      resolve
+     send
+     send-off
+     shutdown-agents
      slurp
      spit
      the-ns})
@@ -299,3 +313,78 @@
       (testing (str api-symbol)
         (is (some? (thrown-by
                     #(sci-env/eval-string (str "(" api-symbol ")")))))))))
+
+(deftest sci-sandbox-blocks-interop-reader-and-evaluation-escapes
+  (testing "the two deliberately exposed Java value classes remain usable"
+    (is (= "00000000-0000-0000-0000-000000000000"
+           (sci-env/eval-string
+            "(str (java.util.UUID/fromString \"00000000-0000-0000-0000-000000000000\"))")))
+    (is (= 0
+           (sci-env/eval-string "(.getTime (java.util.Date. 0))"))))
+
+  (doseq [[escape-class code]
+          [[:interop "(java.lang.Runtime/getRuntime)"]
+           [:interop "(java.lang.Class/forName \"java.lang.Runtime\")"]
+           [:interop "(.getClassLoader (class \"\"))"]
+           [:interop "(java.io.File. \"/tmp/sci-escape\")"]
+           [:host-introspection "(bean (class \"\"))"]
+           [:reader-eval "#=(System/getenv)"]
+           [:reader-eval "(read-string \"#=(System/getenv)\")"]
+           [:reader-tag "(read-string \"#xia/host-secret {}\")"]
+           [:dynamic-eval "(eval '(+ 20 22))"]
+           [:dynamic-eval "(load-string \"(+ 20 22)\")"]
+           [:host-input "(read)"]
+           [:host-input "(read-line)"]]]
+    (testing (str (name escape-class) ": " code)
+      (is (some? (thrown-by #(sci-env/eval-string code))))))
+
+  (testing "plain data readers remain available without reader evaluation"
+    (is (= {:safe [1 2 3]}
+           (sci-env/eval-string
+            "(read-string \"{:safe [1 2 3]}\")")))
+    (is (= "00000000-0000-0000-0000-000000000000"
+           (sci-env/eval-string
+            "(str (read-string \"#uuid \\\"00000000-0000-0000-0000-000000000000\\\"\"))")))))
+
+(deftest sci-sandbox-blocks-resolution-metadata-and-async-escapes
+  (testing "metadata on ordinary sandbox values remains useful"
+    (is (= {:safe true}
+           (sci-env/eval-string "(meta (with-meta {} {:safe true}))"))))
+
+  (doseq [[escape-class code]
+          [[:hidden-var "#'xia.sci-env/eval-string"]
+           [:hidden-var "(var xia.sci-env/sci-api-manifest)"]
+           [:namespace-resolution "(requiring-resolve 'xia.sci-env/eval-string)"]
+           [:namespace-loading
+            "(do (require 'clojure.java.io) (clojure.java.io/file \"/tmp/sci-escape\"))"]
+           [:metadata-mutation
+            "(alter-meta! #'xia.db/get-config assoc :sci/macro true)"]
+           [:var-mutation
+            "(alter-var-root #'xia.db/get-config (constantly (fn [& _] :leaked)))"]
+           [:var-rebinding
+            "(with-redefs [xia.db/get-config (fn [& _] :leaked)] (xia.db/get-config :secret/token))"]
+           [:async "(future :leaked)"]
+           [:async "(future-call (fn [] :leaked))"]
+           [:async "(pmap inc [1 2 3])"]
+           [:async "(agent {})"]
+           [:async "(promise)"]]]
+    (testing (str (name escape-class) ": " code)
+      (is (some? (thrown-by #(sci-env/eval-string code)))))))
+
+(deftest sci-infinite-work-is-uncatchable-and-releases-worker-capacity
+  (with-redefs [task-policy/tool-sci-eval-timeout-ms (constantly 50)
+                task-policy/tool-max-active-sci-workers (constantly 1)]
+    (doseq [code ["(loop [] (recur))"
+                  "(try (doall (repeat :forever)) (catch Exception _ :caught))"
+                  "(doall (repeat :forever))"
+                  "(count (range))"
+                  "(reduce + (iterate inc 0))"]]
+      (testing code
+        (let [failure (thrown-by #(sci-env/eval-string code))]
+          (is (some? failure))
+          (is (= :eval (:stage (ex-data failure))))
+          (is (= 50 (:timeout-ms (ex-data failure)))))
+        ;; With a cap of one this succeeds only if the timed-out worker really
+        ;; terminated; a daemon thread still consuming the sequence is tracked
+        ;; and causes the next evaluation to fail closed with a 503.
+        (is (= 42 (sci-env/eval-string "(+ 20 22)")))))))
