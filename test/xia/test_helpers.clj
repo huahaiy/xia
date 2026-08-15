@@ -21,6 +21,7 @@
             [xia.local-ocr :as local-ocr]
             [xia.oauth :as oauth]
             [xia.permission :as permission]
+            [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-context :as runtime-context]
@@ -298,6 +299,7 @@
     (runtime-overlay/clear!)
     (instance-supervisor/clear-runtime!)
     (messaging/clear-runtime!)
+    (plugin/clear-runtime!)
     (tool/clear-runtime!)
     (checkpoint/clear-runtime!)
     (hippo/clear-runtime!)
@@ -333,6 +335,7 @@
           instance-runtime      (instance-supervisor/make-runtime)
           sci-runtime           (sci-env/make-runtime)
           permission-runtime    (permission/make-runtime)
+          plugin-runtime        (plugin/make-runtime)
           tool-runtime          (tool/make-runtime)
           scheduler-runtime     (scheduler/make-runtime)
           wm-runtime            (wm/make-runtime)
@@ -358,6 +361,7 @@
                                   :xia/instance-supervisor   {:runtime instance-runtime}
                                   :xia/sci-runtime           {:runtime sci-runtime}
                                   :xia/permission-runtime    {:runtime permission-runtime}
+                                  :xia/plugin-runtime        {:runtime plugin-runtime}
                                   :xia/tool-runtime          {:runtime tool-runtime}
                                   :xia/scheduler             {:runtime scheduler-runtime}
                                   :xia/working-memory-runtime {:runtime wm-runtime}
@@ -385,6 +389,7 @@
                (runtime-overlay/clear!)
                (instance-supervisor/clear-runtime!)
                (messaging/clear-runtime!)
+               (plugin/clear-runtime!)
                (tool/clear-runtime!)
                (checkpoint/clear-runtime!)
                (hippo/clear-runtime!)

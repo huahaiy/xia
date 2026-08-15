@@ -20,6 +20,7 @@
             [xia.oauth :as oauth]
             [xia.paths :as paths]
             [xia.permission :as permission]
+            [xia.plugin :as plugin]
             [xia.prompt :as prompt]
             [xia.retrieval-state :as retrieval-state]
             [xia.runtime-context :as runtime-context]
@@ -217,7 +218,7 @@
 
 (defmethod ig/init-key :xia/agent-runtime
   [_ {:keys [db async-runtime runtime-state-runtime prompt-runtime working-memory-runtime
-             llm-runtime fact-review-runtime]}]
+             llm-runtime fact-review-runtime plugin-runtime]}]
   (let [runtime         (agent/make-runtime)
         runtime-context (runtime-context/make {:xia/db db
                                                :xia/async-runtime async-runtime
@@ -226,6 +227,7 @@
                                                :xia/working-memory-runtime working-memory-runtime
                                                :xia/llm-runtime llm-runtime
                                                :xia/fact-review-runtime fact-review-runtime
+                                               :xia/plugin-runtime plugin-runtime
                                                :xia/agent-runtime {:runtime runtime}})
         recovered       (runtime-context/with-runtime-context
                           runtime-context
@@ -241,6 +243,7 @@
      :working-memory-runtime working-memory-runtime
      :llm-runtime llm-runtime
      :fact-review-runtime fact-review-runtime
+     :plugin-runtime plugin-runtime
      :recovered recovered}))
 
 (defmethod ig/halt-key! :xia/agent-runtime
@@ -351,12 +354,27 @@
   [_ component]
   (with-component-runtime-context component permission/clear-runtime!))
 
+(defmethod ig/init-key :xia/plugin-runtime
+  [_ _]
+  (standalone-runtime-component :xia/plugin-runtime
+                                (plugin/make-runtime)))
+
+(defmethod ig/halt-key! :xia/plugin-runtime
+  [_ component]
+  (with-component-runtime-context
+    component
+    #(do
+       (plugin/prepare-shutdown!)
+       (plugin/await-hook-workers!)
+       (plugin/clear-runtime!))))
+
 (defmethod ig/init-key :xia/runtime-support
   [_ {:keys [db overlay runtime-state-runtime retrieval-runtime oauth-runtime
              browser-runtime async-runtime prompt-runtime agent-runtime
              working-memory-runtime bridge-runtime hippocampus-runtime
              checkpoint-runtime llm-runtime local-ocr-runtime
-             service-runtime web-runtime fact-review-runtime permission-runtime]}]
+             service-runtime web-runtime fact-review-runtime permission-runtime
+             plugin-runtime]}]
   (runtime-context/make
    {:xia/db db
     :xia/runtime-overlay overlay
@@ -376,7 +394,8 @@
     :xia/local-ocr-runtime local-ocr-runtime
     :xia/service-runtime service-runtime
     :xia/web-runtime web-runtime
-    :xia/permission-runtime permission-runtime}))
+    :xia/permission-runtime permission-runtime
+    :xia/plugin-runtime plugin-runtime}))
 
 (defmethod ig/halt-key! :xia/runtime-support
   [_ _]
@@ -405,7 +424,7 @@
   [_ {:keys [db async-runtime runtime-state-runtime retrieval-runtime oauth-runtime
              browser-runtime prompt-runtime fact-review-runtime agent-runtime
              working-memory-runtime llm-runtime local-ocr-runtime service-runtime
-             web-runtime instance-supervisor]}]
+             web-runtime instance-supervisor plugin-runtime]}]
   (let [runtime (sci-env/make-runtime)
         runtime-context (runtime-context/make
                          {:xia/db db
@@ -422,6 +441,7 @@
                           :xia/local-ocr-runtime local-ocr-runtime
                           :xia/service-runtime service-runtime
                           :xia/web-runtime web-runtime
+                          :xia/plugin-runtime plugin-runtime
                           :xia/instance-supervisor instance-supervisor
                           :xia/sci-runtime {:runtime runtime}})
         runtime (assoc runtime :runtime-context runtime-context)]
@@ -445,6 +465,7 @@
      :local-ocr-runtime local-ocr-runtime
      :service-runtime service-runtime
      :web-runtime web-runtime
+     :plugin-runtime plugin-runtime
      :instance-supervisor instance-supervisor}))
 
 (defmethod ig/halt-key! :xia/sci-runtime

@@ -6,6 +6,7 @@
 (def ^:private default-plugin-hook-max-code-chars 12000)
 (def ^:private default-plugin-max-hooks 32)
 (def ^:private default-plugin-max-active-workers 16)
+(def ^:private default-plugin-shutdown-await-ms 1000)
 
 (defn plugin-hook-timeout-ms
   []
@@ -26,3 +27,8 @@
   []
   (cfg/positive-long :plugin/max-active-workers
                      default-plugin-max-active-workers))
+
+(defn plugin-shutdown-await-ms
+  []
+  (cfg/positive-long :plugin/shutdown-await-ms
+                     default-plugin-shutdown-await-ms))

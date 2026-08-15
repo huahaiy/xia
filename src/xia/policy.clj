@@ -76,6 +76,7 @@
 (def plugin-hook-max-code-chars plugin/plugin-hook-max-code-chars)
 (def plugin-max-hooks plugin/plugin-max-hooks)
 (def plugin-max-active-workers plugin/plugin-max-active-workers)
+(def plugin-shutdown-await-ms plugin/plugin-shutdown-await-ms)
 
 (def schedule-failure-backoff-minutes scheduler/schedule-failure-backoff-minutes)
 (def schedule-max-failure-backoff-minutes scheduler/schedule-max-failure-backoff-minutes)

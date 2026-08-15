@@ -9,7 +9,8 @@
             [xia.audit :as audit]
             [xia.db :as db]
             [xia.permission :as permission]
-            [xia.policy :as task-policy])
+            [xia.policy :as task-policy]
+            [xia.runtime-context :as runtime-context])
   (:import [java.util Date]
            [java.util.concurrent.atomic AtomicLong]))
 
@@ -103,16 +104,35 @@
 (def ^:private max-output-items 200)
 (def ^:private hook-timeout-stop-grace-ms 100)
 (def ^:private reader-eof (Object.))
+(def ^:private runtime-context-key :xia/plugin-runtime)
 
 (def ^:dynamic *timeout-state* nil)
-(defonce ^:private hook-worker-seq (AtomicLong. 0))
-(defonce ^:private active-hook-workers (atom {}))
+
+(defn make-runtime
+  []
+  {:workers-atom (atom {})
+   :accepting-atom (atom true)
+   :worker-seq (AtomicLong. 0)
+   :lifecycle-lock (Object.)})
+
+(defn- maybe-current-runtime
+  []
+  (runtime-context/runtime runtime-context-key))
+
+(defn- current-runtime
+  []
+  (or (maybe-current-runtime)
+      (throw (ex-info "Plugin runtime is not installed"
+                      {:component runtime-context-key}))))
 
 (declare instrument-timeouts)
 (declare normalize-output-value)
 
 (defn check-timeout!
   []
+  (when (.isInterrupted (Thread/currentThread))
+    (throw (ex-info "plugin hook interrupted during shutdown"
+                    {:type :plugin/hook-interrupted})))
   (when-let [{:keys [deadline-nanos timeout-ms]} *timeout-state*]
     (when (>= (System/nanoTime) (long deadline-nanos))
       (throw (ex-info (str "plugin hook timed out after " timeout-ms "ms")
@@ -499,8 +519,8 @@
   (normalize-output-value value 0))
 
 (defn- reap-finished-hook-workers!
-  []
-  (swap! active-hook-workers
+  [runtime]
+  (swap! (:workers-atom runtime)
          (fn [workers]
            (reduce-kv (fn [live worker-id {:keys [^Thread thread] :as worker-state}]
                         (if (and thread (.isAlive thread))
@@ -514,39 +534,62 @@
   {:active-workers (count workers)
    :timed-out-workers (count (filter :timed-out? (vals workers)))})
 
-(defn- ensure-hook-worker-capacity!
+(defn worker-status
+  "Return a secret-safe snapshot of plugin hook worker admission and capacity."
   []
-  (let [workers (reap-finished-hook-workers!)
-        active-count (long (count workers))
-        max-workers (long (task-policy/plugin-max-active-workers))]
-    (when (>= active-count max-workers)
-      (throw (ex-info (str "plugin hook worker capacity exceeded; "
-                           active-count
-                           " worker thread(s) still active")
-                      (merge {:type :plugin/worker-cap-exceeded
-                              :status 503
-                              :max-active-workers max-workers}
-                             (active-worker-summary workers)))))))
+  (let [runtime (current-runtime)]
+    (locking (:lifecycle-lock runtime)
+      (let [workers (reap-finished-hook-workers! runtime)]
+        (merge {:accepting? @(:accepting-atom runtime)
+                :max-active-workers (task-policy/plugin-max-active-workers)
+                :workers (mapv #(select-keys %
+                                             [:worker-id :thread-name :timeout-ms
+                                              :started-at :timed-out? :timed-out-at])
+                               (vals workers))}
+               (active-worker-summary workers))))))
 
-(defn- register-hook-worker!
-  [worker-id timeout-ms ^Thread worker]
-  (swap! active-hook-workers
-         assoc
-         worker-id
-         {:worker-id worker-id
-          :thread worker
-          :thread-name (.getName worker)
-          :timeout-ms timeout-ms
-          :started-at (Date.)
-          :timed-out? false}))
+(defn- start-hook-worker!
+  [runtime worker-id timeout-ms ^Thread worker]
+  (locking (:lifecycle-lock runtime)
+    (let [workers     (reap-finished-hook-workers! runtime)
+          active-count (long (count workers))
+          max-workers (long (task-policy/plugin-max-active-workers))]
+      (when-not @(:accepting-atom runtime)
+        (throw (ex-info "plugin hook runtime is shutting down"
+                        (merge {:type :plugin/shutting-down
+                                :status 503
+                                :max-active-workers max-workers}
+                               (active-worker-summary workers)))))
+      (when (>= active-count max-workers)
+        (throw (ex-info (str "plugin hook worker capacity exceeded; "
+                             active-count
+                             " worker thread(s) still active")
+                        (merge {:type :plugin/worker-cap-exceeded
+                                :status 503
+                                :max-active-workers max-workers}
+                               (active-worker-summary workers)))))
+      (swap! (:workers-atom runtime)
+             assoc
+             worker-id
+             {:worker-id worker-id
+              :thread worker
+              :thread-name (.getName worker)
+              :timeout-ms timeout-ms
+              :started-at (Date.)
+              :timed-out? false})
+      (try
+        (.start worker)
+        (catch Throwable t
+          (swap! (:workers-atom runtime) dissoc worker-id)
+          (throw t))))))
 
 (defn- unregister-hook-worker!
-  [worker-id]
-  (swap! active-hook-workers dissoc worker-id))
+  [runtime worker-id]
+  (swap! (:workers-atom runtime) dissoc worker-id))
 
 (defn- mark-hook-worker-timed-out!
-  [worker-id]
-  (swap! active-hook-workers
+  [runtime worker-id]
+  (swap! (:workers-atom runtime)
          (fn [workers]
            (if-let [worker-state (get workers worker-id)]
              (assoc workers
@@ -557,22 +600,22 @@
              workers))))
 
 (defn- interrupt-hook-worker!
-  [worker-id timeout-ms ^Thread worker]
+  [runtime worker-id timeout-ms ^Thread worker]
   (.interrupt worker)
   (.join worker (long hook-timeout-stop-grace-ms))
   (when (.isAlive worker)
-    (mark-hook-worker-timed-out! worker-id)
+    (mark-hook-worker-timed-out! runtime worker-id)
     (log/warn "Timed out plugin hook worker ignored interrupt and is still running"
               (merge {:thread (.getName worker)
                       :worker-id worker-id
                       :timeout-ms timeout-ms
                       :max-active-workers (task-policy/plugin-max-active-workers)}
-                     (active-worker-summary (reap-finished-hook-workers!))))
+                     (active-worker-summary (reap-finished-hook-workers! runtime))))
     false)
   (not (.isAlive worker)))
 
 (defn- hook-worker-thread
-  [worker-id timeout-ms f result*]
+  [runtime worker-id timeout-ms f result*]
   (let [runner (bound-fn*
                 (fn []
                   (binding [*timeout-state* {:timeout-ms timeout-ms
@@ -586,37 +629,76 @@
                         (deliver result* {:status :error
                                           :throwable t}))
                       (finally
-                        (unregister-hook-worker! worker-id))))))]
+                        (unregister-hook-worker! runtime worker-id))))))]
     (doto (Thread. ^Runnable
            (reify Runnable
              (run [_]
                (runner)))
-                   ^String (str "xia-plugin-hook-" (System/nanoTime)))
+                   ^String (str "xia-plugin-hook-" worker-id))
       (.setDaemon true))))
 
 (defn- call-with-timeout
   [timeout-ms f]
-  (ensure-hook-worker-capacity!)
-  (let [worker-id (.incrementAndGet ^AtomicLong hook-worker-seq)
+  (let [runtime   (current-runtime)
+        worker-id (.incrementAndGet ^AtomicLong (:worker-seq runtime))
         result*   (promise)
-        thread    (hook-worker-thread worker-id timeout-ms f result*)
+        thread    (hook-worker-thread runtime worker-id timeout-ms f result*)
         timeout (Object.)]
-    (register-hook-worker! worker-id timeout-ms thread)
-    (try
-      (.start ^Thread thread)
-      (catch Throwable t
-        (unregister-hook-worker! worker-id)
-        (throw t)))
+    (start-hook-worker! runtime worker-id timeout-ms thread)
     (let [result (deref result* timeout-ms timeout)]
       (if (identical? timeout result)
         (do
-          (interrupt-hook-worker! worker-id timeout-ms thread)
+          (interrupt-hook-worker! runtime worker-id timeout-ms thread)
           (throw (ex-info (str "plugin hook timed out after " timeout-ms "ms")
                           {:type :plugin/hook-timeout
                            :timeout-ms timeout-ms})))
         (case (:status result)
           :ok (:value result)
           :error (throw (:throwable result)))))))
+
+(defn prepare-shutdown!
+  "Stop admitting plugin hook workers and interrupt every registered worker."
+  []
+  (when-let [runtime (maybe-current-runtime)]
+    (let [workers (locking (:lifecycle-lock runtime)
+                    (reset! (:accepting-atom runtime) false)
+                    (reap-finished-hook-workers! runtime))]
+      (doseq [{:keys [^Thread thread]} (vals workers)]
+        (.interrupt thread))
+      (worker-status))))
+
+(defn await-hook-workers!
+  "Wait for registered hook workers to stop after closing admission."
+  ([]
+   (await-hook-workers! (task-policy/plugin-shutdown-await-ms)))
+  ([timeout-ms]
+   (if-let [runtime (maybe-current-runtime)]
+     (do
+       (prepare-shutdown!)
+       (let [deadline-ms (+ (System/currentTimeMillis) (long timeout-ms))
+             workers     (vals @(:workers-atom runtime))]
+         (try
+           (doseq [{:keys [^Thread thread]} workers
+                   :let [remaining-ms (- deadline-ms (System/currentTimeMillis))]
+                   :while (pos? remaining-ms)]
+             (.join thread (long remaining-ms)))
+           (catch InterruptedException e
+             (.interrupt (Thread/currentThread))
+             (log/warn e "Interrupted while waiting for plugin hook workers")))
+         (let [{:keys [active-workers] :as status} (worker-status)]
+           (when (pos? (long active-workers))
+             (log/warn "Timed out waiting for plugin hook workers to stop"
+                       (assoc (dissoc status :workers)
+                              :timeout-ms timeout-ms)))
+           (zero? (long active-workers)))))
+     true)))
+
+(defn clear-runtime!
+  []
+  (when (maybe-current-runtime)
+    (prepare-shutdown!)
+    (await-hook-workers!))
+  nil)
 
 (defn- make-ctx
   [event]

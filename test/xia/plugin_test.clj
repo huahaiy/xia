@@ -11,6 +11,36 @@
 
 (def authorization-order (atom []))
 
+(defn- start-bound-daemon!
+  [f]
+  (let [result* (promise)
+        runner  (bound-fn []
+                  (deliver result*
+                           (try
+                             (f)
+                             (catch Throwable t
+                               t))))
+        thread  (doto (Thread. ^Runnable
+                       (reify Runnable
+                         (run [_]
+                           (runner)))
+                               ^String (str "xia-plugin-test-" (System/nanoTime)))
+                  (.setDaemon true))]
+    (.start ^Thread thread)
+    {:result result*
+     :thread thread}))
+
+(defn- install-looping-hook!
+  [plugin-id]
+  (plugin/install-plugin!
+   {:id plugin-id
+    :name (name plugin-id)
+    :capabilities #{:hook/post-llm}
+    :hooks [{:id :loop
+             :event :post-llm
+             :handler "(fn [_] (while true nil))"}]})
+  (plugin/enable-plugin! plugin-id true))
+
 (defn authorization-order-handler
   [_arguments]
   (swap! authorization-order conj :handler)
@@ -226,16 +256,67 @@
     (is (empty? (plugin/run-hooks! :post-llm {:channel :terminal})))))
 
 (deftest hook-timeout-stops-tight-loops
-  (plugin/install-plugin!
-   {:id :looping-hook
-    :name "Looping hook"
-    :capabilities #{:hook/post-llm}
-    :hooks [{:id :loop
-             :event :post-llm
-             :handler "(fn [_] (while true nil))"}]})
-  (plugin/enable-plugin! :looping-hook true)
+  (install-looping-hook! :looping-hook)
   (with-redefs [policy/plugin-hook-timeout-ms (constantly 10)]
     (let [results (plugin/run-hooks! :post-llm {:session-id (db/create-session! :terminal)
                                                 :channel :terminal})]
       (is (= :error (:status (first results))))
-      (is (re-find #"timed out" (:error (first results)))))))
+      (is (re-find #"timed out" (:error (first results))))
+      (is (th/wait-until #(zero? (:active-workers (plugin/worker-status)))))
+      (is (:accepting? (plugin/worker-status))))))
+
+(deftest hook-worker-capacity-is-enforced-atomically
+  (install-looping-hook! :capacity-hook)
+  (with-redefs [policy/plugin-hook-timeout-ms (constantly 30000)
+                policy/plugin-max-active-workers (constantly 1)
+                policy/plugin-shutdown-await-ms (constantly 2000)]
+    (let [calls (mapv (fn [_]
+                        (start-bound-daemon!
+                         #(plugin/run-hooks! :post-llm {:channel :terminal})))
+                      (range 8))]
+      (try
+        (is (th/wait-until #(= 1 (:active-workers (plugin/worker-status)))
+                           {:timeout-ms 2000}))
+        (is (th/wait-until #(= 7 (count (filter realized? (map :result calls))))
+                           {:timeout-ms 3000}))
+        (is (= {:active-workers 1
+                :timed-out-workers 0
+                :max-active-workers 1}
+               (select-keys (plugin/worker-status)
+                            [:active-workers :timed-out-workers
+                             :max-active-workers])))
+        (finally
+          (plugin/prepare-shutdown!)
+          (is (plugin/await-hook-workers! 2000))))
+      (is (th/wait-until #(every? realized? (map :result calls))
+                         {:timeout-ms 2000}))
+      (let [results (mapv #(deref (:result %) 0 ::timeout) calls)
+            errors  (mapv (comp :error first) results)]
+        (is (= 7 (count (filter #(re-find #"capacity exceeded" (or % ""))
+                                errors))))
+        (is (= 1 (count (filter #(re-find #"interrupted during shutdown" (or % ""))
+                                errors)))))
+      (is (zero? (:active-workers (plugin/worker-status)))))))
+
+(deftest plugin-shutdown-closes-admission-and-drains-workers
+  (install-looping-hook! :shutdown-hook)
+  (with-redefs [policy/plugin-hook-timeout-ms (constantly 30000)
+                policy/plugin-shutdown-await-ms (constantly 2000)]
+    (let [{:keys [result]} (start-bound-daemon!
+                            #(plugin/run-hooks! :post-llm {:channel :terminal}))]
+      (is (th/wait-until #(= 1 (:active-workers (plugin/worker-status)))
+                         {:timeout-ms 2000}))
+      (let [status (plugin/prepare-shutdown!)]
+        (is (false? (:accepting? status))))
+      (let [rejected (first (plugin/run-hooks! :post-llm {:channel :terminal}))]
+        (is (= :error (:status rejected)))
+        (is (re-find #"shutting down" (:error rejected))))
+      (is (plugin/await-hook-workers! 2000))
+      (let [stopped (first (deref result 2000 ::timeout))]
+        (is (= :error (:status stopped)))
+        (is (re-find #"interrupted during shutdown" (:error stopped))))
+      (is (= {:accepting? false
+              :active-workers 0
+              :timed-out-workers 0}
+             (select-keys (plugin/worker-status)
+                          [:accepting? :active-workers :timed-out-workers]))))))

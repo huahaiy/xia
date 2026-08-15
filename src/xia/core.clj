@@ -327,7 +327,8 @@
       :prompt-runtime (ig/ref :xia/prompt-runtime)
       :working-memory-runtime (ig/ref :xia/working-memory-runtime)
       :llm-runtime (ig/ref :xia/llm-runtime)
-      :fact-review-runtime (ig/ref :xia/fact-review-runtime)}
+      :fact-review-runtime (ig/ref :xia/fact-review-runtime)
+      :plugin-runtime (ig/ref :xia/plugin-runtime)}
 
      :xia/working-memory-runtime
      {:async-runtime (ig/ref :xia/async-runtime)}
@@ -357,6 +358,9 @@
      :xia/permission-runtime
      {}
 
+     :xia/plugin-runtime
+     {}
+
      :xia/runtime-support
      {:db (ig/ref :xia/db)
       :overlay (ig/ref :xia/runtime-overlay)
@@ -376,7 +380,8 @@
       :local-ocr-runtime (ig/ref :xia/local-ocr-runtime)
       :service-runtime (ig/ref :xia/service-runtime)
       :web-runtime (ig/ref :xia/web-runtime)
-      :permission-runtime (ig/ref :xia/permission-runtime)}
+      :permission-runtime (ig/ref :xia/permission-runtime)
+      :plugin-runtime (ig/ref :xia/plugin-runtime)}
 
      :xia/sci-runtime
      {:db (ig/ref :xia/db)
@@ -393,6 +398,7 @@
       :local-ocr-runtime (ig/ref :xia/local-ocr-runtime)
       :service-runtime (ig/ref :xia/service-runtime)
       :web-runtime (ig/ref :xia/web-runtime)
+      :plugin-runtime (ig/ref :xia/plugin-runtime)
       :instance-supervisor (ig/ref :xia/instance-supervisor)}
 
      :xia/instance-supervisor
