@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]
             [xia.browser.backend :as backend]
+            [xia.browser.egress-proxy :as egress-proxy]
             [xia.browser.query :as browser.query]
             [xia.config :as cfg]
             [xia.policy :as task-policy]
@@ -14,9 +15,10 @@
             Browser$NewContextOptions BrowserType$LaunchOptions Playwright$CreateOptions]
            [com.microsoft.playwright.impl.driver Driver]
            [com.microsoft.playwright.impl.driver.jar DriverJar]
+           [com.microsoft.playwright.options Proxy]
            [java.net URI]
            [java.nio.file FileSystem FileSystemAlreadyExistsException FileSystems Files LinkOption Paths]
-           [java.util Base64 Collections Map]
+           [java.util Base64 Collections List Map]
            [java.util.concurrent ConcurrentHashMap]
            [org.jsoup Jsoup]
            [org.jsoup.nodes Document Element]))
@@ -27,6 +29,10 @@
 (def ^:private live-session-ttl-ms (* 60 60 1000))
 (def ^:private action-settle-ms 1200)
 (def ^:private session-snapshot-lock-count 256)
+(def ^:private browser-egress-connect-timeout-ms 10000)
+(def ^:private chromium-egress-args
+  ["--disable-quic"
+   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
 
 (def ^:private runtime-context-key :xia/browser-runtime)
 
@@ -380,7 +386,8 @@
   ([^Playwright playwright headless-override channel]
    (let [launch-opts (doto (BrowserType$LaunchOptions.)
                        (.setHeadless (boolean headless-override))
-                       (.setTimeout (double (timeout-ms))))
+                       (.setTimeout (double (timeout-ms)))
+                       (.setArgs ^List chromium-egress-args))
          channel*    (normalize-channel channel)]
      (when channel*
        (.setChannel launch-opts channel*))
@@ -848,12 +855,20 @@
          session-id
          (live-session->snapshot session-id sess))))))
 
+(defn- close-context-resources!
+  [context proxy]
+  (try
+    (when context
+      (.close ^BrowserContext context))
+    (catch Exception _)
+    (finally
+      (egress-proxy/stop! proxy))))
+
 (defn- close-session-value!
   [sess]
   (when sess
-    (try
-      (.close ^BrowserContext (:context @sess))
-      (catch Exception _))
+    (let [{:keys [context egress-proxy]} @sess]
+      (close-context-resources! context egress-proxy))
     (when (:owned-browser? @sess)
       (try
         (.close ^Browser (:browser @sess))
@@ -937,16 +952,39 @@
         (log/debug e "Playwright page settle timeout wait failed"))))
   page)
 
+(defn- context-options
+  [js-enabled storage-state proxy-url]
+  (let [proxy (doto (Proxy. proxy-url)
+                ;; Chromium otherwise bypasses proxies implicitly for loopback
+                ;; and link-local destinations.
+                (.setBypass "<-loopback>"))]
+    ;; A context proxy applies below page, worker, service-worker, and WebSocket
+    ;; request handling, so route interception is not the egress authority.
+    (cond-> (doto (Browser$NewContextOptions.)
+              (.setJavaScriptEnabled (boolean js-enabled))
+              (.setViewportSize 1280 800)
+              (.setProxy proxy))
+      (seq storage-state) (.setStorageState storage-state))))
+
 (defn- new-context
   [ops {:keys [browser]} js-enabled storage-state]
-  (let [context (.newContext ^Browser browser
-                             (cond-> (doto (Browser$NewContextOptions.)
-                                       (.setJavaScriptEnabled (boolean js-enabled))
-                                       (.setViewportSize 1280 800))
-                               (seq storage-state) (.setStorageState storage-state)))]
-    (.setDefaultTimeout context (double (timeout-ms)))
-    (.setDefaultNavigationTimeout context (double (timeout-ms)))
-    (install-request-guard! ops context)))
+  (let [proxy (egress-proxy/start!
+                {:resolve-url! (:resolve-url! ops)
+                 :connect-timeout-ms browser-egress-connect-timeout-ms})
+        context* (atom nil)]
+    (try
+      (let [context (.newContext ^Browser browser
+                                 (context-options js-enabled
+                                                  storage-state
+                                                  (egress-proxy/proxy-url proxy)))]
+        (reset! context* context)
+        (.setDefaultTimeout context (double (timeout-ms)))
+        (.setDefaultNavigationTimeout context (double (timeout-ms)))
+        {:context (install-request-guard! ops context)
+         :egress-proxy proxy})
+      (catch Exception e
+        (close-context-resources! @context* proxy)
+        (throw e)))))
 
 (defn- session-browser
   [runtime* headless-override channel-override]
@@ -974,23 +1012,37 @@
   ((:validate-url! ops) url)
   (let [runtime* (ensure-runtime!)
         [browser owned-browser?] (session-browser runtime* headless-override channel-override)
-        context (new-context ops {:browser browser} js-enabled storage-state)
-        page (.newPage ^BrowserContext context)
-        sess (atom {:context context
-                    :browser browser
-                    :owned-browser? owned-browser?
-                    :page page
-                    :last-access (now-ms)
-                    :created-at-ms (long (or created-at-ms (now-ms)))
-                    :js-enabled js-enabled})]
-    (session-put! session-id sess)
+        context-resources* (atom nil)
+        session* (atom nil)]
     (try
-      (.navigate ^Page page url)
-      (settle-page! page)
-      (persist-session! ops session-id)
-      @sess
+      (let [{:keys [context egress-proxy] :as context-resources}
+            (new-context ops {:browser browser} js-enabled storage-state)
+            _ (reset! context-resources* context-resources)
+            page (.newPage ^BrowserContext context)
+            sess (atom {:context context
+                        :egress-proxy egress-proxy
+                        :browser browser
+                        :owned-browser? owned-browser?
+                        :page page
+                        :last-access (now-ms)
+                        :created-at-ms (long (or created-at-ms (now-ms)))
+                        :js-enabled js-enabled})]
+        (reset! session* sess)
+        (session-put! session-id sess)
+        (.navigate ^Page page url)
+        (settle-page! page)
+        (persist-session! ops session-id)
+        @sess)
       (catch Exception e
-        (discard-live-session! session-id sess)
+        (if-let [sess @session*]
+          (discard-live-session! session-id sess)
+          (do
+            (when-let [{:keys [context egress-proxy]} @context-resources*]
+              (close-context-resources! context egress-proxy))
+            (when owned-browser?
+              (try
+                (.close ^Browser browser)
+                (catch Exception _)))))
         (throw e)))))
 
 (defn- restore-session!
