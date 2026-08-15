@@ -31,6 +31,7 @@
   xia.skill-test
   xia.snapshot-test
   xia.ssrf-test
+  xia.web-ssrf-test
   xia.summarizer-test
   xia.system-test
   xia.task-spec-test

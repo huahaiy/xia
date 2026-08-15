@@ -15,7 +15,7 @@
     (str (.resolve dir "asset.bin"))))
 
 (defn- read-request-head!
-  [socket]
+  [^Socket socket]
   (let [reader (BufferedReader.
                 (InputStreamReader. (.getInputStream socket)
                                     StandardCharsets/US_ASCII))]
@@ -26,9 +26,10 @@
           lines)))))
 
 (defn- write-response!
-  [socket response]
-  (let [out (.getOutputStream socket)]
-    (.write out (.getBytes response StandardCharsets/US_ASCII))
+  [^Socket socket ^String response]
+  (let [^OutputStream out (.getOutputStream socket)
+        ^bytes payload   (.getBytes response StandardCharsets/US_ASCII)]
+    (.write out payload 0 (alength payload))
     (.flush out)))
 
 (defn- thrown-ex-info
@@ -356,6 +357,85 @@
         (is (re-find #"private/internal" (.getMessage ^Throwable ex)))
         (is (= 2 (count @calls)))
         (is (str/includes? (second @calls) "127.0.0.1")))
+      (finally
+        (.close server)
+        (deref worker 2000 :timeout)))))
+
+(deftest request-connects-to-the-pinned-answer-without-resolving-again
+  (let [server (ServerSocket. 0)
+        port   (.getLocalPort server)
+        calls  (atom 0)
+        head   (promise)
+        worker (future
+                 (with-open [^ServerSocket server server
+                             ^Socket socket (.accept server)]
+                   (deliver head (read-request-head! socket))
+                   (write-response! socket
+                                    (str "HTTP/1.1 200 OK\r\n"
+                                         "Content-Length: 2\r\n"
+                                         "Connection: close\r\n\r\n"
+                                         "ok"))))]
+    (try
+      (let [resp (with-redefs [ssrf/resolve-host-addresses
+                               (fn [_]
+                                 (let [call (swap! calls inc)]
+                                   (if (= 1 call)
+                                     [(InetAddress/getByName "127.0.0.1")]
+                                     [(InetAddress/getByName "169.254.169.254")])))]
+                   (http-client/request
+                    {:url (str "http://changes-after-validation.invalid:" port "/resource")
+                     :allow-private-network? true
+                     :connect-timeout 1000
+                     :max-attempts 1
+                     :timeout 1000}))]
+        (is (= {:status 200 :body "ok"}
+               (select-keys resp [:status :body])))
+        (is (= 1 @calls))
+        (is (= (str "Host: changes-after-validation.invalid:" port)
+               (some #(when (str/starts-with? % "Host:") %) (deref head 2000 :timeout)))))
+      (finally
+        (.close server)
+        (deref worker 2000 :timeout)))))
+
+(deftest download-redirect-targets-are-revalidated-before-connection
+  (let [server       (ServerSocket. 0)
+        port         (.getLocalPort server)
+        calls        (atom [])
+        target       (temp-target)
+        real-resolve ssrf/resolve-url!
+        worker       (future
+                       (with-open [^ServerSocket server server
+                                   ^Socket socket (.accept server)]
+                         (read-request-head! socket)
+                         (write-response! socket
+                                          (str "HTTP/1.1 302 Found\r\n"
+                                               "Location: http://169.254.169.254/latest/meta-data\r\n"
+                                               "Content-Length: 0\r\n\r\n"))))]
+    (try
+      (let [ex (with-redefs [ssrf/resolve-url!
+                             (fn [url opts]
+                               (swap! calls conj url)
+                               (if (str/includes? url "public-download.example")
+                                 {:url url
+                                  :uri (URI. url)
+                                  :host "public-download.example"
+                                  :addresses [(InetAddress/getByName "127.0.0.1")]
+                                  :private-network? false}
+                                 (real-resolve (fn [_]
+                                                 [(InetAddress/getByName "169.254.169.254")])
+                                               url
+                                               opts)))]
+                 (thrown-ex-info
+                  #(http-client/download!
+                    {:url (str "http://public-download.example:" port "/start")
+                     :target-path target
+                     :connect-timeout 1000
+                     :timeout 1000})))]
+        (is (re-find #"private/internal" (.getMessage ^Throwable ex)))
+        (is (= 2 (count @calls)))
+        (is (str/includes? (second @calls) "169.254.169.254"))
+        (is (not (Files/exists (java.nio.file.Paths/get target (make-array String 0))
+                               (make-array java.nio.file.LinkOption 0)))))
       (finally
         (.close server)
         (deref worker 2000 :timeout)))))

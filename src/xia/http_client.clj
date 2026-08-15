@@ -8,7 +8,7 @@
             EOFException InputStream InputStreamReader]
            [java.net InetAddress InetSocketAddress Socket SocketTimeoutException URI URLEncoder]
            [java.nio.charset Charset StandardCharsets]
-           [java.nio.file Files Path Paths StandardCopyOption]
+           [java.nio.file CopyOption Files Path Paths StandardCopyOption]
            [java.nio.file.attribute FileAttribute]
            [java.util.concurrent ArrayBlockingQueue Callable ExecutionException Future RejectedExecutionException
             ThreadFactory ThreadPoolExecutor ThreadPoolExecutor$AbortPolicy TimeUnit TimeoutException]
@@ -782,22 +782,22 @@
 (defn- move-file!
   [^Path source ^Path target]
   (try
-    (Files/move source target
-                (into-array java.nio.file.CopyOption
-                            [StandardCopyOption/ATOMIC_MOVE
-                             StandardCopyOption/REPLACE_EXISTING]))
+    (let [^"[Ljava.nio.file.CopyOption;" options
+          (into-array CopyOption
+                      [StandardCopyOption/ATOMIC_MOVE
+                       StandardCopyOption/REPLACE_EXISTING])]
+      (Files/move source target options))
     (catch Exception _
-      (Files/move source target
-                  (into-array java.nio.file.CopyOption
-                              [StandardCopyOption/REPLACE_EXISTING])))))
+      (let [^"[Ljava.nio.file.CopyOption;" options
+            (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])]
+        (Files/move source target options)))))
 
 (defn- copy-response-body-to-file!
   [^InputStream in headers ^Path target req]
-  (with-open [^InputStream stream (response-body-stream in headers req)]
-    (Files/copy ^InputStream stream
-                target
-                (into-array java.nio.file.CopyOption
-                            [StandardCopyOption/REPLACE_EXISTING]))))
+  (let [^"[Ljava.nio.file.CopyOption;" options
+        (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])]
+    (with-open [^InputStream stream (response-body-stream in headers req)]
+      (Files/copy stream target options))))
 
 (defn- delete-if-exists-quietly!
   [^Path path]
