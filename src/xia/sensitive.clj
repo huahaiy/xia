@@ -58,7 +58,10 @@
     :llm/log-retention-days})
 
 (def ^:private blocked-ident-pattern
-  "Regex matching attribute or key names that sandboxed code cannot query."
+  "Conservative regex matching identifier names that sandboxed code cannot
+   query. It intentionally blocks operational names such as token counters and
+   password-field selectors; callers must not treat a match as an at-rest
+   encryption decision."
   (re-pattern
    (str "(?i)"
         (str/join "|"
@@ -85,13 +88,20 @@
         (some #(str/starts-with? ns %) secret-attr-namespaces))))
 
 (defn secret-attr?
-  "True if the given attribute keyword is secret to sandboxed code."
+  "True for explicitly protected stored attributes.
+
+   This includes encrypted credential fields and plaintext payload fields that
+   are redacted from sandboxed code. Pattern-only conservative query denials
+   are reported by `secret-query-ident?`, not by this predicate."
   [attr]
   (or (encrypted-attr? attr)
       (contains? sandbox-only-secret-attrs attr)))
 
 (defn secret-config-key?
-  "True if the given config key should be treated as secret."
+  "True if the given config key is encrypted and hidden from sandboxed reads.
+
+   Namespace-prefix matching is intentionally conservative: namespaces such
+   as `oauth2`, `tokenizer`, or `secretary` match the protected prefixes."
   [k]
   (or (contains? secret-config-keys k)
       (when-let [ns (when (named-ident? k)
@@ -106,7 +116,11 @@
 
 (defn secret-query-ident?
   "True if the given query identifier or literal should be hidden from
-   sandboxed code."
+   sandboxed code.
+
+   This is deliberately broader than `secret-attr?` and
+   `secret-config-key?`: secret-like names are denied even when the underlying
+   field is harmless operational metadata."
   [form]
   (or (and (keyword? form)
            (secret-attr? form))

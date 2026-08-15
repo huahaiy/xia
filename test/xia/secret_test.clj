@@ -10,6 +10,165 @@
 
 (use-fixtures :each with-test-db)
 
+(def ^:private attribute-classification-matrix
+  [{:ident :llm.provider/api-key
+    :encrypted? true
+    :protected-payload? true
+    :query-blocked? true
+    :class :credential}
+   {:ident :message/content
+    :encrypted? false
+    :protected-payload? true
+    :query-blocked? true
+    :class :plaintext-user-content}
+   {:ident :llm.log/response
+    :encrypted? false
+    :protected-payload? true
+    :query-blocked? true
+    :class :plaintext-diagnostic}
+   {:ident :llm.provider/model
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? false
+    :class :public-operational-metadata}
+   {:ident :audit.event/type
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? false
+    :class :public-operational-metadata}
+   {:ident :schedule-run/status
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? false
+    :class :public-operational-metadata}
+   {:ident :llm.log/prompt-tokens
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? true
+    :class :conservative-name-match}
+   {:ident :message/token-estimate
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? true
+    :class :conservative-name-match}
+   {:ident :site-cred/password-field
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? true
+    :class :conservative-name-match}
+   {:ident :oauth.account/token-url
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? true
+    :class :conservative-name-match}
+   {:ident :llm.provider/credential-source
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? true
+    :class :conservative-name-match}
+   {:ident :service/oauth-account
+    :encrypted? false
+    :protected-payload? false
+    :query-blocked? true
+    :class :conservative-name-match}
+   {:ident :credentialed/label
+    :encrypted? true
+    :protected-payload? true
+    :query-blocked? true
+    :class :conservative-namespace-prefix}
+   {:ident :secretary/name
+    :encrypted? true
+    :protected-payload? true
+    :query-blocked? true
+    :class :conservative-namespace-prefix}])
+
+(def ^:private config-classification-matrix
+  [{:key :credential/gmail
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :secret-namespace}
+   {:key :secret/something
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :secret-namespace}
+   {:key :api-key/openai
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :secret-namespace}
+   {:key :oauth/google
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :secret-namespace}
+   {:key :token/refresh
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :secret-namespace}
+   {:key :web/search-brave-api-key
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :explicit-secret}
+   {:key :llm/log-full-payloads?
+    :secret? false
+    :write-blocked? true
+    :query-blocked? false
+    :class :readable-privacy-boundary}
+   {:key :llm/log-retention-days
+    :secret? false
+    :write-blocked? true
+    :query-blocked? false
+    :class :readable-privacy-boundary}
+   {:key :user/name
+    :secret? false
+    :write-blocked? false
+    :query-blocked? false
+    :class :public-config}
+   {:key :context/budget
+    :secret? false
+    :write-blocked? false
+    :query-blocked? false
+    :class :public-config}
+   {:key :web/search-searxng-url
+    :secret? false
+    :write-blocked? false
+    :query-blocked? false
+    :class :public-config}
+   {:key :local-doc/chunk-summary-max-tokens
+    :secret? false
+    :write-blocked? false
+    :query-blocked? true
+    :class :conservative-query-name-match}
+   {:key :vendor/password-policy
+    :secret? false
+    :write-blocked? false
+    :query-blocked? true
+    :class :conservative-query-name-match}
+   {:key :oauth2/enabled?
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :conservative-namespace-prefix}
+   {:key :tokenizer/model
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :conservative-namespace-prefix}
+   {:key :secretary/name
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :conservative-namespace-prefix}
+   {:key :credentialed/theme
+    :secret? true
+    :write-blocked? true
+    :query-blocked? true
+    :class :conservative-namespace-prefix}])
+
 ;; ---------------------------------------------------------------------------
 ;; secret-attr? tests
 ;; ---------------------------------------------------------------------------
@@ -120,6 +279,47 @@
                           #"Access denied"
                           (secret/safe-set-config! :llm/log-retention-days 3650)))))
 
+(defn- call-outcome
+  [f]
+  (try
+    {:status :allowed
+     :value (f)}
+    (catch clojure.lang.ExceptionInfo e
+      {:status :blocked
+       :type (:type (ex-data e))})))
+
+(deftest config-classification-allow-deny-matrix
+  (doseq [{:keys [key secret? write-blocked? query-blocked? class]}
+          config-classification-matrix]
+    (testing (str key " classified as " class)
+      (is (= secret?
+             (boolean (sensitive/secret-config-key? key))))
+      (is (= write-blocked?
+             (boolean (sensitive/sandbox-blocked-config-write-key? key))))
+      (is (= query-blocked?
+             (boolean (sensitive/secret-query-ident? key))))
+      (let [db-calls (atom [])
+            read-result
+            (with-redefs [db/get-config
+                          (fn [actual-key]
+                            (swap! db-calls conj [:read actual-key])
+                            ::config-value)]
+              (call-outcome #(secret/safe-get-config key)))
+            write-result
+            (with-redefs [db/set-config!
+                          (fn [actual-key value]
+                            (swap! db-calls conj [:write actual-key value])
+                            ::config-written)]
+              (call-outcome #(secret/safe-set-config! key "value")))]
+        (is (= (if secret? :blocked :allowed)
+               (:status read-result)))
+        (is (= (if write-blocked? :blocked :allowed)
+               (:status write-result)))
+        (is (= (cond-> []
+                 (not secret?) (conj [:read key])
+                 (not write-blocked?) (conj [:write key "value"]))
+               @db-calls))))))
+
 ;; ---------------------------------------------------------------------------
 ;; safe-q tests
 ;; ---------------------------------------------------------------------------
@@ -144,6 +344,49 @@
         (boolean (re-find #"Access denied" (.getMessage e))))
       (catch Throwable _
         false))))
+
+(deftest explicit-sensitive-attribute-classes-are-disjoint-and-closed
+  (testing "every encrypted attribute is sandbox-protected"
+    (doseq [attr (sort-by str sensitive/encrypted-attrs)]
+      (is (sensitive/encrypted-attr? attr) (str attr))
+      (is (sensitive/secret-attr? attr) (str attr))
+      (is (sensitive/secret-query-ident? attr) (str attr))))
+  (testing "every plaintext payload remains unencrypted but sandbox-protected"
+    (doseq [attr (sort-by str sensitive/sandbox-only-secret-attrs)]
+      (is (false? (boolean (sensitive/encrypted-attr? attr))) (str attr))
+      (is (sensitive/secret-attr? attr) (str attr))
+      (is (sensitive/secret-query-ident? attr) (str attr))))
+  (testing "the explicit storage classes do not overlap"
+    (is (empty? (filter sensitive/encrypted-attrs
+                        sensitive/sandbox-only-secret-attrs)))
+    (is (empty? (filter sensitive/plaintext-user-content-attrs
+                        sensitive/plaintext-diagnostic-attrs)))))
+
+(deftest attribute-classification-allow-deny-matrix
+  (doseq [{:keys [ident encrypted? protected-payload? query-blocked? class]}
+          attribute-classification-matrix]
+    (testing (str ident " classified as " class)
+      (is (= encrypted?
+             (boolean (sensitive/encrypted-attr? ident))))
+      (is (= protected-payload?
+             (boolean (sensitive/secret-attr? ident))))
+      (is (= query-blocked?
+             (boolean (sensitive/secret-query-ident? ident))))
+      (is (= query-blocked?
+             (safe-q-policy-blocks?
+              [:find '?value :where ['?entity ident '?value]])))
+      (is (= (not query-blocked?)
+             (safe-q-policy-allows?
+              [:find '?value :where ['?entity ident '?value]]))))))
+
+(deftest config-query-allow-deny-matrix
+  (doseq [{:keys [key query-blocked? class]} config-classification-matrix]
+    (testing (str key " query policy for " class)
+      (let [query [:find '?entity :where ['?entity :config/key key]]]
+        (is (= query-blocked?
+               (safe-q-policy-blocks? query)))
+        (is (= (not query-blocked?)
+               (safe-q-policy-allows? query)))))))
 
 (def ^:private short-text-gen
   (gen/fmap #(apply str %)
