@@ -43,10 +43,21 @@
   (db/set-config! k v))
 
 (def ^:private blocked-query-ops
-  '#{pull pull-many})
+  '#{aggregate pull pull-many})
+
+(def ^:private allowed-find-ops
+  "Datalevin built-in aggregates and arithmetic find expressions that do not
+   resolve arbitrary host vars. Qualified symbols are intentionally absent."
+  '#{+ - * / mod rem quot
+     avg count count-distinct distinct max median min rand sample stddev sum
+     variance vec})
+
+(def ^:private allowed-logical-query-ops
+  '#{and not not-join or or-join})
 
 (def ^:private query-section-keys
-  #{:find :with :in :where :keys :strs :syms})
+  #{:find :with :in :where :keys :strs :syms
+    :having :timeout :order-by :limit :offset})
 
 (defn- secret-like-ident?
   [form]
@@ -56,12 +67,26 @@
   [query]
   (loop [xs       query
          current  nil
-         sections {}]
+         sections {}
+         valid?   true]
     (if-let [x (first xs)]
       (if (and (keyword? x) (contains? query-section-keys x))
-        (recur (rest xs) x (assoc sections x []))
-        (recur (rest xs) current (update sections current (fnil conj []) x)))
-      sections)))
+        (recur (rest xs)
+               x
+               (if (contains? sections x)
+                 sections
+                 (assoc sections x []))
+               (and valid? (not (contains? sections x))))
+        (recur (rest xs)
+               current
+               (if current
+                 (update sections current conj x)
+                 sections)
+               (and valid? (some? current))))
+      {:valid? (and valid?
+                    (contains? sections :find)
+                    (seq (get sections :find)))
+       :sections sections})))
 
 (declare unsafe-where-clause?)
 
@@ -80,6 +105,24 @@
 
     :else false))
 
+(defn- unsafe-find-form?
+  [form]
+  (cond
+    (secret-like-ident? form)
+    true
+
+    (and (sequential? form)
+         (symbol? (first form))
+         (not (.startsWith ^String (name (first form)) "?")))
+    (let [op (first form)]
+      (or (not (contains? allowed-find-ops op))
+          (some unsafe-find-form? (rest form))))
+
+    (coll? form)
+    (some unsafe-find-form? form)
+
+    :else false))
+
 (defn- data-pattern-clause?
   [clause]
   (and (vector? clause)
@@ -89,17 +132,28 @@
 (defn- computed-clause?
   [clause]
   (and (vector? clause)
-       (seq? (first clause))))
+       (sequential? (first clause))))
+
+(defn- unsafe-lookup-ref?
+  [form]
+  (and (vector? form)
+       (= 2 (count form))
+       (secret-like-ident? (first form))))
 
 (defn- unsafe-data-pattern?
   [clause]
-  (let [attr (nth clause 1)]
-    (or (not (keyword? attr))
+  (let [entity (nth clause 0)
+        attr   (nth clause 1)
+        value  (nth clause 2)]
+    (or (unsafe-lookup-ref? entity)
+        (unsafe-lookup-ref? value)
+        (not (keyword? attr))
         (secret-like-ident? attr)
         (case attr
           :config/key
           (let [config-key (nth clause 2)]
             (or (not (keyword? config-key))
+                (secret-like-ident? config-key)
                 (secret-config-key? config-key)))
 
           :config/value
@@ -124,7 +178,7 @@
           args (if (#{'or-join 'not-join} op)
                  (rest (rest clause))
                  (rest clause))]
-      (or (contains? blocked-query-ops op)
+      (or (not (contains? allowed-logical-query-ops op))
           (some unsafe-where-clause? args)))
 
     :else false))
@@ -136,15 +190,18 @@
   [query]
   (if-not (vector? query)
     true
-    (let [sections (split-query-sections query)]
+    (let [{:keys [valid? sections]} (split-query-sections query)]
       (boolean
-       (or (unsafe-form? (get sections :find))
+       (or (not valid?)
+           (contains? sections :having)
+           (unsafe-find-form? (get sections :find))
            (some unsafe-where-clause? (get sections :where)))))))
 
 (defn safe-q
   "Restricted Datalog query for the SCI sandbox.
    Rejects queries that reference secret attributes or use indirect attribute
-   access such as pull, computed clauses, or attr-position variables."
+   access such as pull, secret lookup refs, rules, computed clauses,
+   host-resolved aggregates, or attr-position variables."
   [query & inputs]
   (when (query-references-secret? query)
     (throw (ex-info "Access denied: query references secret attributes or uses unsupported query forms"

@@ -1,5 +1,8 @@
 (ns xia.secret-test
   (:require [clojure.test :refer :all]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [xia.db :as db]
             [xia.secret :as secret]
             [xia.sensitive :as sensitive]
@@ -120,6 +123,308 @@
 ;; ---------------------------------------------------------------------------
 ;; safe-q tests
 ;; ---------------------------------------------------------------------------
+
+(def ^:private forwarded-query ::forwarded-query)
+
+(defn- safe-q-policy-allows?
+  [query & inputs]
+  (with-redefs [db/q (fn [& _] forwarded-query)]
+    (try
+      (= forwarded-query (apply secret/safe-q query inputs))
+      (catch Throwable _
+        false))))
+
+(defn- safe-q-policy-blocks?
+  [query & inputs]
+  (with-redefs [db/q (fn [& _] forwarded-query)]
+    (try
+      (apply secret/safe-q query inputs)
+      false
+      (catch clojure.lang.ExceptionInfo e
+        (boolean (re-find #"Access denied" (.getMessage e))))
+      (catch Throwable _
+        false))))
+
+(def ^:private short-text-gen
+  (gen/fmap #(apply str %)
+            (gen/vector (gen/elements (seq "abcxyz012")) 0 5)))
+
+(defn- mixed-case
+  [value uppercase-mask]
+  (apply str
+         (map-indexed (fn [idx ch]
+                        (if (nth uppercase-mask
+                                 (mod idx (count uppercase-mask)))
+                          (let [code (int ch)]
+                            (if (<= (int \a) code (int \z))
+                              (char (- code 32))
+                              ch))
+                          ch))
+                      value)))
+
+(def ^:private secret-marker-gen
+  (gen/elements ["api-key"
+                 "api_key"
+                 "apikey"
+                 "password"
+                 "passwd"
+                 "client-secret"
+                 "credential"
+                 "access-token"
+                 "oauth"
+                 "private-key"
+                 "private_key"]))
+
+(def ^:private secret-marker-attr-gen
+  (gen/fmap
+   (fn [[marker uppercase-mask prefix suffix attr-ns]]
+     (keyword attr-ns
+              (str prefix (mixed-case marker uppercase-mask) suffix)))
+   (gen/tuple secret-marker-gen
+              (gen/vector gen/boolean 32)
+              short-text-gen
+              short-text-gen
+              (gen/elements ["public" "service" "integration" "vendor"]))))
+
+(def ^:private secret-namespace-attr-gen
+  (gen/fmap (fn [[attr-ns suffix attr-name]]
+              (keyword (str attr-ns suffix)
+                       (str "value" attr-name)))
+            (gen/tuple (gen/elements ["credential" "secret"])
+                       short-text-gen
+                       short-text-gen)))
+
+(def ^:private explicit-secret-attr-gen
+  (gen/elements
+   (vec (concat sensitive/encrypted-attrs
+                sensitive/sandbox-only-secret-attrs))))
+
+(def ^:private secret-ident-gen
+  (gen/frequency [[6 secret-marker-attr-gen]
+                  [2 secret-namespace-attr-gen]
+                  [2 explicit-secret-attr-gen]]))
+
+(def ^:private safe-attr-gen
+  (gen/fmap (fn [n]
+              (keyword (str "public" n) (str "field" n)))
+            gen/nat))
+
+(def ^:private secret-query-case-gen
+  (gen/let [attr  secret-ident-gen
+            shape (gen/elements [:attribute
+                                 :find
+                                 :vector-find
+                                 :or
+                                 :not
+                                 :or-join
+                                 :lookup-entity
+                                 :lookup-value
+                                 :config-key
+                                 :duplicate-where])]
+    {:attr attr
+     :query
+     (case shape
+       :attribute
+       [:find '?v :where ['?e attr '?v]]
+
+       :find
+       [:find (list 'count attr) :where ['?e :public/value '?v]]
+
+       :vector-find
+       [:find ['count attr] :where ['?e :public/value '?v]]
+
+       :or
+       [:find '?v :where
+        (list 'or
+              ['?e :public/value '?v]
+              ['?e attr '?v])]
+
+       :not
+       [:find '?v :where
+        ['?e :public/value '?v]
+        (list 'not ['?e attr '?secret-value])]
+
+       :or-join
+       [:find '?v :where
+        (list 'or-join
+              ['?e '?v]
+              ['?e :public/value '?v]
+              ['?e attr '?v])]
+
+       :lookup-entity
+       [:find '?v :where [[attr "guess"] :public/value '?v]]
+
+       :lookup-value
+       [:find '?e :where ['?e :public/ref [attr "guess"]]]
+
+       :config-key
+       [:find '?e :where ['?e :config/key attr]]
+
+       :duplicate-where
+       [:find '?v
+        :where ['?e attr '?v]
+        :where ['?e :public/value '?v]])}))
+
+(def ^:private safe-query-gen
+  (gen/let [attr  safe-attr-gen
+            shape (gen/elements [:attribute
+                                 :or
+                                 :not
+                                 :or-join
+                                 :lookup-entity
+                                 :lookup-value
+                                 :config-key])]
+    (case shape
+      :attribute
+      [:find '?v :where ['?e attr '?v]]
+
+      :or
+      [:find '?v :where
+       (list 'or
+             ['?e attr '?v]
+             ['?e :public/fallback '?v])]
+
+      :not
+      [:find '?v :where
+       ['?e attr '?v]
+       (list 'not ['?e :public/disabled? true])]
+
+      :or-join
+      [:find '?v :where
+       (list 'or-join
+             ['?e '?v]
+             ['?e attr '?v]
+             ['?e :public/fallback '?v])]
+
+      :lookup-entity
+      [:find '?v :where [[attr "known"] :public/value '?v]]
+
+      :lookup-value
+      [:find '?e :where ['?e :public/ref [attr "known"]]]
+
+      :config-key
+      [:find '?e :where ['?e :config/key :user/name]])))
+
+(def ^:private allowed-aggregate-query-gen
+  (gen/let [attr safe-attr-gen
+            op   (gen/elements '[avg count count-distinct distinct max median
+                                 min rand sample stddev sum variance vec])
+            vector-form? gen/boolean]
+    [:find ((if vector-form? vec #(apply list %))
+            (if (#{'rand 'sample} op)
+              [op 1 '?v]
+              [op '?v]))
+     :where ['?e attr '?v]]))
+
+(def ^:private host-aggregate-query-gen
+  (gen/fmap (fn [[op vector-form?]]
+              [:find ((if vector-form? vec #(apply list %)) [op '?v])
+               :where ['?e :public/value '?v]])
+            (gen/tuple
+             (gen/elements '[aggregate
+                             clojure.core/count
+                             clojure.core/eval
+                             clojure.core/slurp
+                             clojure.core/spit
+                             clojure.java.shell/sh
+                             datalevin.core/entity
+                             pull
+                             pull-many
+                             user/aggregate])
+             gen/boolean)))
+
+(def ^:private secret-rule-case-gen
+  (gen/let [attr      secret-ident-gen
+            rule-name (gen/fmap #(symbol (str "generated-rule-" %)) gen/nat)]
+    {:query [:find '?v :in '$ '% :where
+             (list rule-name '?e '?v)]
+     :rules [[(list rule-name '?e '?v)
+              ['?e attr '?v]]]}))
+
+(defspec safe-q-rejects-generated-secret-references 500
+  (prop/for-all [{:keys [attr query]} secret-query-case-gen]
+                (and (sensitive/secret-query-ident? attr)
+                     (safe-q-policy-blocks? query))))
+
+(defspec safe-q-allows-generated-public-data-patterns 300
+  (prop/for-all [query safe-query-gen]
+                (safe-q-policy-allows? query)))
+
+(defspec safe-q-rejects-generated-rule-input-bypasses 250
+  (prop/for-all [{:keys [query rules]} secret-rule-case-gen]
+                (safe-q-policy-blocks? query rules)))
+
+(defspec safe-q-rejects-generated-host-aggregate-resolution 200
+  (prop/for-all [query host-aggregate-query-gen]
+                (safe-q-policy-blocks? query)))
+
+(defspec safe-q-allows-only-reviewed-built-in-aggregates 250
+  (prop/for-all [query allowed-aggregate-query-gen]
+                (safe-q-policy-allows? query)))
+
+(deftest safe-q-blocks-rule-and-aggregate-code-execution
+  (db/transact! [{:llm.provider/id       :safe-q-execution
+                  :llm.provider/name     "safe-q-execution"
+                  :llm.provider/base-url "http://localhost"
+                  :llm.provider/api-key  "sk-safe-q-secret"
+                  :llm.provider/model    "test-model"
+                  :llm.provider/default? false}])
+
+  (testing "rules supplied through % cannot hide secret data patterns"
+    (let [rules '[[(leak-provider-key ?e ?value)
+                   [?e :llm.provider/api-key ?value]]]]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"Access denied"
+           (secret/safe-q '[:find ?value :in $ % :where
+                            (leak-provider-key ?e ?value)]
+                          rules)))))
+
+  (testing "custom aggregate functions never reach the Datalevin executor"
+    (let [invoked?  (atom false)
+          aggregate (fn [values]
+                      (reset! invoked? true)
+                      (count values))]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"Access denied"
+           (secret/safe-q '[:find (aggregate ?aggregate ?name)
+                            :in $ ?aggregate
+                            :where [?e :llm.provider/name ?name]]
+                          aggregate)))
+      (is (false? @invoked?))))
+
+  (testing "reviewed built-in aggregates remain available"
+    (is (= [[1]]
+           (secret/safe-q '[:find (count ?name) :where
+                            [?e :llm.provider/name ?name]])))))
+
+(deftest safe-q-blocks-duplicate-sections-and-secret-lookup-refs
+  (testing "a later duplicate section cannot erase an unsafe earlier section"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?value
+                          :where [?e :llm.provider/api-key ?value]
+                          :where [?e :llm.provider/name ?name]]))))
+
+  (testing "lookup refs cannot use a secret attribute as an existence oracle"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?name :where
+                          [[:llm.provider/api-key "guessed-key"]
+                           :llm.provider/name
+                           ?name]]))))
+
+  (testing "secret-like config literals are rejected conservatively"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q '[:find ?e :where
+                          [?e :config/key :vendor/password]]))))
+
+  (testing "vector-shaped computed clauses are rejected like list calls"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Access denied"
+         (secret/safe-q
+          [:find '?value :where
+           [(vector 'clojure.core/slurp "/tmp/sci-escape") '?value]])))))
 
 (deftest safe-q-blocks-secret-queries
   ;; Seed a provider with an API key

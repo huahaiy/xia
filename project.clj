@@ -20,7 +20,8 @@
   :cljfmt {:paths ["src" "test" "project.clj"]
            :parallel? true}
   :profiles {:dev {:source-paths ["dev"]
-                   :dependencies ~(:dev-dependencies xia-dependency-catalog)
+                   :dependencies ~(vec (concat (:dev-dependencies xia-dependency-catalog)
+                                               (:test-dependencies xia-dependency-catalog)))
                    :repl-options {:init-ns user}}
              :quality {:plugins [[dev.weavejester/lein-cljfmt "0.13.1"]
                                  [jonase/eastwood "1.4.3"]]}
@@ -33,5 +34,6 @@
                        :uberjar-name "xia.jar"}
              :native-test {:source-paths ^:replace ["src" "test"]
                            :resource-paths ^:replace ["resources"]
+                           :dependencies ~(:test-dependencies xia-dependency-catalog)
                            :main xia.test-runner
                            :uberjar-name "xia-tests.jar"}})
