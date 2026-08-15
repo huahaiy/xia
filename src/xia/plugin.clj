@@ -8,6 +8,7 @@
             [taoensso.timbre :as log]
             [xia.audit :as audit]
             [xia.db :as db]
+            [xia.permission :as permission]
             [xia.policy :as task-policy])
   (:import [java.util Date]
            [java.util.concurrent.atomic AtomicLong]))
@@ -18,6 +19,9 @@
     :post-llm
     :task-state-change
     :schedule-run})
+
+(def ^:private tool-hook-events
+  #{:pre-tool :post-tool})
 
 (defn hook-capability
   [event]
@@ -599,7 +603,7 @@
         timeout (Object.)]
     (register-hook-worker! worker-id timeout-ms thread)
     (try
-      (.start thread)
+      (.start ^Thread thread)
       (catch Throwable t
         (unregister-hook-worker! worker-id)
         (throw t)))
@@ -665,38 +669,43 @@
       (throw (ex-info "unsupported plugin hook event"
                       {:type :plugin/unsupported-hook-event
                        :event event*})))
-    (mapv
-     (fn [{:keys [plugin hook]}]
-       (let [payload (assoc (or context {})
-                            :hook-event event*
-                            :plugin-id (:plugin/id plugin)
-                            :hook-id (:id hook))]
-         (try
-           (let [result (call-with-timeout
-                         (task-policy/plugin-hook-timeout-ms)
-                         #(normalize-output
-                           (eval-hook-handler (:handler hook) payload)))]
-             (audit-hook! context event* plugin hook :success
-                          (cond-> {}
-                            (some? result) (assoc :result-summary (summarize-result result))))
-             {:plugin-id (:plugin/id plugin)
-              :hook-id (:id hook)
-              :event event*
-              :status :success
-              :result result})
-           (catch Throwable t
-             (log/warn t "Plugin hook failed"
-                       {:plugin-id (:plugin/id plugin)
-                        :hook-id (:id hook)
-                        :event event*})
-             (audit-hook! context event* plugin hook :error
-                          {:error (.getMessage t)})
-             {:plugin-id (:plugin/id plugin)
-              :hook-id (:id hook)
-              :event event*
-              :status :error
-              :error (.getMessage t)}))))
-     (enabled-plugin-hooks event*))))
+    (let [context* (if (contains? tool-hook-events event*)
+                     (permission/require-tool-authorization!
+                      context
+                      (keyword "plugin-hook" (name event*)))
+                     (or context {}))]
+      (mapv
+       (fn [{:keys [plugin hook]}]
+         (let [payload (assoc context*
+                              :hook-event event*
+                              :plugin-id (:plugin/id plugin)
+                              :hook-id (:id hook))]
+           (try
+             (let [result (call-with-timeout
+                           (task-policy/plugin-hook-timeout-ms)
+                           #(normalize-output
+                             (eval-hook-handler (:handler hook) payload)))]
+               (audit-hook! context* event* plugin hook :success
+                            (cond-> {}
+                              (some? result) (assoc :result-summary (summarize-result result))))
+               {:plugin-id (:plugin/id plugin)
+                :hook-id (:id hook)
+                :event event*
+                :status :success
+                :result result})
+             (catch Throwable t
+               (log/warn t "Plugin hook failed"
+                         {:plugin-id (:plugin/id plugin)
+                          :hook-id (:id hook)
+                          :event event*})
+               (audit-hook! context* event* plugin hook :error
+                            {:error (.getMessage t)})
+               {:plugin-id (:plugin/id plugin)
+                :hook-id (:id hook)
+                :event event*
+                :status :error
+                :error (.getMessage t)}))))
+       (enabled-plugin-hooks event*)))))
 
 (defn blocked-by-pre-tool-hook
   [results]

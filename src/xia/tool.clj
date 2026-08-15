@@ -682,7 +682,8 @@
 (declare execute-pipeline-tool)
 
 (defn- invoke-handler
-  [handler-kind handler arguments]
+  [handler-kind handler arguments context]
+  (permission/require-tool-authorization! context :tool-handler)
   (case handler-kind
     :clojure (handler arguments)
     :sci     (sci-env/call-fn handler arguments)
@@ -708,7 +709,10 @@
              (let [{:keys [allowed? error policy mode] :as execution-decision}
                    (permission/authorize-tool! tool arguments handler-context)]
                (if allowed?
-                 (let [hook-context (assoc handler-context
+                 (let [authorized-context (permission/authorized-tool-context
+                                           handler-context
+                                           execution-decision)
+                       hook-context (assoc authorized-context
                                            :arguments arguments)
                        pre-results  (plugin/run-hooks! :pre-tool hook-context)
                        blocked      (plugin/blocked-by-pre-tool-hook pre-results)]
@@ -728,7 +732,10 @@
                                         :tool-name tool-name})
                        (try
                          (let [result (normalize-tool-result tool-id
-                                                             (invoke-handler handler-kind handler arguments))]
+                                                             (invoke-handler handler-kind
+                                                                             handler
+                                                                             arguments
+                                                                             authorized-context))]
                            (plugin/run-hooks! :post-tool
                                               (assoc hook-context
                                                      :status :success

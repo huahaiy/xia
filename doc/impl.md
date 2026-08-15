@@ -434,6 +434,13 @@ before the handler or plugin hooks run. The permission layer owns channel
 compatibility checks, vision-model gating, branch-worker restrictions, approval
 policy, autonomous bypass rules, and session-scoped approval grants.
 
+An allowed decision carries an opaque in-memory authorization proof bound to
+the tool ID. `xia.tool` must attach that proof to the execution context, and the
+pre-tool hook, handler, and post-tool hook boundaries independently verify it
+immediately before execution. A plain or forged `{:allowed? true}` map is not
+sufficient. The proof is removed before the event reaches sandboxed plugin
+code and is not written to policy audit data.
+
 Approval prompts are still transported through `xia.prompt` channel adapters, so
 terminal, HTTP, Slack, Telegram, and iMessage share the same permission decision
 path. Bridge integrations can also provide a per-invocation

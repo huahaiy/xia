@@ -13,6 +13,9 @@
             [xia.policy :as task-policy]))
 
 (def ^:private runtime-context-key :xia/permission-runtime)
+(def ^:private authorization-context-key ::tool-authorization)
+(def ^:private authorization-proof-key ::authorization-proof)
+(def ^:private authorization-proof (Object.))
 
 (defn make-runtime
   []
@@ -57,6 +60,56 @@
 (defn tool-approval-policy
   [tool]
   (task-policy/tool-approval-policy tool))
+
+(defn- authorization-error
+  [context operation reason]
+  (ex-info "Verified tool authorization is required before execution"
+           {:type :permission/authorization-required
+            :status 403
+            :operation operation
+            :tool-id (:tool-id context)
+            :reason reason}))
+
+(defn- verified-authorization-decision?
+  [decision]
+  (and (map? decision)
+       (true? (:allowed? decision))
+       (identical? authorization-proof
+                   (get (meta decision) authorization-proof-key))))
+
+(defn authorized-tool-context
+  "Attach an opaque, verified authorization decision to a tool context.
+
+   Only decisions issued as allowed by `authorize-tool!` are accepted. The
+   proof is consumed by Xia's handler and tool-hook boundaries; it is removed
+   before a plugin handler receives its event map."
+  [context decision]
+  (cond
+    (not (verified-authorization-decision? decision))
+    (throw (authorization-error context :attach :unverified-decision))
+
+    (not= (:tool-id context) (:tool-id decision))
+    (throw (authorization-error context :attach :tool-id-mismatch))
+
+    :else
+    (assoc context authorization-context-key decision)))
+
+(defn require-tool-authorization!
+  "Verify authorization immediately before a handler or tool hook executes.
+
+   Returns the context with the opaque proof removed so it cannot be exposed
+   to sandboxed plugin code."
+  [context operation]
+  (let [decision (get context authorization-context-key)]
+    (cond
+      (not (verified-authorization-decision? decision))
+      (throw (authorization-error context operation :missing-or-unverified-proof))
+
+      (not= (:tool-id context) (:tool-id decision))
+      (throw (authorization-error context operation :tool-id-mismatch))
+
+      :else
+      (dissoc context authorization-context-key))))
 
 (defn- tool-id
   [tool]
@@ -253,4 +306,8 @@
                               policy-env)
                              preflight)]
     (prompt/policy-decision! execution-decision)
-    execution-decision))
+    (if (:allowed? execution-decision)
+      (with-meta execution-decision
+        (assoc (meta execution-decision)
+               authorization-proof-key authorization-proof))
+      execution-decision)))

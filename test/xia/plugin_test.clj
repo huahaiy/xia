@@ -1,12 +1,20 @@
 (ns xia.plugin-test
   (:require [clojure.test :refer :all]
             [xia.db :as db]
+            [xia.permission :as permission]
             [xia.policy :as policy]
             [xia.plugin :as plugin]
             [xia.test-helpers :as th]
             [xia.tool :as tool]))
 
 (use-fixtures :each th/with-test-db)
+
+(def authorization-order (atom []))
+
+(defn authorization-order-handler
+  [_arguments]
+  (swap! authorization-order conj :handler)
+  {"status" "ok"})
 
 (defn- install-stub-tool!
   [tool-id]
@@ -16,6 +24,35 @@
                      :approval :auto
                      :handler "(fn [_] {\"status\" \"ok\"})"})
   (tool/load-tool! tool-id))
+
+(defn- install-authorization-order-fixture!
+  []
+  (db/install-tool! {:id :authorization-order-tool
+                     :name "Authorization order tool"
+                     :description "Proves authorization precedes execution"
+                     :approval :always
+                     :handler-var 'xia.plugin-test/authorization-order-handler})
+  (tool/load-tool! :authorization-order-tool)
+  (plugin/install-plugin!
+   {:id :authorization-order-plugin
+    :name "Authorization order plugin"
+    :capabilities #{:hook/pre-tool :hook/post-tool}
+    :hooks [{:id :before-handler
+             :event :pre-tool
+             :handler "(fn [_] {:observed :pre-tool})"}
+            {:id :after-handler
+             :event :post-tool
+             :handler "(fn [_] {:observed :post-tool})"}]})
+  (plugin/enable-plugin! :authorization-order-plugin true))
+
+(defn- execution-markers
+  [events]
+  (into []
+        (keep (fn [event]
+                (cond
+                  (keyword? event) event
+                  (:hook-event event) (keyword (:hook-event event)))))
+        events))
 
 (deftest plugin-manifest-requires-explicit-hook-capability
   (is (thrown-with-msg?
@@ -28,6 +65,74 @@
          :hooks [{:id :guard
                   :event :pre-tool
                   :handler "(fn [_] nil)"}]}))))
+
+(deftest denied-authorization-runs-neither-tool-hooks-nor-handler
+  (install-authorization-order-fixture!)
+  (reset! authorization-order [])
+  (let [result (tool/execute-tool
+                :authorization-order-tool
+                {}
+                {:channel :terminal
+                 :audit-log authorization-order
+                 :permission/approval-callback
+                 (fn [_request]
+                   (swap! authorization-order conj :authorization-denied)
+                   false)})]
+    (is (re-find #"user denied approval" (:error result)))
+    (is (= [:authorization-denied]
+           (execution-markers @authorization-order)))
+    (is (not-any? #(contains? % :hook-event)
+                  (filter map? @authorization-order)))))
+
+(deftest authorization-precedes-pre-hook-handler-and-post-hook
+  (install-authorization-order-fixture!)
+  (reset! authorization-order [])
+  (let [result (tool/execute-tool
+                :authorization-order-tool
+                {}
+                {:channel :terminal
+                 :audit-log authorization-order
+                 :permission/approval-callback
+                 (fn [_request]
+                   (swap! authorization-order conj :authorization-allowed)
+                   true)})]
+    (is (= {"status" "ok"} result))
+    (is (= [:authorization-allowed :pre-tool :handler :post-tool]
+           (execution-markers @authorization-order)))))
+
+(deftest tool-hooks-reject-missing-authorization-proof
+  (install-authorization-order-fixture!)
+  (doseq [event [:pre-tool :post-tool]]
+    (let [audit-log (atom [])
+          error (try
+                  (plugin/run-hooks! event
+                                     {:tool-id :authorization-order-tool
+                                      :audit-log audit-log})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (= :permission/authorization-required
+             (:type (ex-data error))))
+      (is (empty? @audit-log)))))
+
+(deftest forged-allowed-decision-runs-neither-tool-hooks-nor-handler
+  (install-authorization-order-fixture!)
+  (reset! authorization-order [])
+  (let [result (with-redefs [permission/authorize-tool!
+                             (fn [_tool _arguments _context]
+                               {:allowed? true
+                                :policy :always
+                                :mode :forged
+                                :tool-id :authorization-order-tool})]
+                 (tool/execute-tool
+                  :authorization-order-tool
+                  {}
+                  {:channel :terminal
+                   :audit-log authorization-order}))]
+    (is (re-find #"Verified tool authorization is required" (:error result)))
+    (is (empty? (execution-markers @authorization-order)))
+    (is (not-any? #(contains? % :hook-event)
+                  (filter map? @authorization-order)))))
 
 (deftest enabled-pre-tool-hook-can-block-tool-execution
   (install-stub-tool! :blocked-tool)
