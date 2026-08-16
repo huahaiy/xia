@@ -659,6 +659,10 @@ Step lifecycle states:
 Resume is task-native. Resuming a task should continue from the first
 non-terminal step using the same persisted spec and runtime state.
 
+`:completed`, `:failed`, and `:cancelled` are immutable terminal states. Task
+controls must not rewrite them, even if stale live-run bookkeeping remains;
+related follow-up work should start as a new task.
+
 ## Triggers
 
 Triggers explain why a task exists or starts. They are metadata, not task types.

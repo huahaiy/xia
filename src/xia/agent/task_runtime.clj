@@ -33,6 +33,19 @@
 (def ^:private restart-lineage-limit 20)
 (def ^:private startup-recovery-task-limit 100000)
 (def ^:private startup-recovery-states #{:running :waiting_input :waiting_approval})
+(def ^:private terminal-task-states #{:completed :failed :cancelled})
+
+(defn- terminal-task?
+  [task]
+  (contains? terminal-task-states (:state task)))
+
+(defn- terminal-control-result
+  [task-id session-id task]
+  {:status :terminal
+   :task-id task-id
+   :session-id session-id
+   :task-state (:state task)
+   :error "task is terminal"})
 
 (defn- runtime-draining-result
   [task-id session-id]
@@ -1203,6 +1216,9 @@
         {:status :invalid
          :error "task has no session"}
 
+        (terminal-task? task)
+        (terminal-control-result task-id session-id task)
+
         (task-active? deps task)
         (if ((:cancel-session! deps) session-id "task pause requested")
           {:status :pausing
@@ -1240,6 +1256,14 @@
         {:status :invalid
          :error "task has no session"}
 
+        (= :cancelled (:state task))
+        {:status :already-stopped
+         :task-id task-id
+         :session-id session-id}
+
+        (terminal-task? task)
+        (terminal-control-result task-id session-id task)
+
         (task-active? deps task)
         (if ((:cancel-session! deps) session-id "task stop requested")
           {:status :stopping
@@ -1247,11 +1271,6 @@
            :session-id session-id}
           {:status :busy
            :error "task is still processing a request"})
-
-        (= :cancelled (:state task))
-        {:status :already-stopped
-         :task-id task-id
-         :session-id session-id}
 
         :else
         (do
@@ -1281,16 +1300,16 @@
         {:status :invalid
          :error "task has no session"}
 
-        (task-active? deps task)
-        {:status :already-running
-         :task-id task-id
-         :session-id session-id}
-
-        (contains? #{:cancelled :failed} (:state task))
+        (terminal-task? task)
         {:status :not-resumable
          :task-id task-id
          :session-id session-id
          :error "task is not resumable"}
+
+        (task-active? deps task)
+        {:status :already-running
+         :task-id task-id
+         :session-id session-id}
 
         (not (contains? #{:paused :resumable :waiting_input :waiting_approval}
                         (:state task)))
@@ -1364,6 +1383,9 @@
         (nil? session-id)
         {:status :invalid
          :error "task has no session"}
+
+        (terminal-task? task)
+        (terminal-control-result task-id session-id task)
 
         (task-active? deps task)
         (if ((:cancel-session! deps) session-id "task interrupt requested")
@@ -1450,6 +1472,9 @@
         (nil? message*)
         {:status :invalid
          :error "steer message is required"}
+
+        (terminal-task? task)
+        (terminal-control-result task-id session-id task)
 
         (not (runtime-state/accepting-new-work?))
         (runtime-draining-result task-id session-id)
