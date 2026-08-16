@@ -5,12 +5,19 @@
    message-processing loop."
   (:import [java.util.concurrent Future]))
 
+(def ^:private task-control-lock-count 64)
+
+(defn- make-task-control-locks
+  []
+  (mapv (fn [_] (Object.)) (range task-control-lock-count)))
+
 (defn make-runtime
   []
   {:active-session-turns-atom (atom #{})
    :session-turn-reservations-atom (atom {})
    :active-session-runs-atom  (atom {})
    :active-task-runs-atom     (atom {})
+   :task-control-locks        (make-task-control-locks)
    :idle-monitor              (Object.)})
 
 (defn- active-session-turns-atom
@@ -52,6 +59,18 @@
   {:active-session-turn-count (count @(active-session-turns-atom runtime))
    :active-session-run-count  (count @(active-session-runs-atom runtime))
    :active-task-run-count     (count @(active-task-runs-atom runtime))})
+
+(defn with-task-control-lock
+  "Serialize controls for one task. Fixed lock striping avoids an unbounded
+   task-id-to-lock registry while allowing unrelated tasks to proceed in
+   parallel."
+  [runtime task-id f]
+  (if task-id
+    (let [locks (:task-control-locks runtime)
+          index (mod (hash task-id) (count locks))]
+      (locking (nth locks index)
+        (f)))
+    (f)))
 
 (defn reserve-next-session-turn!
   [runtime session-id metadata]

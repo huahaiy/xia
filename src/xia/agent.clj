@@ -76,6 +76,10 @@
   [session-id token]
   (run-state/clear-session-turn-reservation! (current-runtime) session-id token))
 
+(defn- with-task-control-lock
+  [task-id f]
+  (run-state/with-task-control-lock (current-runtime) task-id f))
+
 (defn- with-session-turn-lock
   ([session-id f]
    (with-session-turn-lock session-id nil f))
@@ -890,6 +894,7 @@
           :session-run-entry session-run-entry
           :task-run-entry task-run-entry
           :task-control-wait-ms task-control-wait-ms
+          :with-task-control-lock with-task-control-lock
           :unregister-child-session! unregister-child-session!
           :wait-for-task-idle! wait-for-task-idle!
           :wait-for-session-idle! wait-for-session-idle!}))

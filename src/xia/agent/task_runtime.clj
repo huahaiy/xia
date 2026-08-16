@@ -942,15 +942,38 @@
     (when task-id
       (f task-id))))
 
-(defn- task-active?
+(defn- task-active-entry
   [deps task]
-  (boolean
-   (or (live-task-run deps (:id task))
-       (when-let [f (:session-run-entry deps)]
-         (let [entry (some-> task :session-id f)]
-           (and (or (nil? (:task-id entry))
-                    (= (:id task) (:task-id entry)))
-                entry))))))
+  (or (live-task-run deps (:id task))
+      (when-let [f (:session-run-entry deps)]
+        (let [entry (some-> task :session-id f)]
+          (when (and entry
+                     (or (nil? (:task-id entry))
+                         (= (:id task) (:task-id entry))))
+            entry)))))
+
+(def ^:private task-control-by-cancel-reason
+  {"task pause requested" :pause
+   "task stop requested" :stop
+   "task interrupt requested" :interrupt
+   "task steer requested" :steer})
+
+(defn- pending-task-control-result
+  [task-id session-id active-entry]
+  (when (:cancelled? active-entry)
+    {:status :busy
+     :task-id task-id
+     :session-id session-id
+     :pending-control (get task-control-by-cancel-reason
+                           (:cancel-reason active-entry)
+                           :cancel)
+     :error "task control is already in progress"}))
+
+(defn- with-task-control-lock*
+  [deps task-id f]
+  (if-let [with-lock (:with-task-control-lock deps)]
+    (with-lock task-id f)
+    (f)))
 
 (defn- active-task-turn-id
   [deps task-id]
@@ -1206,11 +1229,15 @@
                                      round (assoc :round round)
                                      error (assoc :error error))}))))})
 
-(defn pause-task!
+(defn- pause-task-unlocked!
   [deps task-id]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
-                         (:session-id task))]
+    (let [active-entry  (task-active-entry deps task)
+          session-id    (or (:session-id active-entry)
+                            (:session-id task))
+          pending-result (pending-task-control-result task-id
+                                                      session-id
+                                                      active-entry)]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -1219,7 +1246,10 @@
         (terminal-task? task)
         (terminal-control-result task-id session-id task)
 
-        (task-active? deps task)
+        pending-result
+        pending-result
+
+        active-entry
         (if ((:cancel-session! deps) session-id "task pause requested")
           {:status :pausing
            :task-id task-id
@@ -1246,11 +1276,21 @@
     {:status :not-found
      :error "task not found"}))
 
-(defn stop-task!
+(defn pause-task!
+  [deps task-id]
+  (with-task-control-lock* deps
+    task-id
+    #(pause-task-unlocked! deps task-id)))
+
+(defn- stop-task-unlocked!
   [deps task-id]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
-                         (:session-id task))]
+    (let [active-entry  (task-active-entry deps task)
+          session-id    (or (:session-id active-entry)
+                            (:session-id task))
+          pending-result (pending-task-control-result task-id
+                                                      session-id
+                                                      active-entry)]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -1264,7 +1304,10 @@
         (terminal-task? task)
         (terminal-control-result task-id session-id task)
 
-        (task-active? deps task)
+        pending-result
+        pending-result
+
+        active-entry
         (if ((:cancel-session! deps) session-id "task stop requested")
           {:status :stopping
            :task-id task-id
@@ -1287,14 +1330,24 @@
     {:status :not-found
      :error "task not found"}))
 
-(defn resume-task!
+(defn stop-task!
+  [deps task-id]
+  (with-task-control-lock* deps
+    task-id
+    #(stop-task-unlocked! deps task-id)))
+
+(defn- resume-task-unlocked!
   [deps task-id & {:keys [message]}]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
-                         (:session-id task))
-          channel    (or (:channel task) :terminal)
-          message*   (or (some-> message str str/trim not-empty)
-                         "Continue from the current agenda.")]
+    (let [active-entry  (task-active-entry deps task)
+          session-id    (or (:session-id active-entry)
+                            (:session-id task))
+          pending-result (pending-task-control-result task-id
+                                                      session-id
+                                                      active-entry)
+          channel       (or (:channel task) :terminal)
+          message*      (or (some-> message str str/trim not-empty)
+                            "Continue from the current agenda.")]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -1306,7 +1359,10 @@
          :session-id session-id
          :error "task is not resumable"}
 
-        (task-active? deps task)
+        pending-result
+        pending-result
+
+        active-entry
         {:status :already-running
          :task-id task-id
          :session-id session-id}
@@ -1374,11 +1430,21 @@
     {:status :not-found
      :error "task not found"}))
 
-(defn interrupt-task!
+(defn resume-task!
+  [deps task-id & {:keys [message]}]
+  (with-task-control-lock* deps
+    task-id
+    #(resume-task-unlocked! deps task-id :message message)))
+
+(defn- interrupt-task-unlocked!
   [deps task-id]
   (if-let [task (db/get-task task-id)]
-    (let [session-id (or (some-> (live-task-run deps task-id) :session-id)
-                         (:session-id task))]
+    (let [active-entry  (task-active-entry deps task)
+          session-id    (or (:session-id active-entry)
+                            (:session-id task))
+          pending-result (pending-task-control-result task-id
+                                                      session-id
+                                                      active-entry)]
       (cond
         (nil? session-id)
         {:status :invalid
@@ -1387,7 +1453,10 @@
         (terminal-task? task)
         (terminal-control-result task-id session-id task)
 
-        (task-active? deps task)
+        pending-result
+        pending-result
+
+        active-entry
         (if ((:cancel-session! deps) session-id "task interrupt requested")
           {:status :interrupting
            :task-id task-id
@@ -1414,16 +1483,25 @@
     {:status :not-found
      :error "task not found"}))
 
-(defn steer-task!
+(defn interrupt-task!
+  [deps task-id]
+  (with-task-control-lock* deps
+    task-id
+    #(interrupt-task-unlocked! deps task-id)))
+
+(defn- steer-task-unlocked!
   [deps task-id message]
   (if-let [task (db/get-task task-id)]
-    (let [live-run              (live-task-run deps task-id)
-          session-id            (or (:session-id live-run)
+    (let [active-entry          (task-active-entry deps task)
+          session-id            (or (:session-id active-entry)
                                     (:session-id task))
           channel               (or (:channel task) :terminal)
           message*              (some-> message str str/trim not-empty)
-          interrupted-turn-id   (or (:task-turn-id live-run)
+          interrupted-turn-id   (or (:task-turn-id active-entry)
                                     (active-task-turn-id deps task-id))
+          pending-result        (pending-task-control-result task-id
+                                                             session-id
+                                                             active-entry)
           reserve-turn!         (fn [runtime-op]
                                   ((:reserve-next-session-turn! deps)
                                    session-id
@@ -1476,10 +1554,13 @@
         (terminal-task? task)
         (terminal-control-result task-id session-id task)
 
+        pending-result
+        pending-result
+
         (not (runtime-state/accepting-new-work?))
         (runtime-draining-result task-id session-id)
 
-        (task-active? deps task)
+        active-entry
         (if ((:cancel-session! deps) session-id "task steer requested")
           (if-let [reservation-token (reserve-turn! :steer)]
             (if-let [_future (submit-steer! interrupted-turn-id reservation-token)]
@@ -1537,6 +1618,12 @@
            :error "session is busy"})))
     {:status :not-found
      :error "task not found"}))
+
+(defn steer-task!
+  [deps task-id message]
+  (with-task-control-lock* deps
+    task-id
+    #(steer-task-unlocked! deps task-id message)))
 
 (defn fork-task!
   [deps task-id message]
