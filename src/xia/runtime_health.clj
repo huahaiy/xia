@@ -12,6 +12,7 @@
    `:idle?` means:
    - runtime phase is `:running`
    - no active agent turns/runs
+   - no post-task skill learning is in flight
    - no scheduler executions or maintenance are in flight
    - no pending hippocampus or async LLM log background work remains
 
@@ -44,6 +45,12 @@
                             :kind :task-runs
                             :count (long (:active-task-run-count agent*))
                             :reason "task runs are still active"})
+
+                     (pos? (long (or (:skill-learning-count agent*) 0)))
+                     (conj {:component :agent
+                            :kind :skill-learning
+                            :count (long (:skill-learning-count agent*))
+                            :reason "post-task skill learning is still running"})
 
                      (pos? (long (:running-schedule-count scheduler*)))
                      (conj {:component :scheduler

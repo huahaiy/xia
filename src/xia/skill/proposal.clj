@@ -12,7 +12,27 @@
 (def proposal-risks #{:low :medium :high})
 (def review-decisions #{:approve :reject})
 
+(def ^:private decision-lock-count 64)
+(def ^:private proposal-decision-locks
+  (mapv (fn [_] (Object.)) (range decision-lock-count)))
+(def ^:private skill-mutation-locks
+  (mapv (fn [_] (Object.)) (range decision-lock-count)))
+
 (defn- now [] (Date.))
+
+(defn- striped-lock
+  [locks value]
+  (nth locks (mod (hash value) (count locks))))
+
+(defn- with-proposal-decision-lock
+  [proposal-id f]
+  (locking (striped-lock proposal-decision-locks proposal-id)
+    (f)))
+
+(defn- with-skill-mutation-lock
+  [skill-id f]
+  (locking (striped-lock skill-mutation-locks skill-id)
+    (f)))
 
 (defn- normalize-keyword
   [value field allowed]
@@ -223,21 +243,40 @@
         (:evidence proposal) (assoc :skill.proposal/evidence (write-doc (:evidence proposal))))])
     (get-proposal (:id proposal))))
 
-(defn reject-proposal!
-  [proposal-id & {:keys [reviewer note]}]
-  (let [proposal-id* (normalize-uuid proposal-id "proposal_id")
-        eid          (proposal-eid proposal-id*)]
+(defn- assert-pending!
+  [proposal]
+  (when-not (= :pending (:skill.proposal/status proposal))
+    (throw (ex-info "Skill proposal is not pending"
+                    {:type :skill-proposal/not-pending
+                     :proposal-id (:skill.proposal/id proposal)
+                     :status (:skill.proposal/status proposal)}))))
+
+(defn- reject-proposal-unlocked!
+  [proposal-id reviewer note]
+  (let [proposal (or (get-proposal proposal-id)
+                     (throw (ex-info "Skill proposal not found"
+                                     {:type :skill-proposal/not-found
+                                      :proposal-id proposal-id})))
+        _        (assert-pending! proposal)
+        eid      (proposal-eid proposal-id)]
     (when-not eid
       (throw (ex-info "Skill proposal not found"
                       {:type :skill-proposal/not-found
-                       :proposal-id proposal-id*})))
+                       :proposal-id proposal-id})))
     (db/transact! [(cond-> {:db/id eid
                             :skill.proposal/status :rejected
                             :skill.proposal/updated-at (now)
                             :skill.proposal/reviewed-at (now)}
                      (reviewer-text reviewer) (assoc :skill.proposal/reviewer (reviewer-text reviewer))
                      note (assoc :skill.proposal/review-note (str note)))])
-    (get-proposal proposal-id*)))
+    (get-proposal proposal-id)))
+
+(defn reject-proposal!
+  [proposal-id & {:keys [reviewer note]}]
+  (let [proposal-id* (normalize-uuid proposal-id "proposal_id")]
+    (with-proposal-decision-lock
+      proposal-id*
+      #(reject-proposal-unlocked! proposal-id* reviewer note))))
 
 (defn- proposal-skill-source
   [proposal proposal-id]
@@ -246,14 +285,6 @@
    :proposal-id (str proposal-id)
    :source-task-id (some-> (:skill.proposal/task-id proposal) str)
    :risk (:skill.proposal/risk proposal)})
-
-(defn- assert-pending!
-  [proposal]
-  (when-not (= :pending (:skill.proposal/status proposal))
-    (throw (ex-info "Skill proposal is not pending"
-                    {:type :skill-proposal/not-pending
-                     :proposal-id (:skill.proposal/id proposal)
-                     :status (:skill.proposal/status proposal)}))))
 
 (defn- assert-existing-skill!
   [skill-id]
@@ -275,32 +306,37 @@
                        :expected-content-sha256 expected
                        :actual-content-sha256 (:skill/content-sha256 existing)})))))
 
-(defn apply-proposal!
-  "Apply an approved proposal. New skills are saved as disabled drafts by default;
-   pass `:enable? true` to enable them immediately."
-  [proposal-id & {:keys [reviewer note enable?]}]
-  (let [proposal-id* (normalize-uuid proposal-id "proposal_id")
-        proposal     (or (get-proposal proposal-id*)
+(defn- apply-proposal-unlocked!
+  [proposal-id reviewer note enable?]
+  (let [proposal     (or (get-proposal proposal-id)
                          (throw (ex-info "Skill proposal not found"
                                          {:type :skill-proposal/not-found
-                                          :proposal-id proposal-id*})))
+                                          :proposal-id proposal-id})))
         _            (assert-pending! proposal)
         op           (:skill.proposal/op proposal)
         skill-id     (:skill.proposal/skill-id proposal)
         content      (:skill.proposal/content proposal)
-        applied-at   (now)
-        result       (case op
+        applied-at   (now)]
+    (with-skill-mutation-lock
+      skill-id
+      (fn []
+        (let [result (case op
                        :create
-                       (skill/save-skill!
-                        {:id skill-id
-                         :name (or (:skill.proposal/skill-name proposal)
-                                   (name skill-id))
-                         :description (:skill.proposal/rationale proposal)
-                         :content content
-                         :enabled? (true? enable?)
-                         :trust-level :agent-authored
-                         :source-format :skill-proposal
-                         :provenance (proposal-skill-source proposal proposal-id*)})
+                       (do
+                         (when (db/get-skill skill-id)
+                           (throw (ex-info "Skill proposal target already exists"
+                                           {:type :skill-proposal/skill-already-exists
+                                            :skill-id skill-id})))
+                         (skill/save-skill!
+                          {:id skill-id
+                           :name (or (:skill.proposal/skill-name proposal)
+                                     (name skill-id))
+                           :description (:skill.proposal/rationale proposal)
+                           :content content
+                           :enabled? (true? enable?)
+                           :trust-level :agent-authored
+                           :source-format :skill-proposal
+                           :provenance (proposal-skill-source proposal proposal-id)}))
 
                        :patch
                        (let [existing (assert-existing-skill! skill-id)]
@@ -329,15 +365,24 @@
                                                       :enabled? false
                                                       :archived-at applied-at})
                          (db/get-skill skill-id)))]
-    (db/transact! [(cond-> {:skill.proposal/id proposal-id*
-                            :skill.proposal/status :applied
-                            :skill.proposal/updated-at applied-at
-                            :skill.proposal/reviewed-at applied-at
-                            :skill.proposal/applied-at applied-at}
-                     (reviewer-text reviewer) (assoc :skill.proposal/reviewer (reviewer-text reviewer))
-                     note (assoc :skill.proposal/review-note (str note)))])
-    {:proposal (get-proposal proposal-id*)
-     :skill result}))
+          (db/transact! [(cond-> {:skill.proposal/id proposal-id
+                                  :skill.proposal/status :applied
+                                  :skill.proposal/updated-at applied-at
+                                  :skill.proposal/reviewed-at applied-at
+                                  :skill.proposal/applied-at applied-at}
+                           (reviewer-text reviewer) (assoc :skill.proposal/reviewer (reviewer-text reviewer))
+                           note (assoc :skill.proposal/review-note (str note)))])
+          {:proposal (get-proposal proposal-id)
+           :skill result})))))
+
+(defn apply-proposal!
+  "Apply an approved proposal. New skills are saved as disabled drafts by default;
+   pass `:enable? true` to enable them immediately."
+  [proposal-id & {:keys [reviewer note enable?]}]
+  (let [proposal-id* (normalize-uuid proposal-id "proposal_id")]
+    (with-proposal-decision-lock
+      proposal-id*
+      #(apply-proposal-unlocked! proposal-id* reviewer note enable?))))
 
 (defn- assistant-content
   [message]
@@ -471,16 +516,12 @@
      :enable? (true? (or (value-of parsed :enable)
                          (value-of parsed :enable?)))}))
 
-(defn review-proposal-with-llm!
-  "Ask an LLM to review a pending proposal and immediately apply or reject it
-   when eligible. Create approvals remain disabled drafts by default; pass
-   `:allow-enable? true` to honor an LLM `enable: true` response."
-  [proposal-id & {:keys [allow-enable?] :as opts}]
-  (let [proposal-id* (normalize-uuid proposal-id "proposal_id")
-        proposal     (or (get-proposal proposal-id*)
+(defn- review-proposal-with-llm-unlocked!
+  [proposal-id allow-enable? opts]
+  (let [proposal     (or (get-proposal proposal-id)
                          (throw (ex-info "Skill proposal not found"
                                          {:type :skill-proposal/not-found
-                                          :proposal-id proposal-id*})))
+                                          :proposal-id proposal-id})))
         _            (assert-pending! proposal)
         target       (target-skill proposal)
         _            (assert-llm-review-eligible! proposal target)
@@ -497,7 +538,7 @@
         {:keys [decision reason enable?]} (parse-review-response! message)]
     (case decision
       :approve
-      (let [result (apply-proposal! proposal-id*
+      (let [result (apply-proposal! proposal-id
                                     :reviewer :llm
                                     :note reason
                                     :enable? (and allow-enable? enable?))]
@@ -507,12 +548,25 @@
          :skill (:skill result)})
 
       :reject
-      (let [reviewed (reject-proposal! proposal-id*
+      (let [reviewed (reject-proposal! proposal-id
                                        :reviewer :llm
                                        :note reason)]
         {:decision :rejected
          :reason reason
          :proposal reviewed}))))
+
+(defn review-proposal-with-llm!
+  "Ask an LLM to review a pending proposal and immediately apply or reject it
+   when eligible. Create approvals remain disabled drafts by default; pass
+   `:allow-enable? true` to honor an LLM `enable: true` response. Concurrent
+   reviewers of the same proposal are serialized before spending an LLM call."
+  [proposal-id & {:keys [allow-enable?] :as opts}]
+  (let [proposal-id* (normalize-uuid proposal-id "proposal_id")]
+    (with-proposal-decision-lock
+      proposal-id*
+      #(review-proposal-with-llm-unlocked! proposal-id*
+                                           allow-enable?
+                                           opts))))
 
 (defn- review-or-defer-proposal!
   [proposal opts]

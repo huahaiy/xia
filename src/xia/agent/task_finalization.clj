@@ -1,30 +1,29 @@
 (ns xia.agent.task-finalization
   "Post-task finalization hooks that must not affect task completion."
   (:require [taoensso.timbre :as log]
+            [xia.agent.run-state :as run-state]
             [xia.async :as async]
             [xia.db :as db]
+            [xia.runtime-context :as runtime-context]
             [xia.skill.proposal :as skill-proposal]))
 
-(defonce ^:private learning-in-flight (atom #{}))
+(def ^:private runtime-context-key :xia/agent-runtime)
 
 (defn- now [] (java.util.Date.))
 
+(defn- current-runtime
+  []
+  (or (runtime-context/runtime runtime-context-key)
+      (throw (ex-info "Agent runtime is not installed"
+                      {:component runtime-context-key}))))
+
 (defn- claim-learning!
   [task-id]
-  (loop [in-flight @learning-in-flight]
-    (cond
-      (contains? in-flight task-id)
-      false
-
-      (compare-and-set! learning-in-flight in-flight (conj in-flight task-id))
-      true
-
-      :else
-      (recur @learning-in-flight))))
+  (run-state/claim-skill-learning! (current-runtime) task-id))
 
 (defn- release-learning!
   [task-id]
-  (swap! learning-in-flight disj task-id))
+  (run-state/release-skill-learning! (current-runtime) task-id))
 
 (defn- task-learning-status
   [task]
@@ -108,7 +107,9 @@
       (if (learnable-task? task)
         (do
           (update-learning-meta! task-id {:status :running
+                                          :phase :execution
                                           :started-at (now)
+                                          :finished-at nil
                                           :error nil})
           (try
             (let [result (apply skill-proposal/generate-and-review-proposals-for-task!
@@ -116,12 +117,14 @@
                                 (mapcat identity opts))]
               (update-learning-meta! task-id
                                      (merge {:status :completed
+                                             :phase :completed
                                              :finished-at (now)}
                                             (learning-summary result))))
             (catch Throwable t
               (log/warn t "Post-task skill learning failed"
                         {:task-id task-id})
               (update-learning-meta! task-id {:status :failed
+                                              :phase :execution
                                               :finished-at (now)
                                               :error (.getMessage t)}))))
         (log/debug "Skipping post-task skill learning"
@@ -150,9 +153,18 @@
         true
         (do
           (release-learning! task-id)
+          (update-learning-meta! task-id {:status :failed
+                                          :phase :submission
+                                          :finished-at (now)
+                                          :error "Post-task skill learning worker was not accepted"})
           false))
       (catch Throwable t
         (release-learning! task-id)
+        (update-learning-meta! task-id {:status :failed
+                                        :phase :submission
+                                        :finished-at (now)
+                                        :error (or (.getMessage t)
+                                                   "Post-task skill learning launch failed")})
         (log/warn t "Unable to launch post-task skill learning"
                   {:task-id task-id})
         false))))

@@ -19,6 +19,7 @@
    :active-task-runs-atom     (atom {})
    :child-session-parents-atom (atom {})
    :inherited-cancellations-atom (atom {})
+   :skill-learning-in-flight-atom (atom #{})
    :task-control-locks        (make-task-control-locks)
    :idle-monitor              (Object.)})
 
@@ -62,6 +63,7 @@
   (reset! (:active-task-runs-atom runtime) {})
   (reset! (:child-session-parents-atom runtime) {})
   (reset! (:inherited-cancellations-atom runtime) {})
+  (reset! (:skill-learning-in-flight-atom runtime) #{})
   (locking (:idle-monitor runtime)
     (.notifyAll ^Object (:idle-monitor runtime)))
   nil)
@@ -70,7 +72,27 @@
   [runtime]
   {:active-session-turn-count (count @(active-session-turns-atom runtime))
    :active-session-run-count  (count @(active-session-runs-atom runtime))
-   :active-task-run-count     (count @(active-task-runs-atom runtime))})
+   :active-task-run-count     (count @(active-task-runs-atom runtime))
+   :skill-learning-count      (count @(:skill-learning-in-flight-atom runtime))})
+
+(defn claim-skill-learning!
+  "Claim one post-task learning worker for a task in this agent runtime."
+  [runtime task-id]
+  (let [in-flight-atom (:skill-learning-in-flight-atom runtime)]
+    (loop [in-flight @in-flight-atom]
+      (cond
+        (contains? in-flight task-id)
+        false
+
+        (compare-and-set! in-flight-atom in-flight (conj in-flight task-id))
+        true
+
+        :else
+        (recur @in-flight-atom)))))
+
+(defn release-skill-learning!
+  [runtime task-id]
+  (swap! (:skill-learning-in-flight-atom runtime) disj task-id))
 
 (defn with-task-control-lock
   "Serialize controls for one task. Fixed lock striping avoids an unbounded
