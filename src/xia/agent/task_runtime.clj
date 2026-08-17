@@ -33,6 +33,7 @@
 (def ^:private restart-lineage-limit 20)
 (def ^:private startup-recovery-task-limit 100000)
 (def ^:private startup-recovery-states #{:running :waiting_input :waiting_approval})
+(def ^:private durable-task-states #{:ready :paused :resumable :completed :failed :cancelled})
 (def ^:private terminal-task-states #{:completed :failed :cancelled})
 
 (defn- terminal-task?
@@ -595,21 +596,133 @@
     (when (seq lines)
       (str/join "\n" lines))))
 
-(defn- startup-recovery-needed?
+(defn- startup-recovery-action
   [task]
-  (let [runtime-state (get-in task [:meta :runtime :state])]
-    (or (:current-turn-id task)
-        (contains? startup-recovery-states (:state task))
-        (contains? startup-recovery-states runtime-state))))
+  (let [task-state    (:state task)
+        runtime-state (get-in task [:meta :runtime :state])
+        stale-runtime? (contains? startup-recovery-states runtime-state)
+        stale-turn?    (some? (:current-turn-id task))]
+    (cond
+      (contains? startup-recovery-states task-state)
+      :interrupt-run
+
+      (and (contains? durable-task-states task-state)
+           (or stale-runtime? stale-turn?))
+      :reconcile-boundary
+
+      (or stale-runtime? stale-turn?)
+      :interrupt-run
+
+      :else
+      nil)))
+
+(defn- startup-interrupted-state
+  [task]
+  (let [task-state    (:state task)
+        runtime-state (get-in task [:meta :runtime :state])]
+    ;; A running task's runtime state can identify the more precise wait point.
+    ;; For every other active state, the durable task state is authoritative.
+    (if (= :running task-state)
+      (or (when (contains? startup-recovery-states runtime-state)
+            runtime-state)
+          task-state)
+      (or task-state runtime-state :running))))
 
 (defn- startup-recovery-summary
   [task]
-  (let [interrupted-state (or (get-in task [:meta :runtime :state])
-                              (:state task)
-                              :running)]
+  (let [interrupted-state (startup-interrupted-state task)]
     (str "Paused after runtime restart while task was "
          (name interrupted-state)
          ". Resume to continue from the latest checkpoint.")))
+
+(defn- recovery-doc
+  [task now attrs]
+  (cond-> (merge {:at now
+                  :source :runtime-restart}
+                 attrs)
+    (:current-turn-id task) (assoc :interrupted-turn-id (:current-turn-id task))
+    (task-checkpoint task)  (assoc :checkpoint-summary
+                                   (checkpoint-summary (task-checkpoint task)))))
+
+(defn- clear-current-turn!
+  [task-id current-turn-id turn-attrs]
+  (when current-turn-id
+    ;; update-task-turn! normally releases current-turn-id when the turn exists.
+    ;; Clear it explicitly as well so a dangling reference cannot trigger the
+    ;; same recovery on every startup.
+    (db/update-task-turn! current-turn-id turn-attrs)
+    (db/update-task! task-id {:current-turn-id nil})))
+
+(defn- recover-interrupted-run!
+  [task now]
+  (let [task-id          (:id task)
+        current-turn-id (:current-turn-id task)
+        interrupted-state (startup-interrupted-state task)
+        summary          (startup-recovery-summary task)
+        recovery         (recovery-doc task now
+                                       {:mode :interrupted-run
+                                        :summary summary
+                                        :interrupted-state interrupted-state})]
+    (clear-current-turn! task-id current-turn-id
+                         {:state :cancelled
+                          :summary "Interrupted by runtime restart"
+                          :error "Xia restarted before the task turn completed."
+                          :finished-at now})
+    (sync-runtime-task! task-id
+                        {:state :paused
+                         :stop-reason :runtime-restart
+                         :summary summary
+                         :error nil
+                         :finished-at nil})
+    (set-task-runtime-status! task-id
+                              {:state :paused
+                               :phase :recovered
+                               :message summary})
+    (record-task-recovery-doc! task-id recovery)
+    {:task-id task-id
+     :session-id (:session-id task)
+     :current-turn-id current-turn-id
+     :summary summary}))
+
+(defn- reconciled-turn-state
+  [task-state]
+  (case task-state
+    (:paused :resumable :completed) :completed
+    :failed :failed
+    :cancelled :cancelled
+    :cancelled))
+
+(defn- reconcile-durable-boundary!
+  [task now]
+  (let [task-id          (:id task)
+        task-state       (:state task)
+        runtime-state    (get-in task [:meta :runtime :state])
+        current-turn-id  (:current-turn-id task)
+        summary          (str "Reconciled runtime restart at durable "
+                              (name task-state)
+                              " boundary without changing task state.")
+        turn-summary     (or (:summary task) summary)
+        turn-attrs       (cond-> {:state (reconciled-turn-state task-state)
+                                  :summary turn-summary
+                                  :finished-at now}
+                           (= :failed task-state) (assoc :error (:error task)))
+        recovery         (recovery-doc task now
+                                       {:mode :boundary-reconciliation
+                                        :summary summary
+                                        :preserved-state task-state
+                                        :interrupted-state runtime-state})]
+    (clear-current-turn! task-id current-turn-id turn-attrs)
+    (set-task-runtime-status! task-id
+                              {:state task-state
+                               :phase :reconciled
+                               :message summary})
+    (when-not (:boundary task)
+      (record-task-boundary! task-id))
+    (record-task-recovery-doc! task-id recovery)
+    {:task-id task-id
+     :session-id (:session-id task)
+     :current-turn-id current-turn-id
+     :summary summary}))
 
 (defn recover-interrupted-tasks!
   []
@@ -617,39 +730,14 @@
         tasks (db/list-tasks {:limit startup-recovery-task-limit})]
     (->> tasks
          (keep (fn [task]
-                 (when (startup-recovery-needed? task)
-                   (let [task-id          (:id task)
-                         current-turn-id (:current-turn-id task)
-                         summary        (startup-recovery-summary task)
-                         recovery-doc   (cond-> {:at now
-                                                 :source :runtime-restart
-                                                 :summary summary
-                                                 :interrupted-state (or (get-in task [:meta :runtime :state])
-                                                                        (:state task))}
-                                          current-turn-id (assoc :interrupted-turn-id current-turn-id)
-                                          (task-checkpoint task) (assoc :checkpoint-summary
-                                                                        (checkpoint-summary (task-checkpoint task))))]
-                     (when current-turn-id
-                       (db/update-task-turn! current-turn-id
-                                             {:state :cancelled
-                                              :summary "Interrupted by runtime restart"
-                                              :error "Xia restarted before the task turn completed."
-                                              :finished-at now}))
-                     (sync-runtime-task! task-id
-                                         {:state :paused
-                                          :stop-reason :runtime-restart
-                                          :summary summary
-                                          :error nil
-                                          :finished-at nil})
-                     (set-task-runtime-status! task-id
-                                               {:state :paused
-                                                :phase :recovered
-                                                :message summary})
-                     (record-task-recovery-doc! task-id recovery-doc)
-                     {:task-id task-id
-                      :session-id (:session-id task)
-                      :current-turn-id current-turn-id
-                      :summary summary}))))
+                 (case (startup-recovery-action task)
+                   :interrupt-run
+                   (recover-interrupted-run! task now)
+
+                   :reconcile-boundary
+                   (reconcile-durable-boundary! task now)
+
+                   nil)))
          vec)))
 
 (defn- emit-runtime-event!
