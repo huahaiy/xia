@@ -17,6 +17,8 @@
    :session-turn-reservations-atom (atom {})
    :active-session-runs-atom  (atom {})
    :active-task-runs-atom     (atom {})
+   :child-session-parents-atom (atom {})
+   :inherited-cancellations-atom (atom {})
    :task-control-locks        (make-task-control-locks)
    :idle-monitor              (Object.)})
 
@@ -36,6 +38,14 @@
   [runtime]
   (:active-task-runs-atom runtime))
 
+(defn- child-session-parents-atom
+  [runtime]
+  (:child-session-parents-atom runtime))
+
+(defn- inherited-cancellations-atom
+  [runtime]
+  (:inherited-cancellations-atom runtime))
+
 (defn- idle-monitor
   [runtime]
   (:idle-monitor runtime))
@@ -50,6 +60,8 @@
   (reset! (:session-turn-reservations-atom runtime) {})
   (reset! (:active-session-runs-atom runtime) {})
   (reset! (:active-task-runs-atom runtime) {})
+  (reset! (:child-session-parents-atom runtime) {})
+  (reset! (:inherited-cancellations-atom runtime) {})
   (locking (:idle-monitor runtime)
     (.notifyAll ^Object (:idle-monitor runtime)))
   nil)
@@ -152,26 +164,30 @@
 (defn with-session-run
   [runtime session-id f]
   (if session-id
-    (let [run-id (Object.)]
-      (swap! (active-session-runs-atom runtime) assoc session-id
-             {:run-id run-id
-              :supervisor-thread (Thread/currentThread)
-              :task-id nil
-              :child-session-ids #{}
-              :cancelled? false
-              :cancel-reason nil})
-      (locking (idle-monitor runtime)
+    (let [run-id  (Object.)
+          monitor (idle-monitor runtime)]
+      (locking monitor
+        (let [inherited (get @(inherited-cancellations-atom runtime)
+                             session-id)]
+          (swap! (inherited-cancellations-atom runtime) dissoc session-id)
+          (swap! (active-session-runs-atom runtime) assoc session-id
+                 {:run-id run-id
+                  :supervisor-thread (Thread/currentThread)
+                  :task-id nil
+                  :child-session-ids #{}
+                  :cancelled? (boolean inherited)
+                  :cancel-reason (:reason inherited)}))
         (.notifyAll ^Object (idle-monitor runtime)))
       (try
         (f)
         (finally
-          (swap! (active-session-runs-atom runtime)
-                 (fn [runs]
-                   (if (= run-id (get-in runs [session-id :run-id]))
-                     (dissoc runs session-id)
-                     runs)))
-          (locking (idle-monitor runtime)
-            (.notifyAll ^Object (idle-monitor runtime))))))
+          (locking monitor
+            (swap! (active-session-runs-atom runtime)
+                   (fn [runs]
+                     (if (= run-id (get-in runs [session-id :run-id]))
+                       (dissoc runs session-id)
+                       runs)))
+            (.notifyAll ^Object monitor)))))
     (f)))
 
 (defn session-run-entry
@@ -243,84 +259,112 @@
 (defn register-task-run!
   [runtime session-id task-id task-turn-id]
   (when (and session-id task-id task-turn-id)
-    (when-let [entry (session-run-entry runtime session-id)]
-      (let [session-run-id (:run-id entry)
-            task-run-id (Object.)
-            task-entry {:task-id task-id
-                        :task-turn-id task-turn-id
-                        :session-id session-id
-                        :task-run-id task-run-id
-                        :session-run-id session-run-id
-                        :supervisor-thread (:supervisor-thread entry)
-                        :child-session-ids (:child-session-ids entry)
-                        :cancelled? (:cancelled? entry)
-                        :cancel-reason (:cancel-reason entry)}]
-        (swap! (active-task-runs-atom runtime) assoc task-id task-entry)
-        (update-session-run-entry! runtime
-                                   session-id
-                                   (fn [run]
-                                     (if (= session-run-id (:run-id run))
-                                       (assoc run
-                                              :task-id task-id
-                                              :child-session-ids #{})
-                                       run)))
-        (locking (idle-monitor runtime)
-          (.notifyAll ^Object (idle-monitor runtime)))
-        task-entry))))
+    (locking (idle-monitor runtime)
+      (when-let [entry (session-run-entry runtime session-id)]
+        (let [session-run-id (:run-id entry)
+              task-run-id (Object.)
+              task-entry {:task-id task-id
+                          :task-turn-id task-turn-id
+                          :session-id session-id
+                          :task-run-id task-run-id
+                          :session-run-id session-run-id
+                          :supervisor-thread (:supervisor-thread entry)
+                          :child-session-ids (:child-session-ids entry)
+                          :cancelled? (:cancelled? entry)
+                          :cancel-reason (:cancel-reason entry)}]
+          (swap! (active-task-runs-atom runtime) assoc task-id task-entry)
+          (update-session-run-entry! runtime
+                                     session-id
+                                     (fn [run]
+                                       (if (= session-run-id (:run-id run))
+                                         (assoc run
+                                                :task-id task-id
+                                                :child-session-ids #{})
+                                         run)))
+          (.notifyAll ^Object (idle-monitor runtime))
+          task-entry)))))
 
 (defn clear-task-run!
   [runtime session-id task-id task-turn-id task-run-id]
   (when task-id
-    (let [expected-task-run-id (or task-run-id
-                                   (some-> (task-run-entry runtime task-id) :task-run-id))]
-      (swap! (active-task-runs-atom runtime)
-             (fn [runs]
-               (if-let [entry (get runs task-id)]
-                 (if (and (or (nil? expected-task-run-id)
-                              (= expected-task-run-id (:task-run-id entry)))
-                          (or (nil? session-id)
-                              (= session-id (:session-id entry)))
-                          (or (nil? task-turn-id)
-                              (= task-turn-id (:task-turn-id entry))))
-                   (dissoc runs task-id)
-                   runs)
-                 runs)))
-      (when session-id
-        (update-session-run-entry! runtime
-                                   session-id
-                                   (fn [entry]
-                                     (if (= task-id (:task-id entry))
-                                       (assoc entry
-                                              :task-id nil)
-                                       entry))))
-      (locking (idle-monitor runtime)
+    (locking (idle-monitor runtime)
+      (let [expected-task-run-id (or task-run-id
+                                     (some-> (task-run-entry runtime task-id) :task-run-id))]
+        (swap! (active-task-runs-atom runtime)
+               (fn [runs]
+                 (if-let [entry (get runs task-id)]
+                   (if (and (or (nil? expected-task-run-id)
+                                (= expected-task-run-id (:task-run-id entry)))
+                            (or (nil? session-id)
+                                (= session-id (:session-id entry)))
+                            (or (nil? task-turn-id)
+                                (= task-turn-id (:task-turn-id entry))))
+                     (dissoc runs task-id)
+                     runs)
+                   runs)))
+        (when session-id
+          (update-session-run-entry! runtime
+                                     session-id
+                                     (fn [entry]
+                                       (if (= task-id (:task-id entry))
+                                         (assoc entry
+                                                :task-id nil)
+                                         entry))))
         (.notifyAll ^Object (idle-monitor runtime))))))
+
+(declare request-session-cancel!)
 
 (defn register-child-session!
   [runtime parent-session-id child-session-id]
   (when (and parent-session-id
              child-session-id
              (not= parent-session-id child-session-id))
-    (if-let [task-id (session-bound-task-id runtime parent-session-id)]
-      (update-task-run-entry! runtime
-                              task-id
-                              #(update % :child-session-ids (fnil conj #{}) child-session-id))
-      (update-session-run-entry! runtime
-                                 parent-session-id
-                                 #(update % :child-session-ids (fnil conj #{}) child-session-id)))))
+    (let [parent-entry
+          (locking (idle-monitor runtime)
+            (let [entry
+                  (if-let [task-id (session-bound-task-id runtime parent-session-id)]
+                    (when (task-run-entry runtime task-id)
+                      (update-task-run-entry!
+                       runtime
+                       task-id
+                       #(update % :child-session-ids (fnil conj #{}) child-session-id))
+                      (task-run-entry runtime task-id))
+                    (when (session-run-entry runtime parent-session-id)
+                      (update-session-run-entry!
+                       runtime
+                       parent-session-id
+                       #(update % :child-session-ids (fnil conj #{}) child-session-id))
+                      (session-run-entry runtime parent-session-id)))]
+              (when entry
+                (swap! (child-session-parents-atom runtime)
+                       assoc child-session-id parent-session-id)
+                (.notifyAll ^Object (idle-monitor runtime)))
+              entry))]
+      (when (:cancelled? parent-entry)
+        (request-session-cancel! runtime
+                                 child-session-id
+                                 (:cancel-reason parent-entry)
+                                 :interrupt-supervisor? true
+                                 :inherited-from parent-session-id))
+      (boolean parent-entry))))
 
 (defn unregister-child-session!
   [runtime parent-session-id child-session-id]
   (when (and parent-session-id
              child-session-id
              (not= parent-session-id child-session-id))
-    (if-let [task-id (session-bound-task-id runtime parent-session-id)]
-      (update-task-run-entry! runtime
-                              task-id
-                              #(update % :child-session-ids disj child-session-id))
-      (update-session-run-entry! runtime
-                                 parent-session-id
-                                 #(update % :child-session-ids disj child-session-id)))))
+    (locking (idle-monitor runtime)
+      (if-let [task-id (session-bound-task-id runtime parent-session-id)]
+        (update-task-run-entry! runtime
+                                task-id
+                                #(update % :child-session-ids disj child-session-id))
+        (update-session-run-entry! runtime
+                                   parent-session-id
+                                   #(update % :child-session-ids disj child-session-id)))
+      (swap! (child-session-parents-atom runtime) dissoc child-session-id)
+      (swap! (inherited-cancellations-atom runtime) dissoc child-session-id)
+      (.notifyAll ^Object (idle-monitor runtime))))
+  nil)
 
 (defn begin-worker-run!
   [runtime session-id worker-token]
@@ -477,32 +521,45 @@
     (future-cancel f)))
 
 (defn request-session-cancel!
-  [runtime session-id reason & {:keys [interrupt-supervisor?]
+  [runtime session-id reason & {:keys [interrupt-supervisor? inherited-from]
                                 :or {interrupt-supervisor? false}}]
   (let [session-entry* (atom nil)
-        task-entry*    (atom nil)]
+        task-entry*    (atom nil)
+        inherited?    (atom false)]
     (when session-id
-      (swap! (active-session-runs-atom runtime)
-             (fn [runs]
-               (if-let [entry (get runs session-id)]
-                 (let [updated (assoc entry
-                                      :cancelled? true
-                                      :cancel-reason (or (:cancel-reason entry)
-                                                         reason))]
-                   (reset! session-entry* updated)
-                   (assoc runs session-id updated))
-                 runs)))
-      (when-let [task-id (:task-id @session-entry*)]
-        (swap! (active-task-runs-atom runtime)
+      (locking (idle-monitor runtime)
+        (swap! (active-session-runs-atom runtime)
                (fn [runs]
-                 (if-let [entry (get runs task-id)]
+                 (if-let [entry (get runs session-id)]
                    (let [updated (assoc entry
                                         :cancelled? true
                                         :cancel-reason (or (:cancel-reason entry)
                                                            reason))]
-                     (reset! task-entry* updated)
-                     (assoc runs task-id updated))
-                   runs))))
+                     (reset! session-entry* updated)
+                     (assoc runs session-id updated))
+                   runs)))
+        (when-let [task-id (:task-id @session-entry*)]
+          (swap! (active-task-runs-atom runtime)
+                 (fn [runs]
+                   (if-let [entry (get runs task-id)]
+                     (let [updated (assoc entry
+                                          :cancelled? true
+                                          :cancel-reason (or (:cancel-reason entry)
+                                                             reason))]
+                       (reset! task-entry* updated)
+                       (assoc runs task-id updated))
+                     runs))))
+        (when (and inherited-from
+                   (nil? @session-entry*)
+                   (= inherited-from
+                      (get @(child-session-parents-atom runtime) session-id)))
+          (swap! (inherited-cancellations-atom runtime)
+                 update
+                 session-id
+                 #(or % {:reason reason
+                         :parent-session-id inherited-from}))
+          (reset! inherited? true))
+        (.notifyAll ^Object (idle-monitor runtime)))
       (when-let [entry (or @task-entry* @session-entry*)]
         (when (and interrupt-supervisor?
                    (not= (Thread/currentThread) ^Thread (:supervisor-thread entry)))
@@ -520,8 +577,10 @@
             (request-session-cancel! runtime
                                      child-session-id
                                      reason
-                                     :interrupt-supervisor? true)))
-        true))))
+                                     :interrupt-supervisor? true
+                                     :inherited-from session-id)))))
+    (when (or @session-entry* @inherited?)
+      true)))
 
 (defn cancel-all-sessions!
   [runtime reason cancel-session!]

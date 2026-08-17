@@ -743,7 +743,7 @@
         session-id
         (fn []
           (let [request-context (derive-request-context session-id channel tool-context)
-                runtime-task (atom nil)]
+                runtime-task (atom (when task-id {:task-id task-id}))]
             (binding [prompt/*interaction-context* (merge request-context
                                                           (task-runtime-callbacks runtime-task))]
               (try
